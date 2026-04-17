@@ -7,7 +7,9 @@ use crate::error::JpegError;
 use crate::error::Warning;
 use crate::info::Info;
 use crate::info::Rect;
+use crate::info::SofKind;
 use crate::parse::header::parse_header;
+use crate::parse::header::ParsedHeader;
 use alloc::vec::Vec;
 
 /// Non-fatal outcome of a successful decode. See spec Section 2.
@@ -26,10 +28,21 @@ pub struct DecodeOutcome {
     pub warnings: Vec<Warning>,
 }
 
-/// A borrowed view of a JPEG stream. In M1a this type only supports
-/// header-only inspection; later milestones add full decode methods.
+/// A borrowed view of a JPEG stream ready to decode. Constructed via
+/// [`Decoder::new`]. Internally holds the parsed header snapshot plus a borrow
+/// of the input bytes.
+///
+/// `Decoder<'a>: Send + Sync` because all state is either POD (`Info`) or
+/// immutable after construction (`ParsedHeader`). No interior mutability.
+#[derive(Debug)]
 pub struct Decoder<'a> {
-    _bytes: &'a [u8],
+    // `bytes` and `header` are stashed for `decode_into` (Task 15); currently
+    // unread by the M1b public surface which only exposes `inspect` + `new`.
+    #[allow(dead_code)]
+    pub(crate) bytes: &'a [u8],
+    #[allow(dead_code)]
+    pub(crate) header: ParsedHeader,
+    pub(crate) info: Info,
 }
 
 impl<'a> Decoder<'a> {
@@ -40,6 +53,33 @@ impl<'a> Decoder<'a> {
     /// encountered before the Start-of-Scan marker. See [`JpegError`].
     pub fn inspect(input: &'a [u8]) -> Result<Info, JpegError> {
         parse_header(input).map(|h| h.info())
+    }
+
+    /// Build a decoder ready for `decode_into`. Parses the full header, builds
+    /// any derived lookup structures, and validates that the stream is one of
+    /// the SOFs this release implements.
+    ///
+    /// # Errors
+    /// - Any parse error encountered before SOS (see [`Self::inspect`]).
+    /// - [`JpegError::NotImplemented`] for SOFs that parse but are not yet
+    ///   decodable (Extended12, Progressive, Lossless — all land in M3).
+    pub fn new(input: &'a [u8]) -> Result<Self, JpegError> {
+        let header = parse_header(input)?;
+        let info = header.info();
+        match info.sof_kind {
+            SofKind::Baseline8 | SofKind::Extended8 => {}
+            other => return Err(JpegError::NotImplemented { sof: other }),
+        }
+        Ok(Self {
+            bytes: input,
+            header,
+            info,
+        })
+    }
+
+    /// The parsed header as a public [`Info`]. Cheap to clone; safe to log.
+    pub fn info(&self) -> &Info {
+        &self.info
     }
 }
 
@@ -68,5 +108,68 @@ mod tests {
             warnings: Vec::new(),
         };
         assert!(outcome.warnings.is_empty());
+    }
+
+    // Reproduces the minimal baseline JPEG fixture used in parse::header::tests.
+    // Duplicated because we cannot import pub(crate) test helpers from unit tests
+    // of another module. See `tests/inspect.rs` for the integration-test copy.
+    fn minimal_baseline_jpeg() -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(&[0xFF, 0xD8]);
+        v.extend_from_slice(&[0xFF, 0xDB, 0x00, 67, 0x00]);
+        v.extend(core::iter::repeat(1u8).take(64));
+        v.extend_from_slice(&[
+            0xFF, 0xC0, 0x00, 17, 8, 0, 16, 0, 16, 3,
+            1, (2 << 4) | 2, 0, 2, (1 << 4) | 1, 0, 3, (1 << 4) | 1, 0,
+        ]);
+        v.extend_from_slice(&[
+            0xFF, 0xC4, 0x00, 20, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xAA,
+        ]);
+        v.extend_from_slice(&[
+            0xFF, 0xC4, 0x00, 20, 0x10, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xBB,
+        ]);
+        v.extend_from_slice(&[0xFF, 0xDA, 0x00, 12, 3, 1, 0x00, 2, 0x00, 3, 0x00, 0, 63, 0]);
+        v.extend_from_slice(&[0x00, 0xFF, 0xD9]);
+        v
+    }
+
+    #[test]
+    fn decoder_new_succeeds_on_baseline_stream() {
+        let bytes = minimal_baseline_jpeg();
+        let dec = Decoder::new(&bytes).expect("baseline stream must construct");
+        assert_eq!(dec.info().dimensions, (16, 16));
+        assert_eq!(dec.info().sof_kind, crate::info::SofKind::Baseline8);
+    }
+
+    #[test]
+    fn decoder_new_rejects_arithmetic_coding_as_unsupported() {
+        let mut bytes = minimal_baseline_jpeg();
+        let pos = bytes.windows(2).position(|w| w == [0xFF, 0xC0]).unwrap();
+        bytes[pos + 1] = 0xC9;
+        let err = Decoder::new(&bytes).unwrap_err();
+        assert!(err.is_unsupported());
+    }
+
+    #[test]
+    fn decoder_new_reports_not_implemented_for_progressive() {
+        // Swap SOF0 → SOF2 (progressive 8-bit) — parses fine but M1b cannot decode.
+        let mut bytes = minimal_baseline_jpeg();
+        let pos = bytes.windows(2).position(|w| w == [0xFF, 0xC0]).unwrap();
+        bytes[pos + 1] = 0xC2;
+        let err = Decoder::new(&bytes).unwrap_err();
+        assert!(err.is_not_implemented());
+        assert!(
+            !err.is_unsupported(),
+            "Progressive support lands in M3; M1b must NOT report it as a permanent routing decision"
+        );
+    }
+
+    #[test]
+    fn decoder_new_reports_not_implemented_for_lossless() {
+        let mut bytes = minimal_baseline_jpeg();
+        let pos = bytes.windows(2).position(|w| w == [0xFF, 0xC0]).unwrap();
+        bytes[pos + 1] = 0xC3;
+        let err = Decoder::new(&bytes).unwrap_err();
+        assert!(err.is_not_implemented());
     }
 }

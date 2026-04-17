@@ -49,6 +49,12 @@ pub(crate) fn upsample_h2v1_fancy(input_row: &[u8], output_row: &mut [u8]) {
 }
 
 /// Produce two output rows for 4:2:0 vertical+horizontal fancy upsample.
+///
+/// Matches libjpeg-turbo's `h2v2_fancy_upsample` in `jdsample.c` bit-for-bit:
+/// alternating `+8`/`+7` rounding across the two output columns of each
+/// chroma sample, with distinct formulas at the first and last column so
+/// boundary pixels stay consistent with interior pixels under the same
+/// 3:1 / 1:3 blend.
 pub(crate) fn upsample_h2v2_fancy(
     prev: &[u8],
     curr: &[u8],
@@ -65,32 +71,48 @@ pub(crate) fn upsample_h2v2_fancy(
         return;
     }
 
-    for i in 0..n {
-        let c = curr[i] as u32;
-        let p = prev[i] as u32;
-        let nx = next[i] as u32;
-        let top_co = 3 * c + p;
-        let bot_co = 3 * c + nx;
+    emit_h2v2_row(prev, curr, out_top);
+    emit_h2v2_row(next, curr, out_bot);
+}
 
-        let left = if i == 0 { i } else { i - 1 };
-        let lc = curr[left] as u32;
-        let lp = prev[left] as u32;
-        let lnx = next[left] as u32;
-        let top_l = 3 * lc + lp;
-        let bot_l = 3 * lc + lnx;
+/// Blend one "near" chroma row against `curr` using libjpeg-turbo's 3:1
+/// vertical weighting, then run the 3:1 horizontal blend and emit one
+/// upsampled luma row. `near` = chroma row above (for the top output) or
+/// below (for the bottom output) the current chroma row.
+fn emit_h2v2_row(near: &[u8], curr: &[u8], out: &mut [u8]) {
+    let n = curr.len();
+    // Column sums: `colsum[i] = 3 * curr[i] + near[i]`. libjpeg-turbo streams
+    // these as `this/next/last` without materializing the whole array.
+    let colsum = |i: usize| 3 * curr[i] as u32 + near[i] as u32;
 
-        let right = if i + 1 == n { i } else { i + 1 };
-        let rc = curr[right] as u32;
-        let rp = prev[right] as u32;
-        let rnx = next[right] as u32;
-        let top_r = 3 * rc + rp;
-        let bot_r = 3 * rc + rnx;
-
-        out_top[2 * i] = ((3 * top_co + top_l + 8) >> 4) as u8;
-        out_top[2 * i + 1] = ((3 * top_co + top_r + 8) >> 4) as u8;
-        out_bot[2 * i] = ((3 * bot_co + bot_l + 8) >> 4) as u8;
-        out_bot[2 * i + 1] = ((3 * bot_co + bot_r + 8) >> 4) as u8;
+    if n == 1 {
+        // Degenerate edge: just replicate.
+        let v = (4 * colsum(0) + 8) >> 4;
+        out[0] = v as u8;
+        out[1] = v as u8;
+        return;
     }
+
+    // First column: both output taps use only `colsum(0)` and `colsum(1)`.
+    let mut this = colsum(0);
+    let mut next = colsum(1);
+    out[0] = ((this * 4 + 8) >> 4) as u8;
+    out[1] = ((this * 3 + next + 7) >> 4) as u8;
+
+    // General interior columns.
+    for i in 1..n - 1 {
+        let last = this;
+        this = next;
+        next = colsum(i + 1);
+        out[2 * i] = ((this * 3 + last + 8) >> 4) as u8;
+        out[2 * i + 1] = ((this * 3 + next + 7) >> 4) as u8;
+    }
+
+    // Last column: `this` currently holds `colsum(n-2)`, `next` holds `colsum(n-1)`.
+    let last = this;
+    this = next;
+    out[2 * (n - 1)] = ((this * 3 + last + 8) >> 4) as u8;
+    out[2 * (n - 1) + 1] = ((this * 4 + 7) >> 4) as u8;
 }
 
 #[cfg(test)]

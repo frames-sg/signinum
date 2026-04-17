@@ -78,7 +78,9 @@ pub(crate) fn decode_block(
         }
         let value = br.receive_extend(ssss)?;
         let natural_idx = ZIGZAG[k] as usize;
-        let dequant = value.wrapping_mul(quant[natural_idx] as i32);
+        // Quant table entries are stored in zigzag order per T.81 §B.2.4.1,
+        // so `quant[k]` is the matching coefficient (not `quant[natural_idx]`).
+        let dequant = value.wrapping_mul(quant[k] as i32);
         out[natural_idx] = clamp_i16(dequant);
         k += 1;
     }

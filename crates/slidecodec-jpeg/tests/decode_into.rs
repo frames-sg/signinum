@@ -8,7 +8,6 @@ mod fixtures;
 use fixtures::{grayscale_8x8_jpeg, minimal_baseline_420_jpeg};
 
 #[test]
-#[ignore = "requires Task 17 fixture — see corpus/conformance/"]
 fn decode_into_rgb8_returns_decoded_rect_full_image() {
     let bytes = minimal_baseline_420_jpeg();
     let dec = Decoder::new(&bytes).expect("baseline 4:2:0 must construct");
@@ -22,14 +21,17 @@ fn decode_into_rgb8_returns_decoded_rect_full_image() {
 }
 
 #[test]
-#[ignore = "requires Task 17 fixture — see corpus/conformance/"]
 fn decode_into_rgba8_writes_alpha_byte() {
     let bytes = minimal_baseline_420_jpeg();
     let dec = Decoder::new(&bytes).unwrap();
     let (w, h) = dec.info().dimensions;
     let mut buf = vec![0u8; (w * h * 4) as usize];
-    dec.decode_into(&mut buf, (w * 4) as usize, OutputFormat::Rgba8 { alpha: 200 })
-        .unwrap();
+    dec.decode_into(
+        &mut buf,
+        (w * 4) as usize,
+        OutputFormat::Rgba8 { alpha: 200 },
+    )
+    .unwrap();
     for y in 0..h as usize {
         for x in 0..w as usize {
             let idx = (y * w as usize + x) * 4;
@@ -39,7 +41,6 @@ fn decode_into_rgba8_writes_alpha_byte() {
 }
 
 #[test]
-#[ignore = "requires Task 17 fixture — see corpus/conformance/"]
 fn decode_into_gray8_produces_single_byte_per_pixel() {
     let bytes = grayscale_8x8_jpeg();
     let dec = Decoder::new(&bytes).unwrap();
@@ -54,7 +55,6 @@ fn decode_into_gray8_produces_single_byte_per_pixel() {
 }
 
 #[test]
-#[ignore = "requires Task 17 fixture — see corpus/conformance/"]
 fn decode_into_rejects_undersized_buffer_with_api_misuse_error() {
     let bytes = minimal_baseline_420_jpeg();
     let dec = Decoder::new(&bytes).unwrap();
@@ -67,7 +67,6 @@ fn decode_into_rejects_undersized_buffer_with_api_misuse_error() {
 }
 
 #[test]
-#[ignore = "requires Task 17 fixture — see corpus/conformance/"]
 fn decode_into_rejects_stride_narrower_than_row_width() {
     let bytes = minimal_baseline_420_jpeg();
     let dec = Decoder::new(&bytes).unwrap();
@@ -80,7 +79,6 @@ fn decode_into_rejects_stride_narrower_than_row_width() {
 }
 
 #[test]
-#[ignore = "requires Task 17 fixture — see corpus/conformance/"]
 fn decode_into_tolerates_padded_stride() {
     let bytes = minimal_baseline_420_jpeg();
     let dec = Decoder::new(&bytes).unwrap();

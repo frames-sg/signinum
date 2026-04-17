@@ -175,20 +175,20 @@ impl<'a> Decoder<'a> {
                     table_id: quant_id as u8,
                 },
             )?;
-            let dc_table = self.dc_tables[scan_comp.dc_table as usize]
-                .as_ref()
-                .ok_or(JpegError::MissingHuffmanTable {
+            let dc_table = self.dc_tables[scan_comp.dc_table as usize].as_ref().ok_or(
+                JpegError::MissingHuffmanTable {
                     component: scan_comp.id,
                     class: 0,
                     id: scan_comp.dc_table,
-                })?;
-            let ac_table = self.ac_tables[scan_comp.ac_table as usize]
-                .as_ref()
-                .ok_or(JpegError::MissingHuffmanTable {
+                },
+            )?;
+            let ac_table = self.ac_tables[scan_comp.ac_table as usize].as_ref().ok_or(
+                JpegError::MissingHuffmanTable {
                     component: scan_comp.id,
                     class: 1,
                     id: scan_comp.ac_table,
-                })?;
+                },
+            )?;
             components.push(ComponentCtx {
                 h,
                 v,
@@ -220,8 +220,25 @@ mod tests {
         v.extend_from_slice(&[0xFF, 0xDB, 0x00, 67, 0x00]);
         v.extend(core::iter::repeat(1u8).take(64));
         v.extend_from_slice(&[
-            0xFF, 0xC0, 0x00, 17, 8, 0, 16, 0, 16, 3, 1, (2 << 4) | 2, 0, 2, (1 << 4) | 1, 0, 3,
-            (1 << 4) | 1, 0,
+            0xFF,
+            0xC0,
+            0x00,
+            17,
+            8,
+            0,
+            16,
+            0,
+            16,
+            3,
+            1,
+            (2 << 4) | 2,
+            0,
+            2,
+            (1 << 4) | 1,
+            0,
+            3,
+            (1 << 4) | 1,
+            0,
         ]);
         v.extend_from_slice(&[
             0xFF, 0xC4, 0x00, 20, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xAA,
@@ -229,9 +246,7 @@ mod tests {
         v.extend_from_slice(&[
             0xFF, 0xC4, 0x00, 20, 0x10, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xBB,
         ]);
-        v.extend_from_slice(&[
-            0xFF, 0xDA, 0x00, 12, 3, 1, 0x00, 2, 0x00, 3, 0x00, 0, 63, 0,
-        ]);
+        v.extend_from_slice(&[0xFF, 0xDA, 0x00, 12, 3, 1, 0x00, 2, 0x00, 3, 0x00, 0, 63, 0]);
         v.extend_from_slice(&[0x00, 0xFF, 0xD9]);
         v
     }

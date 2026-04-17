@@ -40,4 +40,4 @@ Apache-2.0. See `LICENSE-APACHE`.
 
 ## MSRV
 
-Rust 1.83. Bumps are minor-version events.
+Rust 1.94. Bumps are minor-version events.

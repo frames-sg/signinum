@@ -12,4 +12,8 @@
 
 extern crate alloc;
 
-// Modules are wired in as they are implemented by later tasks.
+pub mod info;
+pub use info::{
+    ColorSpace, ColorTransform, DownscaleFactor, Info, OutputFormat, Rect,
+    SamplingFactors, SofKind,
+};

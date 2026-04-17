@@ -23,3 +23,5 @@ pub use error::{
     BuilderConflictReason, HuffmanFailure, JpegError, MarkerKind, TableKind,
     UnsupportedReason, Warning,
 };
+
+pub(crate) mod parse;

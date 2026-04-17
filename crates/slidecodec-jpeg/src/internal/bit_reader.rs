@@ -72,6 +72,36 @@ impl<'a> BitReader<'a> {
         Ok(())
     }
 
+    /// Fill the accumulator to at least `n` bits, padding with `1` bits when
+    /// refill pauses at a marker (end of entropy segment). Matches
+    /// libjpeg-turbo's `FILL_BIT_BUFFER_SLOW` policy so a trailing short
+    /// Huffman code immediately before EOI still decodes; bits over-read past
+    /// the true end of the stream are guaranteed to be `1` — any such
+    /// over-read yields invalid Huffman codes rather than spurious short-code
+    /// matches.
+    ///
+    /// If refill ran out because the input buffer is physically truncated
+    /// (no marker, `pos >= bytes.len()`), we still return `TableExhausted` so
+    /// malformed streams are rejected, not silently padded over.
+    pub(crate) fn ensure_bits_padded(&mut self, n: u8) -> Result<(), JpegError> {
+        while self.bits < n {
+            if !self.refill_one_byte() {
+                if self.marker.is_none() {
+                    return Err(JpegError::HuffmanDecode {
+                        mcu: 0,
+                        reason: HuffmanFailure::TableExhausted,
+                    });
+                }
+                while self.bits < n {
+                    self.acc |= 1u64 << (ACC_BITS - 1 - self.bits);
+                    self.bits += 1;
+                }
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+
     /// Refill one byte of data into the accumulator. Returns `true` if a
     /// byte was added, `false` if the refill paused at a marker or ran out
     /// of input.

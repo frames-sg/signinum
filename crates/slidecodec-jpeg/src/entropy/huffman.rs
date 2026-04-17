@@ -133,7 +133,7 @@ impl HuffmanTable {
     /// - `HuffmanDecode { TableExhausted }` if the stream ran out of bits.
     /// - `HuffmanDecode { CodeOverflow }` if no 1..=16-bit code matches.
     pub(crate) fn decode(&self, br: &mut BitReader<'_>) -> Result<u8, JpegError> {
-        br.ensure_bits(FAST_BITS)?;
+        br.ensure_bits_padded(FAST_BITS)?;
         let peek = br.peek_bits(FAST_BITS) as usize;
         let (sym, len) = self.fast[peek];
         if len != 0 {
@@ -141,7 +141,7 @@ impl HuffmanTable {
             return Ok(sym);
         }
         // Slow path: compare against `max_code[l]` for l = 9..=16.
-        br.ensure_bits(16)?;
+        br.ensure_bits_padded(16)?;
         let code16 = br.peek_bits(16) as i32;
         for len in (FAST_BITS as usize + 1)..=16 {
             let l = len as u8;

@@ -19,3 +19,16 @@ Test data committed to this repo. Size budget: ~30 MB total.
   `cargo-fuzz` targets.
 
 Populated in M5 (Hardening). This directory is intentionally empty until then.
+
+## Generating conformance fixtures
+
+Run `corpus/conformance/generate.sh` on a machine with libjpeg-turbo installed.
+The script produces reference `.rgb`/`.gray` outputs and a `manifest.json`
+recording the libjpeg-turbo version. Commit the results — CI does **not**
+regenerate them.
+
+Regenerate on:
+- First-time repo setup (M1b initial fixtures land in `baseline_420_16x16.*`
+  and `grayscale_8x8.*`).
+- libjpeg-turbo version bump recorded in `manifest.json` (tracks Risk #3 in
+  the design spec).

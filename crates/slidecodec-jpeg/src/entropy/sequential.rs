@@ -173,26 +173,10 @@ fn emit_rows<W: OutputWriter>(
                 let row_start = y as usize * y_stride;
                 let y_row = &planes[0][row_start..row_start + width];
                 upsample_chroma_row(
-                    &planes[1],
-                    cb_stride,
-                    cb_h,
-                    cb_v,
-                    max_h,
-                    max_v,
-                    y,
-                    width,
-                    &mut cb_up,
+                    &planes[1], cb_stride, cb_h, cb_v, max_h, max_v, y, width, &mut cb_up,
                 );
                 upsample_chroma_row(
-                    &planes[2],
-                    cr_stride,
-                    cr_h,
-                    cr_v,
-                    max_h,
-                    max_v,
-                    y,
-                    width,
-                    &mut cr_up,
+                    &planes[2], cr_stride, cr_h, cr_v, max_h, max_v, y, width, &mut cr_up,
                 );
                 writer.write_ycbcr_row(y, y_row, &cb_up, &cr_up);
             }

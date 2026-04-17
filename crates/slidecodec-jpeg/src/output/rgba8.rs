@@ -74,10 +74,7 @@ mod tests {
         let mut buf = vec![0u8; 3 * 4];
         let mut w = Rgba8Writer::new(&mut buf, 12, 3, 255);
         w.write_gray_row(0, &[10, 20, 30]);
-        assert_eq!(
-            buf,
-            vec![10, 10, 10, 255, 20, 20, 20, 255, 30, 30, 30, 255]
-        );
+        assert_eq!(buf, vec![10, 10, 10, 255, 20, 20, 20, 255, 30, 30, 30, 255]);
     }
 
     #[test]

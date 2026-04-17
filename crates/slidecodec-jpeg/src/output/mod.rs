@@ -34,12 +34,12 @@ pub(crate) fn validate_buffer(
     image_height: u32,
     bytes_per_pixel: usize,
 ) -> Result<(), JpegError> {
-    let row_bytes = (image_width as usize)
-        .checked_mul(bytes_per_pixel)
-        .ok_or(JpegError::OutputBufferTooSmall {
+    let row_bytes = (image_width as usize).checked_mul(bytes_per_pixel).ok_or(
+        JpegError::OutputBufferTooSmall {
             required: usize::MAX,
             provided: out.len(),
-        })?;
+        },
+    )?;
     if stride < row_bytes {
         return Err(JpegError::InvalidStride {
             stride,

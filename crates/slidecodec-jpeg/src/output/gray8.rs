@@ -3,8 +3,6 @@
 //! `Gray8Writer` — 1-byte-per-pixel grayscale output. Multi-component YCbCr
 //! inputs project to luminance via `Y` (ignoring chroma).
 
-#![allow(dead_code)]
-
 use crate::output::OutputWriter;
 
 pub(crate) struct Gray8Writer<'o> {

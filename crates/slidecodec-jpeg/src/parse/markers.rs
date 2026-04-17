@@ -6,12 +6,9 @@
 //! terminating EOI.
 //!
 //! The walker treats EOI as the only terminator and returns SOS as a regular
-//! length-prefixed marker. After a caller parses the SOS payload it must call
-//! [`MarkerWalker::skip_entropy_data`] to advance past the compressed scan
-//! bytes before calling [`MarkerWalker::next_marker`] again; that is how
-//! progressive streams (multiple SOSes) are enumerated.
-
-#![allow(dead_code)] // header parser in Task 14 wires these up.
+//! length-prefixed marker. After a caller parses the SOS payload the entropy
+//! decoder (`BitReader`) consumes the compressed scan bytes and surfaces the
+//! next non-RST marker; progressive streams resume marker enumeration there.
 
 use crate::error::{JpegError, MarkerKind};
 
@@ -62,8 +59,9 @@ impl<'a> MarkerWalker<'a> {
     }
 
     /// Read the next marker. Returns `None` only when EOI is reached. SOS is
-    /// returned as a normal length-prefixed marker — the caller must call
-    /// [`Self::skip_entropy_data`] before calling `next_marker` again.
+    /// returned as a normal length-prefixed marker — the entropy decoder is
+    /// responsible for consuming the scan bytes that follow before the next
+    /// marker can be read.
     ///
     /// Every marker must be preceded by at least one `0xFF` byte. If the next
     /// byte is not `0xFF`, the walker returns `JpegError::InvalidMarker`
@@ -151,32 +149,6 @@ impl<'a> MarkerWalker<'a> {
         }))
     }
 
-    /// Advance past entropy-coded scan data until the next real marker. Must
-    /// be called after the SOS segment has been read via `next_marker`.
-    ///
-    /// Inside the scan: `0xFF 0x00` is byte-stuffed data, `0xFF D0..=D7` is a
-    /// restart marker (skipped), any other `0xFF xx` is a real marker — the
-    /// walker leaves `pos` pointing at the leading `0xFF` so the next
-    /// `next_marker()` call reads it normally.
-    pub(crate) fn skip_entropy_data(&mut self) -> Result<(), JpegError> {
-        while self.pos + 1 < self.bytes.len() {
-            if self.bytes[self.pos] == 0xFF {
-                let tag = self.bytes[self.pos + 1];
-                match tag {
-                    0x00 => self.pos += 2,        // byte-stuffed 0xFF in scan data
-                    0xD0..=0xD7 => self.pos += 2, // RSTn — continue scanning
-                    _ => return Ok(()),           // real marker; leave pos at the 0xFF
-                }
-            } else {
-                self.pos += 1;
-            }
-        }
-        Err(JpegError::Truncated {
-            offset: self.pos,
-            expected: 2,
-        })
-    }
-
     /// Byte offset of the leading 0xFF of the most recently returned marker.
     /// Valid after `next_marker()` returned `None` (EOI) or `Some(Marker)`.
     pub(crate) fn position(&self) -> usize {
@@ -187,8 +159,6 @@ impl<'a> MarkerWalker<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec;
-    use alloc::vec::Vec;
 
     fn walker(bytes: &[u8]) -> MarkerWalker<'_> {
         let mut w = MarkerWalker::new(bytes);
@@ -318,26 +288,5 @@ mod tests {
         let mut w = walker(bytes);
         let err = w.next_marker().unwrap_err();
         assert!(matches!(err, JpegError::InvalidMarker { marker: 0xAA, .. }));
-    }
-
-    #[test]
-    fn skip_entropy_data_advances_past_stuff_bytes_and_rsts() {
-        // Scan data: 0x00 (raw data), FF 00 (stuffed), FF D0 (restart), FF D9 (EOI)
-        let scan = [0x00u8, 0xFF, 0x00, 0xFF, 0xD0, 0xFF, 0xD9];
-        let mut bytes: Vec<u8> = vec![0xFF, 0xD8];
-        bytes.extend_from_slice(&scan);
-        let mut w = walker(&bytes);
-        w.skip_entropy_data().unwrap();
-        // Walker should be at the 0xFF of the EOI marker.
-        let m = w.next_marker().unwrap();
-        assert!(m.is_none(), "expected EOI (None), got {m:?}");
-    }
-
-    #[test]
-    fn skip_entropy_data_returns_truncated_when_scan_never_terminates() {
-        let bytes = &[0xFF, 0xD8, 0x00, 0x00, 0x00]; // no marker after scan
-        let mut w = walker(bytes);
-        let err = w.skip_entropy_data().unwrap_err();
-        assert!(matches!(err, JpegError::Truncated { .. }));
     }
 }

@@ -11,8 +11,6 @@
 //! the two nearest chroma samples. At image edges the far sample is clamped
 //! to the nearest (replicate) so the filter always has valid taps.
 
-#![allow(dead_code)]
-
 /// Identity upsample: one output row is the input row unchanged. Output width
 /// equals input width. Used for 4:4:4 where no upsample is needed.
 pub(crate) fn upsample_1x1(input: &[u8], output: &mut [u8]) {

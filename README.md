@@ -42,14 +42,18 @@ Apache-2.0. See `LICENSE-APACHE`.
 
 Rust 1.94. Bumps are minor-version events.
 
-## Quick-start (M1a: header inspection only)
+## Quick-start
 
 ```rust
-use slidecodec_jpeg::Decoder;
+use slidecodec_jpeg::{Decoder, OutputFormat};
 
 let bytes = std::fs::read("tile.jpg")?;
 let info = Decoder::inspect(&bytes)?;
-println!("{}×{} {:?}", info.dimensions.0, info.dimensions.1, info.sof_kind);
+
+let dec = Decoder::new(&bytes)?;
+let (w, h) = dec.info().dimensions;
+let mut rgb = vec![0u8; (w * h * 3) as usize];
+dec.decode_into(&mut rgb, (w * 3) as usize, OutputFormat::Rgb8)?;
 ```
 
 ```sh
@@ -61,7 +65,7 @@ $ slidecodec inspect tile.jpg
 
 - [x] M0 — Scaffolding, CI, licenses
 - [x] M1a — Error taxonomy, header parser, `Decoder::inspect`
-- [ ] M1b — Bit reader, Huffman, IDCT, color convert, `Decoder::decode_into`
+- [x] M1b — Bit reader, Huffman, IDCT, color convert, Decoder::decode_into
 - [ ] M1.5 — Perf gate: prototype IDCT + Huffman benches
 - [ ] M2 — WSI-specific APIs (partial decode, downscale, segments, table cache, stitch)
 - [ ] M3 — Extended SOF support (SOF1/SOF2/SOF3)

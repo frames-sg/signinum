@@ -4,8 +4,6 @@
 //! IDCT, and pipes rows through an [`OutputWriter`] with chroma upsample and
 //! color conversion.
 
-#![allow(dead_code)]
-
 use crate::color::upsample::{upsample_1x1, upsample_h2v1_fancy, upsample_h2v2_fancy};
 use crate::entropy::block::decode_block;
 use crate::entropy::huffman::HuffmanTable;

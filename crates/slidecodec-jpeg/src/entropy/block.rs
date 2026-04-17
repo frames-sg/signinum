@@ -15,8 +15,6 @@
 //! Produces a 64-entry array in row-major (natural) order, suitable for
 //! direct consumption by the IDCT.
 
-#![allow(dead_code)]
-
 use crate::entropy::huffman::HuffmanTable;
 use crate::entropy::ZIGZAG;
 use crate::error::{HuffmanFailure, JpegError};

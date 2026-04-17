@@ -12,8 +12,6 @@
 //! and consume RST markers; observing a non-RST marker (e.g. EOI) is how the
 //! MCU loop detects end-of-scan without a separate length cursor.
 
-#![allow(dead_code)] // MCU loop in Task 14 wires these up.
-
 use crate::error::{HuffmanFailure, JpegError};
 
 /// Maximum bits the accumulator can hold. Kept at 64 so a single `u64` is

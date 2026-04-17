@@ -2,8 +2,6 @@
 
 //! `Rgb8Writer` — 3-byte-per-pixel RGB output.
 
-#![allow(dead_code)]
-
 use crate::color::ycbcr::ycbcr_to_rgb;
 use crate::output::OutputWriter;
 

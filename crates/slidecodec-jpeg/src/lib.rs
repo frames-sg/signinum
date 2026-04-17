@@ -33,5 +33,7 @@ pub(crate) mod internal;
 
 pub(crate) mod color;
 
+pub(crate) mod output;
+
 pub mod decoder;
 pub use decoder::{DecodeOutcome, Decoder};

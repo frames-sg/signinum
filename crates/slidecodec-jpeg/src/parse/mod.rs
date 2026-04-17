@@ -5,3 +5,4 @@
 //! parsed DQT / DHT / DRI / APP14 state. See spec Section 3 phase 1.
 
 pub(crate) mod markers;
+pub(crate) mod sof;

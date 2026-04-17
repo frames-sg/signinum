@@ -14,6 +14,7 @@
 #![allow(dead_code)]
 
 use crate::error::{HuffmanFailure, JpegError};
+use crate::internal::bit_reader::BitReader;
 use crate::parse::tables::RawHuffmanTable;
 use alloc::vec::Vec;
 
@@ -30,7 +31,8 @@ pub(crate) struct HuffmanTable {
     /// - `min_code[l]`: smallest `l`-bit code; `i32::MAX` if no `l`-bit code.
     /// - `max_code[l]`: largest `l`-bit code; `-1` if no `l`-bit code.
     /// - `val_offset[l]`: index into `values` where `l`-bit symbols begin,
-    ///   adjusted so `symbol = values[code - min_code[l] + val_offset[l]]`.
+    ///   pre-adjusted by subtracting `min_code[l]` so
+    ///   `symbol = values[code + val_offset[l]]`.
     min_code: [i32; 17],
     max_code: [i32; 17],
     val_offset: [i32; 17],
@@ -123,12 +125,49 @@ impl HuffmanTable {
             values: raw.values.clone(),
         })
     }
+
+    /// Decode one symbol from the bit reader. Common case (code ≤ 8 bits) is
+    /// a single array lookup; long codes fall through to a per-length scan.
+    ///
+    /// # Errors
+    /// - `HuffmanDecode { TableExhausted }` if the stream ran out of bits.
+    /// - `HuffmanDecode { CodeOverflow }` if no 1..=16-bit code matches.
+    pub(crate) fn decode(&self, br: &mut BitReader<'_>) -> Result<u8, JpegError> {
+        br.ensure_bits(FAST_BITS)?;
+        let peek = br.peek_bits(FAST_BITS) as usize;
+        let (sym, len) = self.fast[peek];
+        if len != 0 {
+            br.consume_bits(len);
+            return Ok(sym);
+        }
+        // Slow path: compare against `max_code[l]` for l = 9..=16.
+        br.ensure_bits(16)?;
+        let code16 = br.peek_bits(16) as i32;
+        for len in (FAST_BITS as usize + 1)..=16 {
+            let l = len as u8;
+            let c = code16 >> (16 - l);
+            if c <= self.max_code[len] {
+                br.consume_bits(l);
+                let idx = (c + self.val_offset[len]) as usize;
+                if idx >= self.values.len() {
+                    return Err(JpegError::HuffmanDecode {
+                        mcu: 0,
+                        reason: HuffmanFailure::InvalidSymbol,
+                    });
+                }
+                return Ok(self.values[idx]);
+            }
+        }
+        Err(JpegError::HuffmanDecode {
+            mcu: 0,
+            reason: HuffmanFailure::CodeOverflow,
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::internal::bit_reader::BitReader;
 
     /// Standard JPEG luminance DC table from Annex K.3 — well-known fixture.
     /// `bits[0..16]` counts per length; `values` lists the symbols in order.
@@ -176,10 +215,7 @@ mod tests {
         assert!(table.fast.iter().all(|&(_, len)| len == 0));
     }
 
-    // Fixture for Task 6 (`decodes_all_standard_luma_dc_codes`) kept as reference
-    // data. It exercises every standard JPEG luma DC code — Annex K.3.
-    // The actual test lands once `HuffmanTable::decode` exists.
-    #[allow(dead_code)]
+    /// Exercises every standard JPEG luma DC code — Annex K.3.
     fn luma_dc_code_cases() -> &'static [(u32, u8, u8)] {
         &[
             (0b00, 2, 0),
@@ -198,12 +234,47 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires HuffmanTable::decode — lands in Task 6"]
     fn decodes_all_standard_luma_dc_codes() {
-        // Placeholder: full body lands in Task 6 once `HuffmanTable::decode`
-        // exists. Keep `BitReader` referenced so the import stays pulled in.
-        let _ = BitReader::new(&[]);
-        let _ = luma_dc_code_cases();
-        let _ = HuffmanTable::from_raw(&luma_dc_raw()).unwrap();
+        let table = HuffmanTable::from_raw(&luma_dc_raw()).unwrap();
+        for &(code, len, expected) in luma_dc_code_cases() {
+            let mut bytes = alloc::vec![0u8; 4];
+            let shift = 32 - len;
+            let aligned = code << shift;
+            bytes[0] = (aligned >> 24) as u8;
+            bytes[1] = (aligned >> 16) as u8;
+            bytes[2] = (aligned >> 8) as u8;
+            bytes[3] = aligned as u8;
+            let mut br = BitReader::new(&bytes);
+            let sym = table.decode(&mut br).unwrap();
+            assert_eq!(sym, expected, "code={code:b} len={len}");
+        }
+    }
+
+    #[test]
+    fn decodes_9_plus_bit_codes_via_slow_path() {
+        let table = HuffmanTable::from_raw(&luma_dc_raw()).unwrap();
+        // Code `111111110` (9 bits) → symbol 11. A literal 0xFF in a JPEG
+        // entropy stream must be byte-stuffed as `FF 00` (T.81 §F.1.2.3) so
+        // the BitReader does not mistake it for a marker prefix.
+        let bytes = [0xFFu8, 0x00, 0b0100_0000];
+        let mut br = BitReader::new(&bytes);
+        let sym = table.decode(&mut br).unwrap();
+        assert_eq!(sym, 11);
+    }
+
+    #[test]
+    fn reports_huffman_failure_on_truncated_bit_stream() {
+        let table = HuffmanTable::from_raw(&luma_dc_raw()).unwrap();
+        let bytes = [0u8];
+        let mut br = BitReader::new(&bytes);
+        let _ = table.decode(&mut br).unwrap();
+        let err = table.decode(&mut br).unwrap_err();
+        assert!(matches!(
+            err,
+            JpegError::HuffmanDecode {
+                reason: HuffmanFailure::TableExhausted,
+                ..
+            }
+        ));
     }
 }

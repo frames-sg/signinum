@@ -8,6 +8,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Full scalar baseline decode pipeline (M1b):
+  - `Decoder::new(input)` constructs a decoder ready for pixel decode.
+  - `Decoder::decode_into(out, stride, fmt)` decodes SOF0 and SOF1 8-bit
+    sequential JPEGs to `OutputFormat::{Rgb8, Rgba8, Gray8}`.
+  - Chroma sampling: 4:4:4, 4:2:2, 4:2:0 with libjpeg-turbo fancy upsample.
+  - Restart markers handled at MCU interval boundaries.
+  - Ground-truth ISLOW integer IDCT in `idct::scalar`.
+- Public `DecodeOutcome { decoded: Rect, warnings: Vec<Warning> }`.
+- `JpegError::NotImplemented { sof }` for parseable SOFs that land in M3
+  (Extended12, Progressive, Lossless) — transient variant removed in M3.
+  `JpegError::is_not_implemented()` predicate for routing.
+- First bit-exact libjpeg-turbo parity fixtures:
+  `corpus/conformance/baseline_420_16x16.{jpg,rgb}` and
+  `corpus/conformance/grayscale_8x8.{jpg,gray}`, with `manifest.json` recording
+  the libjpeg-turbo version and regeneration via `generate.sh`.
+- `cargo-fuzz` target `decode_fuzz` covering `Decoder::new + decode_into`.
+
+### Not yet (tracked)
+
+- `OutputFormat::RawYCbCr8` — M2.
+- `Decoder::decode_region_into`, `decode_downscaled_into`, `segments()`,
+  `TableCache`, `DecoderBuilder` — M2.
+- SOF1 12-bit, SOF2 progressive, SOF3 lossless — M3.
+- SIMD IDCT and color convert (NEON / AVX2 / SSE4.1 / simd128) — M4.
+
+### M1a (previously published under Unreleased)
+
 - Workspace, CI (fmt, clippy, test × stable/beta/MSRV × linux/macos, wasm32,
   cargo-deny), licensing, and module skeleton (M0).
 - Public API surface for header parsing: `Decoder::inspect(bytes) -> Info`
@@ -20,8 +47,3 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `parse_fuzz` target covering `Decoder::inspect`.
 - `slidecodec inspect <file>` CLI subcommand.
 - `inspect` example in `examples/`.
-
-### Notes
-
-- No decode APIs yet — those land in M1b.
-- No SIMD yet — the only IDCT/color paths that exist are stubs for M1b.

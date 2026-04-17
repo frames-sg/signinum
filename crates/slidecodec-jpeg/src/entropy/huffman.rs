@@ -11,8 +11,6 @@
 //! Built once from [`crate::parse::tables::RawHuffmanTable`]; read many times
 //! by [`crate::entropy::block::decode_block`].
 
-#![allow(dead_code)]
-
 use crate::error::{HuffmanFailure, JpegError};
 use crate::internal::bit_reader::BitReader;
 use crate::parse::tables::RawHuffmanTable;

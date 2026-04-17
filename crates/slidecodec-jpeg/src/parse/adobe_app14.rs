@@ -18,8 +18,6 @@
 //! We return `None` for non-Adobe APP14 segments (any APP14 not beginning
 //! with `"Adobe"` — those may be Adobe DCT but in an older container).
 
-#![allow(dead_code)] // header parser in Task 14 wires these up.
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AdobeTransform {
     Unknown, // 0 — interpret as component-count heuristic (RGB for 3, CMYK for 4)

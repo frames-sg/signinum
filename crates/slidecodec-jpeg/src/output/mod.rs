@@ -26,7 +26,6 @@ pub(crate) trait OutputWriter {
 
 /// Validate that the caller's `out`/`stride` pair is large enough to hold an
 /// `image_width × image_height` image at `bytes_per_pixel`.
-#[allow(dead_code)]
 pub(crate) fn validate_buffer(
     out: &[u8],
     stride: usize,

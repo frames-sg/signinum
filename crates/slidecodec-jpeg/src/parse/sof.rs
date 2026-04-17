@@ -10,8 +10,6 @@
 //!
 //! Anything else maps to `JpegError::UnsupportedSof` with a typed reason.
 
-#![allow(dead_code)] // header parser in Task 14 wires these up.
-
 use crate::error::{JpegError, UnsupportedReason};
 use crate::info::{SamplingFactors, SofKind};
 use alloc::vec::Vec;

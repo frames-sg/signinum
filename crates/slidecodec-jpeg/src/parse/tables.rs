@@ -3,8 +3,6 @@
 //! Parse DQT (Define Quantization Table) and DHT (Define Huffman Table)
 //! segments into slot-indexed table storage.
 
-#![allow(dead_code)] // header parser in Task 14 wires these up.
-
 use crate::error::JpegError;
 
 /// Up to four quant tables (8-bit precision). 16-bit precision widens each

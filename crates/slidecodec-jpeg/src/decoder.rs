@@ -75,18 +75,14 @@ impl<'a> Decoder<'a> {
         // (T.81 §B.2.3: Ns = Nf). Reject non-interleaved single-scan layouts —
         // they are a progressive-style pattern that M1b doesn't decode.
         if scan.components.len() != header.sampling.components.len() {
-            return Err(JpegError::NotImplemented {
-                sof: info.sof_kind,
-            });
+            return Err(JpegError::NotImplemented { sof: info.sof_kind });
         }
         // M1b requires the first component (Y for 3-component, single for
         // grayscale) to be the maximally-sampled component. Non-luma-leading
         // layouts are pathological; real baselines always satisfy this.
         if let Some(&(h, v)) = header.sampling.components.first() {
             if h != header.sampling.max_h || v != header.sampling.max_v {
-                return Err(JpegError::NotImplemented {
-                    sof: info.sof_kind,
-                });
+                return Err(JpegError::NotImplemented { sof: info.sof_kind });
             }
         }
         // Every component must declare H,V in 1..=4 per T.81 §B.2.2, and max_h
@@ -96,14 +92,10 @@ impl<'a> Decoder<'a> {
         // that cover the image width.
         for &(h, v) in &header.sampling.components {
             if h == 0 || v == 0 || h > 4 || v > 4 {
-                return Err(JpegError::NotImplemented {
-                    sof: info.sof_kind,
-                });
+                return Err(JpegError::NotImplemented { sof: info.sof_kind });
             }
             if header.sampling.max_h % h != 0 || header.sampling.max_v % v != 0 {
-                return Err(JpegError::NotImplemented {
-                    sof: info.sof_kind,
-                });
+                return Err(JpegError::NotImplemented { sof: info.sof_kind });
             }
         }
         for comp in &scan.components {
@@ -169,7 +161,7 @@ impl<'a> Decoder<'a> {
         })?;
         let scan_bytes = &self.bytes[sos_offset..];
 
-        let warnings = match fmt {
+        let scan_warnings = match fmt {
             OutputFormat::Rgb8 => {
                 let mut writer = Rgb8Writer::new(out, stride, w);
                 decode_scan_baseline(&ctx, scan_bytes, &mut writer)?
@@ -189,6 +181,9 @@ impl<'a> Decoder<'a> {
             }
         };
 
+        let mut warnings = self.header.warnings.clone();
+        warnings.extend(scan_warnings);
+
         Ok(DecodeOutcome {
             decoded: Rect::full(self.info.dimensions),
             warnings,
@@ -202,16 +197,19 @@ impl<'a> Decoder<'a> {
         })?;
         let mut components = Vec::with_capacity(scan.components.len());
         for (i, scan_comp) in scan.components.iter().enumerate() {
-            let (h, v) = *header.sampling.components.get(i).ok_or(
-                JpegError::MissingMarker {
+            let (h, v) = *header
+                .sampling
+                .components
+                .get(i)
+                .ok_or(JpegError::MissingMarker {
                     marker: MarkerKind::Sof,
-                },
-            )?;
-            let quant_id = *header.quant_table_ids.get(i).ok_or(
-                JpegError::MissingMarker {
+                })?;
+            let quant_id = *header
+                .quant_table_ids
+                .get(i)
+                .ok_or(JpegError::MissingMarker {
                     marker: MarkerKind::Sof,
-                },
-            )? as usize;
+                })? as usize;
             let quant = header
                 .quant_tables
                 .entries

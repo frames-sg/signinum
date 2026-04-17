@@ -3,8 +3,6 @@
 //! Drive the marker walker and accumulate parsed segments into a `ParsedHeader`.
 //! Produces the `Info` struct returned by `Decoder::inspect`.
 
-#![allow(dead_code)] // M1b consumes quant_table_ids/warnings/huffman_tables/…
-
 use crate::error::{JpegError, MarkerKind, Warning};
 use crate::info::{ColorSpace, Info, SamplingFactors, SofKind};
 use crate::parse::adobe_app14::{parse_adobe_app14, AdobeTransform};

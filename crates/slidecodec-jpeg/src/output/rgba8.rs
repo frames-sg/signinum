@@ -3,8 +3,6 @@
 //! `Rgba8Writer` — 4-byte-per-pixel RGBA output. Alpha is a constant captured
 //! at construction time and written verbatim into every pixel's A channel.
 
-#![allow(dead_code)]
-
 use crate::color::ycbcr::ycbcr_to_rgb;
 use crate::output::OutputWriter;
 

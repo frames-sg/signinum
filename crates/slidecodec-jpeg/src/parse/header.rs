@@ -9,6 +9,7 @@ use crate::error::{JpegError, MarkerKind, Warning};
 use crate::info::{ColorSpace, Info, SamplingFactors, SofKind};
 use crate::parse::adobe_app14::{parse_adobe_app14, AdobeTransform};
 use crate::parse::markers::MarkerWalker;
+use crate::parse::scan::{parse_scan_header, ParsedScan};
 use crate::parse::sof::parse_sof;
 use crate::parse::tables::{parse_dht, parse_dqt, HuffmanTables, QuantTables};
 use alloc::vec::Vec;
@@ -40,6 +41,11 @@ pub(crate) struct ParsedHeader {
     /// payload, not the leading 0xFF of FFDA. Consumed by M1b's entropy
     /// decoder as the start of the scan bitstream.
     pub(crate) sos_offset: Option<usize>,
+    /// Parsed SOS header — which components participate in the first scan and
+    /// their Huffman table selectors. `None` iff `sos_offset` is also `None`
+    /// (stream ended before any SOS — rejected as `MissingMarker { Sos }`
+    /// before `ParsedHeader` is returned).
+    pub(crate) scan: Option<ParsedScan>,
 }
 
 impl ParsedHeader {
@@ -84,6 +90,7 @@ pub(crate) fn parse_header(bytes: &[u8]) -> Result<ParsedHeader, JpegError> {
     let mut warnings: Vec<Warning> = Vec::new();
     let mut scan_count = 0u16;
     let mut sos_offset: Option<usize> = None;
+    let mut scan: Option<ParsedScan> = None;
 
     loop {
         match walker.next_marker()? {
@@ -117,38 +124,9 @@ pub(crate) fn parse_header(bytes: &[u8]) -> Result<ParsedHeader, JpegError> {
                     restart_interval = Some(u16::from_be_bytes([m.payload[0], m.payload[1]]));
                 }
                 0xDA => {
-                    // SOS — validate minimal structure (1 byte Ns + 2·Ns
-                    // bytes of component specs + 3 bytes Ss/Se/Ah+Al), then
-                    // STOP. Header-only parsing does not walk scan data;
-                    // that is the decode path's job (M1b). `skip_entropy_data`
-                    // on the walker remains available for later callers.
-                    //
-                    // For progressive streams this means `scan_count = 1`
-                    // after `inspect` — a lower bound reflecting "at least
-                    // one scan observed". The full count is populated by
-                    // the decode path after it traverses every SOS.
-                    if m.payload.is_empty() {
-                        return Err(JpegError::InvalidSegmentLength {
-                            offset: m.offset,
-                            marker: 0xDA,
-                            length: 2,
-                        });
-                    }
-                    let ns = m.payload[0] as usize;
-                    let expected_len = 1 + ns * 2 + 3;
-                    if m.payload.len() != expected_len {
-                        return Err(JpegError::InvalidSegmentLength {
-                            offset: m.offset,
-                            marker: 0xDA,
-                            length: (m.payload.len() + 2) as u16,
-                        });
-                    }
-                    // `walker.position()` now points at the first byte AFTER
-                    // the SOS segment (its leading 0xFF, length field, and
-                    // payload have all been consumed by `next_marker`). That
-                    // byte is the first entropy byte — which is what M1b
-                    // needs as `sos_offset`.
+                    let parsed = parse_scan_header(m.payload, m.offset + 4)?;
                     sos_offset = Some(walker.position());
+                    scan = Some(parsed);
                     scan_count = 1;
                     break;
                 }
@@ -215,6 +193,7 @@ pub(crate) fn parse_header(bytes: &[u8]) -> Result<ParsedHeader, JpegError> {
         scan_count,
         warnings,
         sos_offset,
+        scan,
     })
 }
 
@@ -401,6 +380,19 @@ mod tests {
             Some(expected_first_entropy_byte),
             "sos_offset must point at the first entropy byte, not the leading FFDA"
         );
+    }
+
+    #[test]
+    fn extracts_scan_component_table_selectors() {
+        let h = parse_header(&minimal_baseline_jpeg()).unwrap();
+        let scan = h.scan.as_ref().expect("SOS must be parsed");
+        assert_eq!(scan.components.len(), 3);
+        // minimal_baseline_jpeg uses Td=0 Ta=0 for every component.
+        for (i, comp) in scan.components.iter().enumerate() {
+            assert_eq!(comp.dc_table, 0, "component {i}");
+            assert_eq!(comp.ac_table, 0, "component {i}");
+        }
+        assert_eq!((scan.ss, scan.se, scan.ah, scan.al), (0, 63, 0, 0));
     }
 
     #[test]

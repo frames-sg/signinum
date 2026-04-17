@@ -25,6 +25,8 @@ pub use error::{
 
 pub(crate) mod parse;
 
+pub(crate) mod entropy;
+
 pub(crate) mod internal;
 
 pub mod decoder;

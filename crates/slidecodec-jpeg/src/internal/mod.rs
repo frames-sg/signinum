@@ -1,3 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! internal module — see lib.rs.
+//! Decoder-internal primitives shared across phases. Nothing in this module
+//! is part of the public API.
+
+pub(crate) mod bit_reader;

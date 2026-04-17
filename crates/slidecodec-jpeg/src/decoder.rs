@@ -5,7 +5,7 @@
 use crate::entropy::huffman::HuffmanTable;
 use crate::entropy::sequential::{decode_scan_baseline, ComponentCtx, DecodeContext};
 use crate::error::{JpegError, MarkerKind, Warning};
-use crate::info::{Info, OutputFormat, Rect, SofKind};
+use crate::info::{ColorSpace, Info, OutputFormat, Rect, SofKind};
 use crate::output::{validate_buffer, Gray8Writer, Rgb8Writer, Rgba8Writer};
 use crate::parse::header::{parse_header, ParsedHeader};
 use alloc::vec::Vec;
@@ -39,7 +39,9 @@ pub struct Decoder<'a> {
 }
 
 impl<'a> Decoder<'a> {
-    /// Parse the headers without decoding pixels. O(header size).
+    /// Parse the headers without decoding pixels. The parser walks headers up
+    /// to the first SOS and then performs a lightweight marker scan so
+    /// `Info::scan_count` reflects all scans in the file.
     ///
     /// # Errors
     /// Returns any structural, unsupported-SOF, or sanity-check error
@@ -64,6 +66,10 @@ impl<'a> Decoder<'a> {
         match info.sof_kind {
             SofKind::Baseline8 | SofKind::Extended8 => {}
             other => return Err(JpegError::NotImplemented { sof: other }),
+        }
+        match info.color_space {
+            ColorSpace::Grayscale | ColorSpace::YCbCr | ColorSpace::Rgb => {}
+            color_space => return Err(JpegError::UnsupportedColorSpace { color_space }),
         }
 
         let mut dc_tables: [Option<HuffmanTable>; 4] = Default::default();
@@ -262,7 +268,7 @@ mod tests {
         let mut v = Vec::new();
         v.extend_from_slice(&[0xFF, 0xD8]);
         v.extend_from_slice(&[0xFF, 0xDB, 0x00, 67, 0x00]);
-        v.extend(core::iter::repeat(1u8).take(64));
+        v.extend(core::iter::repeat_n(1u8, 64));
         v.extend_from_slice(&[
             0xFF,
             0xC0,

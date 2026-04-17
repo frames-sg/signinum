@@ -153,7 +153,7 @@ fn emit_rows<W: OutputWriter>(
                 writer.write_gray_row(y, y_row);
             }
         }
-        ColorSpace::YCbCr | ColorSpace::Rgb => {
+        ColorSpace::YCbCr => {
             let (cb_h, cb_v) = (ctx.components[1].h as u32, ctx.components[1].v as u32);
             let (cr_h, cr_v) = (ctx.components[2].h as u32, ctx.components[2].v as u32);
 
@@ -170,13 +170,42 @@ fn emit_rows<W: OutputWriter>(
             for y in y_start..y_end {
                 let row_start = y as usize * y_stride;
                 let y_row = &planes[0][row_start..row_start + width];
-                upsample_chroma_row(
+                upsample_component_row(
                     &planes[1], cb_stride, cb_h, cb_v, max_h, max_v, y, width, &mut cb_up,
                 );
-                upsample_chroma_row(
+                upsample_component_row(
                     &planes[2], cr_stride, cr_h, cr_v, max_h, max_v, y, width, &mut cr_up,
                 );
                 writer.write_ycbcr_row(y, y_row, &cb_up, &cr_up);
+            }
+        }
+        ColorSpace::Rgb => {
+            let (r_h, r_v) = (ctx.components[0].h as u32, ctx.components[0].v as u32);
+            let (g_h, g_v) = (ctx.components[1].h as u32, ctx.components[1].v as u32);
+            let (b_h, b_v) = (ctx.components[2].h as u32, ctx.components[2].v as u32);
+
+            let max_h = ctx.sampling.max_h as u32;
+            let max_v = ctx.sampling.max_v as u32;
+
+            let r_stride = strides[0];
+            let g_stride = strides[1];
+            let b_stride = strides[2];
+
+            let mut r_up = vec![0u8; width];
+            let mut g_up = vec![0u8; width];
+            let mut b_up = vec![0u8; width];
+
+            for y in y_start..y_end {
+                upsample_component_row(
+                    &planes[0], r_stride, r_h, r_v, max_h, max_v, y, width, &mut r_up,
+                );
+                upsample_component_row(
+                    &planes[1], g_stride, g_h, g_v, max_h, max_v, y, width, &mut g_up,
+                );
+                upsample_component_row(
+                    &planes[2], b_stride, b_h, b_v, max_h, max_v, y, width, &mut b_up,
+                );
+                writer.write_rgb_row(y, &r_up, &g_up, &b_up);
             }
         }
         ColorSpace::Cmyk | ColorSpace::Ycck => {
@@ -190,7 +219,7 @@ fn emit_rows<W: OutputWriter>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn upsample_chroma_row(
+fn upsample_component_row(
     plane: &[u8],
     stride: usize,
     comp_h: u32,

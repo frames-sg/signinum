@@ -25,6 +25,19 @@ impl<'o> Rgba8Writer<'o> {
 }
 
 impl OutputWriter for Rgba8Writer<'_> {
+    fn write_rgb_row(&mut self, y: u32, r_row: &[u8], g_row: &[u8], b_row: &[u8]) {
+        let dst_start = (y as usize) * self.stride;
+        let width = self.width as usize;
+        let dst = &mut self.out[dst_start..dst_start + width * 4];
+        let alpha = self.alpha;
+        for i in 0..width {
+            dst[i * 4] = r_row[i];
+            dst[i * 4 + 1] = g_row[i];
+            dst[i * 4 + 2] = b_row[i];
+            dst[i * 4 + 3] = alpha;
+        }
+    }
+
     fn write_ycbcr_row(&mut self, y: u32, y_row: &[u8], cb_row: &[u8], cr_row: &[u8]) {
         let dst_start = (y as usize) * self.stride;
         let width = self.width as usize;

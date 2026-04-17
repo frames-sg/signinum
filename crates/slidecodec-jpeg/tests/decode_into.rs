@@ -5,7 +5,29 @@
 use slidecodec_jpeg::{Decoder, JpegError, OutputFormat};
 
 mod fixtures;
-use fixtures::{grayscale_8x8_jpeg, minimal_baseline_420_jpeg};
+use fixtures::{
+    grayscale_8x8_jpeg, minimal_baseline_420_jpeg, rgb_app14_8x8_jpeg, rgb_app14_8x8_rgb,
+};
+
+fn minimal_cmyk_baseline_jpeg() -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&[0xff, 0xd8]);
+    bytes.extend_from_slice(&[0xff, 0xdb, 0x00, 67, 0x00]);
+    bytes.extend(std::iter::repeat_n(1u8, 64));
+    bytes.extend_from_slice(&[
+        0xff, 0xc0, 0x00, 20, 8, 0, 8, 0, 8, 4, 1, 0x11, 0, 2, 0x11, 0, 3, 0x11, 0, 4, 0x11, 0,
+    ]);
+    bytes.extend_from_slice(&[
+        0xff, 0xc4, 0x00, 20, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xaa,
+    ]);
+    bytes.extend_from_slice(&[
+        0xff, 0xc4, 0x00, 20, 0x10, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xbb,
+    ]);
+    bytes.extend_from_slice(&[
+        0xff, 0xda, 0x00, 0x0e, 4, 1, 0x00, 2, 0x00, 3, 0x00, 4, 0x00, 0, 63, 0, 0x00, 0xff, 0xd9,
+    ]);
+    bytes
+}
 
 #[test]
 fn decode_into_rgb8_returns_decoded_rect_full_image() {
@@ -94,4 +116,46 @@ fn decode_into_tolerates_padded_stride() {
         &[0xAA; 16],
         "stride padding must not be overwritten"
     );
+}
+
+#[test]
+fn decode_into_rgb8_preserves_app14_rgb_pixels() {
+    let bytes = rgb_app14_8x8_jpeg();
+    let dec = Decoder::new(&bytes).expect("APP14 RGB fixture must construct");
+    let (w, h) = dec.info().dimensions;
+    assert_eq!((w, h), (8, 8));
+    let mut buf = vec![0u8; (w * h * 3) as usize];
+    dec.decode_into(&mut buf, (w * 3) as usize, OutputFormat::Rgb8)
+        .expect("APP14 RGB decode must succeed");
+    assert_eq!(buf, rgb_app14_8x8_rgb());
+}
+
+#[test]
+fn decoder_new_rejects_cmyk_baseline_as_unsupported() {
+    let bytes = minimal_cmyk_baseline_jpeg();
+    let err = Decoder::new(&bytes).expect_err("CMYK should not reach scalar decoder");
+    assert!(matches!(err, JpegError::UnsupportedColorSpace { .. }));
+    assert!(err.is_unsupported());
+}
+
+#[test]
+fn decoder_new_rejects_invalid_sequential_scan_parameters() {
+    let mut bytes = minimal_baseline_420_jpeg();
+    let sos = bytes
+        .windows(2)
+        .position(|w| w == [0xff, 0xda])
+        .expect("fixture SOS");
+    bytes[sos + 2 + 2 + 1 + 3 * 2] = 1;
+
+    let err = Decoder::new(&bytes).expect_err("baseline Ss=1 must be rejected");
+    assert!(matches!(
+        err,
+        JpegError::InvalidScanParameters {
+            ss: 1,
+            se: 63,
+            ah: 0,
+            al: 0,
+            ..
+        }
+    ));
 }

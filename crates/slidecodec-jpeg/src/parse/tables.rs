@@ -145,7 +145,7 @@ mod tests {
     #[test]
     fn parses_single_8bit_quant_table() {
         let mut payload = alloc::vec![0u8]; // Pq=0, Tq=0
-        payload.extend(core::iter::repeat(1u8).take(64));
+        payload.extend(core::iter::repeat_n(1u8, 64));
         let mut tables = QuantTables::default();
         parse_dqt(&payload, 0, &mut tables).unwrap();
         assert_eq!(tables.entries[0].unwrap(), ones_64());
@@ -154,9 +154,9 @@ mod tests {
     #[test]
     fn parses_multiple_8bit_quant_tables_in_one_segment() {
         let mut payload = alloc::vec![0u8]; // Pq=0, Tq=0
-        payload.extend(core::iter::repeat(1u8).take(64));
+        payload.extend(core::iter::repeat_n(1u8, 64));
         payload.push(0x01); // Pq=0, Tq=1
-        payload.extend(core::iter::repeat(2u8).take(64));
+        payload.extend(core::iter::repeat_n(2u8, 64));
         let mut tables = QuantTables::default();
         parse_dqt(&payload, 0, &mut tables).unwrap();
         assert_eq!(tables.entries[0].unwrap(), [1u16; 64]);
@@ -211,9 +211,7 @@ mod tests {
     fn rejects_huffman_with_more_than_256_values() {
         let mut payload = alloc::vec![0u8];
         // 16 counts summing to 257 (invalid)
-        for _ in 0..16 {
-            payload.push(17);
-        }
+        payload.extend(core::iter::repeat_n(17u8, 16));
         payload.push(0); // first value, won't get far
         let mut tables = HuffmanTables::default();
         let err = parse_dht(&payload, 0, &mut tables).unwrap_err();

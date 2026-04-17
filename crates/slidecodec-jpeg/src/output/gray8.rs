@@ -18,6 +18,18 @@ impl<'o> Gray8Writer<'o> {
 }
 
 impl OutputWriter for Gray8Writer<'_> {
+    fn write_rgb_row(&mut self, y: u32, r_row: &[u8], g_row: &[u8], b_row: &[u8]) {
+        let dst_start = (y as usize) * self.stride;
+        let width = self.width as usize;
+        let dst = &mut self.out[dst_start..dst_start + width];
+        for i in 0..width {
+            let r = u32::from(r_row[i]);
+            let g = u32::from(g_row[i]);
+            let b = u32::from(b_row[i]);
+            dst[i] = ((77 * r + 150 * g + 29 * b + 128) >> 8) as u8;
+        }
+    }
+
     fn write_ycbcr_row(&mut self, y: u32, y_row: &[u8], _cb_row: &[u8], _cr_row: &[u8]) {
         let dst_start = (y as usize) * self.stride;
         let width = self.width as usize;

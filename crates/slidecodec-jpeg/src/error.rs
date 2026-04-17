@@ -2,7 +2,7 @@
 
 //! Typed error and warning taxonomy. See spec Section 6.
 
-use crate::info::{Rect, SofKind};
+use crate::info::{ColorSpace, Rect, SofKind};
 
 /// A category of JPEG marker. Carried in [`JpegError::UnexpectedMarker`] and
 /// related variants so callers can branch on marker class without parsing the
@@ -99,6 +99,9 @@ pub enum JpegError {
     #[error("unsupported component count: {count}")]
     UnsupportedComponentCount { count: u8 },
 
+    #[error("unsupported color space for decode: {color_space:?}")]
+    UnsupportedColorSpace { color_space: ColorSpace },
+
     #[error("unsupported bit depth: {depth}")]
     UnsupportedBitDepth { depth: u8 },
 
@@ -119,6 +122,17 @@ pub enum JpegError {
 
     #[error("missing Huffman table class={class} id={id} for component {component}")]
     MissingHuffmanTable { component: u8, class: u8, id: u8 },
+
+    #[error(
+        "invalid sequential scan parameters at offset {offset}: Ss={ss} Se={se} Ah={ah} Al={al}"
+    )]
+    InvalidScanParameters {
+        offset: usize,
+        ss: u8,
+        se: u8,
+        ah: u8,
+        al: u8,
+    },
 
     #[error("Huffman decode failed at MCU {mcu}: {reason:?}")]
     HuffmanDecode { mcu: u32, reason: HuffmanFailure },
@@ -175,6 +189,7 @@ impl JpegError {
             self,
             Self::UnsupportedSof { .. }
                 | Self::UnsupportedComponentCount { .. }
+                | Self::UnsupportedColorSpace { .. }
                 | Self::UnsupportedBitDepth { .. }
                 | Self::UnsupportedPredictor { .. }
         )
@@ -214,6 +229,7 @@ impl JpegError {
             | Self::UnexpectedMarker { offset, .. }
             | Self::DuplicateMarker { offset, .. }
             | Self::InvalidSegmentLength { offset, .. }
+            | Self::InvalidScanParameters { offset, .. }
             | Self::RestartMismatch { offset, .. } => Some(*offset),
             _ => None,
         }
@@ -239,12 +255,17 @@ pub enum Warning {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::info::ColorSpace;
 
     #[test]
     fn unsupported_predicate_matches_only_unsupported_variants() {
         assert!(JpegError::UnsupportedSof {
             marker: 0xC9,
             reason: UnsupportedReason::ArithmeticCoding,
+        }
+        .is_unsupported());
+        assert!(JpegError::UnsupportedColorSpace {
+            color_space: ColorSpace::Cmyk,
         }
         .is_unsupported());
         assert!(JpegError::UnsupportedBitDepth { depth: 16 }.is_unsupported());

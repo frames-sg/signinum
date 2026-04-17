@@ -4,13 +4,16 @@
 
 use slidecodec_jpeg::{ColorSpace, Decoder, JpegError, SofKind};
 
+mod fixtures;
+use fixtures::progressive_8x8_jpeg;
+
 fn minimal_baseline_jpeg() -> Vec<u8> {
     // Same construction as parse::header::tests — duplicated here because
     // integration tests cannot access pub(crate) helpers.
     let mut v = Vec::new();
     v.extend_from_slice(&[0xFF, 0xD8]);
     v.extend_from_slice(&[0xFF, 0xDB, 0x00, 67, 0x00]);
-    v.extend(core::iter::repeat(1u8).take(64));
+    v.extend(core::iter::repeat_n(1u8, 64));
     v.extend_from_slice(&[
         0xFF,
         0xC0,
@@ -84,4 +87,11 @@ fn inspect_is_api_misuse_predicate_negative_for_all_parse_errors() {
     // Parse errors are never API misuse.
     let err = Decoder::inspect(&[]).unwrap_err();
     assert!(!err.is_api_misuse());
+}
+
+#[test]
+fn inspect_reports_all_progressive_scans() {
+    let info = Decoder::inspect(&progressive_8x8_jpeg()).unwrap();
+    assert_eq!(info.sof_kind, SofKind::Progressive8);
+    assert_eq!(info.scan_count, 10);
 }

@@ -25,13 +25,9 @@ pub(crate) struct ParsedHeader {
     pub(crate) huffman_tables: HuffmanTables,
     pub(crate) restart_interval: Option<u16>,
     pub(crate) adobe: Option<AdobeTransform>,
-    /// Number of SOS markers observed during header parsing. `parse_header`
-    /// stops at the first SOS, so this is always `1` when a scan exists and
-    /// `0` when the stream ends before any SOS (which is then rejected as
-    /// `MissingMarker { Sos }` before `ParsedHeader` is returned).
-    ///
-    /// Callers that need the full count for progressive streams obtain it
-    /// from the decode path in M1b (which walks every scan).
+    /// Number of SOS markers observed in the input. The header walk still
+    /// stops at the first SOS for decode setup, but we perform a lightweight
+    /// post-SOS marker scan to count later scans for progressive metadata.
     pub(crate) scan_count: u16,
     pub(crate) warnings: Vec<Warning>,
     /// Byte offset of the first entropy byte after the first SOS header —
@@ -74,7 +70,7 @@ impl ParsedHeader {
     }
 }
 
-/// Walk headers from the start of the input. Stops at the first SOS.
+/// Walk headers from the start of the input.
 pub(crate) fn parse_header(bytes: &[u8]) -> Result<ParsedHeader, JpegError> {
     let mut walker = MarkerWalker::new(bytes);
     walker.read_soi()?;
@@ -123,9 +119,12 @@ pub(crate) fn parse_header(bytes: &[u8]) -> Result<ParsedHeader, JpegError> {
                 }
                 0xDA => {
                     let parsed = parse_scan_header(m.payload, m.offset + 4)?;
+                    if let Some(sof) = sof.as_ref() {
+                        validate_scan_parameters(sof.sof_kind, &parsed, m.offset + 4)?;
+                    }
                     sos_offset = Some(walker.position());
                     scan = Some(parsed);
-                    scan_count = 1;
+                    scan_count = count_scan_markers(bytes, walker.position());
                     break;
                 }
                 0xEE => {
@@ -195,6 +194,96 @@ pub(crate) fn parse_header(bytes: &[u8]) -> Result<ParsedHeader, JpegError> {
     })
 }
 
+fn validate_scan_parameters(
+    sof_kind: SofKind,
+    scan: &ParsedScan,
+    offset: usize,
+) -> Result<(), JpegError> {
+    if matches!(sof_kind, SofKind::Baseline8 | SofKind::Extended8)
+        && (scan.ss != 0 || scan.se != 63 || scan.ah != 0 || scan.al != 0)
+    {
+        return Err(JpegError::InvalidScanParameters {
+            offset,
+            ss: scan.ss,
+            se: scan.se,
+            ah: scan.ah,
+            al: scan.al,
+        });
+    }
+    Ok(())
+}
+
+fn count_scan_markers(bytes: &[u8], mut pos: usize) -> u16 {
+    let mut count = 1u16;
+    while let Some(marker_offset) = find_next_marker(bytes, &mut pos) {
+        let code = bytes[marker_offset + 1];
+        match code {
+            0x00 => {}
+            0xD0..=0xD7 => {}
+            0xD9 => break,
+            0xDA => {
+                count = count.saturating_add(1);
+                if let Some(next) = skip_marker_segment(bytes, marker_offset) {
+                    pos = next;
+                } else {
+                    break;
+                }
+            }
+            0x01 | 0xD8 => {
+                pos = marker_offset + 2;
+            }
+            _ => {
+                if let Some(next) = skip_marker_segment(bytes, marker_offset) {
+                    pos = next;
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+    count
+}
+
+fn find_next_marker(bytes: &[u8], pos: &mut usize) -> Option<usize> {
+    while *pos + 1 < bytes.len() {
+        if bytes[*pos] != 0xFF {
+            *pos += 1;
+            continue;
+        }
+        let mut code_pos = *pos + 1;
+        while code_pos < bytes.len() && bytes[code_pos] == 0xFF {
+            code_pos += 1;
+        }
+        if code_pos >= bytes.len() {
+            *pos = bytes.len();
+            return None;
+        }
+        *pos = code_pos + 1;
+        if bytes[code_pos] == 0x00 {
+            continue;
+        }
+        return Some(code_pos - 1);
+    }
+    *pos = bytes.len();
+    None
+}
+
+fn skip_marker_segment(bytes: &[u8], marker_offset: usize) -> Option<usize> {
+    let len_pos = marker_offset + 2;
+    if len_pos + 1 >= bytes.len() {
+        return None;
+    }
+    let length = usize::from(u16::from_be_bytes([bytes[len_pos], bytes[len_pos + 1]]));
+    if length < 2 {
+        return None;
+    }
+    let next = len_pos.checked_add(length)?;
+    if next > bytes.len() {
+        return None;
+    }
+    Some(next)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -209,7 +298,7 @@ mod tests {
 
         // DQT: Pq=0 Tq=0 followed by 64 bytes of 1
         v.extend_from_slice(&[0xFF, 0xDB, 0x00, 67, 0x00]);
-        v.extend(core::iter::repeat(1u8).take(64));
+        v.extend(core::iter::repeat_n(1u8, 64));
 
         // SOF0: precision 8, 16x16, 3 components, Y(2x2) Cb(1x1) Cr(1x1), all using Tq=0
         v.extend_from_slice(&[
@@ -349,10 +438,7 @@ mod tests {
     }
 
     #[test]
-    fn scan_count_is_one_after_header_only_parse() {
-        // Even for a progressive-shaped stream with two SOSes, header-only
-        // parsing stops at the first SOS. The full count is the decode
-        // path's responsibility (M1b) and is not exercised here.
+    fn scan_count_tracks_all_sos_markers() {
         let mut bytes = minimal_baseline_jpeg();
         let eoi_pos = bytes.windows(2).rposition(|w| w == [0xFF, 0xD9]).unwrap();
         let second_scan = vec![
@@ -360,10 +446,7 @@ mod tests {
         ];
         bytes.splice(eoi_pos..eoi_pos, second_scan.iter().copied());
         let h = parse_header(&bytes).unwrap();
-        assert_eq!(
-            h.scan_count, 1,
-            "header-only inspect sees only the first SOS"
-        );
+        assert_eq!(h.scan_count, 2);
     }
 
     #[test]

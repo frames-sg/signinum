@@ -294,7 +294,7 @@ mod tests {
         let mut br = BitReader::new(&data);
         for i in 0..96 {
             let bit = br.read_bits(1).unwrap();
-            let expected = if i % 2 == 0 { 1 } else { 0 };
+            let expected = u32::from(i % 2 == 0);
             assert_eq!(bit, expected, "bit {i}");
         }
     }

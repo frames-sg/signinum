@@ -17,6 +17,9 @@ pub(crate) use rgba8::Rgba8Writer;
 /// A destination for decoded pixel rows. Each writer carries a mutable slice
 /// of the caller's output buffer and the stride in bytes between rows.
 pub(crate) trait OutputWriter {
+    /// Write one full-width row of RGB data at output row `y`.
+    fn write_rgb_row(&mut self, y: u32, r_row: &[u8], g_row: &[u8], b_row: &[u8]);
+
     /// Write one full-width row of YCbCr data at output row `y`.
     fn write_ycbcr_row(&mut self, y: u32, y_row: &[u8], cb_row: &[u8], cr_row: &[u8]);
 

@@ -93,7 +93,12 @@ mod tests {
     #[test]
     fn decode_outcome_carries_decoded_rect_and_warnings() {
         let outcome = DecodeOutcome {
-            decoded: Rect { x: 0, y: 0, w: 32, h: 16 },
+            decoded: Rect {
+                x: 0,
+                y: 0,
+                w: 32,
+                h: 16,
+            },
             warnings: vec![Warning::MissingEoi],
         };
         assert_eq!(outcome.decoded.w, 32);
@@ -119,8 +124,25 @@ mod tests {
         v.extend_from_slice(&[0xFF, 0xDB, 0x00, 67, 0x00]);
         v.extend(core::iter::repeat(1u8).take(64));
         v.extend_from_slice(&[
-            0xFF, 0xC0, 0x00, 17, 8, 0, 16, 0, 16, 3,
-            1, (2 << 4) | 2, 0, 2, (1 << 4) | 1, 0, 3, (1 << 4) | 1, 0,
+            0xFF,
+            0xC0,
+            0x00,
+            17,
+            8,
+            0,
+            16,
+            0,
+            16,
+            3,
+            1,
+            (2 << 4) | 2,
+            0,
+            2,
+            (1 << 4) | 1,
+            0,
+            3,
+            (1 << 4) | 1,
+            0,
         ]);
         v.extend_from_slice(&[
             0xFF, 0xC4, 0x00, 20, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xAA,

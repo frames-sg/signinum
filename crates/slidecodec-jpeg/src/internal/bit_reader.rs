@@ -111,7 +111,11 @@ impl<'a> BitReader<'a> {
     /// (Huffman codes up to 16 bits).
     pub(crate) fn peek_bits(&self, n: u8) -> u32 {
         debug_assert!(n <= 32, "peek_bits({n}) exceeds u32");
-        debug_assert!(n <= self.bits, "peek_bits({n}) with only {} buffered", self.bits);
+        debug_assert!(
+            n <= self.bits,
+            "peek_bits({n}) with only {} buffered",
+            self.bits
+        );
         if n == 0 {
             0
         } else {
@@ -121,7 +125,11 @@ impl<'a> BitReader<'a> {
 
     /// Advance past `n` bits previously examined with `peek_bits`.
     pub(crate) fn consume_bits(&mut self, n: u8) {
-        debug_assert!(n <= self.bits, "consume_bits({n}) with only {} buffered", self.bits);
+        debug_assert!(
+            n <= self.bits,
+            "consume_bits({n}) with only {} buffered",
+            self.bits
+        );
         self.acc <<= n;
         self.bits -= n;
     }

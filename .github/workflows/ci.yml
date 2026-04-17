@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: rustfmt }
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: clippy }
+      - run: cargo clippy --workspace --all-features -- -D warnings
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,      rust: stable, arch: x86_64 }
+          - { os: ubuntu-latest,      rust: beta,   arch: x86_64 }
+          - { os: ubuntu-latest,      rust: "1.83", arch: x86_64 }
+          - { os: ubuntu-24.04-arm,   rust: stable, arch: aarch64 }
+          - { os: ubuntu-24.04-arm,   rust: "1.83", arch: aarch64 }
+          - { os: macos-latest,       rust: stable, arch: aarch64 }
+          - { os: macos-latest,       rust: "1.83", arch: aarch64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with: { toolchain: ${{ matrix.rust }} }
+      - run: cargo test --workspace --all-features
+      - run: cargo test --workspace --no-default-features
+
+  wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: "wasm32-unknown-unknown,wasm32-wasi" }
+      - run: cargo build -p slidecodec-jpeg --no-default-features --target wasm32-unknown-unknown
+      - run: cargo build -p slidecodec-jpeg --target wasm32-wasi
+
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with: { command: check licenses advisories bans sources }

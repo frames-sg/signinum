@@ -1,0 +1,26 @@
+[package]
+name    = "slidecodec-jpeg-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys    = "0.4"
+slidecodec-jpeg  = { path = "..", features = ["scalar-only"] }
+
+[[bin]]
+name             = "parse_fuzz"
+path             = "fuzz_targets/parse_fuzz.rs"
+test             = false
+doc              = false
+bench            = false
+
+[profile.release]
+debug = 1
+
+# The fuzz crate is not part of the workspace; cargo-fuzz expects it to be an
+# independent crate.
+[workspace]

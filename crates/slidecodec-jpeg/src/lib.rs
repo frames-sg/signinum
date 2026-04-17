@@ -17,3 +17,9 @@ pub use info::{
     ColorSpace, ColorTransform, DownscaleFactor, Info, OutputFormat, Rect,
     SamplingFactors, SofKind,
 };
+
+pub mod error;
+pub use error::{
+    BuilderConflictReason, HuffmanFailure, JpegError, MarkerKind, TableKind,
+    UnsupportedReason, Warning,
+};

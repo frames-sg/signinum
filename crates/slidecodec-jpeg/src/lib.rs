@@ -14,14 +14,13 @@ extern crate alloc;
 
 pub mod info;
 pub use info::{
-    ColorSpace, ColorTransform, DownscaleFactor, Info, OutputFormat, Rect,
-    SamplingFactors, SofKind,
+    ColorSpace, ColorTransform, DownscaleFactor, Info, OutputFormat, Rect, SamplingFactors, SofKind,
 };
 
 pub mod error;
 pub use error::{
-    BuilderConflictReason, HuffmanFailure, JpegError, MarkerKind, TableKind,
-    UnsupportedReason, Warning,
+    BuilderConflictReason, HuffmanFailure, JpegError, MarkerKind, TableKind, UnsupportedReason,
+    Warning,
 };
 
 pub(crate) mod parse;

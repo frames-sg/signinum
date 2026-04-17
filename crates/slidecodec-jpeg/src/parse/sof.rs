@@ -83,7 +83,9 @@ pub(crate) fn parse_sof(
             });
         }
         (_, bad_precision) => {
-            return Err(JpegError::UnsupportedBitDepth { depth: bad_precision });
+            return Err(JpegError::UnsupportedBitDepth {
+                depth: bad_precision,
+            });
         }
     };
 
@@ -108,7 +110,11 @@ pub(crate) fn parse_sof(
         let h = sampling_byte >> 4;
         let v = sampling_byte & 0x0F;
         if !(1..=4).contains(&h) || !(1..=4).contains(&v) {
-            return Err(JpegError::InvalidSampling { component: i as u8, h, v });
+            return Err(JpegError::InvalidSampling {
+                component: i as u8,
+                h,
+                v,
+            });
         }
         components.push((h, v));
         quant_table_ids.push(tq);
@@ -121,7 +127,11 @@ pub(crate) fn parse_sof(
         bit_depth: precision,
         width,
         height,
-        sampling: SamplingFactors { components, max_h, max_v },
+        sampling: SamplingFactors {
+            components,
+            max_h,
+            max_v,
+        },
         quant_table_ids,
     })
 }
@@ -136,10 +146,21 @@ mod tests {
         // precision=8, height=16, width=16, Nf=3,
         // [Y: id=1 H=2 V=2 Tq=0][Cb: id=2 H=1 V=1 Tq=1][Cr: id=3 H=1 V=1 Tq=1]
         vec![
-            8, 0, 16, 0, 16, 3,
-            1, (2 << 4) | 2, 0,
-            2, (1 << 4) | 1, 1,
-            3, (1 << 4) | 1, 1,
+            8,
+            0,
+            16,
+            0,
+            16,
+            3,
+            1,
+            (2 << 4) | 2,
+            0,
+            2,
+            (1 << 4) | 1,
+            1,
+            3,
+            (1 << 4) | 1,
+            1,
         ]
     }
 
@@ -179,7 +200,10 @@ mod tests {
         let err = parse_sof(0xC9, &sof0_420_payload(), 0).unwrap_err();
         assert!(matches!(
             err,
-            JpegError::UnsupportedSof { reason: UnsupportedReason::ArithmeticCoding, .. }
+            JpegError::UnsupportedSof {
+                reason: UnsupportedReason::ArithmeticCoding,
+                ..
+            }
         ));
     }
 
@@ -188,7 +212,10 @@ mod tests {
         let err = parse_sof(0xC5, &sof0_420_payload(), 0).unwrap_err();
         assert!(matches!(
             err,
-            JpegError::UnsupportedSof { reason: UnsupportedReason::Hierarchical, .. }
+            JpegError::UnsupportedSof {
+                reason: UnsupportedReason::Hierarchical,
+                ..
+            }
         ));
     }
 
@@ -205,7 +232,10 @@ mod tests {
     fn rejects_two_component_image() {
         let payload = vec![8, 0, 16, 0, 16, 2, 1, 0x11, 0, 2, 0x11, 0];
         let err = parse_sof(0xC0, &payload, 0).unwrap_err();
-        assert!(matches!(err, JpegError::UnsupportedComponentCount { count: 2 }));
+        assert!(matches!(
+            err,
+            JpegError::UnsupportedComponentCount { count: 2 }
+        ));
     }
 
     #[test]

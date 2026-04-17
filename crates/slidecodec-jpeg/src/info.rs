@@ -59,7 +59,12 @@ pub struct Rect {
 impl Rect {
     /// The full image rect for the given dimensions.
     pub fn full(dims: (u32, u32)) -> Self {
-        Self { x: 0, y: 0, w: dims.0, h: dims.1 }
+        Self {
+            x: 0,
+            y: 0,
+            w: dims.0,
+            h: dims.1,
+        }
     }
 
     /// True if the rect is fully inside the bounding box of size `dims`.
@@ -130,19 +135,51 @@ mod tests {
     #[test]
     fn rect_full_matches_dimensions() {
         let r = Rect::full((1024, 768));
-        assert_eq!(r, Rect { x: 0, y: 0, w: 1024, h: 768 });
+        assert_eq!(
+            r,
+            Rect {
+                x: 0,
+                y: 0,
+                w: 1024,
+                h: 768
+            }
+        );
     }
 
     #[test]
     fn rect_is_within_accepts_contained_rect() {
-        assert!(Rect { x: 0, y: 0, w: 100, h: 100 }.is_within((100, 100)));
-        assert!(Rect { x: 10, y: 20, w: 30, h: 40 }.is_within((100, 100)));
+        assert!(Rect {
+            x: 0,
+            y: 0,
+            w: 100,
+            h: 100
+        }
+        .is_within((100, 100)));
+        assert!(Rect {
+            x: 10,
+            y: 20,
+            w: 30,
+            h: 40
+        }
+        .is_within((100, 100)));
     }
 
     #[test]
     fn rect_is_within_rejects_overflowing_rect() {
-        assert!(!Rect { x: 50, y: 50, w: 60, h: 10 }.is_within((100, 100)));
-        assert!(!Rect { x: u32::MAX, y: 0, w: 1, h: 1 }.is_within((100, 100)));
+        assert!(!Rect {
+            x: 50,
+            y: 50,
+            w: 60,
+            h: 10
+        }
+        .is_within((100, 100)));
+        assert!(!Rect {
+            x: u32::MAX,
+            y: 0,
+            w: 1,
+            h: 1
+        }
+        .is_within((100, 100)));
     }
 
     #[test]

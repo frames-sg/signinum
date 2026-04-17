@@ -12,16 +12,34 @@ fn minimal_baseline_jpeg() -> Vec<u8> {
     v.extend_from_slice(&[0xFF, 0xDB, 0x00, 67, 0x00]);
     v.extend(core::iter::repeat(1u8).take(64));
     v.extend_from_slice(&[
-        0xFF, 0xC0, 0x00, 17, 8, 0, 16, 0, 16, 3,
-        1, (2 << 4) | 2, 0, 2, (1 << 4) | 1, 0, 3, (1 << 4) | 1, 0,
+        0xFF,
+        0xC0,
+        0x00,
+        17,
+        8,
+        0,
+        16,
+        0,
+        16,
+        3,
+        1,
+        (2 << 4) | 2,
+        0,
+        2,
+        (1 << 4) | 1,
+        0,
+        3,
+        (1 << 4) | 1,
+        0,
     ]);
     // DHT length = 2 (length field) + 1 (Tc/Th) + 16 (bits[]) + 1 (value) = 20
-    v.extend_from_slice(&[0xFF, 0xC4, 0x00, 20, 0, 1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0xAA]);
-    v.extend_from_slice(&[0xFF, 0xC4, 0x00, 20, 0x10, 1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0xBB]);
     v.extend_from_slice(&[
-        0xFF, 0xDA, 0x00, 12, 3,
-        1, 0x00, 2, 0x00, 3, 0x00, 0, 63, 0,
+        0xFF, 0xC4, 0x00, 20, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xAA,
     ]);
+    v.extend_from_slice(&[
+        0xFF, 0xC4, 0x00, 20, 0x10, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xBB,
+    ]);
+    v.extend_from_slice(&[0xFF, 0xDA, 0x00, 12, 3, 1, 0x00, 2, 0x00, 3, 0x00, 0, 63, 0]);
     v.extend_from_slice(&[0x00, 0xFF, 0xD9]);
     v
 }

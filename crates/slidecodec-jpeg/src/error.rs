@@ -68,7 +68,11 @@ pub enum JpegError {
     InvalidMarker { offset: usize, marker: u8 },
 
     #[error("expected {expected:?}, found FF{found:02X} at offset {offset}")]
-    UnexpectedMarker { offset: usize, expected: MarkerKind, found: u8 },
+    UnexpectedMarker {
+        offset: usize,
+        expected: MarkerKind,
+        found: u8,
+    },
 
     #[error("missing required marker {marker:?}")]
     MissingMarker { marker: MarkerKind },
@@ -77,13 +81,20 @@ pub enum JpegError {
     DuplicateMarker { offset: usize, marker: MarkerKind },
 
     #[error("invalid length {length} for marker FF{marker:02X} at offset {offset}")]
-    InvalidSegmentLength { offset: usize, marker: u8, length: u16 },
+    InvalidSegmentLength {
+        offset: usize,
+        marker: u8,
+        length: u16,
+    },
 
     /// Unsupported SOF variant. Carries the raw marker byte (e.g. `0xC9` for
     /// arithmetic extended-sequential) so callers routing to a fallback
     /// decoder can distinguish FFC5 from FFC9 without relying on `reason`.
     #[error("unsupported SOF marker FF{marker:02X} ({reason:?})")]
-    UnsupportedSof { marker: u8, reason: UnsupportedReason },
+    UnsupportedSof {
+        marker: u8,
+        reason: UnsupportedReason,
+    },
 
     #[error("unsupported component count: {count}")]
     UnsupportedComponentCount { count: u8 },
@@ -113,7 +124,11 @@ pub enum JpegError {
     HuffmanDecode { mcu: u32, reason: HuffmanFailure },
 
     #[error("restart mismatch at offset {offset}: expected RST{expected}, found FF{found:02X}")]
-    RestartMismatch { offset: usize, expected: u8, found: u8 },
+    RestartMismatch {
+        offset: usize,
+        expected: u8,
+        found: u8,
+    },
 
     #[error("unexpected EOI at MCU {mcu_at}/{mcu_total}")]
     UnexpectedEoi { mcu_at: u32, mcu_total: u32 },
@@ -216,36 +231,61 @@ mod tests {
         }
         .is_unsupported());
         assert!(JpegError::UnsupportedBitDepth { depth: 16 }.is_unsupported());
-        assert!(!JpegError::Truncated { offset: 0, expected: 1 }.is_unsupported());
+        assert!(!JpegError::Truncated {
+            offset: 0,
+            expected: 1
+        }
+        .is_unsupported());
     }
 
     #[test]
     fn truncated_predicate_covers_truncation_and_unexpected_eoi() {
-        assert!(JpegError::Truncated { offset: 10, expected: 5 }.is_truncated());
-        assert!(JpegError::UnexpectedEoi { mcu_at: 3, mcu_total: 10 }.is_truncated());
-        assert!(!JpegError::InvalidMarker { offset: 4, marker: 0xFF }.is_truncated());
+        assert!(JpegError::Truncated {
+            offset: 10,
+            expected: 5
+        }
+        .is_truncated());
+        assert!(JpegError::UnexpectedEoi {
+            mcu_at: 3,
+            mcu_total: 10
+        }
+        .is_truncated());
+        assert!(!JpegError::InvalidMarker {
+            offset: 4,
+            marker: 0xFF
+        }
+        .is_truncated());
     }
 
     #[test]
     fn api_misuse_predicate_covers_caller_bugs() {
-        assert!(JpegError::OutputBufferTooSmall { required: 100, provided: 64 }.is_api_misuse());
+        assert!(JpegError::OutputBufferTooSmall {
+            required: 100,
+            provided: 64
+        }
+        .is_api_misuse());
         assert!(JpegError::InvalidStride { stride: 2, row: 8 }.is_api_misuse());
         assert!(JpegError::BuilderConflict {
             reason: BuilderConflictReason::NoInput
         }
         .is_api_misuse());
-        assert!(!JpegError::Truncated { offset: 0, expected: 1 }.is_api_misuse());
+        assert!(!JpegError::Truncated {
+            offset: 0,
+            expected: 1
+        }
+        .is_api_misuse());
     }
 
     #[test]
     fn offset_returns_some_for_byte_positioned_errors() {
         assert_eq!(
-            JpegError::InvalidMarker { offset: 42, marker: 0xBA }.offset(),
+            JpegError::InvalidMarker {
+                offset: 42,
+                marker: 0xBA
+            }
+            .offset(),
             Some(42),
         );
-        assert_eq!(
-            JpegError::UnsupportedBitDepth { depth: 16 }.offset(),
-            None,
-        );
+        assert_eq!(JpegError::UnsupportedBitDepth { depth: 16 }.offset(), None,);
     }
 }

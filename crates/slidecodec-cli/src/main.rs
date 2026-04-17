@@ -41,18 +41,25 @@ fn inspect(path: &Path) -> ExitCode {
     };
     match slidecodec_jpeg::Decoder::inspect(&bytes) {
         Ok(info) => {
-            println!("{}×{} {:?} {:?} bit={} samp={:?} rst={:?} scans={}",
-                info.dimensions.0, info.dimensions.1,
-                info.sof_kind, info.color_space,
-                info.bit_depth, info.sampling.components,
-                info.restart_interval, info.scan_count,
+            println!(
+                "{}×{} {:?} {:?} bit={} samp={:?} rst={:?} scans={}",
+                info.dimensions.0,
+                info.dimensions.1,
+                info.sof_kind,
+                info.color_space,
+                info.bit_depth,
+                info.sampling.components,
+                info.restart_interval,
+                info.scan_count,
             );
             ExitCode::SUCCESS
         }
         Err(e) => {
             eprintln!("error: {e}");
             if e.is_unsupported() {
-                eprintln!("hint: this file is not supported by slidecodec; try jpeg-decoder or openjpeg");
+                eprintln!(
+                    "hint: this file is not supported by slidecodec; try jpeg-decoder or openjpeg"
+                );
             }
             ExitCode::from(1)
         }

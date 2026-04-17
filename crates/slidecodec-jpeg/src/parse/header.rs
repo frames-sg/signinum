@@ -174,7 +174,9 @@ pub(crate) fn parse_header(bytes: &[u8]) -> Result<ParsedHeader, JpegError> {
                     // APP0 JFIF — presence noted, contents not interpreted in v1.
                 }
                 0xE2 => {
-                    warnings.push(Warning::IccProfileIgnored { size: m.payload.len() });
+                    warnings.push(Warning::IccProfileIgnored {
+                        size: m.payload.len(),
+                    });
                 }
                 0xE1..=0xEF => {
                     warnings.push(Warning::UnknownAppMarker {
@@ -195,7 +197,9 @@ pub(crate) fn parse_header(bytes: &[u8]) -> Result<ParsedHeader, JpegError> {
         }
     }
 
-    let sof = sof.ok_or(JpegError::MissingMarker { marker: MarkerKind::Sof })?;
+    let sof = sof.ok_or(JpegError::MissingMarker {
+        marker: MarkerKind::Sof,
+    })?;
     let _ = sof_seen_code; // reserved for future use (progressive / lossless routing)
 
     Ok(ParsedHeader {
@@ -232,20 +236,38 @@ mod tests {
 
         // SOF0: precision 8, 16x16, 3 components, Y(2x2) Cb(1x1) Cr(1x1), all using Tq=0
         v.extend_from_slice(&[
-            0xFF, 0xC0, 0x00, 17, 8, 0, 16, 0, 16, 3,
-            1, (2 << 4) | 2, 0, 2, (1 << 4) | 1, 0, 3, (1 << 4) | 1, 0,
+            0xFF,
+            0xC0,
+            0x00,
+            17,
+            8,
+            0,
+            16,
+            0,
+            16,
+            3,
+            1,
+            (2 << 4) | 2,
+            0,
+            2,
+            (1 << 4) | 1,
+            0,
+            3,
+            (1 << 4) | 1,
+            0,
         ]);
 
         // DHT DC0 and AC0 (minimal: 1 value each)
         // DHT length = 2 (length field) + 1 (Tc/Th) + 16 (bits[]) + 1 (value) = 20
-        v.extend_from_slice(&[0xFF, 0xC4, 0x00, 20, 0, 1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0xAA]);
-        v.extend_from_slice(&[0xFF, 0xC4, 0x00, 20, 0x10, 1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0xBB]);
+        v.extend_from_slice(&[
+            0xFF, 0xC4, 0x00, 20, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xAA,
+        ]);
+        v.extend_from_slice(&[
+            0xFF, 0xC4, 0x00, 20, 0x10, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xBB,
+        ]);
 
         // SOS: 3 components, Ss=0 Se=63 Ah=0 Al=0
-        v.extend_from_slice(&[
-            0xFF, 0xDA, 0x00, 12, 3,
-            1, 0x00, 2, 0x00, 3, 0x00, 0, 63, 0,
-        ]);
+        v.extend_from_slice(&[0xFF, 0xDA, 0x00, 12, 3, 1, 0x00, 2, 0x00, 3, 0x00, 0, 63, 0]);
 
         // Minimal scan data + EOI
         v.extend_from_slice(&[0x00, 0xFF, 0xD9]);
@@ -272,7 +294,12 @@ mod tests {
         // SOI directly followed by SOS/EOI
         let bytes = vec![0xFF, 0xD8, 0xFF, 0xD9];
         let err = parse_header(&bytes).unwrap_err();
-        assert!(matches!(err, JpegError::MissingMarker { marker: MarkerKind::Sof }));
+        assert!(matches!(
+            err,
+            JpegError::MissingMarker {
+                marker: MarkerKind::Sof
+            }
+        ));
     }
 
     #[test]
@@ -281,12 +308,35 @@ mod tests {
         // Insert a second SOF0 before SOS. Find SOS offset and splice.
         let sos_pos = bytes.windows(2).position(|w| w == [0xFF, 0xDA]).unwrap();
         let second_sof = vec![
-            0xFF, 0xC0, 0x00, 17, 8, 0, 16, 0, 16, 3,
-            1, (2 << 4) | 2, 0, 2, (1 << 4) | 1, 0, 3, (1 << 4) | 1, 0,
+            0xFF,
+            0xC0,
+            0x00,
+            17,
+            8,
+            0,
+            16,
+            0,
+            16,
+            3,
+            1,
+            (2 << 4) | 2,
+            0,
+            2,
+            (1 << 4) | 1,
+            0,
+            3,
+            (1 << 4) | 1,
+            0,
         ];
         bytes.splice(sos_pos..sos_pos, second_sof.iter().copied());
         let err = parse_header(&bytes).unwrap_err();
-        assert!(matches!(err, JpegError::DuplicateMarker { marker: MarkerKind::Sof, .. }));
+        assert!(matches!(
+            err,
+            JpegError::DuplicateMarker {
+                marker: MarkerKind::Sof,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -329,13 +379,14 @@ mod tests {
         let mut bytes = minimal_baseline_jpeg();
         let eoi_pos = bytes.windows(2).rposition(|w| w == [0xFF, 0xD9]).unwrap();
         let second_scan = vec![
-            0xFF, 0xDA, 0x00, 12, 3,
-            1, 0x00, 2, 0x00, 3, 0x00, 0, 63, 0,
-            0x00,
+            0xFF, 0xDA, 0x00, 12, 3, 1, 0x00, 2, 0x00, 3, 0x00, 0, 63, 0, 0x00,
         ];
         bytes.splice(eoi_pos..eoi_pos, second_scan.iter().copied());
         let h = parse_header(&bytes).unwrap();
-        assert_eq!(h.scan_count, 1, "header-only inspect sees only the first SOS");
+        assert_eq!(
+            h.scan_count, 1,
+            "header-only inspect sees only the first SOS"
+        );
     }
 
     #[test]

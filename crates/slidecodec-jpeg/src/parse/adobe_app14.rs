@@ -22,9 +22,9 @@
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AdobeTransform {
-    Unknown,  // 0 — interpret as component-count heuristic (RGB for 3, CMYK for 4)
-    YCbCr,    // 1
-    Ycck,     // 2
+    Unknown, // 0 — interpret as component-count heuristic (RGB for 3, CMYK for 4)
+    YCbCr,   // 1
+    Ycck,    // 2
 }
 
 pub(crate) fn parse_adobe_app14(payload: &[u8]) -> Option<AdobeTransform> {
@@ -56,22 +56,34 @@ mod tests {
 
     #[test]
     fn parses_adobe_ycbcr_transform() {
-        assert_eq!(parse_adobe_app14(&adobe_payload(1)), Some(AdobeTransform::YCbCr));
+        assert_eq!(
+            parse_adobe_app14(&adobe_payload(1)),
+            Some(AdobeTransform::YCbCr)
+        );
     }
 
     #[test]
     fn parses_adobe_ycck_transform() {
-        assert_eq!(parse_adobe_app14(&adobe_payload(2)), Some(AdobeTransform::Ycck));
+        assert_eq!(
+            parse_adobe_app14(&adobe_payload(2)),
+            Some(AdobeTransform::Ycck)
+        );
     }
 
     #[test]
     fn parses_adobe_unknown_transform_zero() {
-        assert_eq!(parse_adobe_app14(&adobe_payload(0)), Some(AdobeTransform::Unknown));
+        assert_eq!(
+            parse_adobe_app14(&adobe_payload(0)),
+            Some(AdobeTransform::Unknown)
+        );
     }
 
     #[test]
     fn parses_adobe_unknown_transform_out_of_range() {
-        assert_eq!(parse_adobe_app14(&adobe_payload(99)), Some(AdobeTransform::Unknown));
+        assert_eq!(
+            parse_adobe_app14(&adobe_payload(99)),
+            Some(AdobeTransform::Unknown)
+        );
     }
 
     #[test]

@@ -33,7 +33,11 @@ pub(crate) struct MarkerWalker<'a> {
 
 impl<'a> MarkerWalker<'a> {
     pub(crate) fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, pos: 0, soi_seen: false }
+        Self {
+            bytes,
+            pos: 0,
+            soi_seen: false,
+        }
     }
 
     /// Read and consume the SOI marker (`FFD8`). Must be called before
@@ -73,7 +77,10 @@ impl<'a> MarkerWalker<'a> {
         // additional 0xFF fill bytes per T.81 §B.1.1.2.
         let scan_start = self.pos;
         if self.pos >= self.bytes.len() {
-            return Err(JpegError::Truncated { offset: self.pos, expected: 2 });
+            return Err(JpegError::Truncated {
+                offset: self.pos,
+                expected: 2,
+            });
         }
         if self.bytes[self.pos] != 0xFF {
             return Err(JpegError::InvalidMarker {
@@ -85,7 +92,10 @@ impl<'a> MarkerWalker<'a> {
             self.pos += 1;
         }
         if self.pos >= self.bytes.len() {
-            return Err(JpegError::Truncated { offset: self.pos, expected: 1 });
+            return Err(JpegError::Truncated {
+                offset: self.pos,
+                expected: 1,
+            });
         }
         let _ = scan_start; // kept for future diagnostics
 
@@ -97,7 +107,11 @@ impl<'a> MarkerWalker<'a> {
             // Stand-alone markers with no payload (restart markers, TEM, and
             // the escape 0x00 which should not appear in header space).
             0x00 | 0x01 | 0xD0..=0xD7 => {
-                return Ok(Some(Marker { code, offset: marker_offset, payload: &[] }));
+                return Ok(Some(Marker {
+                    code,
+                    offset: marker_offset,
+                    payload: &[],
+                }));
             }
             // EOI: end of image — terminates header walk.
             0xD9 => {
@@ -130,7 +144,11 @@ impl<'a> MarkerWalker<'a> {
         }
         let payload = &self.bytes[self.pos + 2..self.pos + 2 + payload_len];
         self.pos += 2 + payload_len;
-        Ok(Some(Marker { code, offset: marker_offset, payload }))
+        Ok(Some(Marker {
+            code,
+            offset: marker_offset,
+            payload,
+        }))
     }
 
     /// Advance past entropy-coded scan data until the next real marker. Must
@@ -145,15 +163,18 @@ impl<'a> MarkerWalker<'a> {
             if self.bytes[self.pos] == 0xFF {
                 let tag = self.bytes[self.pos + 1];
                 match tag {
-                    0x00 => self.pos += 2, // byte-stuffed 0xFF in scan data
+                    0x00 => self.pos += 2,        // byte-stuffed 0xFF in scan data
                     0xD0..=0xD7 => self.pos += 2, // RSTn — continue scanning
-                    _ => return Ok(()), // real marker; leave pos at the 0xFF
+                    _ => return Ok(()),           // real marker; leave pos at the 0xFF
                 }
             } else {
                 self.pos += 1;
             }
         }
-        Err(JpegError::Truncated { offset: self.pos, expected: 2 })
+        Err(JpegError::Truncated {
+            offset: self.pos,
+            expected: 2,
+        })
     }
 
     /// Byte offset of the leading 0xFF of the most recently returned marker.
@@ -185,7 +206,13 @@ mod tests {
     fn read_soi_rejects_wrong_bytes() {
         let mut w = MarkerWalker::new(&[0x00, 0x00]);
         let err = w.read_soi().unwrap_err();
-        assert!(matches!(err, JpegError::UnexpectedMarker { expected: MarkerKind::Soi, .. }));
+        assert!(matches!(
+            err,
+            JpegError::UnexpectedMarker {
+                expected: MarkerKind::Soi,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -205,9 +232,8 @@ mod tests {
     fn next_marker_returns_sos_as_regular_marker() {
         // SOI + SOS len=12 + 10-byte payload + scan body + EOI
         let bytes = &[
-            0xFF, 0xD8, 0xFF, 0xDA, 0x00, 0x0C,
-            3, 1, 0x00, 2, 0x00, 3, 0x00, 0, 63, 0,
-            0x00, 0xFF, 0xD9,
+            0xFF, 0xD8, 0xFF, 0xDA, 0x00, 0x0C, 3, 1, 0x00, 2, 0x00, 3, 0x00, 0, 63, 0, 0x00, 0xFF,
+            0xD9,
         ];
         let mut w = walker(bytes);
         let m = w.next_marker().unwrap().unwrap();
@@ -218,7 +244,9 @@ mod tests {
     #[test]
     fn next_marker_returns_payload_for_length_prefixed_marker() {
         // SOI + DQT (FFDB) len=5 with 3 payload bytes (len field counts itself) + EOI
-        let bytes = &[0xFF, 0xD8, 0xFF, 0xDB, 0x00, 0x05, 0xAA, 0xBB, 0xCC, 0xFF, 0xD9];
+        let bytes = &[
+            0xFF, 0xD8, 0xFF, 0xDB, 0x00, 0x05, 0xAA, 0xBB, 0xCC, 0xFF, 0xD9,
+        ];
         let mut w = walker(bytes);
         let m = w.next_marker().unwrap().unwrap();
         assert_eq!(m.code, 0xDB);
@@ -232,7 +260,10 @@ mod tests {
         let bytes = &[0xFF, 0xD8, 0xFF, 0xDB, 0x00, 0x01];
         let mut w = walker(bytes);
         let err = w.next_marker().unwrap_err();
-        assert!(matches!(err, JpegError::InvalidSegmentLength { length: 1, .. }));
+        assert!(matches!(
+            err,
+            JpegError::InvalidSegmentLength { length: 1, .. }
+        ));
     }
 
     #[test]
@@ -272,7 +303,13 @@ mod tests {
         let bytes = &[0xFF, 0xD8, 0x00, 0xC0, 0xFF, 0xD9];
         let mut w = walker(bytes);
         let err = w.next_marker().unwrap_err();
-        assert!(matches!(err, JpegError::InvalidMarker { marker: 0x00, offset: 2 }));
+        assert!(matches!(
+            err,
+            JpegError::InvalidMarker {
+                marker: 0x00,
+                offset: 2
+            }
+        ));
     }
 
     #[test]

@@ -67,10 +67,8 @@ pub(crate) fn parse_dqt(
             }
         } else if pq == 1 {
             for k in 0..64 {
-                entries[k] = u16::from_be_bytes([
-                    payload[i + 1 + k * 2],
-                    payload[i + 1 + k * 2 + 1],
-                ]);
+                entries[k] =
+                    u16::from_be_bytes([payload[i + 1 + k * 2], payload[i + 1 + k * 2 + 1]]);
             }
         } else {
             return Err(JpegError::UnsupportedBitDepth { depth: pq });
@@ -142,7 +140,9 @@ pub(crate) fn parse_dht(
 mod tests {
     use super::*;
 
-    fn ones_64() -> [u16; 64] { [1; 64] }
+    fn ones_64() -> [u16; 64] {
+        [1; 64]
+    }
 
     #[test]
     fn parses_single_8bit_quant_table() {
@@ -200,8 +200,8 @@ mod tests {
     fn parses_multiple_huffman_tables_in_one_segment() {
         // First table: Tc=0 Th=0 with 1 value; second: Tc=1 Th=0 with 1 value
         let payload = alloc::vec![
-            0u8, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xAA,
-            0x10, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xBB,
+            0u8, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xAA, 0x10, 1, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0xBB,
         ];
         let mut tables = HuffmanTables::default();
         parse_dht(&payload, 0, &mut tables).unwrap();

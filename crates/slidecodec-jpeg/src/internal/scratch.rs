@@ -14,6 +14,7 @@
 
 use crate::entropy::sequential::{PreparedDecodePlan, StripeBuffer};
 use alloc::vec::Vec;
+use slidecodec_core::ScratchPool as CoreScratchPool;
 
 #[derive(Debug, Default)]
 pub(crate) struct YCbCr420Rows {
@@ -133,5 +134,68 @@ impl ScratchPool {
 
     pub(crate) fn restore_sink_rows(&mut self, rows: SinkRows) {
         self.sink_rows = rows;
+    }
+}
+
+impl CoreScratchPool for ScratchPool {
+    fn bytes_allocated(&self) -> usize {
+        fn vec_bytes<T>(vec: &Vec<T>) -> usize {
+            vec.capacity().saturating_mul(core::mem::size_of::<T>())
+        }
+
+        fn stripe_bytes(stripe: &StripeBuffer) -> usize {
+            let mut total = 0usize;
+            for plane in &stripe.planes {
+                total = total.saturating_add(vec_bytes(plane));
+            }
+            total = total
+                .saturating_add(vec_bytes(&stripe.plane_strides))
+                .saturating_add(vec_bytes(&stripe.plane_rows));
+            total
+        }
+
+        let mut total = vec_bytes(&self.prev_dc);
+        total = total
+            .saturating_add(stripe_bytes(&self.stripe_a))
+            .saturating_add(stripe_bytes(&self.stripe_b))
+            .saturating_add(stripe_bytes(&self.stripe_c))
+            .saturating_add(vec_bytes(&self.ycbcr_420_rows.cb_top))
+            .saturating_add(vec_bytes(&self.ycbcr_420_rows.cb_bot))
+            .saturating_add(vec_bytes(&self.ycbcr_420_rows.cr_top))
+            .saturating_add(vec_bytes(&self.ycbcr_420_rows.cr_bot))
+            .saturating_add(vec_bytes(&self.ycbcr_generic_rows.cb_up))
+            .saturating_add(vec_bytes(&self.ycbcr_generic_rows.cr_up))
+            .saturating_add(vec_bytes(&self.rgb_generic_rows.r))
+            .saturating_add(vec_bytes(&self.rgb_generic_rows.g))
+            .saturating_add(vec_bytes(&self.rgb_generic_rows.b))
+            .saturating_add(vec_bytes(&self.sink_rows.top_row))
+            .saturating_add(vec_bytes(&self.sink_rows.bottom_row));
+        total
+    }
+
+    fn reset(&mut self) {
+        fn clear_stripe(stripe: &mut StripeBuffer) {
+            for plane in &mut stripe.planes {
+                plane.clear();
+            }
+            stripe.plane_strides.clear();
+            stripe.plane_rows.clear();
+        }
+
+        self.prev_dc.clear();
+        clear_stripe(&mut self.stripe_a);
+        clear_stripe(&mut self.stripe_b);
+        clear_stripe(&mut self.stripe_c);
+        self.ycbcr_420_rows.cb_top.clear();
+        self.ycbcr_420_rows.cb_bot.clear();
+        self.ycbcr_420_rows.cr_top.clear();
+        self.ycbcr_420_rows.cr_bot.clear();
+        self.ycbcr_generic_rows.cb_up.clear();
+        self.ycbcr_generic_rows.cr_up.clear();
+        self.rgb_generic_rows.r.clear();
+        self.rgb_generic_rows.g.clear();
+        self.rgb_generic_rows.b.clear();
+        self.sink_rows.top_row.clear();
+        self.sink_rows.bottom_row.clear();
     }
 }

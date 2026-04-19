@@ -3,6 +3,7 @@
 //! Typed error and warning taxonomy. See spec Section 6.
 
 use crate::info::{ColorSpace, Rect, SofKind};
+use slidecodec_core::CodecError;
 
 /// A category of JPEG marker. Carried in [`JpegError::UnexpectedMarker`] and
 /// related variants so callers can branch on marker class without parsing the
@@ -197,6 +198,9 @@ pub enum JpegError {
     /// that a newer version of slidecodec will decode natively.
     #[error("decode not yet implemented for {sof:?} — see CHANGELOG for milestone")]
     NotImplemented { sof: SofKind },
+
+    #[error("row sink aborted decode")]
+    RowSinkAborted,
 }
 
 impl JpegError {
@@ -257,6 +261,29 @@ impl JpegError {
     }
 }
 
+impl CodecError for JpegError {
+    fn is_truncated(&self) -> bool {
+        Self::is_truncated(self)
+    }
+
+    fn is_not_implemented(&self) -> bool {
+        Self::is_not_implemented(self)
+    }
+
+    fn is_unsupported(&self) -> bool {
+        Self::is_unsupported(self)
+    }
+
+    fn is_buffer_error(&self) -> bool {
+        matches!(
+            self,
+            Self::OutputBufferTooSmall { .. }
+                | Self::InvalidStride { .. }
+                | Self::RectOutOfBounds { .. }
+        )
+    }
+}
+
 /// Non-fatal notices emitted during decode. See spec Section 6.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -271,6 +298,38 @@ pub enum Warning {
     PrecisionClamped { from_bits: u8, to_bits: u8 },
     UnknownColorProfile,
     TableCacheMismatch { which: TableKind, id: u8 },
+}
+
+impl core::fmt::Display for Warning {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::MissingEoi => f.write_str("missing EOI"),
+            Self::SofDimensionsPatched { from, to } => {
+                write!(f, "patched SOF dimensions from {from:?} to {to:?}")
+            }
+            Self::NonstandardTables => f.write_str("nonstandard tables"),
+            Self::AdobeApp14Ambiguous { raw_transform } => {
+                write!(f, "ambiguous Adobe APP14 transform {raw_transform}")
+            }
+            Self::IccProfileIgnored { size } => write!(f, "ignored ICC profile of {size} bytes"),
+            Self::UnknownAppMarker { marker, size } => {
+                write!(f, "unknown APP marker FF{marker:02X} ({size} bytes)")
+            }
+            Self::RestartRecovered { offset } => {
+                write!(f, "recovered at restart marker near offset {offset}")
+            }
+            Self::PrecisionClamped { from_bits, to_bits } => {
+                write!(
+                    f,
+                    "precision clamped from {from_bits} bits to {to_bits} bits"
+                )
+            }
+            Self::UnknownColorProfile => f.write_str("unknown color profile"),
+            Self::TableCacheMismatch { which, id } => {
+                write!(f, "table cache mismatch for {which:?} {id}")
+            }
+        }
+    }
 }
 
 #[cfg(test)]

@@ -19,6 +19,7 @@ path = "src/lib.rs"
 scalar-only  = []   # retained for fuzz/reference decode until native SIMD backends land
 
 [dependencies]
+slidecodec-core = { path = "../slidecodec-core" }
 thiserror = { workspace = true }
 memchr = { version = "2.7.6", default-features = false }
 

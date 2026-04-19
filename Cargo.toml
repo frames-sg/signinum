@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/slidecodec-core",
     "crates/slidecodec-jpeg",
     "crates/slidecodec-cli",
 ]

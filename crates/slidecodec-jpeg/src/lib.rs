@@ -18,6 +18,10 @@ pub mod info;
 pub use info::{
     ColorSpace, ColorTransform, DownscaleFactor, Info, OutputFormat, Rect, SamplingFactors, SofKind,
 };
+pub use slidecodec_core::{
+    CacheStats, CodecContext, DecodeRowsError, Downscale, ImageCodec, ImageDecode, ImageDecodeRows,
+    PixelFormat, PixelLayout, RowSink, Sample, SampleType, TileBatchDecode, TileDecompress,
+};
 
 pub mod context;
 pub use context::DecoderContext;
@@ -49,6 +53,9 @@ pub use decoder::{
 };
 
 pub use internal::scratch::ScratchPool;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct JpegCodec;
 
 #[doc(hidden)]
 pub mod bench_support;

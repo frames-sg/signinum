@@ -9,6 +9,7 @@ use crate::error::Warning;
 use crate::info::Info;
 use crate::parse::tables::RawHuffmanTable;
 use alloc::sync::Arc;
+use slidecodec_core::{CacheStats, CodecContext};
 
 const QUANT_CACHE_SLOTS: usize = 8;
 const HUFFMAN_CACHE_SLOTS: usize = 8;
@@ -161,6 +162,16 @@ impl DecoderContext {
             plan: built.2.clone(),
         });
         Ok(built)
+    }
+}
+
+impl CodecContext for DecoderContext {
+    fn clear(&mut self) {
+        *self = Self::new();
+    }
+
+    fn cache_stats(&self) -> CacheStats {
+        CacheStats::default()
     }
 }
 

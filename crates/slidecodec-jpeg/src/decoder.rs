@@ -17,9 +17,15 @@ use crate::output::{
     validate_buffer, Gray8Writer, InterleavedRgbWriter, OutputWriter, Rgb8Writer, Rgba8Writer,
 };
 use crate::parse::header::{parse_header, parse_info, ParsedHeader};
+use crate::JpegCodec;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cell::RefCell;
+use slidecodec_core::{
+    Colorspace as CoreColorspace, DecodeOutcome as CoreDecodeOutcome, DecodeRowsError,
+    DecoderContext as CoreDecoderContext, Downscale, ImageCodec, ImageDecode, ImageDecodeRows,
+    PixelFormat, RowSink, TileBatchDecode,
+};
 
 const DEFAULT_MAX_DECODE_BYTES: usize = 512 * 1024 * 1024;
 
@@ -74,6 +80,15 @@ impl<'a> JpegView<'a> {
 pub trait RgbRowSink {
     /// Accept one decoded interleaved RGB row at image row `y`.
     fn write_rgb_row(&mut self, y: u32, row: &[u8]) -> Result<(), JpegError>;
+}
+
+impl<T> RgbRowSink for T
+where
+    T: RowSink<u8, Error = JpegError>,
+{
+    fn write_rgb_row(&mut self, y: u32, row: &[u8]) -> Result<(), JpegError> {
+        self.write_row(y, row)
+    }
 }
 
 /// A borrowed view of a JPEG stream ready to decode. Constructed via
@@ -641,6 +656,276 @@ fn merged_warnings(header_warnings: &[Warning], scan_warnings: Vec<Warning>) -> 
     warnings.extend_from_slice(header_warnings);
     warnings.extend(scan_warnings);
     warnings
+}
+
+fn core_colorspace(color_space: ColorSpace) -> CoreColorspace {
+    match color_space {
+        ColorSpace::Grayscale => CoreColorspace::Grayscale,
+        ColorSpace::YCbCr => CoreColorspace::YCbCr,
+        ColorSpace::Rgb => CoreColorspace::Rgb,
+        ColorSpace::Cmyk => CoreColorspace::Cmyk,
+        ColorSpace::Ycck => CoreColorspace::Ycck,
+    }
+}
+
+fn core_info(info: &Info) -> slidecodec_core::Info {
+    slidecodec_core::Info {
+        dimensions: info.dimensions,
+        components: info.sampling.len() as u8,
+        colorspace: core_colorspace(info.color_space),
+        bit_depth: info.bit_depth,
+        tile_layout: None,
+        resolution_levels: 1,
+    }
+}
+
+fn core_rect(rect: Rect) -> slidecodec_core::Rect {
+    slidecodec_core::Rect {
+        x: rect.x,
+        y: rect.y,
+        w: rect.w,
+        h: rect.h,
+    }
+}
+
+fn jpeg_rect(rect: slidecodec_core::Rect) -> Rect {
+    Rect {
+        x: rect.x,
+        y: rect.y,
+        w: rect.w,
+        h: rect.h,
+    }
+}
+
+fn core_outcome(outcome: DecodeOutcome) -> CoreDecodeOutcome<Warning> {
+    CoreDecodeOutcome {
+        decoded: core_rect(outcome.decoded),
+        warnings: outcome.warnings,
+    }
+}
+
+fn jpeg_downscale(scale: Downscale) -> DownscaleFactor {
+    match scale {
+        Downscale::None => DownscaleFactor::Full,
+        Downscale::Half => DownscaleFactor::Half,
+        Downscale::Quarter => DownscaleFactor::Quarter,
+        Downscale::Eighth => DownscaleFactor::Eighth,
+        _ => DownscaleFactor::Full,
+    }
+}
+
+fn output_format_from_parts(fmt: PixelFormat, scale: Downscale) -> Result<OutputFormat, JpegError> {
+    match (fmt, scale) {
+        (PixelFormat::Rgb8, Downscale::None) => Ok(OutputFormat::Rgb8),
+        (PixelFormat::Rgb8, scale) => Ok(OutputFormat::Rgb8Scaled {
+            factor: jpeg_downscale(scale),
+        }),
+        (PixelFormat::Gray8, Downscale::None) => Ok(OutputFormat::Gray8),
+        (PixelFormat::Gray8, scale) => Ok(OutputFormat::Gray8Scaled {
+            factor: jpeg_downscale(scale),
+        }),
+        (PixelFormat::Rgba8, Downscale::None) => Ok(OutputFormat::Rgba8 { alpha: 255 }),
+        (PixelFormat::Rgba8, _) => Err(JpegError::DownscaleUnsupported {
+            sof: SofKind::Baseline8,
+        }),
+        (PixelFormat::Rgb16 | PixelFormat::Rgba16 | PixelFormat::Gray16, _) => {
+            Err(JpegError::UnsupportedBitDepth { depth: 16 })
+        }
+        _ => Err(JpegError::NotImplemented {
+            sof: SofKind::Baseline8,
+        }),
+    }
+}
+
+impl ImageCodec for JpegCodec {
+    type Error = JpegError;
+    type Warning = Warning;
+    type Pool = ScratchPool;
+}
+
+impl ImageCodec for Decoder<'_> {
+    type Error = JpegError;
+    type Warning = Warning;
+    type Pool = ScratchPool;
+}
+
+impl<'a> ImageDecode<'a> for Decoder<'a> {
+    type View = JpegView<'a>;
+
+    fn inspect(input: &'a [u8]) -> Result<slidecodec_core::Info, Self::Error> {
+        Ok(core_info(&Decoder::inspect(input)?))
+    }
+
+    fn parse(input: &'a [u8]) -> Result<Self::View, Self::Error> {
+        JpegView::parse(input)
+    }
+
+    fn from_view(view: Self::View) -> Result<Self, Self::Error> {
+        Decoder::from_view(view)
+    }
+
+    fn decode_into(
+        &mut self,
+        out: &mut [u8],
+        stride: usize,
+        fmt: PixelFormat,
+    ) -> Result<CoreDecodeOutcome<Self::Warning>, Self::Error> {
+        Decoder::decode_into(
+            self,
+            out,
+            stride,
+            output_format_from_parts(fmt, Downscale::None)?,
+        )
+        .map(core_outcome)
+    }
+
+    fn decode_into_with_scratch(
+        &mut self,
+        pool: &mut Self::Pool,
+        out: &mut [u8],
+        stride: usize,
+        fmt: PixelFormat,
+    ) -> Result<CoreDecodeOutcome<Self::Warning>, Self::Error> {
+        Decoder::decode_into_with_scratch(
+            self,
+            pool,
+            out,
+            stride,
+            output_format_from_parts(fmt, Downscale::None)?,
+        )
+        .map(core_outcome)
+    }
+
+    fn decode_region_into(
+        &mut self,
+        pool: &mut Self::Pool,
+        out: &mut [u8],
+        stride: usize,
+        fmt: PixelFormat,
+        roi: slidecodec_core::Rect,
+    ) -> Result<CoreDecodeOutcome<Self::Warning>, Self::Error> {
+        Decoder::decode_region_into_with_scratch(
+            self,
+            pool,
+            out,
+            stride,
+            output_format_from_parts(fmt, Downscale::None)?,
+            jpeg_rect(roi),
+        )
+        .map(core_outcome)
+    }
+
+    fn decode_scaled_into(
+        &mut self,
+        pool: &mut Self::Pool,
+        out: &mut [u8],
+        stride: usize,
+        fmt: PixelFormat,
+        scale: Downscale,
+    ) -> Result<CoreDecodeOutcome<Self::Warning>, Self::Error> {
+        Decoder::decode_into_with_scratch(
+            self,
+            pool,
+            out,
+            stride,
+            output_format_from_parts(fmt, scale)?,
+        )
+        .map(core_outcome)
+    }
+}
+
+struct CoreRowSinkAdapter<'a, R: RowSink<u8>> {
+    sink: &'a mut R,
+    sink_error: Option<R::Error>,
+}
+
+impl<R: RowSink<u8>> RgbRowSink for CoreRowSinkAdapter<'_, R> {
+    fn write_rgb_row(&mut self, y: u32, row: &[u8]) -> Result<(), JpegError> {
+        match self.sink.write_row(y, row) {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                self.sink_error = Some(err);
+                Err(JpegError::RowSinkAborted)
+            }
+        }
+    }
+}
+
+impl<'a> ImageDecodeRows<'a, u8> for Decoder<'a> {
+    fn decode_rows<R: RowSink<u8>>(
+        &mut self,
+        sink: &mut R,
+    ) -> Result<CoreDecodeOutcome<Self::Warning>, DecodeRowsError<Self::Error, R::Error>> {
+        let mut adapter = CoreRowSinkAdapter {
+            sink,
+            sink_error: None,
+        };
+        match Decoder::decode_rows(self, &mut adapter) {
+            Ok(outcome) => Ok(core_outcome(outcome)),
+            Err(JpegError::RowSinkAborted) => Err(DecodeRowsError::Sink(
+                adapter
+                    .sink_error
+                    .expect("row sink abort stores the original sink error"),
+            )),
+            Err(err) => Err(DecodeRowsError::Decode(err)),
+        }
+    }
+}
+
+impl TileBatchDecode for JpegCodec {
+    type Context = DecoderContext;
+
+    fn decode_tile(
+        ctx: &mut CoreDecoderContext<Self::Context>,
+        pool: &mut Self::Pool,
+        input: &[u8],
+        out: &mut [u8],
+        stride: usize,
+        fmt: PixelFormat,
+    ) -> Result<CoreDecodeOutcome<Self::Warning>, Self::Error> {
+        let dec = Decoder::from_view_in_context(JpegView::parse(input)?, ctx.codec_mut())?;
+        dec.decode_into_with_scratch(
+            pool,
+            out,
+            stride,
+            output_format_from_parts(fmt, Downscale::None)?,
+        )
+        .map(core_outcome)
+    }
+
+    fn decode_tile_region(
+        ctx: &mut CoreDecoderContext<Self::Context>,
+        pool: &mut Self::Pool,
+        input: &[u8],
+        out: &mut [u8],
+        stride: usize,
+        fmt: PixelFormat,
+        roi: slidecodec_core::Rect,
+    ) -> Result<CoreDecodeOutcome<Self::Warning>, Self::Error> {
+        let dec = Decoder::from_view_in_context(JpegView::parse(input)?, ctx.codec_mut())?;
+        dec.decode_region_into_with_scratch(
+            pool,
+            out,
+            stride,
+            output_format_from_parts(fmt, Downscale::None)?,
+            jpeg_rect(roi),
+        )
+        .map(core_outcome)
+    }
+
+    fn decode_tile_scaled(
+        ctx: &mut CoreDecoderContext<Self::Context>,
+        pool: &mut Self::Pool,
+        input: &[u8],
+        out: &mut [u8],
+        stride: usize,
+        fmt: PixelFormat,
+        scale: Downscale,
+    ) -> Result<CoreDecodeOutcome<Self::Warning>, Self::Error> {
+        let dec = Decoder::from_view_in_context(JpegView::parse(input)?, ctx.codec_mut())?;
+        dec.decode_into_with_scratch(pool, out, stride, output_format_from_parts(fmt, scale)?)
+            .map(core_outcome)
+    }
 }
 
 #[allow(clippy::uninit_vec)]

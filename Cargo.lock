@@ -596,6 +596,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "slidecodec-core"
+version = "0.0.0"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
 name = "slidecodec-jpeg"
 version = "0.0.0"
 dependencies = [
@@ -603,6 +610,7 @@ dependencies = [
  "jpeg-decoder",
  "memchr",
  "proptest",
+ "slidecodec-core",
  "thiserror",
  "zune-core",
  "zune-jpeg",

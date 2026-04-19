@@ -7,8 +7,8 @@ pub(crate) mod classification;
 pub(crate) use self::classification::DecodeMode;
 use self::classification::{classify_corpus_input, color_space_mode, CorpusInputClass};
 use slidecodec_jpeg::{
-    decode_tile_into_in_context, decode_tile_region_into_in_context, Decoder, DecoderContext,
-    Downscale, DownscaleFactor, JpegError, OutputFormat, PixelFormat, Rect, RowSink, ScratchPool,
+    decode_tile_region_scaled_into_in_context, decode_tile_scaled_into_in_context, Decoder,
+    DecoderContext, Downscale, JpegError, PixelFormat, Rect, RowSink, ScratchPool,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -154,25 +154,25 @@ pub(crate) fn zune_inspect(bytes: &[u8]) {
 pub(crate) fn slidecodec_decode(bytes: &[u8], mode: DecodeMode) {
     let dec = Decoder::new(bytes).expect("slidecodec decoder");
     let fmt = match mode {
-        DecodeMode::Gray => OutputFormat::Gray8,
-        DecodeMode::Rgb => OutputFormat::Rgb8,
+        DecodeMode::Gray => PixelFormat::Gray8,
+        DecodeMode::Rgb => PixelFormat::Rgb8,
     };
     let (out, _) = dec.decode(fmt).expect("slidecodec decode");
     std::hint::black_box(out);
 }
 
-/// Output dimensions (`stride`, `total length`, `OutputFormat`) for `mode`.
-pub(crate) fn output_geometry(dec: &Decoder<'_>, mode: DecodeMode) -> (OutputFormat, usize, usize) {
+/// Output dimensions (`stride`, `total length`, `PixelFormat`) for `mode`.
+pub(crate) fn output_geometry(dec: &Decoder<'_>, mode: DecodeMode) -> (PixelFormat, usize, usize) {
     let (width, height) = dec.info().dimensions;
     match mode {
         DecodeMode::Gray => {
             let len = (width as usize) * (height as usize);
-            (OutputFormat::Gray8, width as usize, len)
+            (PixelFormat::Gray8, width as usize, len)
         }
         DecodeMode::Rgb => {
             let stride = (width as usize) * 3;
             let len = stride * (height as usize);
-            (OutputFormat::Rgb8, stride, len)
+            (PixelFormat::Rgb8, stride, len)
         }
     }
 }
@@ -186,7 +186,7 @@ pub(crate) fn slidecodec_decode_reused(
     dec: &Decoder<'_>,
     out: &mut [u8],
     stride: usize,
-    fmt: OutputFormat,
+    fmt: PixelFormat,
 ) {
     dec.decode_into(out, stride, fmt)
         .expect("slidecodec decode (reused)");
@@ -202,7 +202,7 @@ pub(crate) fn slidecodec_decode_with_scratch(
     pool: &mut ScratchPool,
     out: &mut [u8],
     stride: usize,
-    fmt: OutputFormat,
+    fmt: PixelFormat,
 ) {
     dec.decode_into_with_scratch(pool, out, stride, fmt)
         .expect("slidecodec decode (scratch)");
@@ -239,23 +239,24 @@ pub(crate) fn slidecodec_decode_tile_batch(bytes: &[u8], batch_size: usize) {
 pub(crate) fn slidecodec_decode_tile_batch_scaled(
     bytes: &[u8],
     batch_size: usize,
-    factor: DownscaleFactor,
+    factor: Downscale,
 ) {
     let info = Decoder::inspect(bytes).expect("slidecodec inspect");
-    let out_width = info.dimensions.0.div_ceil(factor.denominator());
-    let out_height = info.dimensions.1.div_ceil(factor.denominator());
+    let out_width = info.dimensions.0.div_ceil(scale_denominator(factor));
+    let out_height = info.dimensions.1.div_ceil(scale_denominator(factor));
     let stride = out_width as usize * 3;
     let mut out = vec![0u8; stride * out_height as usize];
     let mut ctx = DecoderContext::new();
     let mut pool = ScratchPool::new();
     for _ in 0..batch_size {
-        decode_tile_into_in_context(
+        decode_tile_scaled_into_in_context(
             bytes,
             &mut ctx,
             &mut pool,
             &mut out,
             stride,
-            OutputFormat::Rgb8Scaled { factor },
+            PixelFormat::Rgb8,
+            factor,
         )
         .expect("slidecodec scaled tile batch");
     }
@@ -266,7 +267,7 @@ pub(crate) fn slidecodec_decode_tile_batch_region_scaled(
     bytes: &[u8],
     batch_size: usize,
     side: u32,
-    factor: DownscaleFactor,
+    factor: Downscale,
 ) {
     let info = Decoder::inspect(bytes).expect("slidecodec inspect");
     let roi = centered_roi(info.dimensions, side);
@@ -276,14 +277,15 @@ pub(crate) fn slidecodec_decode_tile_batch_region_scaled(
     let mut ctx = DecoderContext::new();
     let mut pool = ScratchPool::new();
     for _ in 0..batch_size {
-        decode_tile_region_into_in_context(
+        decode_tile_region_scaled_into_in_context(
             bytes,
             &mut ctx,
             &mut pool,
             &mut out,
             stride,
-            OutputFormat::Rgb8Scaled { factor },
+            PixelFormat::Rgb8,
             roi,
+            factor,
         )
         .expect("slidecodec region-scaled tile batch");
     }
@@ -294,24 +296,24 @@ pub(crate) fn slidecodec_decode_region(bytes: &[u8], side: u32) {
     let dec = Decoder::new(bytes).expect("slidecodec decoder");
     let roi = centered_roi(dec.info().dimensions, side);
     let (out, _) = dec
-        .decode_region(OutputFormat::Rgb8, roi)
+        .decode_region(PixelFormat::Rgb8, roi)
         .expect("slidecodec region decode");
     std::hint::black_box(out);
 }
 
-pub(crate) fn slidecodec_decode_scaled(bytes: &[u8], factor: DownscaleFactor) {
+pub(crate) fn slidecodec_decode_scaled(bytes: &[u8], factor: Downscale) {
     let dec = Decoder::new(bytes).expect("slidecodec decoder");
     let (out, _) = dec
-        .decode_scaled(PixelFormat::Rgb8, jpeg_downscale(factor))
+        .decode_scaled(PixelFormat::Rgb8, factor)
         .expect("slidecodec scaled decode");
     std::hint::black_box(out);
 }
 
-pub(crate) fn slidecodec_decode_region_scaled(bytes: &[u8], side: u32, factor: DownscaleFactor) {
+pub(crate) fn slidecodec_decode_region_scaled(bytes: &[u8], side: u32, factor: Downscale) {
     let dec = Decoder::new(bytes).expect("slidecodec decoder");
     let roi = centered_roi(dec.info().dimensions, side);
     let (out, _) = dec
-        .decode_region_scaled(PixelFormat::Rgb8, roi, jpeg_downscale(factor))
+        .decode_region_scaled(PixelFormat::Rgb8, roi, factor)
         .expect("slidecodec scaled region decode");
     std::hint::black_box(out);
 }
@@ -331,7 +333,7 @@ pub(crate) fn jpeg_decoder_decode_region(bytes: &[u8], side: u32) {
     std::hint::black_box(cropped);
 }
 
-pub(crate) fn jpeg_decoder_decode_scaled(bytes: &[u8], factor: DownscaleFactor) {
+pub(crate) fn jpeg_decoder_decode_scaled(bytes: &[u8], factor: Downscale) {
     let mut decoder = jpeg_decoder::Decoder::new(std::io::Cursor::new(bytes));
     let out = decoder.decode().expect("jpeg-decoder decode");
     let info = decoder.info().expect("jpeg-decoder info");
@@ -339,12 +341,12 @@ pub(crate) fn jpeg_decoder_decode_scaled(bytes: &[u8], factor: DownscaleFactor) 
         &out,
         info.width as usize,
         info.height as usize,
-        factor.denominator() as usize,
+        scale_denominator(factor) as usize,
     );
     std::hint::black_box(scaled);
 }
 
-pub(crate) fn jpeg_decoder_decode_region_scaled(bytes: &[u8], side: u32, factor: DownscaleFactor) {
+pub(crate) fn jpeg_decoder_decode_region_scaled(bytes: &[u8], side: u32, factor: Downscale) {
     let mut decoder = jpeg_decoder::Decoder::new(std::io::Cursor::new(bytes));
     let out = decoder.decode().expect("jpeg-decoder decode");
     let info = decoder.info().expect("jpeg-decoder info");
@@ -354,7 +356,7 @@ pub(crate) fn jpeg_decoder_decode_region_scaled(bytes: &[u8], side: u32, factor:
         &cropped,
         roi.w as usize,
         roi.h as usize,
-        factor.denominator() as usize,
+        scale_denominator(factor) as usize,
     );
     std::hint::black_box(scaled);
 }
@@ -388,7 +390,7 @@ pub(crate) fn zune_decode_region(bytes: &[u8], side: u32) {
     std::hint::black_box(cropped);
 }
 
-pub(crate) fn zune_decode_scaled(bytes: &[u8], factor: DownscaleFactor) {
+pub(crate) fn zune_decode_scaled(bytes: &[u8], factor: Downscale) {
     let mut decoder = zune_jpeg::JpegDecoder::new_with_options(
         ZCursor::new(bytes),
         DecoderOptions::new_fast()
@@ -402,12 +404,12 @@ pub(crate) fn zune_decode_scaled(bytes: &[u8], factor: DownscaleFactor) {
         &out,
         info.width.into(),
         info.height.into(),
-        factor.denominator() as usize,
+        scale_denominator(factor) as usize,
     );
     std::hint::black_box(scaled);
 }
 
-pub(crate) fn zune_decode_region_scaled(bytes: &[u8], side: u32, factor: DownscaleFactor) {
+pub(crate) fn zune_decode_region_scaled(bytes: &[u8], side: u32, factor: Downscale) {
     let mut decoder = zune_jpeg::JpegDecoder::new_with_options(
         ZCursor::new(bytes),
         DecoderOptions::new_fast()
@@ -423,16 +425,12 @@ pub(crate) fn zune_decode_region_scaled(bytes: &[u8], side: u32, factor: Downsca
         &cropped,
         roi.w as usize,
         roi.h as usize,
-        factor.denominator() as usize,
+        scale_denominator(factor) as usize,
     );
     std::hint::black_box(scaled);
 }
 
-pub(crate) fn jpeg_decoder_decode_batch_scaled(
-    bytes: &[u8],
-    batch_size: usize,
-    factor: DownscaleFactor,
-) {
+pub(crate) fn jpeg_decoder_decode_batch_scaled(bytes: &[u8], batch_size: usize, factor: Downscale) {
     for _ in 0..batch_size {
         jpeg_decoder_decode_scaled(bytes, factor);
     }
@@ -442,14 +440,14 @@ pub(crate) fn jpeg_decoder_decode_batch_region_scaled(
     bytes: &[u8],
     batch_size: usize,
     side: u32,
-    factor: DownscaleFactor,
+    factor: Downscale,
 ) {
     for _ in 0..batch_size {
         jpeg_decoder_decode_region_scaled(bytes, side, factor);
     }
 }
 
-pub(crate) fn zune_decode_batch_scaled(bytes: &[u8], batch_size: usize, factor: DownscaleFactor) {
+pub(crate) fn zune_decode_batch_scaled(bytes: &[u8], batch_size: usize, factor: Downscale) {
     for _ in 0..batch_size {
         zune_decode_scaled(bytes, factor);
     }
@@ -459,7 +457,7 @@ pub(crate) fn zune_decode_batch_region_scaled(
     bytes: &[u8],
     batch_size: usize,
     side: u32,
-    factor: DownscaleFactor,
+    factor: Downscale,
 ) {
     for _ in 0..batch_size {
         zune_decode_region_scaled(bytes, side, factor);
@@ -477,8 +475,8 @@ pub(crate) fn centered_roi((width, height): (u32, u32), side: u32) -> Rect {
     }
 }
 
-pub(crate) fn scaled_rect(rect: Rect, factor: DownscaleFactor) -> Rect {
-    let denom = factor.denominator();
+pub(crate) fn scaled_rect(rect: Rect, factor: Downscale) -> Rect {
+    let denom = scale_denominator(factor);
     let x_end = rect.x + rect.w;
     let y_end = rect.y + rect.h;
     Rect {
@@ -489,12 +487,13 @@ pub(crate) fn scaled_rect(rect: Rect, factor: DownscaleFactor) -> Rect {
     }
 }
 
-fn jpeg_downscale(factor: DownscaleFactor) -> Downscale {
+fn scale_denominator(factor: Downscale) -> u32 {
     match factor {
-        DownscaleFactor::Full => Downscale::None,
-        DownscaleFactor::Half => Downscale::Half,
-        DownscaleFactor::Quarter => Downscale::Quarter,
-        DownscaleFactor::Eighth => Downscale::Eighth,
+        Downscale::None => 1,
+        Downscale::Half => 2,
+        Downscale::Quarter => 4,
+        Downscale::Eighth => 8,
+        _ => unreachable!("unsupported Downscale variant"),
     }
 }
 

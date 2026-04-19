@@ -2,9 +2,7 @@
 
 //! Integration tests for `Decoder::decode_into`.
 
-use slidecodec_jpeg::{
-    Decoder, Downscale, DownscaleFactor, JpegError, OutputFormat, PixelFormat, Rect,
-};
+use slidecodec_jpeg::{Decoder, Downscale, JpegError, PixelFormat, Rect};
 
 mod fixtures;
 use fixtures::{
@@ -38,7 +36,7 @@ fn decode_into_rgb8_returns_decoded_rect_full_image() {
     let (w, h) = dec.info().dimensions;
     let mut buf = vec![0u8; (w * h * 3) as usize];
     let outcome = dec
-        .decode_into(&mut buf, (w * 3) as usize, OutputFormat::Rgb8)
+        .decode_into(&mut buf, (w * 3) as usize, PixelFormat::Rgb8)
         .expect("baseline 4:2:0 decode must succeed");
     assert_eq!(outcome.decoded.w, w);
     assert_eq!(outcome.decoded.h, h);
@@ -51,10 +49,10 @@ fn decode_owned_rgb8_matches_decode_into() {
     let (w, h) = dec.info().dimensions;
     let mut expected = vec![0u8; (w * h * 3) as usize];
     let expected_outcome = dec
-        .decode_into(&mut expected, (w * 3) as usize, OutputFormat::Rgb8)
+        .decode_into(&mut expected, (w * 3) as usize, PixelFormat::Rgb8)
         .expect("baseline 4:2:0 decode must succeed");
 
-    let (owned, outcome) = dec.decode(OutputFormat::Rgb8).unwrap();
+    let (owned, outcome) = dec.decode(PixelFormat::Rgb8).unwrap();
     assert_eq!(owned, expected);
     assert_eq!(outcome, expected_outcome);
 }
@@ -65,16 +63,28 @@ fn decode_into_rgba8_writes_alpha_byte() {
     let dec = Decoder::new(&bytes).unwrap();
     let (w, h) = dec.info().dimensions;
     let mut buf = vec![0u8; (w * h * 4) as usize];
-    dec.decode_into(
-        &mut buf,
-        (w * 4) as usize,
-        OutputFormat::Rgba8 { alpha: 200 },
-    )
-    .unwrap();
+    dec.decode_rgba8_into_with_alpha(&mut buf, (w * 4) as usize, 200)
+        .unwrap();
     for y in 0..h as usize {
         for x in 0..w as usize {
             let idx = (y * w as usize + x) * 4;
             assert_eq!(buf[idx + 3], 200, "pixel ({x},{y}) alpha");
+        }
+    }
+}
+
+#[test]
+fn decode_into_rgba8_defaults_alpha_to_255() {
+    let bytes = minimal_baseline_420_jpeg();
+    let dec = Decoder::new(&bytes).unwrap();
+    let (w, h) = dec.info().dimensions;
+    let mut buf = vec![0u8; (w * h * 4) as usize];
+    dec.decode_into(&mut buf, (w * 4) as usize, PixelFormat::Rgba8)
+        .unwrap();
+    for y in 0..h as usize {
+        for x in 0..w as usize {
+            let idx = (y * w as usize + x) * 4;
+            assert_eq!(buf[idx + 3], 255, "pixel ({x},{y}) alpha");
         }
     }
 }
@@ -108,6 +118,22 @@ fn decode_owned_region_scaled_matches_decode_region_into() {
 }
 
 #[test]
+fn decode_owned_scaled_matches_decode_scaled_into() {
+    let bytes = rgb_app14_8x8_jpeg();
+    let dec = Decoder::new(&bytes).unwrap();
+    let mut expected = vec![0u8; 4 * 4 * 3];
+    let expected_outcome = dec
+        .decode_scaled_into(&mut expected, 4 * 3, PixelFormat::Rgb8, Downscale::Half)
+        .unwrap();
+
+    let (owned, outcome) = dec
+        .decode_scaled(PixelFormat::Rgb8, Downscale::Half)
+        .unwrap();
+    assert_eq!(owned, expected);
+    assert_eq!(outcome, expected_outcome);
+}
+
+#[test]
 fn decode_into_gray8_produces_single_byte_per_pixel() {
     let bytes = grayscale_8x8_jpeg();
     let dec = Decoder::new(&bytes).unwrap();
@@ -115,7 +141,7 @@ fn decode_into_gray8_produces_single_byte_per_pixel() {
     assert_eq!((w, h), (8, 8));
     let mut buf = vec![0u8; (w * h) as usize];
     let outcome = dec
-        .decode_into(&mut buf, w as usize, OutputFormat::Gray8)
+        .decode_into(&mut buf, w as usize, PixelFormat::Gray8)
         .unwrap();
     assert_eq!(outcome.decoded.w, 8);
     assert!(buf.iter().any(|&b| b != 0), "expected non-zero pixels");
@@ -127,7 +153,7 @@ fn decode_into_rejects_undersized_buffer_with_api_misuse_error() {
     let dec = Decoder::new(&bytes).unwrap();
     let mut buf = vec![0u8; 4];
     let err = dec
-        .decode_into(&mut buf, 48, OutputFormat::Rgb8)
+        .decode_into(&mut buf, 48, PixelFormat::Rgb8)
         .unwrap_err();
     assert!(err.is_api_misuse());
     assert!(matches!(err, JpegError::OutputBufferTooSmall { .. }));
@@ -139,7 +165,7 @@ fn decode_into_rejects_stride_narrower_than_row_width() {
     let dec = Decoder::new(&bytes).unwrap();
     let mut buf = vec![0u8; 16 * 16 * 3];
     let err = dec
-        .decode_into(&mut buf, 10, OutputFormat::Rgb8)
+        .decode_into(&mut buf, 10, PixelFormat::Rgb8)
         .unwrap_err();
     assert!(err.is_api_misuse());
     assert!(matches!(err, JpegError::InvalidStride { .. }));
@@ -152,7 +178,7 @@ fn decode_into_tolerates_padded_stride() {
     let (w, h) = dec.info().dimensions;
     let padded_stride = (w as usize * 3) + 32;
     let mut buf = vec![0xAAu8; padded_stride * h as usize];
-    dec.decode_into(&mut buf, padded_stride, OutputFormat::Rgb8)
+    dec.decode_into(&mut buf, padded_stride, PixelFormat::Rgb8)
         .unwrap();
     let last_row_start = (h as usize - 1) * padded_stride;
     let last_row_end = last_row_start + w as usize * 3;
@@ -170,7 +196,7 @@ fn decode_into_rgb8_preserves_app14_rgb_pixels() {
     let (w, h) = dec.info().dimensions;
     assert_eq!((w, h), (8, 8));
     let mut buf = vec![0u8; (w * h * 3) as usize];
-    dec.decode_into(&mut buf, (w * 3) as usize, OutputFormat::Rgb8)
+    dec.decode_into(&mut buf, (w * 3) as usize, PixelFormat::Rgb8)
         .expect("APP14 RGB decode must succeed");
     assert_eq!(buf, rgb_app14_8x8_rgb());
 }
@@ -226,7 +252,7 @@ fn decode_region_into_rgb8_crops_constant_app14_rgb_pixels() {
     };
     let mut buf = vec![0u8; roi.w as usize * roi.h as usize * 3];
     let outcome = dec
-        .decode_region_into(&mut buf, roi.w as usize * 3, OutputFormat::Rgb8, roi)
+        .decode_region_into(&mut buf, roi.w as usize * 3, PixelFormat::Rgb8, roi)
         .unwrap();
     assert_eq!(outcome.decoded, roi);
     let mut expected = Vec::with_capacity(buf.len());
@@ -256,55 +282,6 @@ fn decode_region_into_rgb8_scaled_crops_constant_app14_rgb_pixels() {
         expected.extend_from_slice(&[200, 20, 10]);
     }
     assert_eq!(buf, expected);
-}
-
-#[test]
-fn decode_scaled_into_rgb8_matches_existing_scaled_output_api() {
-    let bytes = rgb_app14_8x8_jpeg();
-    let dec = Decoder::new(&bytes).expect("decoder");
-    let mut via_new = vec![0u8; 4 * 4 * 3];
-    let mut via_old = vec![0u8; 4 * 4 * 3];
-
-    dec.decode_scaled_into(&mut via_new, 4 * 3, PixelFormat::Rgb8, Downscale::Half)
-        .expect("new scaled api");
-    dec.decode_into(
-        &mut via_old,
-        4 * 3,
-        OutputFormat::Rgb8Scaled {
-            factor: DownscaleFactor::Half,
-        },
-    )
-    .expect("old scaled api");
-
-    assert_eq!(via_new, via_old);
-}
-
-#[test]
-fn decode_region_scaled_into_rgb8_matches_existing_region_scaled_api() {
-    let bytes = rgb_app14_8x8_jpeg();
-    let dec = Decoder::new(&bytes).expect("decoder");
-    let roi = Rect {
-        x: 2,
-        y: 2,
-        w: 4,
-        h: 4,
-    };
-    let mut via_new = vec![0u8; 2 * 2 * 3];
-    let mut via_old = vec![0u8; 2 * 2 * 3];
-
-    dec.decode_region_scaled_into(&mut via_new, 2 * 3, PixelFormat::Rgb8, roi, Downscale::Half)
-        .expect("new region scaled api");
-    dec.decode_region_into(
-        &mut via_old,
-        2 * 3,
-        OutputFormat::Rgb8Scaled {
-            factor: DownscaleFactor::Half,
-        },
-        roi,
-    )
-    .expect("old region scaled api");
-
-    assert_eq!(via_new, via_old);
 }
 
 #[test]

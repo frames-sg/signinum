@@ -162,8 +162,13 @@ fn decode_rgb(bytes: &[u8]) -> Vec<u8> {
     let dec = Decoder::new(bytes).expect("fixture must construct");
     let (w, h) = dec.info().dimensions;
     let mut out = vec![0u8; (w * h * 3) as usize];
-    dec.decode_scaled_into(&mut out, (w * 3) as usize, PixelFormat::Rgb8, Downscale::None)
-        .expect("fixture decode must succeed");
+    dec.decode_scaled_into(
+        &mut out,
+        (w * 3) as usize,
+        PixelFormat::Rgb8,
+        Downscale::None,
+    )
+    .expect("fixture decode must succeed");
     out
 }
 

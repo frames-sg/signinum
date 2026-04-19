@@ -24,7 +24,7 @@ fn rgb8_decode_is_byte_stable_across_pool_reuse() {
         PixelFormat::Rgb8,
         Downscale::None,
     )
-        .unwrap();
+    .unwrap();
     let reference = out.clone();
 
     for i in 0..50 {
@@ -36,7 +36,7 @@ fn rgb8_decode_is_byte_stable_across_pool_reuse() {
             PixelFormat::Rgb8,
             Downscale::None,
         )
-            .unwrap();
+        .unwrap();
         assert_eq!(out, reference, "iteration {i} diverged from reference");
     }
 }
@@ -57,7 +57,7 @@ fn gray8_decode_is_byte_stable_across_pool_reuse() {
         PixelFormat::Gray8,
         Downscale::None,
     )
-        .unwrap();
+    .unwrap();
     let reference = out.clone();
 
     for i in 0..50 {
@@ -69,7 +69,7 @@ fn gray8_decode_is_byte_stable_across_pool_reuse() {
             PixelFormat::Gray8,
             Downscale::None,
         )
-            .unwrap();
+        .unwrap();
         assert_eq!(out, reference, "iteration {i} diverged from reference");
     }
 }
@@ -94,7 +94,7 @@ fn shared_pool_matches_fresh_pool_output() {
         PixelFormat::Rgb8,
         Downscale::None,
     )
-        .unwrap();
+    .unwrap();
 
     assert_eq!(
         out_fresh, out_pooled,

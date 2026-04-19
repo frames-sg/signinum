@@ -116,32 +116,29 @@ impl Rect {
     }
 }
 
-/// Caller-requested output format.
+/// Internal JPEG-specific output format used behind the public core
+/// `PixelFormat` + `Downscale` API adapters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OutputFormat {
+pub(crate) enum OutputFormat {
     Rgb8,
     Rgb8Scaled { factor: DownscaleFactor },
     Rgba8 { alpha: u8 },
     Gray8,
     Gray8Scaled { factor: DownscaleFactor },
-    RawYCbCr8,
 }
 
 impl OutputFormat {
-    pub fn bytes_per_pixel(self) -> usize {
+    pub(crate) fn bytes_per_pixel(self) -> usize {
         match self {
             Self::Rgb8 | Self::Rgb8Scaled { .. } => 3,
             Self::Rgba8 { .. } => 4,
             Self::Gray8 | Self::Gray8Scaled { .. } => 1,
-            Self::RawYCbCr8 => 3,
         }
     }
 
-    pub fn downscale(self) -> DownscaleFactor {
+    pub(crate) fn downscale(self) -> DownscaleFactor {
         match self {
-            Self::Rgb8 | Self::Rgba8 { .. } | Self::Gray8 | Self::RawYCbCr8 => {
-                DownscaleFactor::Full
-            }
+            Self::Rgb8 | Self::Rgba8 { .. } | Self::Gray8 => DownscaleFactor::Full,
             Self::Rgb8Scaled { factor } | Self::Gray8Scaled { factor } => factor,
         }
     }
@@ -150,7 +147,7 @@ impl OutputFormat {
 /// IDCT-level downscale factor; applies only to DCT-based SOFs (see spec
 /// Section 4 matrix).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DownscaleFactor {
+pub(crate) enum DownscaleFactor {
     Full,
     Half,
     Quarter,
@@ -158,7 +155,7 @@ pub enum DownscaleFactor {
 }
 
 impl DownscaleFactor {
-    pub const fn denominator(self) -> u32 {
+    pub(crate) const fn denominator(self) -> u32 {
         match self {
             Self::Full => 1,
             Self::Half => 2,
@@ -167,7 +164,7 @@ impl DownscaleFactor {
         }
     }
 
-    pub const fn output_block_size(self) -> u32 {
+    pub(crate) const fn output_block_size(self) -> u32 {
         match self {
             Self::Full => 8,
             Self::Half => 4,
@@ -273,7 +270,6 @@ mod tests {
             .bytes_per_pixel(),
             1
         );
-        assert_eq!(OutputFormat::RawYCbCr8.bytes_per_pixel(), 3);
     }
 
     #[test]

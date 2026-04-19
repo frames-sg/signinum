@@ -250,7 +250,7 @@ impl<'a> Decoder<'a> {
         &self,
         out: &mut [u8],
         stride: usize,
-        fmt: OutputFormat,
+        fmt: PixelFormat,
     ) -> Result<DecodeOutcome, JpegError> {
         DEFAULT_SCRATCH
             .with(|pool| self.decode_into_with_scratch(&mut pool.borrow_mut(), out, stride, fmt))
@@ -262,7 +262,7 @@ impl<'a> Decoder<'a> {
     /// avoids pre-zeroing the destination buffer, which matters on WSI-sized
     /// RGB outputs where the allocation itself can otherwise dominate the
     /// benchmark.
-    pub fn decode(&self, fmt: OutputFormat) -> Result<(Vec<u8>, DecodeOutcome), JpegError> {
+    pub fn decode(&self, fmt: PixelFormat) -> Result<(Vec<u8>, DecodeOutcome), JpegError> {
         DEFAULT_SCRATCH.with(|pool| self.decode_with_scratch(&mut pool.borrow_mut(), fmt))
     }
 
@@ -295,15 +295,9 @@ impl<'a> Decoder<'a> {
     pub fn decode_with_scratch(
         &self,
         pool: &mut ScratchPool,
-        fmt: OutputFormat,
+        fmt: PixelFormat,
     ) -> Result<(Vec<u8>, DecodeOutcome), JpegError> {
-        let downscale = fmt.downscale();
-        let (width, height) = scaled_dimensions(self.info.dimensions, downscale);
-        let stride = width as usize * fmt.bytes_per_pixel();
-        let len = stride * height as usize;
-        let mut out = allocate_output_buffer(len);
-        let outcome = self.decode_into_with_scratch(pool, &mut out, stride, fmt)?;
-        Ok((out, outcome))
+        self.decode_scaled_with_scratch(pool, fmt, Downscale::None)
     }
 
     /// [`Self::decode_scaled`] with caller-owned scratch.
@@ -313,7 +307,7 @@ impl<'a> Decoder<'a> {
         fmt: PixelFormat,
         scale: Downscale,
     ) -> Result<(Vec<u8>, DecodeOutcome), JpegError> {
-        let legacy = output_format_from_parts(fmt, scale)?;
+        let legacy = output_format_from_parts(self.info.sof_kind, fmt, scale)?;
         let downscale = legacy.downscale();
         let (width, height) = scaled_dimensions(self.info.dimensions, downscale);
         let stride = width as usize * legacy.bytes_per_pixel();
@@ -333,6 +327,16 @@ impl<'a> Decoder<'a> {
     /// # Errors
     /// Identical to [`Self::decode_into`].
     pub fn decode_into_with_scratch(
+        &self,
+        pool: &mut ScratchPool,
+        out: &mut [u8],
+        stride: usize,
+        fmt: PixelFormat,
+    ) -> Result<DecodeOutcome, JpegError> {
+        self.decode_scaled_into_with_scratch(pool, out, stride, fmt, Downscale::None)
+    }
+
+    fn decode_into_output_format_with_scratch(
         &self,
         pool: &mut ScratchPool,
         out: &mut [u8],
@@ -372,9 +376,6 @@ impl<'a> Decoder<'a> {
                     Rect::full(self.info.dimensions),
                 )
             }
-            OutputFormat::RawYCbCr8 => Err(JpegError::NotImplemented {
-                sof: self.info.sof_kind,
-            }),
         }
     }
 
@@ -387,7 +388,12 @@ impl<'a> Decoder<'a> {
         fmt: PixelFormat,
         scale: Downscale,
     ) -> Result<DecodeOutcome, JpegError> {
-        self.decode_into_with_scratch(pool, out, stride, output_format_from_parts(fmt, scale)?)
+        self.decode_into_output_format_with_scratch(
+            pool,
+            out,
+            stride,
+            output_format_from_parts(self.info.sof_kind, fmt, scale)?,
+        )
     }
 
     /// Decode the full image into interleaved RGB rows delivered to `sink`.
@@ -430,7 +436,7 @@ impl<'a> Decoder<'a> {
         &self,
         out: &mut [u8],
         stride: usize,
-        fmt: OutputFormat,
+        fmt: PixelFormat,
         roi: Rect,
     ) -> Result<DecodeOutcome, JpegError> {
         DEFAULT_SCRATCH.with(|pool| {
@@ -441,7 +447,7 @@ impl<'a> Decoder<'a> {
     /// Decode `roi` into a freshly allocated tightly-packed buffer.
     pub fn decode_region(
         &self,
-        fmt: OutputFormat,
+        fmt: PixelFormat,
         roi: Rect,
     ) -> Result<(Vec<u8>, DecodeOutcome), JpegError> {
         DEFAULT_SCRATCH
@@ -465,15 +471,10 @@ impl<'a> Decoder<'a> {
     pub fn decode_region_with_scratch(
         &self,
         pool: &mut ScratchPool,
-        fmt: OutputFormat,
+        fmt: PixelFormat,
         roi: Rect,
     ) -> Result<(Vec<u8>, DecodeOutcome), JpegError> {
-        let scaled_roi = scaled_rect_covering(roi, fmt.downscale())?;
-        let stride = scaled_roi.w as usize * fmt.bytes_per_pixel();
-        let len = stride * scaled_roi.h as usize;
-        let mut out = allocate_output_buffer(len);
-        let outcome = self.decode_region_into_with_scratch(pool, &mut out, stride, fmt, roi)?;
-        Ok((out, outcome))
+        self.decode_region_scaled_with_scratch(pool, fmt, roi, Downscale::None)
     }
 
     /// [`Self::decode_region_scaled`] with caller-owned scratch.
@@ -484,7 +485,7 @@ impl<'a> Decoder<'a> {
         roi: Rect,
         scale: Downscale,
     ) -> Result<(Vec<u8>, DecodeOutcome), JpegError> {
-        let legacy = output_format_from_parts(fmt, scale)?;
+        let legacy = output_format_from_parts(self.info.sof_kind, fmt, scale)?;
         let scaled_roi = scaled_rect_covering(roi, legacy.downscale())?;
         let stride = scaled_roi.w as usize * legacy.bytes_per_pixel();
         let len = stride * scaled_roi.h as usize;
@@ -496,6 +497,17 @@ impl<'a> Decoder<'a> {
 
     /// [`Self::decode_region_into`] with caller-owned scratch.
     pub fn decode_region_into_with_scratch(
+        &self,
+        pool: &mut ScratchPool,
+        out: &mut [u8],
+        stride: usize,
+        fmt: PixelFormat,
+        roi: Rect,
+    ) -> Result<DecodeOutcome, JpegError> {
+        self.decode_region_scaled_into_with_scratch(pool, out, stride, fmt, roi, Downscale::None)
+    }
+
+    fn decode_region_into_output_format_with_scratch(
         &self,
         pool: &mut ScratchPool,
         out: &mut [u8],
@@ -561,9 +573,6 @@ impl<'a> Decoder<'a> {
                 let mut writer = CroppedWriter::new(base, scaled_roi, scaled_width);
                 self.decode_with_writer(pool, &mut writer, downscale, roi)
             }
-            OutputFormat::RawYCbCr8 => Err(JpegError::NotImplemented {
-                sof: self.info.sof_kind,
-            }),
         }
     }
 
@@ -599,11 +608,81 @@ impl<'a> Decoder<'a> {
         roi: Rect,
         scale: Downscale,
     ) -> Result<DecodeOutcome, JpegError> {
-        self.decode_region_into_with_scratch(
+        self.decode_region_into_output_format_with_scratch(
             pool,
             out,
             stride,
-            output_format_from_parts(fmt, scale)?,
+            output_format_from_parts(self.info.sof_kind, fmt, scale)?,
+            roi,
+        )
+    }
+
+    /// Decode the full image into RGBA with a caller-chosen alpha byte.
+    pub fn decode_rgba8_into_with_alpha(
+        &self,
+        out: &mut [u8],
+        stride: usize,
+        alpha: u8,
+    ) -> Result<DecodeOutcome, JpegError> {
+        DEFAULT_SCRATCH.with(|pool| {
+            self.decode_rgba8_into_with_alpha_with_scratch(
+                &mut pool.borrow_mut(),
+                out,
+                stride,
+                alpha,
+            )
+        })
+    }
+
+    /// [`Self::decode_rgba8_into_with_alpha`] with caller-owned scratch.
+    pub fn decode_rgba8_into_with_alpha_with_scratch(
+        &self,
+        pool: &mut ScratchPool,
+        out: &mut [u8],
+        stride: usize,
+        alpha: u8,
+    ) -> Result<DecodeOutcome, JpegError> {
+        self.decode_into_output_format_with_scratch(
+            pool,
+            out,
+            stride,
+            OutputFormat::Rgba8 { alpha },
+        )
+    }
+
+    /// Decode a region into RGBA with a caller-chosen alpha byte.
+    pub fn decode_region_rgba8_into_with_alpha(
+        &self,
+        out: &mut [u8],
+        stride: usize,
+        roi: Rect,
+        alpha: u8,
+    ) -> Result<DecodeOutcome, JpegError> {
+        DEFAULT_SCRATCH.with(|pool| {
+            self.decode_region_rgba8_into_with_alpha_with_scratch(
+                &mut pool.borrow_mut(),
+                out,
+                stride,
+                roi,
+                alpha,
+            )
+        })
+    }
+
+    /// [`Self::decode_region_rgba8_into_with_alpha`] with caller-owned scratch.
+    pub fn decode_region_rgba8_into_with_alpha_with_scratch(
+        &self,
+        pool: &mut ScratchPool,
+        out: &mut [u8],
+        stride: usize,
+        roi: Rect,
+        alpha: u8,
+    ) -> Result<DecodeOutcome, JpegError> {
+        self.decode_region_into_output_format_with_scratch(
+            pool,
+            out,
+            stride,
+            OutputFormat::Rgba8 { alpha },
             roi,
         )
     }
@@ -621,12 +700,12 @@ impl<'a> Decoder<'a> {
 /// # Example
 ///
 /// ```no_run
-/// use slidecodec_jpeg::{decode_tile_into, OutputFormat, ScratchPool};
+/// use slidecodec_jpeg::{decode_tile_into, PixelFormat, ScratchPool};
 ///
 /// let bytes: &[u8] = todo!("read tile bytes");
 /// let mut out = vec![0u8; 256 * 256 * 3];
 /// let mut pool = ScratchPool::new();
-/// decode_tile_into(bytes, &mut pool, &mut out, 256 * 3, OutputFormat::Rgb8)?;
+/// decode_tile_into(bytes, &mut pool, &mut out, 256 * 3, PixelFormat::Rgb8)?;
 /// # Ok::<(), slidecodec_jpeg::JpegError>(())
 /// ```
 ///
@@ -638,7 +717,7 @@ pub fn decode_tile_into(
     pool: &mut ScratchPool,
     out: &mut [u8],
     stride: usize,
-    fmt: OutputFormat,
+    fmt: PixelFormat,
 ) -> Result<DecodeOutcome, JpegError> {
     DEFAULT_CONTEXT.with(|ctx| {
         decode_tile_into_in_context(bytes, &mut ctx.borrow_mut(), pool, out, stride, fmt)
@@ -654,7 +733,7 @@ pub fn decode_tile_into_in_context(
     pool: &mut ScratchPool,
     out: &mut [u8],
     stride: usize,
-    fmt: OutputFormat,
+    fmt: PixelFormat,
 ) -> Result<DecodeOutcome, JpegError> {
     let dec = Decoder::from_view_in_context(JpegView::parse(bytes)?, ctx)?;
     dec.decode_into_with_scratch(pool, out, stride, fmt)
@@ -669,11 +748,45 @@ pub fn decode_tile_region_into_in_context(
     pool: &mut ScratchPool,
     out: &mut [u8],
     stride: usize,
-    fmt: OutputFormat,
+    fmt: PixelFormat,
     roi: Rect,
 ) -> Result<DecodeOutcome, JpegError> {
     let dec = Decoder::from_view_in_context(JpegView::parse(bytes)?, ctx)?;
     dec.decode_region_into_with_scratch(pool, out, stride, fmt, roi)
+}
+
+/// One-shot parse-plus-scaled-decode of an independent JPEG tile into the
+/// caller's buffer, reusing both caller-owned [`DecoderContext`] and
+/// caller-owned [`ScratchPool`].
+pub fn decode_tile_scaled_into_in_context(
+    bytes: &[u8],
+    ctx: &mut DecoderContext,
+    pool: &mut ScratchPool,
+    out: &mut [u8],
+    stride: usize,
+    fmt: PixelFormat,
+    scale: Downscale,
+) -> Result<DecodeOutcome, JpegError> {
+    let dec = Decoder::from_view_in_context(JpegView::parse(bytes)?, ctx)?;
+    dec.decode_scaled_into_with_scratch(pool, out, stride, fmt, scale)
+}
+
+/// One-shot parse-plus-region-scaled-decode of an independent JPEG tile into
+/// the caller's buffer, reusing both caller-owned [`DecoderContext`] and
+/// caller-owned [`ScratchPool`].
+#[allow(clippy::too_many_arguments)]
+pub fn decode_tile_region_scaled_into_in_context(
+    bytes: &[u8],
+    ctx: &mut DecoderContext,
+    pool: &mut ScratchPool,
+    out: &mut [u8],
+    stride: usize,
+    fmt: PixelFormat,
+    roi: Rect,
+    scale: Downscale,
+) -> Result<DecodeOutcome, JpegError> {
+    let dec = Decoder::from_view_in_context(JpegView::parse(bytes)?, ctx)?;
+    dec.decode_region_scaled_into_with_scratch(pool, out, stride, fmt, roi, scale)
 }
 
 impl Decoder<'_> {
@@ -830,11 +943,15 @@ fn jpeg_downscale(scale: Downscale) -> DownscaleFactor {
         Downscale::Half => DownscaleFactor::Half,
         Downscale::Quarter => DownscaleFactor::Quarter,
         Downscale::Eighth => DownscaleFactor::Eighth,
-        _ => DownscaleFactor::Full,
+        _ => unreachable!("unsupported Downscale variant"),
     }
 }
 
-fn output_format_from_parts(fmt: PixelFormat, scale: Downscale) -> Result<OutputFormat, JpegError> {
+fn output_format_from_parts(
+    sof_kind: SofKind,
+    fmt: PixelFormat,
+    scale: Downscale,
+) -> Result<OutputFormat, JpegError> {
     match (fmt, scale) {
         (PixelFormat::Rgb8, Downscale::None) => Ok(OutputFormat::Rgb8),
         (PixelFormat::Rgb8, scale) => Ok(OutputFormat::Rgb8Scaled {
@@ -845,15 +962,11 @@ fn output_format_from_parts(fmt: PixelFormat, scale: Downscale) -> Result<Output
             factor: jpeg_downscale(scale),
         }),
         (PixelFormat::Rgba8, Downscale::None) => Ok(OutputFormat::Rgba8 { alpha: 255 }),
-        (PixelFormat::Rgba8, _) => Err(JpegError::DownscaleUnsupported {
-            sof: SofKind::Baseline8,
-        }),
+        (PixelFormat::Rgba8, _) => Err(JpegError::DownscaleUnsupported { sof: sof_kind }),
         (PixelFormat::Rgb16 | PixelFormat::Rgba16 | PixelFormat::Gray16, _) => {
             Err(JpegError::UnsupportedBitDepth { depth: 16 })
         }
-        _ => Err(JpegError::NotImplemented {
-            sof: SofKind::Baseline8,
-        }),
+        _ => Err(JpegError::DownscaleUnsupported { sof: sof_kind }),
     }
 }
 
@@ -890,13 +1003,7 @@ impl<'a> ImageDecode<'a> for Decoder<'a> {
         stride: usize,
         fmt: PixelFormat,
     ) -> Result<CoreDecodeOutcome<Self::Warning>, Self::Error> {
-        Decoder::decode_into(
-            self,
-            out,
-            stride,
-            output_format_from_parts(fmt, Downscale::None)?,
-        )
-        .map(core_outcome)
+        Decoder::decode_into(self, out, stride, fmt).map(core_outcome)
     }
 
     fn decode_into_with_scratch(
@@ -906,14 +1013,7 @@ impl<'a> ImageDecode<'a> for Decoder<'a> {
         stride: usize,
         fmt: PixelFormat,
     ) -> Result<CoreDecodeOutcome<Self::Warning>, Self::Error> {
-        Decoder::decode_into_with_scratch(
-            self,
-            pool,
-            out,
-            stride,
-            output_format_from_parts(fmt, Downscale::None)?,
-        )
-        .map(core_outcome)
+        Decoder::decode_into_with_scratch(self, pool, out, stride, fmt).map(core_outcome)
     }
 
     fn decode_region_into(
@@ -924,15 +1024,8 @@ impl<'a> ImageDecode<'a> for Decoder<'a> {
         fmt: PixelFormat,
         roi: slidecodec_core::Rect,
     ) -> Result<CoreDecodeOutcome<Self::Warning>, Self::Error> {
-        Decoder::decode_region_into_with_scratch(
-            self,
-            pool,
-            out,
-            stride,
-            output_format_from_parts(fmt, Downscale::None)?,
-            jpeg_rect(roi),
-        )
-        .map(core_outcome)
+        Decoder::decode_region_into_with_scratch(self, pool, out, stride, fmt, jpeg_rect(roi))
+            .map(core_outcome)
     }
 
     fn decode_scaled_into(
@@ -943,14 +1036,8 @@ impl<'a> ImageDecode<'a> for Decoder<'a> {
         fmt: PixelFormat,
         scale: Downscale,
     ) -> Result<CoreDecodeOutcome<Self::Warning>, Self::Error> {
-        Decoder::decode_into_with_scratch(
-            self,
-            pool,
-            out,
-            stride,
-            output_format_from_parts(fmt, scale)?,
-        )
-        .map(core_outcome)
+        Decoder::decode_scaled_into_with_scratch(self, pool, out, stride, fmt, scale)
+            .map(core_outcome)
     }
 }
 
@@ -1006,13 +1093,8 @@ impl TileBatchDecode for JpegCodec {
         fmt: PixelFormat,
     ) -> Result<CoreDecodeOutcome<Self::Warning>, Self::Error> {
         let dec = Decoder::from_view_in_context(JpegView::parse(input)?, ctx.codec_mut())?;
-        dec.decode_into_with_scratch(
-            pool,
-            out,
-            stride,
-            output_format_from_parts(fmt, Downscale::None)?,
-        )
-        .map(core_outcome)
+        dec.decode_into_with_scratch(pool, out, stride, fmt)
+            .map(core_outcome)
     }
 
     fn decode_tile_region(
@@ -1025,14 +1107,8 @@ impl TileBatchDecode for JpegCodec {
         roi: slidecodec_core::Rect,
     ) -> Result<CoreDecodeOutcome<Self::Warning>, Self::Error> {
         let dec = Decoder::from_view_in_context(JpegView::parse(input)?, ctx.codec_mut())?;
-        dec.decode_region_into_with_scratch(
-            pool,
-            out,
-            stride,
-            output_format_from_parts(fmt, Downscale::None)?,
-            jpeg_rect(roi),
-        )
-        .map(core_outcome)
+        dec.decode_region_into_with_scratch(pool, out, stride, fmt, jpeg_rect(roi))
+            .map(core_outcome)
     }
 
     fn decode_tile_scaled(
@@ -1045,7 +1121,7 @@ impl TileBatchDecode for JpegCodec {
         scale: Downscale,
     ) -> Result<CoreDecodeOutcome<Self::Warning>, Self::Error> {
         let dec = Decoder::from_view_in_context(JpegView::parse(input)?, ctx.codec_mut())?;
-        dec.decode_into_with_scratch(pool, out, stride, output_format_from_parts(fmt, scale)?)
+        dec.decode_scaled_into_with_scratch(pool, out, stride, fmt, scale)
             .map(core_outcome)
     }
 }
@@ -1556,7 +1632,7 @@ mod tests {
         let dec = Decoder::new(&bytes).unwrap();
         let mut buf = vec![0u8; 4];
         let err = dec
-            .decode_into(&mut buf, 48, OutputFormat::Rgb8)
+            .decode_into(&mut buf, 48, PixelFormat::Rgb8)
             .unwrap_err();
         assert!(matches!(err, JpegError::OutputBufferTooSmall { .. }));
     }
@@ -1567,19 +1643,8 @@ mod tests {
         let dec = Decoder::new(&bytes).unwrap();
         let mut buf = vec![0u8; 16 * 16 * 3];
         let err = dec
-            .decode_into(&mut buf, 10, OutputFormat::Rgb8)
+            .decode_into(&mut buf, 10, PixelFormat::Rgb8)
             .unwrap_err();
         assert!(matches!(err, JpegError::InvalidStride { .. }));
-    }
-
-    #[test]
-    fn decode_into_raw_ycbcr_returns_not_implemented() {
-        let bytes = minimal_baseline_jpeg();
-        let dec = Decoder::new(&bytes).unwrap();
-        let mut buf = vec![0u8; 16 * 16 * 3];
-        let err = dec
-            .decode_into(&mut buf, 48, OutputFormat::RawYCbCr8)
-            .unwrap_err();
-        assert!(err.is_not_implemented());
     }
 }

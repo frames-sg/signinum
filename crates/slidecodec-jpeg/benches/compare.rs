@@ -15,7 +15,7 @@ use common::{
     zune_decode_region_scaled, zune_decode_scaled, zune_inspect, DecodeMode,
 };
 use criterion::{criterion_group, criterion_main, Criterion};
-use slidecodec_jpeg::{Decoder, DownscaleFactor, ScratchPool};
+use slidecodec_jpeg::{Decoder, Downscale, ScratchPool};
 
 fn bench_compare(c: &mut Criterion) {
     let inputs = load_bench_inputs();
@@ -163,13 +163,13 @@ fn bench_compare(c: &mut Criterion) {
         input.mode == DecodeMode::Rgb && input.input_class == CorpusInputClass::BoundedFullFrame
     }) {
         wsi_scaled_rgb_q4.bench_function(format!("slidecodec/{}", input.name), |b| {
-            b.iter(|| slidecodec_decode_scaled(&input.bytes, DownscaleFactor::Quarter));
+            b.iter(|| slidecodec_decode_scaled(&input.bytes, Downscale::Quarter));
         });
         wsi_scaled_rgb_q4.bench_function(format!("jpeg-decoder/{}", input.name), |b| {
-            b.iter(|| jpeg_decoder_decode_scaled(&input.bytes, DownscaleFactor::Quarter));
+            b.iter(|| jpeg_decoder_decode_scaled(&input.bytes, Downscale::Quarter));
         });
         wsi_scaled_rgb_q4.bench_function(format!("zune-jpeg/{}", input.name), |b| {
-            b.iter(|| zune_decode_scaled(&input.bytes, DownscaleFactor::Quarter));
+            b.iter(|| zune_decode_scaled(&input.bytes, Downscale::Quarter));
         });
     }
     wsi_scaled_rgb_q4.finish();
@@ -179,13 +179,13 @@ fn bench_compare(c: &mut Criterion) {
         input.mode == DecodeMode::Rgb && input.input_class == CorpusInputClass::BoundedFullFrame
     }) {
         wsi_scaled_rgb_q8.bench_function(format!("slidecodec/{}", input.name), |b| {
-            b.iter(|| slidecodec_decode_scaled(&input.bytes, DownscaleFactor::Eighth));
+            b.iter(|| slidecodec_decode_scaled(&input.bytes, Downscale::Eighth));
         });
         wsi_scaled_rgb_q8.bench_function(format!("jpeg-decoder/{}", input.name), |b| {
-            b.iter(|| jpeg_decoder_decode_scaled(&input.bytes, DownscaleFactor::Eighth));
+            b.iter(|| jpeg_decoder_decode_scaled(&input.bytes, Downscale::Eighth));
         });
         wsi_scaled_rgb_q8.bench_function(format!("zune-jpeg/{}", input.name), |b| {
-            b.iter(|| zune_decode_scaled(&input.bytes, DownscaleFactor::Eighth));
+            b.iter(|| zune_decode_scaled(&input.bytes, Downscale::Eighth));
         });
     }
     wsi_scaled_rgb_q8.finish();
@@ -195,15 +195,15 @@ fn bench_compare(c: &mut Criterion) {
         input.mode == DecodeMode::Rgb && input.input_class == CorpusInputClass::BoundedFullFrame
     }) {
         wsi_region_scaled_rgb_q4.bench_function(format!("slidecodec/{}", input.name), |b| {
-            b.iter(|| slidecodec_decode_region_scaled(&input.bytes, 256, DownscaleFactor::Quarter));
+            b.iter(|| slidecodec_decode_region_scaled(&input.bytes, 256, Downscale::Quarter));
         });
         wsi_region_scaled_rgb_q4.bench_function(format!("jpeg-decoder/{}", input.name), |b| {
             b.iter(|| {
-                jpeg_decoder_decode_region_scaled(&input.bytes, 256, DownscaleFactor::Quarter);
+                jpeg_decoder_decode_region_scaled(&input.bytes, 256, Downscale::Quarter);
             });
         });
         wsi_region_scaled_rgb_q4.bench_function(format!("zune-jpeg/{}", input.name), |b| {
-            b.iter(|| zune_decode_region_scaled(&input.bytes, 256, DownscaleFactor::Quarter));
+            b.iter(|| zune_decode_region_scaled(&input.bytes, 256, Downscale::Quarter));
         });
     }
     wsi_region_scaled_rgb_q4.finish();
@@ -213,15 +213,15 @@ fn bench_compare(c: &mut Criterion) {
         input.mode == DecodeMode::Rgb && input.input_class == CorpusInputClass::BoundedFullFrame
     }) {
         wsi_region_scaled_rgb_q8.bench_function(format!("slidecodec/{}", input.name), |b| {
-            b.iter(|| slidecodec_decode_region_scaled(&input.bytes, 256, DownscaleFactor::Eighth));
+            b.iter(|| slidecodec_decode_region_scaled(&input.bytes, 256, Downscale::Eighth));
         });
         wsi_region_scaled_rgb_q8.bench_function(format!("jpeg-decoder/{}", input.name), |b| {
             b.iter(|| {
-                jpeg_decoder_decode_region_scaled(&input.bytes, 256, DownscaleFactor::Eighth);
+                jpeg_decoder_decode_region_scaled(&input.bytes, 256, Downscale::Eighth);
             });
         });
         wsi_region_scaled_rgb_q8.bench_function(format!("zune-jpeg/{}", input.name), |b| {
-            b.iter(|| zune_decode_region_scaled(&input.bytes, 256, DownscaleFactor::Eighth));
+            b.iter(|| zune_decode_region_scaled(&input.bytes, 256, Downscale::Eighth));
         });
     }
     wsi_region_scaled_rgb_q8.finish();
@@ -230,14 +230,14 @@ fn bench_compare(c: &mut Criterion) {
     for input in inputs.iter().filter(|input| input.mode == DecodeMode::Rgb) {
         wsi_tile_batch_scaled_rgb_q4.bench_function(format!("slidecodec/{}", input.name), |b| {
             b.iter(|| {
-                slidecodec_decode_tile_batch_scaled(&input.bytes, 64, DownscaleFactor::Quarter);
+                slidecodec_decode_tile_batch_scaled(&input.bytes, 64, Downscale::Quarter);
             });
         });
         wsi_tile_batch_scaled_rgb_q4.bench_function(format!("jpeg-decoder/{}", input.name), |b| {
-            b.iter(|| jpeg_decoder_decode_batch_scaled(&input.bytes, 64, DownscaleFactor::Quarter));
+            b.iter(|| jpeg_decoder_decode_batch_scaled(&input.bytes, 64, Downscale::Quarter));
         });
         wsi_tile_batch_scaled_rgb_q4.bench_function(format!("zune-jpeg/{}", input.name), |b| {
-            b.iter(|| zune_decode_batch_scaled(&input.bytes, 64, DownscaleFactor::Quarter));
+            b.iter(|| zune_decode_batch_scaled(&input.bytes, 64, Downscale::Quarter));
         });
     }
     wsi_tile_batch_scaled_rgb_q4.finish();
@@ -253,7 +253,7 @@ fn bench_compare(c: &mut Criterion) {
                         &input.bytes,
                         64,
                         256,
-                        DownscaleFactor::Quarter,
+                        Downscale::Quarter,
                     );
                 });
             },
@@ -266,7 +266,7 @@ fn bench_compare(c: &mut Criterion) {
                         &input.bytes,
                         64,
                         256,
-                        DownscaleFactor::Quarter,
+                        Downscale::Quarter,
                     );
                 });
             },
@@ -275,12 +275,7 @@ fn bench_compare(c: &mut Criterion) {
             format!("zune-jpeg/{}", input.name),
             |b| {
                 b.iter(|| {
-                    zune_decode_batch_region_scaled(
-                        &input.bytes,
-                        64,
-                        256,
-                        DownscaleFactor::Quarter,
-                    );
+                    zune_decode_batch_region_scaled(&input.bytes, 64, 256, Downscale::Quarter);
                 });
             },
         );

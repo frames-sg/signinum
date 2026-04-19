@@ -48,7 +48,7 @@ fn inspect(path: &Path) -> ExitCode {
                 info.sof_kind,
                 info.color_space,
                 info.bit_depth,
-                info.sampling.components,
+                info.sampling.components(),
                 info.restart_interval,
                 info.scan_count,
             );

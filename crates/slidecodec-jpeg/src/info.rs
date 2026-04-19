@@ -7,8 +7,6 @@
 //! cycle. `DecodeOutcome`, which does need `Warning`, lives in `decoder.rs`
 //! and is added in M1b when the decode methods are introduced.
 
-use alloc::vec::Vec;
-
 /// Start-of-frame variant. Determines the decode pipeline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SofKind {
@@ -37,14 +35,57 @@ pub enum ColorSpace {
 }
 
 /// Per-component (H, V) sampling factors, stored in declaration order.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SamplingFactors {
-    /// (H, V) pairs, one per component, each in `1..=4`.
-    pub components: Vec<(u8, u8)>,
+    components: [(u8, u8); 4],
+    component_count: u8,
     /// `max(H_i)` across components — MCU width in data units.
     pub max_h: u8,
     /// `max(V_i)` across components — MCU height in data units.
     pub max_v: u8,
+}
+
+impl SamplingFactors {
+    pub fn from_components(components: &[(u8, u8)]) -> Self {
+        assert!(
+            components.len() <= 4,
+            "sampling metadata supports at most four components"
+        );
+        let mut packed = [(0u8, 0u8); 4];
+        let mut max_h = 0u8;
+        let mut max_v = 0u8;
+        for (idx, &(h, v)) in components.iter().enumerate() {
+            packed[idx] = (h, v);
+            max_h = max_h.max(h);
+            max_v = max_v.max(v);
+        }
+        Self {
+            components: packed,
+            component_count: components.len() as u8,
+            max_h,
+            max_v,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.component_count as usize
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.component_count == 0
+    }
+
+    pub fn component(&self, index: usize) -> Option<(u8, u8)> {
+        self.components().get(index).copied()
+    }
+
+    pub fn components(&self) -> &[(u8, u8)] {
+        &self.components[..self.component_count as usize]
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (u8, u8)> + '_ {
+        self.components().iter().copied()
+    }
 }
 
 /// Inclusive axis-aligned rectangle in image coordinates.
@@ -79,18 +120,29 @@ impl Rect {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputFormat {
     Rgb8,
+    Rgb8Scaled { factor: DownscaleFactor },
     Rgba8 { alpha: u8 },
     Gray8,
+    Gray8Scaled { factor: DownscaleFactor },
     RawYCbCr8,
 }
 
 impl OutputFormat {
     pub fn bytes_per_pixel(self) -> usize {
         match self {
-            Self::Rgb8 => 3,
+            Self::Rgb8 | Self::Rgb8Scaled { .. } => 3,
             Self::Rgba8 { .. } => 4,
-            Self::Gray8 => 1,
+            Self::Gray8 | Self::Gray8Scaled { .. } => 1,
             Self::RawYCbCr8 => 3,
+        }
+    }
+
+    pub fn downscale(self) -> DownscaleFactor {
+        match self {
+            Self::Rgb8 | Self::Rgba8 { .. } | Self::Gray8 | Self::RawYCbCr8 => {
+                DownscaleFactor::Full
+            }
+            Self::Rgb8Scaled { factor } | Self::Gray8Scaled { factor } => factor,
         }
     }
 }
@@ -103,6 +155,26 @@ pub enum DownscaleFactor {
     Half,
     Quarter,
     Eighth,
+}
+
+impl DownscaleFactor {
+    pub const fn denominator(self) -> u32 {
+        match self {
+            Self::Full => 1,
+            Self::Half => 2,
+            Self::Quarter => 4,
+            Self::Eighth => 8,
+        }
+    }
+
+    pub const fn output_block_size(self) -> u32 {
+        match self {
+            Self::Full => 8,
+            Self::Half => 4,
+            Self::Quarter => 2,
+            Self::Eighth => 1,
+        }
+    }
 }
 
 /// Override for APP14 color-transform detection.
@@ -185,8 +257,34 @@ mod tests {
     #[test]
     fn output_format_bytes_per_pixel_matches_spec() {
         assert_eq!(OutputFormat::Rgb8.bytes_per_pixel(), 3);
+        assert_eq!(
+            OutputFormat::Rgb8Scaled {
+                factor: DownscaleFactor::Quarter
+            }
+            .bytes_per_pixel(),
+            3
+        );
         assert_eq!(OutputFormat::Rgba8 { alpha: 255 }.bytes_per_pixel(), 4);
         assert_eq!(OutputFormat::Gray8.bytes_per_pixel(), 1);
+        assert_eq!(
+            OutputFormat::Gray8Scaled {
+                factor: DownscaleFactor::Half
+            }
+            .bytes_per_pixel(),
+            1
+        );
         assert_eq!(OutputFormat::RawYCbCr8.bytes_per_pixel(), 3);
+    }
+
+    #[test]
+    fn sampling_factors_store_components_without_heap_state() {
+        let sampling = SamplingFactors::from_components(&[(2, 2), (1, 1), (1, 1)]);
+        assert_eq!(sampling.len(), 3);
+        assert_eq!(sampling.component(0), Some((2, 2)));
+        assert_eq!(sampling.component(1), Some((1, 1)));
+        assert_eq!(sampling.component(3), None);
+        assert_eq!(sampling.components(), &[(2, 2), (1, 1), (1, 1)]);
+        assert_eq!(sampling.max_h, 2);
+        assert_eq!(sampling.max_v, 2);
     }
 }

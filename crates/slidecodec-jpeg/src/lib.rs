@@ -5,10 +5,12 @@
 //! See the top-level README for project positioning. The primary entry point
 //! is [`Decoder`] — start with [`Decoder::inspect`] for header-only parsing.
 
-#![cfg_attr(not(feature = "std"), no_std)]
-#![forbid(unsafe_code)]
+#![deny(unsafe_op_in_unsafe_fn)]
 #![warn(unreachable_pub)]
 // `missing_docs` is scheduled to turn on before 0.1.0; see Cargo.toml for rationale.
+
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+compile_error!("slidecodec-jpeg currently supports only x86_64 and aarch64 targets");
 
 extern crate alloc;
 
@@ -16,6 +18,9 @@ pub mod info;
 pub use info::{
     ColorSpace, ColorTransform, DownscaleFactor, Info, OutputFormat, Rect, SamplingFactors, SofKind,
 };
+
+pub mod context;
+pub use context::DecoderContext;
 
 pub mod error;
 pub use error::{
@@ -33,7 +38,17 @@ pub(crate) mod internal;
 
 pub(crate) mod color;
 
+pub(crate) mod backend;
+
 pub(crate) mod output;
 
 pub mod decoder;
-pub use decoder::{DecodeOutcome, Decoder};
+pub use decoder::{
+    decode_tile_into, decode_tile_into_in_context, decode_tile_region_into_in_context,
+    DecodeOutcome, Decoder, JpegView, RgbRowSink,
+};
+
+pub use internal::scratch::ScratchPool;
+
+#[doc(hidden)]
+pub mod bench_support;

@@ -4,3 +4,5 @@
 //! is part of the public API.
 
 pub(crate) mod bit_reader;
+
+pub(crate) mod scratch;

@@ -134,6 +134,24 @@ pub enum JpegError {
         al: u8,
     },
 
+    #[error("unknown scan component id {component} at offset {offset}")]
+    UnknownScanComponent { offset: usize, component: u8 },
+
+    #[error("duplicate scan component id {component} at offset {offset}")]
+    DuplicateScanComponent { offset: usize, component: u8 },
+
+    #[error(
+        "invalid sequential scan component set at offset {offset}: expected {expected} components, found {found}"
+    )]
+    InvalidSequentialComponentSet {
+        offset: usize,
+        expected: u8,
+        found: u8,
+    },
+
+    #[error("invalid sequential scan count for {sof:?}: expected 1, found {count}")]
+    InvalidSequentialScanCount { sof: SofKind, count: u16 },
+
     #[error("Huffman decode failed at MCU {mcu}: {reason:?}")]
     HuffmanDecode { mcu: u32, reason: HuffmanFailure },
 
@@ -230,6 +248,9 @@ impl JpegError {
             | Self::DuplicateMarker { offset, .. }
             | Self::InvalidSegmentLength { offset, .. }
             | Self::InvalidScanParameters { offset, .. }
+            | Self::UnknownScanComponent { offset, .. }
+            | Self::DuplicateScanComponent { offset, .. }
+            | Self::InvalidSequentialComponentSet { offset, .. }
             | Self::RestartMismatch { offset, .. } => Some(*offset),
             _ => None,
         }

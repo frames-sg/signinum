@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+#![allow(clippy::inline_always)]
+
 //! Bit-level reader over an entropy-coded JPEG scan. Presents three core
 //! operations: `peek_bits(n)` to examine the next up-to-32 bits, `consume_bits(n)`
 //! to advance past them, and `read_bits(n)` which combines both. Internally
@@ -23,6 +25,7 @@ const ACC_BITS: u8 = 64;
 /// before returning so the next 16-bit peek can always succeed without a
 /// mid-decode refill. 56 matches the spec's "refill when `bits < 56`, 4 bytes
 /// at a time" guidance (spec §5 hot-path discipline).
+#[cfg(test)]
 const REFILL_THRESHOLD: u8 = 56;
 
 pub(crate) struct BitReader<'a> {
@@ -55,6 +58,7 @@ impl<'a> BitReader<'a> {
 
     /// Ensure at least `n` bits are in the accumulator, refilling as needed.
     /// Returns `HuffmanDecode { TableExhausted }` if the scan is truncated.
+    #[inline(always)]
     pub(crate) fn ensure_bits(&mut self, n: u8) -> Result<(), JpegError> {
         while self.bits < n {
             if !self.refill_one_byte() {
@@ -81,6 +85,7 @@ impl<'a> BitReader<'a> {
     /// If refill ran out because the input buffer is physically truncated
     /// (no marker, `pos >= bytes.len()`), we still return `TableExhausted` so
     /// malformed streams are rejected, not silently padded over.
+    #[inline(always)]
     pub(crate) fn ensure_bits_padded(&mut self, n: u8) -> Result<(), JpegError> {
         while self.bits < n {
             if !self.refill_one_byte() {
@@ -103,6 +108,7 @@ impl<'a> BitReader<'a> {
     /// Refill one byte of data into the accumulator. Returns `true` if a
     /// byte was added, `false` if the refill paused at a marker or ran out
     /// of input.
+    #[inline(always)]
     fn refill_one_byte(&mut self) -> bool {
         if self.marker.is_some() || self.pos >= self.bytes.len() {
             return false;
@@ -128,6 +134,7 @@ impl<'a> BitReader<'a> {
         }
     }
 
+    #[inline(always)]
     fn push_byte(&mut self, b: u8) {
         let shift = ACC_BITS - 8 - self.bits;
         self.acc |= u64::from(b) << shift;
@@ -137,6 +144,7 @@ impl<'a> BitReader<'a> {
     /// Return the next `n` bits (MSB-first) without advancing. Caller must
     /// have ensured enough bits via `ensure_bits`. `n <= 16` on the hot path
     /// (Huffman codes up to 16 bits).
+    #[inline(always)]
     pub(crate) fn peek_bits(&self, n: u8) -> u32 {
         debug_assert!(n <= 32, "peek_bits({n}) exceeds u32");
         debug_assert!(
@@ -152,6 +160,7 @@ impl<'a> BitReader<'a> {
     }
 
     /// Advance past `n` bits previously examined with `peek_bits`.
+    #[inline(always)]
     pub(crate) fn consume_bits(&mut self, n: u8) {
         debug_assert!(
             n <= self.bits,
@@ -163,6 +172,7 @@ impl<'a> BitReader<'a> {
     }
 
     /// Combined peek + consume. Refills as needed.
+    #[cfg(test)]
     pub(crate) fn read_bits(&mut self, n: u8) -> Result<u32, JpegError> {
         self.ensure_bits(n)?;
         let v = self.peek_bits(n);
@@ -173,6 +183,7 @@ impl<'a> BitReader<'a> {
 
     /// After consuming bits, top up the accumulator so the next Huffman peek
     /// can always examine 16 bits without further refill.
+    #[cfg(test)]
     fn refill_to_threshold(&mut self) {
         while self.bits < REFILL_THRESHOLD && self.refill_one_byte() {}
     }
@@ -180,11 +191,14 @@ impl<'a> BitReader<'a> {
     /// Signed-value extension per T.81 §F.2.2.1 ("EXTEND" procedure). `ssss`
     /// is the category — a non-zero value in `1..=15` — and the return is the
     /// signed coefficient value.
+    #[inline(always)]
     pub(crate) fn receive_extend(&mut self, ssss: u8) -> Result<i32, JpegError> {
         if ssss == 0 {
             return Ok(0);
         }
-        let v = self.read_bits(ssss)? as i32;
+        self.ensure_bits(ssss)?;
+        let v = self.peek_bits(ssss) as i32;
+        self.consume_bits(ssss);
         let threshold = 1i32 << (ssss - 1);
         Ok(if v < threshold {
             v + ((-1i32) << ssss) + 1

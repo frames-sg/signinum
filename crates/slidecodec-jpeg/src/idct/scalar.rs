@@ -34,12 +34,27 @@ const FIX_3_072711026: Wrapping<i32> = Wrapping(25172);
 /// Inverse DCT of a single 8×8 block, with level shift and clamping.
 pub(crate) fn idct_islow(input: &[i16; 64], output: &mut [u8; 64]) {
     let mut work = [Wrapping(0i32); 64];
-    for col in 0..8 {
-        idct_1d_column(input, &mut work, col);
+    if input[32..].iter().all(|&coeff| coeff == 0) {
+        for col in 0..8 {
+            idct_1d_column_bottom_half_zero(input, &mut work, col);
+        }
+    } else {
+        for col in 0..8 {
+            idct_1d_column(input, &mut work, col);
+        }
     }
     for row in 0..8 {
         idct_1d_row(&work, output, row);
     }
+}
+
+/// Bit-exact DC-only ISLOW path. Equivalent to `idct_islow` when every AC
+/// coefficient is zero.
+pub(crate) fn idct_islow_dc_only(dc_coeff: i16, output: &mut [u8; 64]) {
+    let pixel = ((i32::from(dc_coeff) + 4) >> 3)
+        .wrapping_add(128)
+        .clamp(0, 255) as u8;
+    output.fill(pixel);
 }
 
 fn idct_1d_column(input: &[i16; 64], work: &mut [Wrapping<i32>; 64], col: usize) {
@@ -108,6 +123,60 @@ fn idct_1d_column(input: &[i16; 64], work: &mut [Wrapping<i32>; 64], col: usize)
     let tmp1 = tmp1 + z2 + z4;
     let tmp2 = tmp2 + z2 + z3;
     let tmp3 = tmp3 + z1 + z4;
+
+    let shift = CONST_BITS - PASS1_BITS;
+    let rounding = Wrapping(1i32 << (shift - 1));
+    work[col] = descale(tmp10 + tmp3 + rounding, shift);
+    work[col + 56] = descale(tmp10 - tmp3 + rounding, shift);
+    work[col + 8] = descale(tmp11 + tmp2 + rounding, shift);
+    work[col + 48] = descale(tmp11 - tmp2 + rounding, shift);
+    work[col + 16] = descale(tmp12 + tmp1 + rounding, shift);
+    work[col + 40] = descale(tmp12 - tmp1 + rounding, shift);
+    work[col + 24] = descale(tmp13 + tmp0 + rounding, shift);
+    work[col + 32] = descale(tmp13 - tmp0 + rounding, shift);
+}
+
+fn idct_1d_column_bottom_half_zero(input: &[i16; 64], work: &mut [Wrapping<i32>; 64], col: usize) {
+    let p0 = Wrapping(input[col] as i32);
+    let p1 = Wrapping(input[col + 8] as i32);
+    let p2 = Wrapping(input[col + 16] as i32);
+    let p3 = Wrapping(input[col + 24] as i32);
+
+    if p1.0 == 0 && p2.0 == 0 && p3.0 == 0 {
+        let dc = p0 << PASS1_BITS;
+        work[col] = dc;
+        work[col + 8] = dc;
+        work[col + 16] = dc;
+        work[col + 24] = dc;
+        work[col + 32] = dc;
+        work[col + 40] = dc;
+        work[col + 48] = dc;
+        work[col + 56] = dc;
+        return;
+    }
+
+    let z1 = p2 * FIX_0_541196100;
+    let tmp2 = z1;
+    let tmp3 = z1 + p2 * FIX_0_765366865;
+
+    let tmp0 = p0 << CONST_BITS;
+    let tmp1 = p0 << CONST_BITS;
+
+    let tmp10 = tmp0 + tmp3;
+    let tmp13 = tmp0 - tmp3;
+    let tmp11 = tmp1 + tmp2;
+    let tmp12 = tmp1 - tmp2;
+
+    let z5 = (p1 + p3) * FIX_1_175875602;
+    let z1 = p1 * (-FIX_0_899976223);
+    let z2 = p3 * (-FIX_2_562915447);
+    let z3 = p3 * (-FIX_1_961570560) + z5;
+    let z4 = p1 * (-FIX_0_390180644) + z5;
+
+    let tmp0 = z1 + z3;
+    let tmp1 = z2 + z4;
+    let tmp2 = p3 * FIX_3_072711026 + z2 + z3;
+    let tmp3 = p1 * FIX_1_501321110 + z1 + z4;
 
     let shift = CONST_BITS - PASS1_BITS;
     let rounding = Wrapping(1i32 << (shift - 1));
@@ -230,6 +299,17 @@ mod tests {
         for &px in &output {
             assert!((px as i32 - 136).abs() <= 1, "got {px}");
         }
+    }
+
+    #[test]
+    fn dc_only_helper_matches_full_idct() {
+        let mut input = [0i16; 64];
+        input[0] = 73;
+        let mut full = [0u8; 64];
+        let mut fast = [0u8; 64];
+        idct_islow(&input, &mut full);
+        idct_islow_dc_only(input[0], &mut fast);
+        assert_eq!(fast, full);
     }
 
     #[test]

@@ -1,0 +1,106 @@
+// SPDX-License-Identifier: Apache-2.0
+
+use criterion::{criterion_group, criterion_main, Criterion};
+use slidecodec_jpeg::bench_support::{
+    bench_idct_reference_block, BenchColorRowScratch, BenchHuffmanState, BenchUpsampleH2V2Scratch,
+};
+use slidecodec_jpeg::Decoder;
+
+fn bench_micro(c: &mut Criterion) {
+    let small = include_bytes!("../../../corpus/conformance/baseline_420_16x16.jpg");
+
+    c.bench_function("micro/inspect_small", |b| {
+        b.iter(|| {
+            let info = Decoder::inspect(small).expect("slidecodec inspect");
+            std::hint::black_box(info);
+        });
+    });
+
+    let huffman = BenchHuffmanState::luma_dc_zeros(2048);
+    c.bench_function("micro/huffman_luma_dc_zero_stream", |b| {
+        b.iter(|| {
+            let sum = huffman.decode_all().expect("huffman decode");
+            std::hint::black_box(sum);
+        });
+    });
+
+    c.bench_function("micro/idct_reference_block", |b| {
+        b.iter(|| {
+            let out = bench_idct_reference_block();
+            std::hint::black_box(out);
+        });
+    });
+
+    // Scalar-vs-SIMD one-block parity workload on a mid-complexity coefficient
+    // block, tracking the Phase 1 speedup ratio precisely.
+    let mut coeffs = [0i16; 64];
+    coeffs[0] = 480;
+    coeffs[1] = -120;
+    coeffs[2] = 75;
+    coeffs[8] = 92;
+    coeffs[9] = -38;
+    coeffs[10] = 17;
+    coeffs[16] = -22;
+    coeffs[17] = 9;
+    coeffs[24] = 11;
+
+    {
+        use slidecodec_jpeg::bench_support::bench_idct_reference_block_with;
+        c.bench_function("micro/idct_islow_scalar_block", |b| {
+            let mut out = [0u8; 64];
+            b.iter(|| {
+                bench_idct_reference_block_with(std::hint::black_box(&coeffs), &mut out);
+                std::hint::black_box(&out);
+            });
+        });
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        use slidecodec_jpeg::bench_support::bench_idct_neon_block;
+        c.bench_function("micro/idct_islow_neon_block", |b| {
+            let mut out = [0u8; 64];
+            b.iter(|| {
+                bench_idct_neon_block(std::hint::black_box(&coeffs), &mut out);
+                std::hint::black_box(&out);
+            });
+        });
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::is_x86_feature_detected!("avx2") {
+            use slidecodec_jpeg::bench_support::bench_idct_avx2_block;
+            c.bench_function("micro/idct_islow_avx2_block", |b| {
+                let mut out = [0u8; 64];
+                b.iter(|| {
+                    bench_idct_avx2_block(std::hint::black_box(&coeffs), &mut out);
+                    std::hint::black_box(&out);
+                });
+            });
+        }
+    }
+
+    // Chroma fancy upsample over two output rows. 128 chroma samples ⇒ 256
+    // luma columns per row — typical of a 256-wide WSI tile's 4:2:0 chroma.
+    let mut upsample = BenchUpsampleH2V2Scratch::new(128);
+    c.bench_function("micro/upsample_h2v2_fancy_rows_128", |b| {
+        b.iter(|| {
+            upsample.run();
+            std::hint::black_box(&upsample);
+        });
+    });
+
+    // Scalar YCbCr→RGB conversion across a 256-pixel row — the path every
+    // Phase 2 SIMD variant has to beat.
+    let mut color = BenchColorRowScratch::new(256);
+    c.bench_function("micro/ycbcr_to_rgb_row_scalar_256", |b| {
+        b.iter(|| {
+            color.run_scalar();
+            std::hint::black_box(&color);
+        });
+    });
+}
+
+criterion_group!(micro_benches, bench_micro);
+criterion_main!(micro_benches);

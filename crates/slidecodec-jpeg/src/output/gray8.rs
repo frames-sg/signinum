@@ -3,6 +3,7 @@
 //! `Gray8Writer` — 1-byte-per-pixel grayscale output. Multi-component YCbCr
 //! inputs project to luminance via `Y` (ignoring chroma).
 
+use crate::error::JpegError;
 use crate::output::OutputWriter;
 
 pub(crate) struct Gray8Writer<'o> {
@@ -18,7 +19,13 @@ impl<'o> Gray8Writer<'o> {
 }
 
 impl OutputWriter for Gray8Writer<'_> {
-    fn write_rgb_row(&mut self, y: u32, r_row: &[u8], g_row: &[u8], b_row: &[u8]) {
+    fn write_rgb_row(
+        &mut self,
+        y: u32,
+        r_row: &[u8],
+        g_row: &[u8],
+        b_row: &[u8],
+    ) -> Result<(), JpegError> {
         let dst_start = (y as usize) * self.stride;
         let width = self.width as usize;
         let dst = &mut self.out[dst_start..dst_start + width];
@@ -28,18 +35,27 @@ impl OutputWriter for Gray8Writer<'_> {
             let b = u32::from(b_row[i]);
             dst[i] = ((77 * r + 150 * g + 29 * b + 128) >> 8) as u8;
         }
+        Ok(())
     }
 
-    fn write_ycbcr_row(&mut self, y: u32, y_row: &[u8], _cb_row: &[u8], _cr_row: &[u8]) {
+    fn write_ycbcr_row(
+        &mut self,
+        y: u32,
+        y_row: &[u8],
+        _cb_row: &[u8],
+        _cr_row: &[u8],
+    ) -> Result<(), JpegError> {
         let dst_start = (y as usize) * self.stride;
         let width = self.width as usize;
         self.out[dst_start..dst_start + width].copy_from_slice(&y_row[..width]);
+        Ok(())
     }
 
-    fn write_gray_row(&mut self, y: u32, gray_row: &[u8]) {
+    fn write_gray_row(&mut self, y: u32, gray_row: &[u8]) -> Result<(), JpegError> {
         let dst_start = (y as usize) * self.stride;
         let width = self.width as usize;
         self.out[dst_start..dst_start + width].copy_from_slice(&gray_row[..width]);
+        Ok(())
     }
 }
 
@@ -52,7 +68,7 @@ mod tests {
     fn copies_gray_row_verbatim() {
         let mut buf = vec![0u8; 4];
         let mut w = Gray8Writer::new(&mut buf, 4, 4);
-        w.write_gray_row(0, &[10, 20, 30, 40]);
+        w.write_gray_row(0, &[10, 20, 30, 40]).unwrap();
         assert_eq!(buf, vec![10, 20, 30, 40]);
     }
 
@@ -60,7 +76,8 @@ mod tests {
     fn ycbcr_row_projects_to_y_channel_only() {
         let mut buf = vec![0u8; 4];
         let mut w = Gray8Writer::new(&mut buf, 4, 4);
-        w.write_ycbcr_row(0, &[10, 20, 30, 40], &[250; 4], &[5; 4]);
+        w.write_ycbcr_row(0, &[10, 20, 30, 40], &[250; 4], &[5; 4])
+            .unwrap();
         assert_eq!(buf, vec![10, 20, 30, 40]);
     }
 
@@ -68,8 +85,8 @@ mod tests {
     fn respects_stride_across_rows() {
         let mut buf = vec![0u8; 16];
         let mut w = Gray8Writer::new(&mut buf, 8, 2);
-        w.write_gray_row(0, &[1, 2]);
-        w.write_gray_row(1, &[3, 4]);
+        w.write_gray_row(0, &[1, 2]).unwrap();
+        w.write_gray_row(1, &[3, 4]).unwrap();
         assert_eq!(buf[0..2], [1, 2]);
         assert_eq!(buf[8..10], [3, 4]);
     }

@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   - Restart markers handled at MCU interval boundaries.
   - Ground-truth ISLOW integer IDCT in `idct::scalar`.
 - Public `DecodeOutcome { decoded: Rect, warnings: Vec<Warning> }`.
+- `JpegView::parse`, `Decoder::from_view`, and `Decoder::decode_rows` for the
+  prepared-parse and row-streaming API slice.
+- Internal prepared decode state now lives in an owned decode plan, and the
+  baseline sequential path decodes through reusable MCU-row stripe buffers
+  instead of full-image component planes.
 - `JpegError::NotImplemented { sof }` for parseable SOFs that land in M3
   (Extended12, Progressive, Lossless) — transient variant removed in M3.
   `JpegError::is_not_implemented()` predicate for routing.
@@ -24,6 +29,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `corpus/conformance/grayscale_8x8.{jpg,gray}`, with `manifest.json` recording
   the libjpeg-turbo version and regeneration via `generate.sh`.
 - `cargo-fuzz` target `decode_fuzz` covering `Decoder::new + decode_into`.
+- Native-only crate groundwork: supported targets are now `x86_64` and
+  `aarch64`, and CI no longer carries wasm / `no-default-features` jobs for
+  `slidecodec-jpeg`.
+- Comparator benches now skip impractical multi-gigapixel full-frame decodes
+  and add a `decode_rows_rgb` benchmark group for large extracted WSI JPEGs.
 
 ### Not yet (tracked)
 

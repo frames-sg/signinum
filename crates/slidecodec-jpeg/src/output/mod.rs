@@ -14,17 +14,37 @@ pub(crate) use gray8::Gray8Writer;
 pub(crate) use rgb8::Rgb8Writer;
 pub(crate) use rgba8::Rgba8Writer;
 
+/// A writer that can expose one or two mutable interleaved RGB rows so the
+/// decoder can fill final output bytes directly.
+pub(crate) trait InterleavedRgbWriter {
+    fn with_rgb_rows<R, F>(&mut self, y: u32, row_count: usize, fill: F) -> Result<R, JpegError>
+    where
+        F: FnOnce(&mut [u8], Option<&mut [u8]>) -> Result<R, JpegError>;
+}
+
 /// A destination for decoded pixel rows. Each writer carries a mutable slice
 /// of the caller's output buffer and the stride in bytes between rows.
 pub(crate) trait OutputWriter {
     /// Write one full-width row of RGB data at output row `y`.
-    fn write_rgb_row(&mut self, y: u32, r_row: &[u8], g_row: &[u8], b_row: &[u8]);
+    fn write_rgb_row(
+        &mut self,
+        y: u32,
+        r_row: &[u8],
+        g_row: &[u8],
+        b_row: &[u8],
+    ) -> Result<(), JpegError>;
 
     /// Write one full-width row of YCbCr data at output row `y`.
-    fn write_ycbcr_row(&mut self, y: u32, y_row: &[u8], cb_row: &[u8], cr_row: &[u8]);
+    fn write_ycbcr_row(
+        &mut self,
+        y: u32,
+        y_row: &[u8],
+        cb_row: &[u8],
+        cr_row: &[u8],
+    ) -> Result<(), JpegError>;
 
     /// Write one full-width row of grayscale data.
-    fn write_gray_row(&mut self, y: u32, gray_row: &[u8]);
+    fn write_gray_row(&mut self, y: u32, gray_row: &[u8]) -> Result<(), JpegError>;
 }
 
 /// Validate that the caller's `out`/`stride` pair is large enough to hold an

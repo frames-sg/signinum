@@ -2,13 +2,31 @@
 
 //! Public [`Decoder`] entry points.
 
+use crate::backend::Backend;
+use crate::context::DecoderContext;
 use crate::entropy::huffman::HuffmanTable;
-use crate::entropy::sequential::{decode_scan_baseline, ComponentCtx, DecodeContext};
+use crate::entropy::sequential::{
+    decode_scan_baseline, decode_scan_baseline_rgb, decode_scan_fast_rgb_444,
+    decode_scan_fast_tile_rgb, decode_scan_fast_tile_rgb_region, PreparedComponentPlan,
+    PreparedDecodePlan,
+};
 use crate::error::{JpegError, MarkerKind, Warning};
-use crate::info::{ColorSpace, Info, OutputFormat, Rect, SofKind};
-use crate::output::{validate_buffer, Gray8Writer, Rgb8Writer, Rgba8Writer};
-use crate::parse::header::{parse_header, ParsedHeader};
+use crate::info::{ColorSpace, DownscaleFactor, Info, OutputFormat, Rect, SofKind};
+use crate::internal::scratch::{ScratchPool, SinkRows};
+use crate::output::{
+    validate_buffer, Gray8Writer, InterleavedRgbWriter, OutputWriter, Rgb8Writer, Rgba8Writer,
+};
+use crate::parse::header::{parse_header, parse_info, ParsedHeader};
+use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::cell::RefCell;
+
+const DEFAULT_MAX_DECODE_BYTES: usize = 512 * 1024 * 1024;
+
+std::thread_local! {
+    static DEFAULT_SCRATCH: RefCell<ScratchPool> = RefCell::new(ScratchPool::new());
+    static DEFAULT_CONTEXT: RefCell<DecoderContext> = RefCell::new(DecoderContext::new());
+}
 
 /// Non-fatal outcome of a successful decode. See spec Section 2.
 ///
@@ -26,16 +44,47 @@ pub struct DecodeOutcome {
     pub warnings: Vec<Warning>,
 }
 
+/// A parsed borrowed view of a JPEG stream.
+#[derive(Debug)]
+pub struct JpegView<'a> {
+    bytes: &'a [u8],
+    header: ParsedHeader,
+    info: Info,
+}
+
+impl<'a> JpegView<'a> {
+    /// Parse the stream into a borrowed view that can later build a decoder.
+    pub fn parse(input: &'a [u8]) -> Result<Self, JpegError> {
+        let header = parse_header(input)?;
+        let info = header.info();
+        Ok(Self {
+            bytes: input,
+            header,
+            info,
+        })
+    }
+
+    /// Header-derived metadata for the parsed stream.
+    pub fn info(&self) -> &Info {
+        &self.info
+    }
+}
+
+/// RGB row sink used by [`Decoder::decode_rows`].
+pub trait RgbRowSink {
+    /// Accept one decoded interleaved RGB row at image row `y`.
+    fn write_rgb_row(&mut self, y: u32, row: &[u8]) -> Result<(), JpegError>;
+}
+
 /// A borrowed view of a JPEG stream ready to decode. Constructed via
-/// [`Decoder::new`]. `Decoder<'a>: Send + Sync`.
+/// [`Decoder::new`] or [`Decoder::from_view`]. `Decoder<'a>: Send + Sync`.
 #[derive(Debug)]
 pub struct Decoder<'a> {
     pub(crate) bytes: &'a [u8],
-    pub(crate) header: ParsedHeader,
     pub(crate) info: Info,
-    /// Huffman tables pre-built at construction. Indexed by slot id 0..=3.
-    pub(crate) dc_tables: [Option<HuffmanTable>; 4],
-    pub(crate) ac_tables: [Option<HuffmanTable>; 4],
+    pub(crate) warnings: Arc<[Warning]>,
+    pub(crate) backend: Backend,
+    pub(crate) plan: PreparedDecodePlan,
 }
 
 impl<'a> Decoder<'a> {
@@ -47,7 +96,7 @@ impl<'a> Decoder<'a> {
     /// Returns any structural, unsupported-SOF, or sanity-check error
     /// encountered before the Start-of-Scan marker. See [`JpegError`].
     pub fn inspect(input: &'a [u8]) -> Result<Info, JpegError> {
-        parse_header(input).map(|h| h.info())
+        parse_info(input)
     }
 
     /// Build a decoder ready for `decode_into`. Parses the full header, pre-
@@ -61,8 +110,59 @@ impl<'a> Decoder<'a> {
     /// - [`JpegError::MissingHuffmanTable`] if the scan references a DC/AC
     ///   table slot that was never defined by a DHT segment.
     pub fn new(input: &'a [u8]) -> Result<Self, JpegError> {
-        let header = parse_header(input)?;
-        let info = header.info();
+        let view = JpegView::parse(input)?;
+        DEFAULT_CONTEXT.with(|ctx| Self::from_view_in_context(view, &mut ctx.borrow_mut()))
+    }
+
+    /// Build a decoder from a previously parsed [`JpegView`].
+    pub fn from_view(view: JpegView<'a>) -> Result<Self, JpegError> {
+        DEFAULT_CONTEXT.with(|ctx| Self::from_view_in_context(view, &mut ctx.borrow_mut()))
+    }
+
+    /// Build a decoder from a previously parsed [`JpegView`], reusing shared
+    /// compiled DHT/DQT state from `ctx` when table contents repeat.
+    pub fn from_view_in_context(
+        view: JpegView<'a>,
+        ctx: &mut DecoderContext,
+    ) -> Result<Self, JpegError> {
+        let JpegView {
+            bytes,
+            header,
+            info,
+        } = view;
+        let backend = Backend::detect();
+        let (info, warnings, plan) = if let Some(scan_offset) = header.sos_offset {
+            let header_prefix = &bytes[..scan_offset];
+            ctx.resolve_decode_plan(header_prefix, |ctx| {
+                let plan = Self::build_prepared_plan(&header, &info, ctx)?;
+                Ok((
+                    info.clone(),
+                    Arc::<[Warning]>::from(header.warnings.as_slice()),
+                    plan,
+                ))
+            })?
+        } else {
+            let plan = Self::build_prepared_plan(&header, &info, ctx)?;
+            (
+                info,
+                Arc::<[Warning]>::from(header.warnings.as_slice()),
+                plan,
+            )
+        };
+        Ok(Self {
+            bytes,
+            info,
+            warnings,
+            backend,
+            plan,
+        })
+    }
+
+    fn build_prepared_plan(
+        header: &ParsedHeader,
+        info: &Info,
+        ctx: &mut DecoderContext,
+    ) -> Result<PreparedDecodePlan, JpegError> {
         match info.sof_kind {
             SofKind::Baseline8 | SofKind::Extended8 => {}
             other => return Err(JpegError::NotImplemented { sof: other }),
@@ -72,21 +172,21 @@ impl<'a> Decoder<'a> {
             color_space => return Err(JpegError::UnsupportedColorSpace { color_space }),
         }
 
-        let mut dc_tables: [Option<HuffmanTable>; 4] = Default::default();
-        let mut ac_tables: [Option<HuffmanTable>; 4] = Default::default();
+        let mut dc_tables: [Option<Arc<HuffmanTable>>; 4] = Default::default();
+        let mut ac_tables: [Option<Arc<HuffmanTable>>; 4] = Default::default();
         let scan = header.scan.as_ref().ok_or(JpegError::MissingMarker {
             marker: MarkerKind::Sos,
         })?;
-        // Baseline/Extended-8 sequential scans must cover every SOF component
-        // (T.81 §B.2.3: Ns = Nf). Reject non-interleaved single-scan layouts —
-        // they are a progressive-style pattern that M1b doesn't decode.
-        if scan.components.len() != header.sampling.components.len() {
-            return Err(JpegError::NotImplemented { sof: info.sof_kind });
+        if header.scan_count != 1 {
+            return Err(JpegError::InvalidSequentialScanCount {
+                sof: info.sof_kind,
+                count: header.scan_count,
+            });
         }
         // M1b requires the first component (Y for 3-component, single for
         // grayscale) to be the maximally-sampled component. Non-luma-leading
         // layouts are pathological; real baselines always satisfy this.
-        if let Some(&(h, v)) = header.sampling.components.first() {
+        if let Some((h, v)) = header.sampling.component(0) {
             if h != header.sampling.max_h || v != header.sampling.max_v {
                 return Err(JpegError::NotImplemented { sof: info.sof_kind });
             }
@@ -96,11 +196,12 @@ impl<'a> Decoder<'a> {
         // streams can set H=0 (div-by-zero in upsample ratio), non-divisors
         // (arbitrary ratios M2 handles), or ratios that don't produce planes
         // that cover the image width.
-        for &(h, v) in &header.sampling.components {
+        for (h, v) in header.sampling.iter() {
             if h == 0 || v == 0 || h > 4 || v > 4 {
                 return Err(JpegError::NotImplemented { sof: info.sof_kind });
             }
-            if header.sampling.max_h % h != 0 || header.sampling.max_v % v != 0 {
+            if !header.sampling.max_h.is_multiple_of(h) || !header.sampling.max_v.is_multiple_of(v)
+            {
                 return Err(JpegError::NotImplemented { sof: info.sof_kind });
             }
         }
@@ -115,7 +216,7 @@ impl<'a> Decoder<'a> {
                         id: comp.dc_table,
                     },
                 )?;
-                dc_tables[di] = Some(HuffmanTable::from_raw(raw)?);
+                dc_tables[di] = Some(ctx.resolve_huffman_table(raw)?);
             }
             if ac_tables[ai].is_none() {
                 let raw = header.huffman_tables.ac[ai].as_ref().ok_or(
@@ -125,17 +226,11 @@ impl<'a> Decoder<'a> {
                         id: comp.ac_table,
                     },
                 )?;
-                ac_tables[ai] = Some(HuffmanTable::from_raw(raw)?);
+                ac_tables[ai] = Some(ctx.resolve_huffman_table(raw)?);
             }
         }
 
-        Ok(Self {
-            bytes: input,
-            header,
-            info,
-            dc_tables,
-            ac_tables,
-        })
+        build_decode_plan(header, info, &dc_tables, &ac_tables, ctx)
     }
 
     /// The parsed header as a public [`Info`].
@@ -157,104 +252,805 @@ impl<'a> Decoder<'a> {
         stride: usize,
         fmt: OutputFormat,
     ) -> Result<DecodeOutcome, JpegError> {
-        let (w, h) = self.info.dimensions;
+        DEFAULT_SCRATCH
+            .with(|pool| self.decode_into_with_scratch(&mut pool.borrow_mut(), out, stride, fmt))
+    }
+
+    /// Decode the full image into a freshly allocated tightly-packed buffer.
+    ///
+    /// This is the owned-output counterpart to [`Self::decode_into`]. It
+    /// avoids pre-zeroing the destination buffer, which matters on WSI-sized
+    /// RGB outputs where the allocation itself can otherwise dominate the
+    /// benchmark.
+    pub fn decode(&self, fmt: OutputFormat) -> Result<(Vec<u8>, DecodeOutcome), JpegError> {
+        DEFAULT_SCRATCH.with(|pool| self.decode_with_scratch(&mut pool.borrow_mut(), fmt))
+    }
+
+    /// [`Self::decode`] with caller-owned scratch.
+    pub fn decode_with_scratch(
+        &self,
+        pool: &mut ScratchPool,
+        fmt: OutputFormat,
+    ) -> Result<(Vec<u8>, DecodeOutcome), JpegError> {
+        let downscale = fmt.downscale();
+        let (width, height) = scaled_dimensions(self.info.dimensions, downscale);
+        let stride = width as usize * fmt.bytes_per_pixel();
+        let len = stride * height as usize;
+        let mut out = allocate_output_buffer(len);
+        let outcome = self.decode_into_with_scratch(pool, &mut out, stride, fmt)?;
+        Ok((out, outcome))
+    }
+
+    /// Decode the full image into the caller's buffer, reusing the supplied
+    /// [`ScratchPool`]. On a long-running tile batch this eliminates the
+    /// per-tile allocation of stripe buffers, the DC predictor, and the
+    /// chroma upsample rows — the realistic WSI reader shape. The first
+    /// call against a fresh pool does the allocation; subsequent calls at
+    /// the same-or-smaller shape reuse the underlying `Vec`s.
+    ///
+    /// # Errors
+    /// Identical to [`Self::decode_into`].
+    pub fn decode_into_with_scratch(
+        &self,
+        pool: &mut ScratchPool,
+        out: &mut [u8],
+        stride: usize,
+        fmt: OutputFormat,
+    ) -> Result<DecodeOutcome, JpegError> {
+        let downscale = fmt.downscale();
+        let (w, h) = scaled_dimensions(self.info.dimensions, downscale);
+        let _ = self.decode_scratch_bytes(DEFAULT_MAX_DECODE_BYTES)?;
         let bpp = fmt.bytes_per_pixel();
         validate_buffer(out, stride, w, h, bpp)?;
-
-        let ctx = self.build_decode_context()?;
-        let sos_offset = self.header.sos_offset.ok_or(JpegError::MissingMarker {
-            marker: MarkerKind::Sos,
-        })?;
-        let scan_bytes = &self.bytes[sos_offset..];
-
-        let scan_warnings = match fmt {
-            OutputFormat::Rgb8 => {
+        match fmt {
+            OutputFormat::Rgb8 | OutputFormat::Rgb8Scaled { .. } => {
                 let mut writer = Rgb8Writer::new(out, stride, w);
-                decode_scan_baseline(&ctx, scan_bytes, &mut writer)?
+                self.decode_rgb_with_writer(
+                    pool,
+                    &mut writer,
+                    downscale,
+                    Rect::full(self.info.dimensions),
+                )
             }
             OutputFormat::Rgba8 { alpha } => {
                 let mut writer = Rgba8Writer::new(out, stride, w, alpha);
-                decode_scan_baseline(&ctx, scan_bytes, &mut writer)?
+                self.decode_with_writer(
+                    pool,
+                    &mut writer,
+                    downscale,
+                    Rect::full(self.info.dimensions),
+                )
             }
-            OutputFormat::Gray8 => {
+            OutputFormat::Gray8 | OutputFormat::Gray8Scaled { .. } => {
                 let mut writer = Gray8Writer::new(out, stride, w);
-                decode_scan_baseline(&ctx, scan_bytes, &mut writer)?
+                self.decode_with_writer(
+                    pool,
+                    &mut writer,
+                    downscale,
+                    Rect::full(self.info.dimensions),
+                )
             }
-            OutputFormat::RawYCbCr8 => {
-                return Err(JpegError::NotImplemented {
-                    sof: self.info.sof_kind,
-                });
-            }
-        };
+            OutputFormat::RawYCbCr8 => Err(JpegError::NotImplemented {
+                sof: self.info.sof_kind,
+            }),
+        }
+    }
 
-        let mut warnings = self.header.warnings.clone();
-        warnings.extend(scan_warnings);
+    /// Decode the full image into interleaved RGB rows delivered to `sink`.
+    pub fn decode_rows(&self, sink: &mut impl RgbRowSink) -> Result<DecodeOutcome, JpegError> {
+        DEFAULT_SCRATCH.with(|pool| self.decode_rows_with_scratch(&mut pool.borrow_mut(), sink))
+    }
 
-        Ok(DecodeOutcome {
-            decoded: Rect::full(self.info.dimensions),
-            warnings,
+    /// [`Self::decode_rows`] with caller-owned scratch. See
+    /// [`Self::decode_into_with_scratch`] for the reuse contract.
+    pub fn decode_rows_with_scratch(
+        &self,
+        pool: &mut ScratchPool,
+        sink: &mut impl RgbRowSink,
+    ) -> Result<DecodeOutcome, JpegError> {
+        let width = self.info.dimensions.0 as usize;
+        let rows = pool.take_sink_rows(width);
+        let mut writer = SinkWriter::new(sink, rows, self.backend);
+        let result = self.decode_rgb_with_writer(
+            pool,
+            &mut writer,
+            DownscaleFactor::Full,
+            Rect::full(self.info.dimensions),
+        );
+        pool.restore_sink_rows(writer.into_rows());
+        result
+    }
+
+    /// Decode a rectangular region of the image into the caller's buffer.
+    ///
+    /// `roi` is expressed in source-image coordinates. If `fmt` requests a
+    /// downscaled output, the written pixels cover the corresponding bounding
+    /// box in the scaled image grid.
+    pub fn decode_region_into(
+        &self,
+        out: &mut [u8],
+        stride: usize,
+        fmt: OutputFormat,
+        roi: Rect,
+    ) -> Result<DecodeOutcome, JpegError> {
+        DEFAULT_SCRATCH.with(|pool| {
+            self.decode_region_into_with_scratch(&mut pool.borrow_mut(), out, stride, fmt, roi)
         })
     }
 
-    fn build_decode_context(&self) -> Result<DecodeContext<'_>, JpegError> {
-        let header = &self.header;
-        let scan = header.scan.as_ref().ok_or(JpegError::MissingMarker {
-            marker: MarkerKind::Sos,
+    /// Decode `roi` into a freshly allocated tightly-packed buffer.
+    pub fn decode_region(
+        &self,
+        fmt: OutputFormat,
+        roi: Rect,
+    ) -> Result<(Vec<u8>, DecodeOutcome), JpegError> {
+        DEFAULT_SCRATCH
+            .with(|pool| self.decode_region_with_scratch(&mut pool.borrow_mut(), fmt, roi))
+    }
+
+    /// [`Self::decode_region`] with caller-owned scratch.
+    pub fn decode_region_with_scratch(
+        &self,
+        pool: &mut ScratchPool,
+        fmt: OutputFormat,
+        roi: Rect,
+    ) -> Result<(Vec<u8>, DecodeOutcome), JpegError> {
+        let scaled_roi = scaled_rect_covering(roi, fmt.downscale())?;
+        let stride = scaled_roi.w as usize * fmt.bytes_per_pixel();
+        let len = stride * scaled_roi.h as usize;
+        let mut out = allocate_output_buffer(len);
+        let outcome = self.decode_region_into_with_scratch(pool, &mut out, stride, fmt, roi)?;
+        Ok((out, outcome))
+    }
+
+    /// [`Self::decode_region_into`] with caller-owned scratch.
+    pub fn decode_region_into_with_scratch(
+        &self,
+        pool: &mut ScratchPool,
+        out: &mut [u8],
+        stride: usize,
+        fmt: OutputFormat,
+        roi: Rect,
+    ) -> Result<DecodeOutcome, JpegError> {
+        if !roi.is_within(self.info.dimensions) {
+            return Err(JpegError::RectOutOfBounds {
+                rect: roi,
+                width: self.info.dimensions.0,
+                height: self.info.dimensions.1,
+            });
+        }
+
+        let downscale = fmt.downscale();
+        let scaled_roi = scaled_rect_covering(roi, downscale)?;
+        let _ = self.decode_scratch_bytes(DEFAULT_MAX_DECODE_BYTES)?;
+        validate_buffer(
+            out,
+            stride,
+            scaled_roi.w,
+            scaled_roi.h,
+            fmt.bytes_per_pixel(),
+        )?;
+
+        match fmt {
+            OutputFormat::Rgb8 | OutputFormat::Rgb8Scaled { .. } => {
+                if fmt == OutputFormat::Rgb8
+                    && downscale == DownscaleFactor::Full
+                    && self.plan.matches_fast_tile_shape()
+                {
+                    let mut writer = Rgb8Writer::new(out, stride, scaled_roi.w);
+                    let scan_bytes = &self.bytes[self.plan.scan_offset..];
+                    let scan_warnings = decode_scan_fast_tile_rgb_region(
+                        &self.plan,
+                        self.backend,
+                        scan_bytes,
+                        pool,
+                        &mut writer,
+                        roi,
+                    )?;
+                    Ok(DecodeOutcome {
+                        decoded: roi,
+                        warnings: merged_warnings(&self.warnings, scan_warnings),
+                    })
+                } else {
+                    let base = Rgb8Writer::new(out, stride, scaled_roi.w);
+                    let (scaled_width, _) = scaled_dimensions(self.info.dimensions, downscale);
+                    let mut writer = CroppedWriter::new(base, scaled_roi, scaled_width);
+                    self.decode_rgb_with_writer(pool, &mut writer, downscale, roi)
+                }
+            }
+            OutputFormat::Rgba8 { alpha } => {
+                let base = Rgba8Writer::new(out, stride, scaled_roi.w, alpha);
+                let (scaled_width, _) = scaled_dimensions(self.info.dimensions, downscale);
+                let mut writer = CroppedWriter::new(base, scaled_roi, scaled_width);
+                self.decode_with_writer(pool, &mut writer, downscale, roi)
+            }
+            OutputFormat::Gray8 | OutputFormat::Gray8Scaled { .. } => {
+                let base = Gray8Writer::new(out, stride, scaled_roi.w);
+                let (scaled_width, _) = scaled_dimensions(self.info.dimensions, downscale);
+                let mut writer = CroppedWriter::new(base, scaled_roi, scaled_width);
+                self.decode_with_writer(pool, &mut writer, downscale, roi)
+            }
+            OutputFormat::RawYCbCr8 => Err(JpegError::NotImplemented {
+                sof: self.info.sof_kind,
+            }),
+        }
+    }
+}
+
+/// One-shot parse-plus-decode of an independent JPEG tile into the caller's
+/// buffer, reusing a pre-allocated [`ScratchPool`]. This is the primitive
+/// WSI tile-batch readers want: one function call per tile, with all
+/// heap state external.
+///
+/// Parallelism is the caller's responsibility. The idiomatic shape is
+/// [`std::thread::scope`] with one `ScratchPool` per worker thread —
+/// no crate dependency on `rayon`.
+///
+/// # Example
+///
+/// ```no_run
+/// use slidecodec_jpeg::{decode_tile_into, OutputFormat, ScratchPool};
+///
+/// let bytes: &[u8] = todo!("read tile bytes");
+/// let mut out = vec![0u8; 256 * 256 * 3];
+/// let mut pool = ScratchPool::new();
+/// decode_tile_into(bytes, &mut pool, &mut out, 256 * 3, OutputFormat::Rgb8)?;
+/// # Ok::<(), slidecodec_jpeg::JpegError>(())
+/// ```
+///
+/// # Errors
+/// Forwarded from [`Decoder::new`] (parse) and
+/// [`Decoder::decode_into_with_scratch`] (decode).
+pub fn decode_tile_into(
+    bytes: &[u8],
+    pool: &mut ScratchPool,
+    out: &mut [u8],
+    stride: usize,
+    fmt: OutputFormat,
+) -> Result<DecodeOutcome, JpegError> {
+    DEFAULT_CONTEXT.with(|ctx| {
+        decode_tile_into_in_context(bytes, &mut ctx.borrow_mut(), pool, out, stride, fmt)
+    })
+}
+
+/// One-shot parse-plus-decode of an independent JPEG tile into the caller's
+/// buffer, reusing both caller-owned [`DecoderContext`] and caller-owned
+/// [`ScratchPool`].
+pub fn decode_tile_into_in_context(
+    bytes: &[u8],
+    ctx: &mut DecoderContext,
+    pool: &mut ScratchPool,
+    out: &mut [u8],
+    stride: usize,
+    fmt: OutputFormat,
+) -> Result<DecodeOutcome, JpegError> {
+    let dec = Decoder::from_view_in_context(JpegView::parse(bytes)?, ctx)?;
+    dec.decode_into_with_scratch(pool, out, stride, fmt)
+}
+
+/// One-shot parse-plus-region-decode of an independent JPEG tile into the
+/// caller's buffer, reusing both caller-owned [`DecoderContext`] and
+/// caller-owned [`ScratchPool`].
+pub fn decode_tile_region_into_in_context(
+    bytes: &[u8],
+    ctx: &mut DecoderContext,
+    pool: &mut ScratchPool,
+    out: &mut [u8],
+    stride: usize,
+    fmt: OutputFormat,
+    roi: Rect,
+) -> Result<DecodeOutcome, JpegError> {
+    let dec = Decoder::from_view_in_context(JpegView::parse(bytes)?, ctx)?;
+    dec.decode_region_into_with_scratch(pool, out, stride, fmt, roi)
+}
+
+impl Decoder<'_> {
+    /// One-shot parse-plus-row-decode of a JPEG tile using caller-owned shared
+    /// table context and caller-owned scratch.
+    pub fn decode_tile<S: RgbRowSink>(
+        bytes: &[u8],
+        ctx: &mut DecoderContext,
+        pool: &mut ScratchPool,
+        sink: &mut S,
+    ) -> Result<DecodeOutcome, JpegError> {
+        let dec = Decoder::from_view_in_context(JpegView::parse(bytes)?, ctx)?;
+        dec.decode_rows_with_scratch(pool, sink)
+    }
+}
+
+impl Decoder<'_> {
+    fn decode_scratch_bytes(&self, cap: usize) -> Result<usize, JpegError> {
+        if self.plan.scratch_bytes > cap {
+            return Err(JpegError::MemoryCapExceeded {
+                requested: self.plan.scratch_bytes,
+                cap,
+            });
+        }
+        Ok(self.plan.scratch_bytes)
+    }
+
+    fn decode_with_writer<W: OutputWriter>(
+        &self,
+        pool: &mut ScratchPool,
+        writer: &mut W,
+        downscale: DownscaleFactor,
+        decoded: Rect,
+    ) -> Result<DecodeOutcome, JpegError> {
+        let _ = self.decode_scratch_bytes(DEFAULT_MAX_DECODE_BYTES)?;
+        let output_rect = scaled_rect_covering(decoded, downscale)?;
+        let scan_bytes = &self.bytes[self.plan.scan_offset..];
+        let scan_warnings = decode_scan_baseline(
+            &self.plan,
+            self.backend,
+            scan_bytes,
+            pool,
+            writer,
+            downscale,
+            output_rect,
+        )?;
+        Ok(DecodeOutcome {
+            decoded,
+            warnings: merged_warnings(&self.warnings, scan_warnings),
+        })
+    }
+
+    fn decode_rgb_with_writer<W: OutputWriter + InterleavedRgbWriter>(
+        &self,
+        pool: &mut ScratchPool,
+        writer: &mut W,
+        downscale: DownscaleFactor,
+        decoded: Rect,
+    ) -> Result<DecodeOutcome, JpegError> {
+        let _ = self.decode_scratch_bytes(DEFAULT_MAX_DECODE_BYTES)?;
+        let output_rect = scaled_rect_covering(decoded, downscale)?;
+        let scan_bytes = &self.bytes[self.plan.scan_offset..];
+        let scan_warnings =
+            if downscale == DownscaleFactor::Full && self.plan.matches_fast_tile_shape() {
+                decode_scan_fast_tile_rgb(&self.plan, self.backend, scan_bytes, pool, writer)?
+            } else if downscale == DownscaleFactor::Full
+                && decoded == Rect::full(self.info.dimensions)
+                && self.plan.matches_fast_rgb444_shape()
+            {
+                decode_scan_fast_rgb_444(&self.plan, self.backend, scan_bytes, pool, writer)?
+            } else {
+                decode_scan_baseline_rgb(
+                    &self.plan,
+                    self.backend,
+                    scan_bytes,
+                    pool,
+                    writer,
+                    downscale,
+                    output_rect,
+                )?
+            };
+        Ok(DecodeOutcome {
+            decoded,
+            warnings: merged_warnings(&self.warnings, scan_warnings),
+        })
+    }
+}
+
+fn merged_warnings(header_warnings: &[Warning], scan_warnings: Vec<Warning>) -> Vec<Warning> {
+    if header_warnings.is_empty() {
+        return scan_warnings;
+    }
+    if scan_warnings.is_empty() {
+        return header_warnings.to_vec();
+    }
+    let mut warnings = Vec::with_capacity(header_warnings.len() + scan_warnings.len());
+    warnings.extend_from_slice(header_warnings);
+    warnings.extend(scan_warnings);
+    warnings
+}
+
+#[allow(clippy::uninit_vec)]
+fn allocate_output_buffer(len: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(len);
+    // Safety: all owned-output entrypoints use tight row strides, and the
+    // decode writers fully initialize every byte in the destination on success.
+    // If decode returns an error, dropping a Vec<u8> with uninitialized bytes is
+    // still sound because `u8` has no drop glue.
+    unsafe {
+        out.set_len(len);
+    }
+    out
+}
+
+fn scaled_dimensions(dims: (u32, u32), factor: DownscaleFactor) -> (u32, u32) {
+    let denom = factor.denominator();
+    (dims.0.div_ceil(denom), dims.1.div_ceil(denom))
+}
+
+fn scaled_rect_covering(rect: Rect, factor: DownscaleFactor) -> Result<Rect, JpegError> {
+    let denom = factor.denominator();
+    let x_end = rect
+        .x
+        .checked_add(rect.w)
+        .ok_or(JpegError::RectOutOfBounds {
+            rect,
+            width: u32::MAX,
+            height: u32::MAX,
         })?;
-        let mut components = Vec::with_capacity(scan.components.len());
-        for (i, scan_comp) in scan.components.iter().enumerate() {
-            let (h, v) = *header
-                .sampling
-                .components
-                .get(i)
-                .ok_or(JpegError::MissingMarker {
-                    marker: MarkerKind::Sof,
+    let y_end = rect
+        .y
+        .checked_add(rect.h)
+        .ok_or(JpegError::RectOutOfBounds {
+            rect,
+            width: u32::MAX,
+            height: u32::MAX,
+        })?;
+    let x0 = rect.x / denom;
+    let y0 = rect.y / denom;
+    let x1 = x_end.div_ceil(denom);
+    let y1 = y_end.div_ceil(denom);
+    Ok(Rect {
+        x: x0,
+        y: y0,
+        w: x1.saturating_sub(x0),
+        h: y1.saturating_sub(y0),
+    })
+}
+
+struct CroppedWriter<W> {
+    inner: W,
+    rect: Rect,
+    source_width: u32,
+    top_row: Vec<u8>,
+    bottom_row: Vec<u8>,
+}
+
+impl<W> CroppedWriter<W> {
+    fn new(inner: W, rect: Rect, source_width: u32) -> Self {
+        let row_len = source_width as usize * 3;
+        Self {
+            inner,
+            rect,
+            source_width,
+            top_row: vec![0; row_len],
+            bottom_row: vec![0; row_len],
+        }
+    }
+}
+
+impl<W: OutputWriter> OutputWriter for CroppedWriter<W> {
+    fn write_rgb_row(
+        &mut self,
+        y: u32,
+        r_row: &[u8],
+        g_row: &[u8],
+        b_row: &[u8],
+    ) -> Result<(), JpegError> {
+        if y < self.rect.y || y >= self.rect.y + self.rect.h {
+            return Ok(());
+        }
+        let x0 = self.rect.x as usize;
+        let x1 = x0 + self.rect.w as usize;
+        self.inner.write_rgb_row(
+            y - self.rect.y,
+            &r_row[x0..x1],
+            &g_row[x0..x1],
+            &b_row[x0..x1],
+        )
+    }
+
+    fn write_ycbcr_row(
+        &mut self,
+        y: u32,
+        y_row: &[u8],
+        cb_row: &[u8],
+        cr_row: &[u8],
+    ) -> Result<(), JpegError> {
+        if y < self.rect.y || y >= self.rect.y + self.rect.h {
+            return Ok(());
+        }
+        let x0 = self.rect.x as usize;
+        let x1 = x0 + self.rect.w as usize;
+        self.inner.write_ycbcr_row(
+            y - self.rect.y,
+            &y_row[x0..x1],
+            &cb_row[x0..x1],
+            &cr_row[x0..x1],
+        )
+    }
+
+    fn write_gray_row(&mut self, y: u32, gray_row: &[u8]) -> Result<(), JpegError> {
+        if y < self.rect.y || y >= self.rect.y + self.rect.h {
+            return Ok(());
+        }
+        let x0 = self.rect.x as usize;
+        let x1 = x0 + self.rect.w as usize;
+        self.inner
+            .write_gray_row(y - self.rect.y, &gray_row[x0..x1])
+    }
+}
+
+impl<W: InterleavedRgbWriter> InterleavedRgbWriter for CroppedWriter<W> {
+    fn with_rgb_rows<R, F>(&mut self, y: u32, row_count: usize, fill: F) -> Result<R, JpegError>
+    where
+        F: FnOnce(&mut [u8], Option<&mut [u8]>) -> Result<R, JpegError>,
+    {
+        let row_len = self.source_width as usize * 3;
+        if self.top_row.len() != row_len {
+            self.top_row.resize(row_len, 0);
+            self.bottom_row.resize(row_len, 0);
+        }
+
+        let result = match row_count {
+            1 => fill(&mut self.top_row, None)?,
+            2 => fill(&mut self.top_row, Some(&mut self.bottom_row))?,
+            _ => unreachable!("CroppedWriter only supports one or two rows"),
+        };
+
+        let top_in = y >= self.rect.y && y < self.rect.y + self.rect.h;
+        let bottom_y = y + 1;
+        let bottom_in =
+            row_count == 2 && bottom_y >= self.rect.y && bottom_y < self.rect.y + self.rect.h;
+        let x0 = self.rect.x as usize * 3;
+        let x1 = x0 + self.rect.w as usize * 3;
+
+        match (top_in, bottom_in) {
+            (false, false) => {}
+            (true, false) => {
+                self.inner.with_rgb_rows(y - self.rect.y, 1, |dst, _| {
+                    dst.copy_from_slice(&self.top_row[x0..x1]);
+                    Ok(())
                 })?;
-            let quant_id = *header
+            }
+            (false, true) => {
+                self.inner
+                    .with_rgb_rows(bottom_y - self.rect.y, 1, |dst, _| {
+                        dst.copy_from_slice(&self.bottom_row[x0..x1]);
+                        Ok(())
+                    })?;
+            }
+            (true, true) => {
+                self.inner
+                    .with_rgb_rows(y - self.rect.y, 2, |dst_top, dst_bottom| {
+                        dst_top.copy_from_slice(&self.top_row[x0..x1]);
+                        dst_bottom
+                            .expect("row_count=2 supplies bottom row")
+                            .copy_from_slice(&self.bottom_row[x0..x1]);
+                        Ok(())
+                    })?;
+            }
+        }
+
+        Ok(result)
+    }
+}
+
+fn build_decode_plan(
+    header: &ParsedHeader,
+    info: &Info,
+    dc_tables: &[Option<Arc<HuffmanTable>>; 4],
+    ac_tables: &[Option<Arc<HuffmanTable>>; 4],
+    ctx: &mut DecoderContext,
+) -> Result<PreparedDecodePlan, JpegError> {
+    let scan = header.scan.as_ref().ok_or(JpegError::MissingMarker {
+        marker: MarkerKind::Sos,
+    })?;
+    let scan_offset = header.sos_offset.ok_or(JpegError::MissingMarker {
+        marker: MarkerKind::Sos,
+    })?;
+
+    let mut components = Vec::with_capacity(scan.components.len());
+    for scan_comp in scan.components.iter().copied() {
+        let output_index = find_component_index(&header.component_ids, scan_comp.id).ok_or(
+            JpegError::UnknownScanComponent {
+                offset: scan_offset,
+                component: scan_comp.id,
+            },
+        )?;
+        let (h, v) = header
+            .sampling
+            .component(output_index)
+            .ok_or(JpegError::MissingMarker {
+                marker: MarkerKind::Sof,
+            })?;
+        let quant_id =
+            *header
                 .quant_table_ids
-                .get(i)
+                .get(output_index)
                 .ok_or(JpegError::MissingMarker {
                     marker: MarkerKind::Sof,
                 })? as usize;
-            let quant = header
-                .quant_tables
-                .entries
-                .get(quant_id)
-                .and_then(|q| q.as_ref())
-                .ok_or(JpegError::MissingQuantTable {
-                    component: scan_comp.id,
-                    table_id: quant_id as u8,
-                })?;
-            let dc_table = self.dc_tables[scan_comp.dc_table as usize].as_ref().ok_or(
-                JpegError::MissingHuffmanTable {
-                    component: scan_comp.id,
-                    class: 0,
-                    id: scan_comp.dc_table,
-                },
-            )?;
-            let ac_table = self.ac_tables[scan_comp.ac_table as usize].as_ref().ok_or(
-                JpegError::MissingHuffmanTable {
-                    component: scan_comp.id,
-                    class: 1,
-                    id: scan_comp.ac_table,
-                },
-            )?;
-            components.push(ComponentCtx {
-                h,
-                v,
-                quant,
-                dc_table,
-                ac_table,
+        let quant = *header
+            .quant_tables
+            .entries
+            .get(quant_id)
+            .and_then(|q| q.as_ref())
+            .ok_or(JpegError::MissingQuantTable {
+                component: scan_comp.id,
+                table_id: quant_id as u8,
+            })?;
+        let dc_table = dc_tables[scan_comp.dc_table as usize].as_ref().ok_or(
+            JpegError::MissingHuffmanTable {
+                component: scan_comp.id,
+                class: 0,
+                id: scan_comp.dc_table,
+            },
+        )?;
+        let ac_table = ac_tables[scan_comp.ac_table as usize].as_ref().ok_or(
+            JpegError::MissingHuffmanTable {
+                component: scan_comp.id,
+                class: 1,
+                id: scan_comp.ac_table,
+            },
+        )?;
+        components.push(PreparedComponentPlan {
+            h,
+            v,
+            output_index,
+            quant: ctx.resolve_quant_table(quant),
+            dc_table: Arc::clone(dc_table),
+            ac_table: Arc::clone(ac_table),
+        });
+    }
+
+    let scratch_bytes =
+        compute_decode_scratch_bytes(info.dimensions, info.sampling, DEFAULT_MAX_DECODE_BYTES)?;
+
+    Ok(PreparedDecodePlan {
+        components,
+        sampling: info.sampling,
+        color_space: info.color_space,
+        restart_interval: header.restart_interval,
+        dimensions: info.dimensions,
+        scan_offset,
+        scratch_bytes,
+    })
+}
+
+struct SinkWriter<'a, S> {
+    sink: &'a mut S,
+    rows: SinkRows,
+    backend: Backend,
+}
+
+impl<'a, S> SinkWriter<'a, S> {
+    fn new(sink: &'a mut S, rows: SinkRows, backend: Backend) -> Self {
+        debug_assert_eq!(rows.top_row.len(), rows.bottom_row.len());
+        Self {
+            sink,
+            rows,
+            backend,
+        }
+    }
+
+    fn into_rows(self) -> SinkRows {
+        self.rows
+    }
+}
+
+impl<S: RgbRowSink> InterleavedRgbWriter for SinkWriter<'_, S> {
+    fn with_rgb_rows<R, F>(&mut self, y: u32, row_count: usize, fill: F) -> Result<R, JpegError>
+    where
+        F: FnOnce(&mut [u8], Option<&mut [u8]>) -> Result<R, JpegError>,
+    {
+        let result = match row_count {
+            1 => fill(&mut self.rows.top_row, None),
+            2 => fill(&mut self.rows.top_row, Some(&mut self.rows.bottom_row)),
+            _ => unreachable!("SinkWriter only supports one or two rows"),
+        }?;
+        self.sink.write_rgb_row(y, &self.rows.top_row)?;
+        if row_count == 2 {
+            self.sink.write_rgb_row(y + 1, &self.rows.bottom_row)?;
+        }
+        Ok(result)
+    }
+}
+
+impl<S: RgbRowSink> OutputWriter for SinkWriter<'_, S> {
+    fn write_rgb_row(
+        &mut self,
+        y: u32,
+        r_row: &[u8],
+        g_row: &[u8],
+        b_row: &[u8],
+    ) -> Result<(), JpegError> {
+        self.backend
+            .fill_rgb_row_from_rgb(r_row, g_row, b_row, &mut self.rows.top_row);
+        self.sink.write_rgb_row(y, &self.rows.top_row)
+    }
+
+    fn write_ycbcr_row(
+        &mut self,
+        y: u32,
+        y_row: &[u8],
+        cb_row: &[u8],
+        cr_row: &[u8],
+    ) -> Result<(), JpegError> {
+        self.backend
+            .fill_rgb_row_from_ycbcr(y_row, cb_row, cr_row, &mut self.rows.top_row);
+        self.sink.write_rgb_row(y, &self.rows.top_row)
+    }
+
+    fn write_gray_row(&mut self, y: u32, gray_row: &[u8]) -> Result<(), JpegError> {
+        self.backend
+            .fill_rgb_row_from_gray(gray_row, &mut self.rows.top_row);
+        self.sink.write_rgb_row(y, &self.rows.top_row)
+    }
+}
+
+fn find_component_index(component_ids: &[u8], id: u8) -> Option<usize> {
+    component_ids
+        .iter()
+        .position(|&component_id| component_id == id)
+}
+
+fn compute_decode_scratch_bytes(
+    (width, height): (u32, u32),
+    sampling: crate::info::SamplingFactors,
+    cap: usize,
+) -> Result<usize, JpegError> {
+    let max_h = u32::from(sampling.max_h);
+    let max_v = u32::from(sampling.max_v);
+    let mcu_width = 8u32
+        .checked_mul(max_h)
+        .ok_or(JpegError::MemoryCapExceeded {
+            requested: usize::MAX,
+            cap,
+        })?;
+    let mcu_height = 8u32
+        .checked_mul(max_v)
+        .ok_or(JpegError::MemoryCapExceeded {
+            requested: usize::MAX,
+            cap,
+        })?;
+    let mcus_per_row = width.div_ceil(mcu_width);
+    let _mcu_rows = height.div_ceil(mcu_height);
+
+    let mut stripe_total = 0usize;
+    for (h, v) in sampling.iter() {
+        let cols = checked_usize_product(&[mcus_per_row as usize, usize::from(h), 8usize], cap)?;
+        let rows = checked_usize_product(&[usize::from(v), 8usize], cap)?;
+        let plane = cols.checked_mul(rows).ok_or(JpegError::MemoryCapExceeded {
+            requested: usize::MAX,
+            cap,
+        })?;
+        stripe_total = stripe_total
+            .checked_add(plane)
+            .ok_or(JpegError::MemoryCapExceeded {
+                requested: usize::MAX,
+                cap,
+            })?;
+        if stripe_total > cap {
+            return Err(JpegError::MemoryCapExceeded {
+                requested: stripe_total,
+                cap,
             });
         }
-        Ok(DecodeContext {
-            components,
-            sampling: &header.sampling,
-            color_space: self.info.color_space,
-            restart_interval: header.restart_interval,
-            dimensions: self.info.dimensions,
-        })
     }
+
+    let stripe_buffers = checked_usize_product(&[stripe_total, 3], cap)?;
+    let row_scratch = checked_usize_product(&[width as usize, 7], cap)?;
+    let total = stripe_buffers
+        .checked_add(row_scratch)
+        .ok_or(JpegError::MemoryCapExceeded {
+            requested: usize::MAX,
+            cap,
+        })?;
+    if total > cap {
+        return Err(JpegError::MemoryCapExceeded {
+            requested: total,
+            cap,
+        });
+    }
+
+    Ok(total)
+}
+
+fn checked_usize_product(factors: &[usize], cap: usize) -> Result<usize, JpegError> {
+    let mut value = 1usize;
+    for factor in factors {
+        value = value
+            .checked_mul(*factor)
+            .ok_or(JpegError::MemoryCapExceeded {
+                requested: usize::MAX,
+                cap,
+            })?;
+    }
+    Ok(value)
 }
 
 #[cfg(test)]

@@ -5,6 +5,44 @@
 
 use crate::error::JpegError;
 
+/// Inline storage for the values payload of a DHT segment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HuffmanValues {
+    bytes: [u8; 256],
+    len: u16,
+}
+
+impl Default for HuffmanValues {
+    fn default() -> Self {
+        Self {
+            bytes: [0; 256],
+            len: 0,
+        }
+    }
+}
+
+impl HuffmanValues {
+    pub(crate) fn from_slice(values: &[u8]) -> Self {
+        debug_assert!(values.len() <= 256);
+        let mut out = Self::default();
+        out.bytes[..values.len()].copy_from_slice(values);
+        out.len = values.len() as u16;
+        out
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.len as usize
+    }
+
+    pub(crate) fn as_slice(&self) -> &[u8] {
+        &self.bytes[..self.len()]
+    }
+
+    pub(crate) fn get(&self, index: usize) -> Option<u8> {
+        self.as_slice().get(index).copied()
+    }
+}
+
 /// Up to four quant tables (8-bit precision). 16-bit precision widens each
 /// entry but the slot model is identical; we decode into u16 for uniformity.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -23,7 +61,7 @@ pub(crate) struct HuffmanTables {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RawHuffmanTable {
     pub(crate) bits: [u8; 16],
-    pub(crate) values: alloc::vec::Vec<u8>,
+    pub(crate) values: HuffmanValues,
 }
 
 /// Parse a DQT payload into one or more table slots. Multiple tables may be
@@ -116,7 +154,7 @@ pub(crate) fn parse_dht(
                 expected: (i + 17 + total_values) - payload.len(),
             });
         }
-        let values = payload[i + 17..i + 17 + total_values].to_vec();
+        let values = HuffmanValues::from_slice(&payload[i + 17..i + 17 + total_values]);
         let table = RawHuffmanTable { bits, values };
         match tc {
             0 => tables.dc[th] = Some(table),
@@ -191,7 +229,7 @@ mod tests {
         parse_dht(&payload, 0, &mut tables).unwrap();
         let t = tables.dc[0].as_ref().unwrap();
         assert_eq!(t.bits, [0, 1, 5, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0]);
-        assert_eq!(t.values, alloc::vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+        assert_eq!(t.values.as_slice(), &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
     }
 
     #[test]
@@ -203,8 +241,8 @@ mod tests {
         ];
         let mut tables = HuffmanTables::default();
         parse_dht(&payload, 0, &mut tables).unwrap();
-        assert_eq!(tables.dc[0].as_ref().unwrap().values, alloc::vec![0xAA]);
-        assert_eq!(tables.ac[0].as_ref().unwrap().values, alloc::vec![0xBB]);
+        assert_eq!(tables.dc[0].as_ref().unwrap().values.as_slice(), &[0xAA]);
+        assert_eq!(tables.ac[0].as_ref().unwrap().values.as_slice(), &[0xBB]);
     }
 
     #[test]

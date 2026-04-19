@@ -20,30 +20,53 @@ pub(crate) fn upsample_1x1(input: &[u8], output: &mut [u8]) {
 
 /// Horizontal fancy upsample (4:2:2). `input_row` has length `input_cols`;
 /// `output_row` must have length `2 * input_cols`.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn upsample_h2v1_fancy(input_row: &[u8], output_row: &mut [u8]) {
     let n = input_row.len();
     assert_eq!(output_row.len(), n * 2, "output row must be 2× input width");
-    if n == 0 {
+    upsample_h2v1_fancy_row(input_row, output_row.len(), output_row);
+}
+
+/// Horizontal fancy upsample that emits only the visible output width.
+pub(crate) fn upsample_h2v1_fancy_row(
+    input_row: &[u8],
+    output_width: usize,
+    output_row: &mut [u8],
+) {
+    let n = input_row.len();
+    assert!(
+        output_width <= output_row.len(),
+        "output width must fit in the destination slice"
+    );
+    assert!(
+        output_width <= n * 2,
+        "visible width cannot exceed the full upsampled row"
+    );
+    if output_width == 0 || n == 0 {
         return;
     }
     if n == 1 {
-        output_row[0] = input_row[0];
-        output_row[1] = input_row[0];
+        output_row[..output_width].fill(input_row[0]);
         return;
     }
-    output_row[0] = input_row[0];
-    output_row[1] = ((3 * input_row[0] as u32 + input_row[1] as u32 + 2) / 4) as u8;
-    for i in 1..n - 1 {
-        let prev = input_row[i - 1] as u32;
-        let curr = input_row[i] as u32;
-        let next = input_row[i + 1] as u32;
-        output_row[2 * i] = ((3 * curr + prev + 2) / 4) as u8;
-        output_row[2 * i + 1] = ((3 * curr + next + 2) / 4) as u8;
+
+    for (x, slot) in output_row.iter_mut().enumerate().take(output_width) {
+        let sample = x / 2;
+        *slot = match x {
+            0 => input_row[0],
+            _ if x == n * 2 - 1 => input_row[n - 1],
+            _ if x.is_multiple_of(2) => {
+                let prev = input_row[sample - 1] as u32;
+                let curr = input_row[sample] as u32;
+                ((3 * curr + prev + 2) / 4) as u8
+            }
+            _ => {
+                let curr = input_row[sample] as u32;
+                let next = input_row[sample + 1] as u32;
+                ((3 * curr + next + 2) / 4) as u8
+            }
+        };
     }
-    let last = input_row[n - 1] as u32;
-    let before = input_row[n - 2] as u32;
-    output_row[2 * n - 2] = ((3 * last + before + 2) / 4) as u8;
-    output_row[2 * n - 1] = input_row[n - 1];
 }
 
 /// Produce two output rows for 4:2:0 vertical+horizontal fancy upsample.
@@ -53,6 +76,7 @@ pub(crate) fn upsample_h2v1_fancy(input_row: &[u8], output_row: &mut [u8]) {
 /// chroma sample, with distinct formulas at the first and last column so
 /// boundary pixels stay consistent with interior pixels under the same
 /// 3:1 / 1:3 blend.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn upsample_h2v2_fancy(
     prev: &[u8],
     curr: &[u8],
@@ -69,15 +93,55 @@ pub(crate) fn upsample_h2v2_fancy(
         return;
     }
 
-    emit_h2v2_row(prev, curr, out_top);
-    emit_h2v2_row(next, curr, out_bot);
+    upsample_h2v2_fancy_rows(prev, curr, next, 2 * n, out_top, out_bot);
+}
+
+/// Vertical+horizontal fancy upsample that emits only the visible output width.
+pub(crate) fn upsample_h2v2_fancy_rows(
+    prev: &[u8],
+    curr: &[u8],
+    next: &[u8],
+    output_width: usize,
+    out_top: &mut [u8],
+    out_bot: &mut [u8],
+) {
+    let n = curr.len();
+    assert_eq!(prev.len(), n);
+    assert_eq!(next.len(), n);
+    assert!(
+        output_width <= out_top.len() && output_width <= out_bot.len(),
+        "output width must fit in both destination rows"
+    );
+    assert!(
+        output_width <= n * 2,
+        "visible width cannot exceed the full upsampled rows"
+    );
+    if output_width == 0 || n == 0 {
+        return;
+    }
+
+    emit_h2v2_row(prev, curr, output_width, out_top);
+    emit_h2v2_row(next, curr, output_width, out_bot);
+}
+
+/// Emit one visible output row from a 4:2:0 fancy-upsampled chroma triple.
+pub(crate) fn upsample_h2v2_fancy_row(
+    prev: &[u8],
+    curr: &[u8],
+    next: &[u8],
+    output_width: usize,
+    output_is_bottom: bool,
+    out: &mut [u8],
+) {
+    let near = if output_is_bottom { next } else { prev };
+    emit_h2v2_row(near, curr, output_width, out);
 }
 
 /// Blend one "near" chroma row against `curr` using libjpeg-turbo's 3:1
 /// vertical weighting, then run the 3:1 horizontal blend and emit one
 /// upsampled luma row. `near` = chroma row above (for the top output) or
 /// below (for the bottom output) the current chroma row.
-fn emit_h2v2_row(near: &[u8], curr: &[u8], out: &mut [u8]) {
+fn emit_h2v2_row(near: &[u8], curr: &[u8], output_width: usize, out: &mut [u8]) {
     let n = curr.len();
     // Column sums: `colsum[i] = 3 * curr[i] + near[i]`. libjpeg-turbo streams
     // these as `this/next/last` without materializing the whole array.
@@ -86,31 +150,26 @@ fn emit_h2v2_row(near: &[u8], curr: &[u8], out: &mut [u8]) {
     if n == 1 {
         // Degenerate edge: just replicate.
         let v = (4 * colsum(0) + 8) >> 4;
-        out[0] = v as u8;
-        out[1] = v as u8;
+        out[..output_width].fill(v as u8);
         return;
     }
 
-    // First column: both output taps use only `colsum(0)` and `colsum(1)`.
-    let mut this = colsum(0);
-    let mut next = colsum(1);
-    out[0] = ((this * 4 + 8) >> 4) as u8;
-    out[1] = ((this * 3 + next + 7) >> 4) as u8;
-
-    // General interior columns.
-    for i in 1..n - 1 {
-        let last = this;
-        this = next;
-        next = colsum(i + 1);
-        out[2 * i] = ((this * 3 + last + 8) >> 4) as u8;
-        out[2 * i + 1] = ((this * 3 + next + 7) >> 4) as u8;
+    for (x, slot) in out.iter_mut().enumerate().take(output_width) {
+        let sample = x / 2;
+        let this = colsum(sample);
+        *slot = match x {
+            0 => ((this * 4 + 8) >> 4) as u8,
+            _ if x == n * 2 - 1 => ((this * 4 + 7) >> 4) as u8,
+            _ if x.is_multiple_of(2) => {
+                let last = colsum(sample - 1);
+                ((this * 3 + last + 8) >> 4) as u8
+            }
+            _ => {
+                let next = colsum(sample + 1);
+                ((this * 3 + next + 7) >> 4) as u8
+            }
+        };
     }
-
-    // Last column: `this` currently holds `colsum(n-2)`, `next` holds `colsum(n-1)`.
-    let last = this;
-    this = next;
-    out[2 * (n - 1)] = ((this * 3 + last + 8) >> 4) as u8;
-    out[2 * (n - 1) + 1] = ((this * 4 + 7) >> 4) as u8;
 }
 
 #[cfg(test)]
@@ -169,5 +228,39 @@ mod tests {
         upsample_h2v2_fancy(&prev, &curr, &next, &mut top, &mut bot);
         assert_eq!(top[0], 150);
         assert_eq!(bot[0], 200);
+    }
+
+    #[test]
+    fn h2v1_fancy_row_matches_truncated_full_output() {
+        let input = vec![10u8, 20, 30, 40];
+        let mut full = vec![0u8; 8];
+        let mut truncated = vec![0u8; 7];
+        upsample_h2v1_fancy(&input, &mut full);
+        upsample_h2v1_fancy_row(&input, truncated.len(), &mut truncated);
+        assert_eq!(truncated, full[..truncated.len()]);
+    }
+
+    #[test]
+    fn h2v2_fancy_rows_match_truncated_full_output() {
+        let prev = vec![0u8, 10, 20, 30];
+        let curr = vec![40u8, 50, 60, 70];
+        let next = vec![80u8, 90, 100, 110];
+        let mut full_top = vec![0u8; 8];
+        let mut full_bot = vec![0u8; 8];
+        let mut truncated_top = vec![0u8; 7];
+        let mut truncated_bot = vec![0u8; 7];
+
+        upsample_h2v2_fancy(&prev, &curr, &next, &mut full_top, &mut full_bot);
+        upsample_h2v2_fancy_rows(
+            &prev,
+            &curr,
+            &next,
+            truncated_top.len(),
+            &mut truncated_top,
+            &mut truncated_bot,
+        );
+
+        assert_eq!(truncated_top, full_top[..truncated_top.len()]);
+        assert_eq!(truncated_bot, full_bot[..truncated_bot.len()]);
     }
 }

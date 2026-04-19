@@ -15,6 +15,16 @@ const FIX_0_71414: i32 = 46_802; // (int)(0.71414 * 65536 + 0.5)
 const FIX_1_77200: i32 = 116_130; // (int)(1.77200 * 65536 + 0.5)
 const ROUND: i32 = 1 << 15; // 0.5 in 16-bit fixed point
 
+const fn clamp_to_u8(v: i32) -> u8 {
+    if v < 0 {
+        0
+    } else if v > 255 {
+        255
+    } else {
+        v as u8
+    }
+}
+
 /// Convert one YCbCr pixel to RGB. `y`, `cb`, `cr` are the 8-bit component
 /// values as read from the decoded block after IDCT and upsample.
 ///
@@ -23,16 +33,11 @@ pub(crate) fn ycbcr_to_rgb(y: u8, cb: u8, cr: u8) -> (u8, u8, u8) {
     let y = y as i32;
     let cb_centered = cb as i32 - 128;
     let cr_centered = cr as i32 - 128;
-
     let r = y + ((FIX_1_40200 * cr_centered + ROUND) >> 16);
     let g = y - ((FIX_0_34414 * cb_centered + FIX_0_71414 * cr_centered + ROUND) >> 16);
     let b = y + ((FIX_1_77200 * cb_centered + ROUND) >> 16);
 
-    (
-        r.clamp(0, 255) as u8,
-        g.clamp(0, 255) as u8,
-        b.clamp(0, 255) as u8,
-    )
+    (clamp_to_u8(r), clamp_to_u8(g), clamp_to_u8(b))
 }
 
 #[cfg(test)]

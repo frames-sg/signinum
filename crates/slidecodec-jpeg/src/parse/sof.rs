@@ -21,6 +21,7 @@ pub(crate) struct ParsedSof {
     pub(crate) width: u16,
     pub(crate) height: u16,
     pub(crate) sampling: SamplingFactors,
+    pub(crate) component_ids: Vec<u8>,
     /// Quantization-table id for each component (SOF3 ignores this; kept
     /// for baseline/extended/progressive).
     pub(crate) quant_table_ids: Vec<u8>,
@@ -90,19 +91,24 @@ pub(crate) fn parse_sof(
     if width == 0 || height == 0 {
         return Err(JpegError::ZeroDimension { width, height });
     }
+    if width > 65_500 || height > 65_500 {
+        return Err(JpegError::DimensionOverflow {
+            width: u32::from(width),
+            height: u32::from(height),
+        });
+    }
 
     if !matches!(nf, 1 | 3 | 4) {
         return Err(JpegError::UnsupportedComponentCount { count: nf });
     }
 
     let mut components = Vec::with_capacity(nf as usize);
+    let mut component_ids = Vec::with_capacity(nf as usize);
     let mut quant_table_ids = Vec::with_capacity(nf as usize);
-    let mut max_h = 1u8;
-    let mut max_v = 1u8;
 
     for i in 0..nf as usize {
         let base = 6 + i * 3;
-        let _component_id = payload[base];
+        let component_id = payload[base];
         let sampling_byte = payload[base + 1];
         let tq = payload[base + 2];
         let h = sampling_byte >> 4;
@@ -115,9 +121,8 @@ pub(crate) fn parse_sof(
             });
         }
         components.push((h, v));
+        component_ids.push(component_id);
         quant_table_ids.push(tq);
-        max_h = max_h.max(h);
-        max_v = max_v.max(v);
     }
 
     Ok(ParsedSof {
@@ -125,11 +130,8 @@ pub(crate) fn parse_sof(
         bit_depth: precision,
         width,
         height,
-        sampling: SamplingFactors {
-            components,
-            max_h,
-            max_v,
-        },
+        sampling: SamplingFactors::from_components(&components),
+        component_ids,
         quant_table_ids,
     })
 }
@@ -169,9 +171,10 @@ mod tests {
         assert_eq!(p.width, 16);
         assert_eq!(p.height, 16);
         assert_eq!(p.bit_depth, 8);
-        assert_eq!(p.sampling.components, vec![(2, 2), (1, 1), (1, 1)]);
+        assert_eq!(p.sampling.components(), &[(2, 2), (1, 1), (1, 1)]);
         assert_eq!(p.sampling.max_h, 2);
         assert_eq!(p.sampling.max_v, 2);
+        assert_eq!(p.component_ids, vec![1, 2, 3]);
         assert_eq!(p.quant_table_ids, vec![0, 1, 1]);
     }
 

@@ -16,18 +16,35 @@ name = "slidecodec_jpeg"
 path = "src/lib.rs"
 
 [features]
-default      = ["std"]
-std          = []
-scalar-only  = []   # disables SIMD dispatch; used by fuzz and by the miri job
+scalar-only  = []   # retained for fuzz/reference decode until native SIMD backends land
 
 [dependencies]
 thiserror = { workspace = true }
+memchr = { version = "2.7.6", default-features = false }
 
 [dev-dependencies]
 proptest = { workspace = true }
+criterion = { workspace = true }
+jpeg-decoder = { version = "0.3.2", default-features = false }
+zune-core = "0.5.1"
+zune-jpeg = "0.5.15"
+
+[[bench]]
+name = "compare"
+harness = false
+
+[[bench]]
+name = "micro"
+harness = false
+
+[[bench]]
+name = "corpus_report"
+harness = false
 
 [lints.rust]
-unsafe_code     = "forbid"
+# SIMD backends use tightly-scoped intrinsics in `src/backend/`; keep unsafe
+# explicit there while the rest of the crate remains safe Rust.
+unsafe_code     = "allow"
 unreachable_pub = "warn"
 # `missing_docs` is deliberately *not* enabled pre-0.1 — the crate is still
 # growing its public surface and CI uses `-D warnings`, which would turn every

@@ -48,16 +48,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with: { toolchain: ${{ matrix.rust }} }
       - run: cargo test --workspace --all-features
-      - run: cargo test --workspace --no-default-features
 
-  wasm:
+  bench-build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-        with: { targets: "wasm32-unknown-unknown,wasm32-wasip1" }
-      - run: cargo build -p slidecodec-jpeg --no-default-features --target wasm32-unknown-unknown
-      - run: cargo build -p slidecodec-jpeg --target wasm32-wasip1
+      - run: cargo bench -p slidecodec-jpeg --no-run
 
   deny:
     runs-on: ubuntu-latest

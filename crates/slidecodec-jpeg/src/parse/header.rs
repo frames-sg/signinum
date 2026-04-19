@@ -11,6 +11,7 @@ use crate::parse::scan::{parse_scan_header, ParsedScan};
 use crate::parse::sof::parse_sof;
 use crate::parse::tables::{parse_dht, parse_dqt, HuffmanTables, QuantTables};
 use alloc::vec::Vec;
+use memchr::memchr;
 
 /// Everything the header walk produces. `Info` is derivable from this by
 /// calling `.info()`.
@@ -20,6 +21,7 @@ pub(crate) struct ParsedHeader {
     pub(crate) bit_depth: u8,
     pub(crate) dimensions: (u32, u32),
     pub(crate) sampling: SamplingFactors,
+    pub(crate) component_ids: Vec<u8>,
     pub(crate) quant_table_ids: Vec<u8>,
     pub(crate) quant_tables: QuantTables,
     pub(crate) huffman_tables: HuffmanTables,
@@ -44,30 +46,96 @@ pub(crate) struct ParsedHeader {
 
 impl ParsedHeader {
     pub(crate) fn color_space(&self) -> ColorSpace {
-        // Per spec Section 4 matrix.
-        match (self.sampling.components.len(), self.adobe) {
-            (1, _) => ColorSpace::Grayscale,
-            (3, Some(AdobeTransform::YCbCr)) => ColorSpace::YCbCr,
-            (3, Some(AdobeTransform::Unknown)) => ColorSpace::Rgb,
-            (3, None) => ColorSpace::YCbCr, // JFIF default
-            (3, Some(AdobeTransform::Ycck)) => ColorSpace::YCbCr, // invalid combo, fall back
-            (4, Some(AdobeTransform::Ycck)) => ColorSpace::Ycck,
-            (4, _) => ColorSpace::Cmyk,
-            _ => ColorSpace::YCbCr, // unreachable — SOF parser already rejected other counts
-        }
+        color_space_for_components(self.sampling.len(), self.adobe)
     }
 
     pub(crate) fn info(&self) -> Info {
         Info {
             dimensions: self.dimensions,
             color_space: self.color_space(),
-            sampling: self.sampling.clone(),
+            sampling: self.sampling,
             sof_kind: self.sof_kind,
             bit_depth: self.bit_depth,
             restart_interval: self.restart_interval,
             scan_count: self.scan_count,
         }
     }
+}
+
+pub(crate) fn parse_info(bytes: &[u8]) -> Result<Info, JpegError> {
+    let mut walker = MarkerWalker::new(bytes);
+    walker.read_soi()?;
+
+    let mut sof: Option<crate::parse::sof::ParsedSof> = None;
+    let mut restart_interval: Option<u16> = None;
+    let mut adobe: Option<AdobeTransform> = None;
+    let mut scan_count = 0u16;
+
+    loop {
+        match walker.next_marker()? {
+            None => break,
+            Some(m) => match m.code {
+                0xC0..=0xC3 | 0xC5..=0xC7 | 0xC9..=0xCB | 0xCD..=0xCF => {
+                    if sof.is_some() {
+                        return Err(JpegError::DuplicateMarker {
+                            offset: m.offset,
+                            marker: MarkerKind::Sof,
+                        });
+                    }
+                    sof = Some(parse_sof(m.code, m.payload, m.offset + 4)?);
+                }
+                0xDD => {
+                    if m.payload.len() != 2 {
+                        return Err(JpegError::InvalidSegmentLength {
+                            offset: m.offset,
+                            marker: 0xDD,
+                            length: (m.payload.len() + 2) as u16,
+                        });
+                    }
+                    restart_interval = Some(u16::from_be_bytes([m.payload[0], m.payload[1]]));
+                }
+                0xDA => {
+                    let parsed = parse_scan_header(m.payload, m.offset + 4)?;
+                    if let Some(sof) = sof.as_ref() {
+                        validate_scan_parameters(sof.sof_kind, &parsed, m.offset + 4)?;
+                        validate_sequential_scan_components(sof, &parsed, m.offset + 4)?;
+                        scan_count = match sof.sof_kind {
+                            SofKind::Progressive8 | SofKind::Progressive12 => {
+                                count_scan_markers(bytes, walker.position())
+                            }
+                            _ => 1,
+                        };
+                    }
+                    break;
+                }
+                0xEE => {
+                    if let Some(t) = parse_adobe_app14(m.payload) {
+                        adobe = Some(t);
+                    }
+                }
+                0xDB | 0xC4 | 0xE0 | 0xE1..=0xEF | 0xFE => {}
+                _ => {
+                    return Err(JpegError::InvalidMarker {
+                        offset: m.offset,
+                        marker: m.code,
+                    });
+                }
+            },
+        }
+    }
+
+    let sof = sof.ok_or(JpegError::MissingMarker {
+        marker: MarkerKind::Sof,
+    })?;
+    Ok(Info {
+        dimensions: (u32::from(sof.width), u32::from(sof.height)),
+        color_space: color_space_for_components(sof.sampling.len(), adobe),
+        sampling: sof.sampling,
+        sof_kind: sof.sof_kind,
+        bit_depth: sof.bit_depth,
+        restart_interval,
+        scan_count,
+    })
 }
 
 /// Walk headers from the start of the input.
@@ -121,6 +189,7 @@ pub(crate) fn parse_header(bytes: &[u8]) -> Result<ParsedHeader, JpegError> {
                     let parsed = parse_scan_header(m.payload, m.offset + 4)?;
                     if let Some(sof) = sof.as_ref() {
                         validate_scan_parameters(sof.sof_kind, &parsed, m.offset + 4)?;
+                        validate_sequential_scan_components(sof, &parsed, m.offset + 4)?;
                     }
                     sos_offset = Some(walker.position());
                     scan = Some(parsed);
@@ -182,6 +251,7 @@ pub(crate) fn parse_header(bytes: &[u8]) -> Result<ParsedHeader, JpegError> {
         bit_depth: sof.bit_depth,
         dimensions: (u32::from(sof.width), u32::from(sof.height)),
         sampling: sof.sampling,
+        component_ids: sof.component_ids,
         quant_table_ids: sof.quant_table_ids,
         quant_tables,
         huffman_tables,
@@ -213,10 +283,60 @@ fn validate_scan_parameters(
     Ok(())
 }
 
+fn validate_sequential_scan_components(
+    sof: &crate::parse::sof::ParsedSof,
+    scan: &ParsedScan,
+    offset: usize,
+) -> Result<(), JpegError> {
+    if !matches!(sof.sof_kind, SofKind::Baseline8 | SofKind::Extended8) {
+        return Ok(());
+    }
+
+    let mut seen = Vec::with_capacity(scan.components.len());
+    for (i, comp) in scan.components.iter().enumerate() {
+        let component_offset = offset + 1 + i * 2;
+        if !sof.component_ids.contains(&comp.id) {
+            return Err(JpegError::UnknownScanComponent {
+                offset: component_offset,
+                component: comp.id,
+            });
+        }
+        if seen.contains(&comp.id) {
+            return Err(JpegError::DuplicateScanComponent {
+                offset: component_offset,
+                component: comp.id,
+            });
+        }
+        seen.push(comp.id);
+    }
+
+    if seen.len() != sof.component_ids.len() {
+        return Err(JpegError::InvalidSequentialComponentSet {
+            offset,
+            expected: sof.component_ids.len() as u8,
+            found: seen.len() as u8,
+        });
+    }
+
+    Ok(())
+}
+
 fn count_scan_markers(bytes: &[u8], mut pos: usize) -> u16 {
     let mut count = 1u16;
-    while let Some(marker_offset) = find_next_marker(bytes, &mut pos) {
-        let code = bytes[marker_offset + 1];
+    while pos < bytes.len() {
+        let Some(ff_rel) = memchr(0xFF, &bytes[pos..]) else {
+            break;
+        };
+        let marker_offset = pos + ff_rel;
+        let mut code_pos = marker_offset + 1;
+        while code_pos < bytes.len() && bytes[code_pos] == 0xFF {
+            code_pos += 1;
+        }
+        if code_pos >= bytes.len() {
+            break;
+        }
+        pos = code_pos + 1;
+        let code = bytes[code_pos];
         match code {
             0x00 => {}
             0xD0..=0xD7 => {}
@@ -244,30 +364,6 @@ fn count_scan_markers(bytes: &[u8], mut pos: usize) -> u16 {
     count
 }
 
-fn find_next_marker(bytes: &[u8], pos: &mut usize) -> Option<usize> {
-    while *pos + 1 < bytes.len() {
-        if bytes[*pos] != 0xFF {
-            *pos += 1;
-            continue;
-        }
-        let mut code_pos = *pos + 1;
-        while code_pos < bytes.len() && bytes[code_pos] == 0xFF {
-            code_pos += 1;
-        }
-        if code_pos >= bytes.len() {
-            *pos = bytes.len();
-            return None;
-        }
-        *pos = code_pos + 1;
-        if bytes[code_pos] == 0x00 {
-            continue;
-        }
-        return Some(code_pos - 1);
-    }
-    *pos = bytes.len();
-    None
-}
-
 fn skip_marker_segment(bytes: &[u8], marker_offset: usize) -> Option<usize> {
     let len_pos = marker_offset + 2;
     if len_pos + 1 >= bytes.len() {
@@ -282,6 +378,19 @@ fn skip_marker_segment(bytes: &[u8], marker_offset: usize) -> Option<usize> {
         return None;
     }
     Some(next)
+}
+
+fn color_space_for_components(component_count: usize, adobe: Option<AdobeTransform>) -> ColorSpace {
+    match (component_count, adobe) {
+        (1, _) => ColorSpace::Grayscale,
+        (3, Some(AdobeTransform::YCbCr)) => ColorSpace::YCbCr,
+        (3, Some(AdobeTransform::Unknown)) => ColorSpace::Rgb,
+        (3, None) => ColorSpace::YCbCr,
+        (3, Some(AdobeTransform::Ycck)) => ColorSpace::YCbCr,
+        (4, Some(AdobeTransform::Ycck)) => ColorSpace::Ycck,
+        (4, _) => ColorSpace::Cmyk,
+        _ => ColorSpace::YCbCr,
+    }
 }
 
 #[cfg(test)]
@@ -347,7 +456,7 @@ mod tests {
         assert_eq!(h.sof_kind, SofKind::Baseline8);
         assert_eq!(h.color_space(), ColorSpace::YCbCr);
         assert_eq!(h.bit_depth, 8);
-        assert_eq!(h.sampling.components, vec![(2, 2), (1, 1), (1, 1)]);
+        assert_eq!(h.sampling.components(), &[(2, 2), (1, 1), (1, 1)]);
         assert!(h.quant_tables.entries[0].is_some());
         assert!(h.huffman_tables.dc[0].is_some());
         assert!(h.huffman_tables.ac[0].is_some());

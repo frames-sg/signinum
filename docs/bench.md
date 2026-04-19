@@ -20,11 +20,11 @@ performance signoff path.
   - `jpeg-decoder`: `Decoder::read_info`
   - `zune-jpeg`: `JpegDecoder::decode_headers`
 - `decode_rgb`
-  - `slidecodec-jpeg`: `Decoder::new` + `decode_into(OutputFormat::Rgb8)`
+  - `slidecodec-jpeg`: `Decoder::new` + `decode_into(PixelFormat::Rgb8)`
   - `jpeg-decoder`: `Decoder::decode`
   - `zune-jpeg`: `JpegDecoder::decode` with RGB output
 - `decode_gray`
-  - `slidecodec-jpeg`: `Decoder::new` + `decode_into(OutputFormat::Gray8)`
+  - `slidecodec-jpeg`: `Decoder::new` + `decode_into(PixelFormat::Gray8)`
   - `jpeg-decoder`: `Decoder::decode`
   - `zune-jpeg`: `JpegDecoder::decode` with Luma output
 - `decode_rows_rgb`
@@ -37,7 +37,7 @@ performance signoff path.
   - no cross-crate comparator; this is the parse+decode tile-batch path that
     WSI readers actually use, including shared table-cache reuse
 - `wsi_region_rgb`
-  - `slidecodec-jpeg`: `Decoder::decode_region_into(..., OutputFormat::Rgb8, roi)`
+  - `slidecodec-jpeg`: `Decoder::decode_region_into(..., PixelFormat::Rgb8, roi)`
   - `jpeg-decoder` / `zune-jpeg`: full RGB decode, then crop the centered
     `256×256` region in memory
 - `wsi_scaled_rgb_q4`
@@ -57,14 +57,14 @@ performance signoff path.
   - `jpeg-decoder` / `zune-jpeg`: full RGB decode, crop the centered
     `256×256` region, then spatially decimate by `8×`
 - `wsi_tile_batch_scaled_rgb_q4`
-  - `slidecodec-jpeg`: repeated `decode_tile_into_in_context(..., OutputFormat::Rgb8Scaled { factor: Quarter })`
+  - `slidecodec-jpeg`: repeated `decode_tile_scaled_into_in_context(..., PixelFormat::Rgb8, Downscale::Quarter)`
     with shared `DecoderContext`, shared `ScratchPool`, and one reused output
     buffer
   - `jpeg-decoder` / `zune-jpeg`: repeated fresh decode followed by in-memory
     `4×` decimation per tile
 - `wsi_tile_batch_region_scaled_rgb_q4`
   - `slidecodec-jpeg`: repeated
-    `decode_tile_region_into_in_context(..., OutputFormat::Rgb8Scaled { factor: Quarter }, roi)`
+    `decode_tile_region_scaled_into_in_context(..., PixelFormat::Rgb8, roi, Downscale::Quarter)`
     with shared `DecoderContext`, shared `ScratchPool`, and one reused output
     buffer
   - `jpeg-decoder` / `zune-jpeg`: repeated fresh decode, centered

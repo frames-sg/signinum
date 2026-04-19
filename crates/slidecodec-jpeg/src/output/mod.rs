@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Stride-aware output writers. One implementor per [`crate::OutputFormat`];
+//! Stride-aware output writers. One implementor per internal JPEG output mode;
 //! the decode loop is generic over `<W: OutputWriter>` and monomorphized at
 //! each call site so there is no dynamic dispatch on the per-pixel hot path.
 

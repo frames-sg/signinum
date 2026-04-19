@@ -6,8 +6,8 @@
 //! dependency).
 
 use slidecodec_jpeg::{
-    decode_tile_into_in_context, decode_tile_region_into_in_context, Decoder, DecoderContext,
-    Downscale, DownscaleFactor, OutputFormat, PixelFormat, Rect, RowSink, ScratchPool,
+    decode_tile_into_in_context, decode_tile_region_scaled_into_in_context, Decoder,
+    DecoderContext, Downscale, PixelFormat, Rect, RowSink, ScratchPool,
 };
 use std::thread;
 
@@ -107,7 +107,7 @@ fn tile_buffer_decode_matches_decoder_decode_into() {
     let stride = width as usize * 3;
     let mut expected = vec![0u8; stride * height as usize];
     let mut actual = vec![0u8; expected.len()];
-    dec.decode_into(&mut expected, stride, OutputFormat::Rgb8)
+    dec.decode_into(&mut expected, stride, PixelFormat::Rgb8)
         .expect("baseline decode_into");
 
     let mut ctx = DecoderContext::new();
@@ -118,7 +118,7 @@ fn tile_buffer_decode_matches_decoder_decode_into() {
         &mut pool,
         &mut actual,
         stride,
-        OutputFormat::Rgb8,
+        PixelFormat::Rgb8,
     )
     .expect("tile decode_into_in_context");
 
@@ -134,20 +134,12 @@ fn tile_region_scaled_decode_matches_decoder_region_decode() {
         w: 8,
         h: 8,
     };
-    let factor = DownscaleFactor::Quarter;
-    let scaled_w = (roi.x + roi.w).div_ceil(factor.denominator()) - roi.x / factor.denominator();
-    let scaled_h = (roi.y + roi.h).div_ceil(factor.denominator()) - roi.y / factor.denominator();
+    let denom = 4;
+    let scaled_w = (roi.x + roi.w).div_ceil(denom) - roi.x / denom;
+    let scaled_h = (roi.y + roi.h).div_ceil(denom) - roi.y / denom;
     let stride = scaled_w as usize * 3;
-    let mut legacy_expected = vec![0u8; stride * scaled_h as usize];
     let mut expected = vec![0u8; stride * scaled_h as usize];
     let mut actual = vec![0u8; expected.len()];
-    dec.decode_region_into(
-        &mut legacy_expected,
-        stride,
-        OutputFormat::Rgb8Scaled { factor },
-        roi,
-    )
-    .expect("legacy region decode");
     dec.decode_region_scaled_into(
         &mut expected,
         stride,
@@ -156,18 +148,18 @@ fn tile_region_scaled_decode_matches_decoder_region_decode() {
         Downscale::Quarter,
     )
     .expect("core region-scaled decode");
-    assert_eq!(expected, legacy_expected);
 
     let mut ctx = DecoderContext::new();
     let mut pool = ScratchPool::new();
-    decode_tile_region_into_in_context(
+    decode_tile_region_scaled_into_in_context(
         BASELINE_420,
         &mut ctx,
         &mut pool,
         &mut actual,
         stride,
-        OutputFormat::Rgb8Scaled { factor },
+        PixelFormat::Rgb8,
         roi,
+        Downscale::Quarter,
     )
     .expect("tile region decode_into_in_context");
 

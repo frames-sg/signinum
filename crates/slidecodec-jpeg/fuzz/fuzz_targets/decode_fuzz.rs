@@ -2,7 +2,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use slidecodec_jpeg::{Decoder, OutputFormat};
+use slidecodec_jpeg::{Decoder, PixelFormat};
 
 /// The invariant: on any arbitrary byte input, `Decoder::new` + `decode_into`
 /// either succeeds with a filled buffer or returns a typed `JpegError` — and
@@ -26,5 +26,5 @@ fuzz_target!(|data: &[u8]| {
     }
     let stride = (w as usize).saturating_mul(bpp);
     let mut out = vec![0u8; needed];
-    let _ = dec.decode_into(&mut out, stride, OutputFormat::Rgb8);
+    let _ = dec.decode_into(&mut out, stride, PixelFormat::Rgb8);
 });

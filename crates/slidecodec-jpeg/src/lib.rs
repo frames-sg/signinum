@@ -15,9 +15,7 @@ compile_error!("slidecodec-jpeg currently supports only x86_64 and aarch64 targe
 extern crate alloc;
 
 pub mod info;
-pub use info::{
-    ColorSpace, ColorTransform, DownscaleFactor, Info, OutputFormat, Rect, SamplingFactors, SofKind,
-};
+pub use info::{ColorSpace, ColorTransform, Info, Rect, SamplingFactors, SofKind};
 pub use slidecodec_core::{
     CacheStats, CodecContext, DecodeRowsError, Downscale, ImageCodec, ImageDecode, ImageDecodeRows,
     PixelFormat, PixelLayout, RowSink, Sample, SampleType, TileBatchDecode, TileDecompress,
@@ -49,7 +47,8 @@ pub(crate) mod output;
 pub mod decoder;
 pub use decoder::{
     decode_tile_into, decode_tile_into_in_context, decode_tile_region_into_in_context,
-    DecodeOutcome, Decoder, JpegView,
+    decode_tile_region_scaled_into_in_context, decode_tile_scaled_into_in_context, DecodeOutcome,
+    Decoder, JpegView,
 };
 
 pub use internal::scratch::ScratchPool;

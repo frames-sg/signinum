@@ -23,7 +23,7 @@ use common::{
     zune_decode_batch_region_scaled, zune_decode_batch_scaled, zune_decode_region,
     zune_decode_region_scaled, zune_decode_scaled, zune_inspect, BenchInput, DecodeMode,
 };
-use slidecodec_jpeg::{DownscaleFactor, Rect};
+use slidecodec_jpeg::{Downscale, Rect};
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fs;
@@ -335,27 +335,26 @@ fn estimated_output_bytes(input: &BenchInput, operation: Operation) -> Option<us
         Operation::WsiRegionRgb => rect_dims(centered_roi(input.dimensions, ROI_SIDE)),
         Operation::WsiScaledRgbQ4 => rect_dims(scaled_rect(
             Rect::full(input.dimensions),
-            DownscaleFactor::Quarter,
+            Downscale::Quarter,
         )),
-        Operation::WsiScaledRgbQ8 => rect_dims(scaled_rect(
-            Rect::full(input.dimensions),
-            DownscaleFactor::Eighth,
-        )),
+        Operation::WsiScaledRgbQ8 => {
+            rect_dims(scaled_rect(Rect::full(input.dimensions), Downscale::Eighth))
+        }
         Operation::WsiRegionScaledRgbQ4 => rect_dims(scaled_rect(
             centered_roi(input.dimensions, ROI_SIDE),
-            DownscaleFactor::Quarter,
+            Downscale::Quarter,
         )),
         Operation::WsiRegionScaledRgbQ8 => rect_dims(scaled_rect(
             centered_roi(input.dimensions, ROI_SIDE),
-            DownscaleFactor::Eighth,
+            Downscale::Eighth,
         )),
         Operation::WsiTileBatchScaledRgbQ4 => rect_dims(scaled_rect(
             Rect::full(input.dimensions),
-            DownscaleFactor::Quarter,
+            Downscale::Quarter,
         )),
         Operation::WsiTileBatchRegionScaledRgbQ4 => rect_dims(scaled_rect(
             centered_roi(input.dimensions, ROI_SIDE),
-            DownscaleFactor::Quarter,
+            Downscale::Quarter,
         )),
         Operation::Inspect => return None,
     };
@@ -576,56 +575,56 @@ fn run_operation(library: Library, operation: Operation, input: &BenchInput) {
         }
         (Library::Zune, Operation::WsiRegionRgb) => zune_decode_region(&input.bytes, ROI_SIDE),
         (Library::Slidecodec, Operation::WsiScaledRgbQ4) => {
-            slidecodec_decode_scaled(&input.bytes, DownscaleFactor::Quarter);
+            slidecodec_decode_scaled(&input.bytes, Downscale::Quarter);
         }
         (Library::JpegDecoder, Operation::WsiScaledRgbQ4) => {
-            jpeg_decoder_decode_scaled(&input.bytes, DownscaleFactor::Quarter);
+            jpeg_decoder_decode_scaled(&input.bytes, Downscale::Quarter);
         }
         (Library::Zune, Operation::WsiScaledRgbQ4) => {
-            zune_decode_scaled(&input.bytes, DownscaleFactor::Quarter);
+            zune_decode_scaled(&input.bytes, Downscale::Quarter);
         }
         (Library::Slidecodec, Operation::WsiScaledRgbQ8) => {
-            slidecodec_decode_scaled(&input.bytes, DownscaleFactor::Eighth);
+            slidecodec_decode_scaled(&input.bytes, Downscale::Eighth);
         }
         (Library::JpegDecoder, Operation::WsiScaledRgbQ8) => {
-            jpeg_decoder_decode_scaled(&input.bytes, DownscaleFactor::Eighth);
+            jpeg_decoder_decode_scaled(&input.bytes, Downscale::Eighth);
         }
         (Library::Zune, Operation::WsiScaledRgbQ8) => {
-            zune_decode_scaled(&input.bytes, DownscaleFactor::Eighth);
+            zune_decode_scaled(&input.bytes, Downscale::Eighth);
         }
         (Library::Slidecodec, Operation::WsiRegionScaledRgbQ4) => {
-            slidecodec_decode_region_scaled(&input.bytes, ROI_SIDE, DownscaleFactor::Quarter);
+            slidecodec_decode_region_scaled(&input.bytes, ROI_SIDE, Downscale::Quarter);
         }
         (Library::JpegDecoder, Operation::WsiRegionScaledRgbQ4) => {
-            jpeg_decoder_decode_region_scaled(&input.bytes, ROI_SIDE, DownscaleFactor::Quarter);
+            jpeg_decoder_decode_region_scaled(&input.bytes, ROI_SIDE, Downscale::Quarter);
         }
         (Library::Zune, Operation::WsiRegionScaledRgbQ4) => {
-            zune_decode_region_scaled(&input.bytes, ROI_SIDE, DownscaleFactor::Quarter);
+            zune_decode_region_scaled(&input.bytes, ROI_SIDE, Downscale::Quarter);
         }
         (Library::Slidecodec, Operation::WsiRegionScaledRgbQ8) => {
-            slidecodec_decode_region_scaled(&input.bytes, ROI_SIDE, DownscaleFactor::Eighth);
+            slidecodec_decode_region_scaled(&input.bytes, ROI_SIDE, Downscale::Eighth);
         }
         (Library::JpegDecoder, Operation::WsiRegionScaledRgbQ8) => {
-            jpeg_decoder_decode_region_scaled(&input.bytes, ROI_SIDE, DownscaleFactor::Eighth);
+            jpeg_decoder_decode_region_scaled(&input.bytes, ROI_SIDE, Downscale::Eighth);
         }
         (Library::Zune, Operation::WsiRegionScaledRgbQ8) => {
-            zune_decode_region_scaled(&input.bytes, ROI_SIDE, DownscaleFactor::Eighth);
+            zune_decode_region_scaled(&input.bytes, ROI_SIDE, Downscale::Eighth);
         }
         (Library::Slidecodec, Operation::WsiTileBatchScaledRgbQ4) => {
-            slidecodec_decode_tile_batch_scaled(&input.bytes, TILE_BATCH, DownscaleFactor::Quarter);
+            slidecodec_decode_tile_batch_scaled(&input.bytes, TILE_BATCH, Downscale::Quarter);
         }
         (Library::JpegDecoder, Operation::WsiTileBatchScaledRgbQ4) => {
-            jpeg_decoder_decode_batch_scaled(&input.bytes, TILE_BATCH, DownscaleFactor::Quarter);
+            jpeg_decoder_decode_batch_scaled(&input.bytes, TILE_BATCH, Downscale::Quarter);
         }
         (Library::Zune, Operation::WsiTileBatchScaledRgbQ4) => {
-            zune_decode_batch_scaled(&input.bytes, TILE_BATCH, DownscaleFactor::Quarter);
+            zune_decode_batch_scaled(&input.bytes, TILE_BATCH, Downscale::Quarter);
         }
         (Library::Slidecodec, Operation::WsiTileBatchRegionScaledRgbQ4) => {
             slidecodec_decode_tile_batch_region_scaled(
                 &input.bytes,
                 TILE_BATCH,
                 ROI_SIDE,
-                DownscaleFactor::Quarter,
+                Downscale::Quarter,
             );
         }
         (Library::JpegDecoder, Operation::WsiTileBatchRegionScaledRgbQ4) => {
@@ -633,16 +632,11 @@ fn run_operation(library: Library, operation: Operation, input: &BenchInput) {
                 &input.bytes,
                 TILE_BATCH,
                 ROI_SIDE,
-                DownscaleFactor::Quarter,
+                Downscale::Quarter,
             );
         }
         (Library::Zune, Operation::WsiTileBatchRegionScaledRgbQ4) => {
-            zune_decode_batch_region_scaled(
-                &input.bytes,
-                TILE_BATCH,
-                ROI_SIDE,
-                DownscaleFactor::Quarter,
-            );
+            zune_decode_batch_region_scaled(&input.bytes, TILE_BATCH, ROI_SIDE, Downscale::Quarter);
         }
         _ => unreachable!("unsupported operation dispatched after validation"),
     }

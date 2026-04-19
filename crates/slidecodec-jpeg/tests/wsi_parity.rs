@@ -2,7 +2,7 @@
 
 //! Bit-exact parity against libjpeg-turbo's ISLOW path.
 
-use slidecodec_jpeg::{Decoder, OutputFormat};
+use slidecodec_jpeg::{Decoder, Downscale, PixelFormat};
 
 const BASELINE_420_JPG: &[u8] =
     include_bytes!("../../../corpus/conformance/baseline_420_16x16.jpg");
@@ -19,7 +19,7 @@ fn baseline_420_16x16_matches_libjpeg_turbo_bit_exact() {
     assert_eq!((w, h), (16, 16));
     let mut out = vec![0u8; 16 * 16 * 3];
     let outcome = dec
-        .decode_into(&mut out, 16 * 3, OutputFormat::Rgb8)
+        .decode_scaled_into(&mut out, 16 * 3, PixelFormat::Rgb8, Downscale::None)
         .expect("decode must succeed");
     assert_eq!(outcome.decoded.w, 16);
     assert_eq!(outcome.decoded.h, 16);
@@ -46,7 +46,7 @@ fn grayscale_8x8_matches_libjpeg_turbo_bit_exact() {
     let (w, h) = dec.info().dimensions;
     assert_eq!((w, h), (8, 8));
     let mut out = vec![0u8; 8 * 8];
-    dec.decode_into(&mut out, 8, OutputFormat::Gray8)
+    dec.decode_scaled_into(&mut out, 8, PixelFormat::Gray8, Downscale::None)
         .expect("grayscale decode must succeed");
     assert_eq!(
         out, GRAYSCALE_8X8_GRAY,

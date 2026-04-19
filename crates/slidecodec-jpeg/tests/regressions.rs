@@ -2,7 +2,7 @@
 
 //! Regression coverage for structural decode bugs and allocation guardrails.
 
-use slidecodec_jpeg::{Decoder, JpegError, OutputFormat, RowSink};
+use slidecodec_jpeg::{Decoder, Downscale, JpegError, PixelFormat, RowSink};
 
 mod fixtures;
 use fixtures::minimal_baseline_420_jpeg;
@@ -115,7 +115,7 @@ fn decode_into_large_streaming_decode_hits_output_validation() {
     let dec = Decoder::new(&bytes).expect("header must parse before cap check");
 
     let err = dec
-        .decode_into(&mut [], 50_000, OutputFormat::Gray8)
+        .decode_scaled_into(&mut [], 50_000, PixelFormat::Gray8, Downscale::None)
         .expect_err("undersized caller buffer must be rejected");
     assert!(matches!(err, JpegError::OutputBufferTooSmall { .. }));
 }
@@ -153,7 +153,7 @@ fn decode_into_handles_restart_marker_after_partial_entropy_byte() {
     let stride = width as usize;
     let mut out = vec![0u8; stride * height as usize];
 
-    dec.decode_into(&mut out, stride, OutputFormat::Gray8)
+    dec.decode_scaled_into(&mut out, stride, PixelFormat::Gray8, Downscale::None)
         .expect("restart-coded baseline stream must decode");
     assert!(out.iter().all(|&sample| sample == 128));
 }
@@ -162,7 +162,7 @@ fn decode_rgb(bytes: &[u8]) -> Vec<u8> {
     let dec = Decoder::new(bytes).expect("fixture must construct");
     let (w, h) = dec.info().dimensions;
     let mut out = vec![0u8; (w * h * 3) as usize];
-    dec.decode_into(&mut out, (w * 3) as usize, OutputFormat::Rgb8)
+    dec.decode_scaled_into(&mut out, (w * 3) as usize, PixelFormat::Rgb8, Downscale::None)
         .expect("fixture decode must succeed");
     out
 }

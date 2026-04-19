@@ -2,7 +2,7 @@
 
 //! Integration tests for the parsed-view API and row-streaming decode surface.
 
-use slidecodec_jpeg::{Decoder, JpegError, JpegView, OutputFormat, RowSink};
+use slidecodec_jpeg::{Decoder, Downscale, JpegError, JpegView, PixelFormat, RowSink};
 
 mod fixtures;
 use fixtures::{grayscale_8x8_jpeg, minimal_baseline_420_jpeg, rgb_app14_8x8_jpeg};
@@ -42,10 +42,10 @@ fn decoder_from_view_matches_decoder_new_rgb_output() {
     let mut view_out = vec![0u8; stride * h as usize];
 
     dec_from_new
-        .decode_into(&mut new_out, stride, OutputFormat::Rgb8)
+        .decode_scaled_into(&mut new_out, stride, PixelFormat::Rgb8, Downscale::None)
         .unwrap();
     dec_from_view
-        .decode_into(&mut view_out, stride, OutputFormat::Rgb8)
+        .decode_scaled_into(&mut view_out, stride, PixelFormat::Rgb8, Downscale::None)
         .unwrap();
 
     assert_eq!(view_out, new_out);
@@ -59,7 +59,7 @@ fn decode_rows_matches_decode_into_rgb8() {
     let stride = (w * 3) as usize;
 
     let mut expected = vec![0u8; stride * h as usize];
-    dec.decode_into(&mut expected, stride, OutputFormat::Rgb8)
+    dec.decode_scaled_into(&mut expected, stride, PixelFormat::Rgb8, Downscale::None)
         .unwrap();
 
     let mut sink = CollectRows::default();
@@ -85,7 +85,7 @@ fn decode_rows_matches_decode_into_rgb8_for_grayscale_input() {
     let stride = (w * 3) as usize;
 
     let mut expected = vec![0u8; stride * h as usize];
-    dec.decode_into(&mut expected, stride, OutputFormat::Rgb8)
+    dec.decode_scaled_into(&mut expected, stride, PixelFormat::Rgb8, Downscale::None)
         .unwrap();
 
     let mut sink = CollectRows::default();

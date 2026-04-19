@@ -5,7 +5,7 @@
 #[path = "../benches/common/classification.rs"]
 mod classification;
 
-use slidecodec_jpeg::{ColorSpace, Decoder, JpegError, OutputFormat, RowSink};
+use slidecodec_jpeg::{ColorSpace, Decoder, Downscale, JpegError, PixelFormat, RowSink};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -154,16 +154,16 @@ fn extracted_wsi_jpegs_decode_when_local_corpus_is_available() {
         let (fmt, stride, len) = match dec.info().color_space {
             ColorSpace::Grayscale => {
                 let stride = width as usize;
-                (OutputFormat::Gray8, stride, stride * height as usize)
+                (PixelFormat::Gray8, stride, stride * height as usize)
             }
             ColorSpace::YCbCr | ColorSpace::Rgb => {
                 let stride = (width as usize) * 3;
-                (OutputFormat::Rgb8, stride, stride * height as usize)
+                (PixelFormat::Rgb8, stride, stride * height as usize)
             }
             ColorSpace::Cmyk | ColorSpace::Ycck => continue,
         };
         let mut out = vec![0u8; len];
-        dec.decode_into(&mut out, stride, fmt)
+        dec.decode_scaled_into(&mut out, stride, fmt, Downscale::None)
             .unwrap_or_else(|err| {
                 panic!("decode_into failed for {}: {err:?}", path.display());
             });

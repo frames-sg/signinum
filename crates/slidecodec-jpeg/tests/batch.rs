@@ -7,7 +7,7 @@
 
 use slidecodec_jpeg::{
     decode_tile_into_in_context, decode_tile_region_into_in_context, Decoder, DecoderContext,
-    DownscaleFactor, OutputFormat, Rect, RgbRowSink, ScratchPool,
+    Downscale, DownscaleFactor, OutputFormat, PixelFormat, Rect, RowSink, ScratchPool,
 };
 use std::thread;
 
@@ -20,8 +20,10 @@ struct CollectRows {
     rows: Vec<u8>,
 }
 
-impl RgbRowSink for CollectRows {
-    fn write_rgb_row(&mut self, _y: u32, row: &[u8]) -> Result<(), slidecodec_jpeg::JpegError> {
+impl RowSink<u8> for CollectRows {
+    type Error = slidecodec_jpeg::JpegError;
+
+    fn write_row(&mut self, _y: u32, row: &[u8]) -> Result<(), slidecodec_jpeg::JpegError> {
         self.rows.extend_from_slice(row);
         Ok(())
     }
@@ -136,15 +138,25 @@ fn tile_region_scaled_decode_matches_decoder_region_decode() {
     let scaled_w = (roi.x + roi.w).div_ceil(factor.denominator()) - roi.x / factor.denominator();
     let scaled_h = (roi.y + roi.h).div_ceil(factor.denominator()) - roi.y / factor.denominator();
     let stride = scaled_w as usize * 3;
+    let mut legacy_expected = vec![0u8; stride * scaled_h as usize];
     let mut expected = vec![0u8; stride * scaled_h as usize];
     let mut actual = vec![0u8; expected.len()];
     dec.decode_region_into(
-        &mut expected,
+        &mut legacy_expected,
         stride,
         OutputFormat::Rgb8Scaled { factor },
         roi,
     )
-    .expect("baseline decode_region_into");
+    .expect("legacy region decode");
+    dec.decode_region_scaled_into(
+        &mut expected,
+        stride,
+        PixelFormat::Rgb8,
+        roi,
+        Downscale::Quarter,
+    )
+    .expect("core region-scaled decode");
+    assert_eq!(expected, legacy_expected);
 
     let mut ctx = DecoderContext::new();
     let mut pool = ScratchPool::new();

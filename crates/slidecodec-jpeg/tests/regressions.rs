@@ -2,7 +2,7 @@
 
 //! Regression coverage for structural decode bugs and allocation guardrails.
 
-use slidecodec_jpeg::{Decoder, JpegError, OutputFormat, RgbRowSink};
+use slidecodec_jpeg::{Decoder, JpegError, OutputFormat, RowSink};
 
 mod fixtures;
 use fixtures::minimal_baseline_420_jpeg;
@@ -123,8 +123,10 @@ fn decode_into_large_streaming_decode_hits_output_validation() {
 #[derive(Default)]
 struct NullSink;
 
-impl RgbRowSink for NullSink {
-    fn write_rgb_row(&mut self, _y: u32, _row: &[u8]) -> Result<(), JpegError> {
+impl RowSink<u8> for NullSink {
+    type Error = JpegError;
+
+    fn write_row(&mut self, _y: u32, _row: &[u8]) -> Result<(), JpegError> {
         Ok(())
     }
 }

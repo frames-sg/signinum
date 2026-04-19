@@ -5,15 +5,17 @@
 #[path = "../benches/common/classification.rs"]
 mod classification;
 
-use slidecodec_jpeg::{ColorSpace, Decoder, JpegError, OutputFormat, RgbRowSink};
+use slidecodec_jpeg::{ColorSpace, Decoder, JpegError, OutputFormat, RowSink};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 #[derive(Default)]
 struct NullSink;
 
-impl RgbRowSink for NullSink {
-    fn write_rgb_row(&mut self, _y: u32, _row: &[u8]) -> Result<(), JpegError> {
+impl RowSink<u8> for NullSink {
+    type Error = JpegError;
+
+    fn write_row(&mut self, _y: u32, _row: &[u8]) -> Result<(), JpegError> {
         Ok(())
     }
 }

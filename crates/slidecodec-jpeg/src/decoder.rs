@@ -76,21 +76,6 @@ impl<'a> JpegView<'a> {
     }
 }
 
-/// RGB row sink used by [`Decoder::decode_rows`].
-pub trait RgbRowSink {
-    /// Accept one decoded interleaved RGB row at image row `y`.
-    fn write_rgb_row(&mut self, y: u32, row: &[u8]) -> Result<(), JpegError>;
-}
-
-impl<T> RgbRowSink for T
-where
-    T: RowSink<u8, Error = JpegError>,
-{
-    fn write_rgb_row(&mut self, y: u32, row: &[u8]) -> Result<(), JpegError> {
-        self.write_row(y, row)
-    }
-}
-
 /// A borrowed view of a JPEG stream ready to decode. Constructed via
 /// [`Decoder::new`] or [`Decoder::from_view`]. `Decoder<'a>: Send + Sync`.
 #[derive(Debug)]
@@ -281,6 +266,31 @@ impl<'a> Decoder<'a> {
         DEFAULT_SCRATCH.with(|pool| self.decode_with_scratch(&mut pool.borrow_mut(), fmt))
     }
 
+    /// Decode the full image into the caller's buffer using the core
+    /// `PixelFormat` + `Downscale` contract.
+    pub fn decode_scaled_into(
+        &self,
+        out: &mut [u8],
+        stride: usize,
+        fmt: PixelFormat,
+        scale: Downscale,
+    ) -> Result<DecodeOutcome, JpegError> {
+        DEFAULT_SCRATCH.with(|pool| {
+            self.decode_scaled_into_with_scratch(&mut pool.borrow_mut(), out, stride, fmt, scale)
+        })
+    }
+
+    /// Decode the full image into a freshly allocated tightly-packed buffer
+    /// using the core `PixelFormat` + `Downscale` contract.
+    pub fn decode_scaled(
+        &self,
+        fmt: PixelFormat,
+        scale: Downscale,
+    ) -> Result<(Vec<u8>, DecodeOutcome), JpegError> {
+        DEFAULT_SCRATCH
+            .with(|pool| self.decode_scaled_with_scratch(&mut pool.borrow_mut(), fmt, scale))
+    }
+
     /// [`Self::decode`] with caller-owned scratch.
     pub fn decode_with_scratch(
         &self,
@@ -293,6 +303,23 @@ impl<'a> Decoder<'a> {
         let len = stride * height as usize;
         let mut out = allocate_output_buffer(len);
         let outcome = self.decode_into_with_scratch(pool, &mut out, stride, fmt)?;
+        Ok((out, outcome))
+    }
+
+    /// [`Self::decode_scaled`] with caller-owned scratch.
+    pub fn decode_scaled_with_scratch(
+        &self,
+        pool: &mut ScratchPool,
+        fmt: PixelFormat,
+        scale: Downscale,
+    ) -> Result<(Vec<u8>, DecodeOutcome), JpegError> {
+        let legacy = output_format_from_parts(fmt, scale)?;
+        let downscale = legacy.downscale();
+        let (width, height) = scaled_dimensions(self.info.dimensions, downscale);
+        let stride = width as usize * legacy.bytes_per_pixel();
+        let len = stride * height as usize;
+        let mut out = allocate_output_buffer(len);
+        let outcome = self.decode_scaled_into_with_scratch(pool, &mut out, stride, fmt, scale)?;
         Ok((out, outcome))
     }
 
@@ -351,18 +378,36 @@ impl<'a> Decoder<'a> {
         }
     }
 
+    /// [`Self::decode_scaled_into`] with caller-owned scratch.
+    pub fn decode_scaled_into_with_scratch(
+        &self,
+        pool: &mut ScratchPool,
+        out: &mut [u8],
+        stride: usize,
+        fmt: PixelFormat,
+        scale: Downscale,
+    ) -> Result<DecodeOutcome, JpegError> {
+        self.decode_into_with_scratch(pool, out, stride, output_format_from_parts(fmt, scale)?)
+    }
+
     /// Decode the full image into interleaved RGB rows delivered to `sink`.
-    pub fn decode_rows(&self, sink: &mut impl RgbRowSink) -> Result<DecodeOutcome, JpegError> {
+    pub fn decode_rows<S>(&self, sink: &mut S) -> Result<DecodeOutcome, JpegError>
+    where
+        S: RowSink<u8, Error = JpegError>,
+    {
         DEFAULT_SCRATCH.with(|pool| self.decode_rows_with_scratch(&mut pool.borrow_mut(), sink))
     }
 
     /// [`Self::decode_rows`] with caller-owned scratch. See
     /// [`Self::decode_into_with_scratch`] for the reuse contract.
-    pub fn decode_rows_with_scratch(
+    pub fn decode_rows_with_scratch<S>(
         &self,
         pool: &mut ScratchPool,
-        sink: &mut impl RgbRowSink,
-    ) -> Result<DecodeOutcome, JpegError> {
+        sink: &mut S,
+    ) -> Result<DecodeOutcome, JpegError>
+    where
+        S: RowSink<u8, Error = JpegError>,
+    {
         let width = self.info.dimensions.0 as usize;
         let rows = pool.take_sink_rows(width);
         let mut writer = SinkWriter::new(sink, rows, self.backend);
@@ -403,6 +448,19 @@ impl<'a> Decoder<'a> {
             .with(|pool| self.decode_region_with_scratch(&mut pool.borrow_mut(), fmt, roi))
     }
 
+    /// Decode `roi` into a freshly allocated tightly-packed buffer using the
+    /// core `PixelFormat` + `Downscale` contract.
+    pub fn decode_region_scaled(
+        &self,
+        fmt: PixelFormat,
+        roi: Rect,
+        scale: Downscale,
+    ) -> Result<(Vec<u8>, DecodeOutcome), JpegError> {
+        DEFAULT_SCRATCH.with(|pool| {
+            self.decode_region_scaled_with_scratch(&mut pool.borrow_mut(), fmt, roi, scale)
+        })
+    }
+
     /// [`Self::decode_region`] with caller-owned scratch.
     pub fn decode_region_with_scratch(
         &self,
@@ -415,6 +473,24 @@ impl<'a> Decoder<'a> {
         let len = stride * scaled_roi.h as usize;
         let mut out = allocate_output_buffer(len);
         let outcome = self.decode_region_into_with_scratch(pool, &mut out, stride, fmt, roi)?;
+        Ok((out, outcome))
+    }
+
+    /// [`Self::decode_region_scaled`] with caller-owned scratch.
+    pub fn decode_region_scaled_with_scratch(
+        &self,
+        pool: &mut ScratchPool,
+        fmt: PixelFormat,
+        roi: Rect,
+        scale: Downscale,
+    ) -> Result<(Vec<u8>, DecodeOutcome), JpegError> {
+        let legacy = output_format_from_parts(fmt, scale)?;
+        let scaled_roi = scaled_rect_covering(roi, legacy.downscale())?;
+        let stride = scaled_roi.w as usize * legacy.bytes_per_pixel();
+        let len = stride * scaled_roi.h as usize;
+        let mut out = allocate_output_buffer(len);
+        let outcome =
+            self.decode_region_scaled_into_with_scratch(pool, &mut out, stride, fmt, roi, scale)?;
         Ok((out, outcome))
     }
 
@@ -490,6 +566,47 @@ impl<'a> Decoder<'a> {
             }),
         }
     }
+
+    /// Decode `roi` into the caller's buffer using the core `PixelFormat` +
+    /// `Downscale` contract.
+    pub fn decode_region_scaled_into(
+        &self,
+        out: &mut [u8],
+        stride: usize,
+        fmt: PixelFormat,
+        roi: Rect,
+        scale: Downscale,
+    ) -> Result<DecodeOutcome, JpegError> {
+        DEFAULT_SCRATCH.with(|pool| {
+            self.decode_region_scaled_into_with_scratch(
+                &mut pool.borrow_mut(),
+                out,
+                stride,
+                fmt,
+                roi,
+                scale,
+            )
+        })
+    }
+
+    /// [`Self::decode_region_scaled_into`] with caller-owned scratch.
+    pub fn decode_region_scaled_into_with_scratch(
+        &self,
+        pool: &mut ScratchPool,
+        out: &mut [u8],
+        stride: usize,
+        fmt: PixelFormat,
+        roi: Rect,
+        scale: Downscale,
+    ) -> Result<DecodeOutcome, JpegError> {
+        self.decode_region_into_with_scratch(
+            pool,
+            out,
+            stride,
+            output_format_from_parts(fmt, scale)?,
+            roi,
+        )
+    }
 }
 
 /// One-shot parse-plus-decode of an independent JPEG tile into the caller's
@@ -562,12 +679,15 @@ pub fn decode_tile_region_into_in_context(
 impl Decoder<'_> {
     /// One-shot parse-plus-row-decode of a JPEG tile using caller-owned shared
     /// table context and caller-owned scratch.
-    pub fn decode_tile<S: RgbRowSink>(
+    pub fn decode_tile<S>(
         bytes: &[u8],
         ctx: &mut DecoderContext,
         pool: &mut ScratchPool,
         sink: &mut S,
-    ) -> Result<DecodeOutcome, JpegError> {
+    ) -> Result<DecodeOutcome, JpegError>
+    where
+        S: RowSink<u8, Error = JpegError>,
+    {
         let dec = Decoder::from_view_in_context(JpegView::parse(bytes)?, ctx)?;
         dec.decode_rows_with_scratch(pool, sink)
     }
@@ -839,8 +959,10 @@ struct CoreRowSinkAdapter<'a, R: RowSink<u8>> {
     sink_error: Option<R::Error>,
 }
 
-impl<R: RowSink<u8>> RgbRowSink for CoreRowSinkAdapter<'_, R> {
-    fn write_rgb_row(&mut self, y: u32, row: &[u8]) -> Result<(), JpegError> {
+impl<R: RowSink<u8>> RowSink<u8> for CoreRowSinkAdapter<'_, R> {
+    type Error = JpegError;
+
+    fn write_row(&mut self, y: u32, row: &[u8]) -> Result<(), JpegError> {
         match self.sink.write_row(y, row) {
             Ok(()) => Ok(()),
             Err(err) => {
@@ -1207,7 +1329,10 @@ impl<'a, S> SinkWriter<'a, S> {
     }
 }
 
-impl<S: RgbRowSink> InterleavedRgbWriter for SinkWriter<'_, S> {
+impl<S> InterleavedRgbWriter for SinkWriter<'_, S>
+where
+    S: RowSink<u8, Error = JpegError>,
+{
     fn with_rgb_rows<R, F>(&mut self, y: u32, row_count: usize, fill: F) -> Result<R, JpegError>
     where
         F: FnOnce(&mut [u8], Option<&mut [u8]>) -> Result<R, JpegError>,
@@ -1217,15 +1342,18 @@ impl<S: RgbRowSink> InterleavedRgbWriter for SinkWriter<'_, S> {
             2 => fill(&mut self.rows.top_row, Some(&mut self.rows.bottom_row)),
             _ => unreachable!("SinkWriter only supports one or two rows"),
         }?;
-        self.sink.write_rgb_row(y, &self.rows.top_row)?;
+        self.sink.write_row(y, &self.rows.top_row)?;
         if row_count == 2 {
-            self.sink.write_rgb_row(y + 1, &self.rows.bottom_row)?;
+            self.sink.write_row(y + 1, &self.rows.bottom_row)?;
         }
         Ok(result)
     }
 }
 
-impl<S: RgbRowSink> OutputWriter for SinkWriter<'_, S> {
+impl<S> OutputWriter for SinkWriter<'_, S>
+where
+    S: RowSink<u8, Error = JpegError>,
+{
     fn write_rgb_row(
         &mut self,
         y: u32,
@@ -1235,7 +1363,7 @@ impl<S: RgbRowSink> OutputWriter for SinkWriter<'_, S> {
     ) -> Result<(), JpegError> {
         self.backend
             .fill_rgb_row_from_rgb(r_row, g_row, b_row, &mut self.rows.top_row);
-        self.sink.write_rgb_row(y, &self.rows.top_row)
+        self.sink.write_row(y, &self.rows.top_row)
     }
 
     fn write_ycbcr_row(
@@ -1247,13 +1375,13 @@ impl<S: RgbRowSink> OutputWriter for SinkWriter<'_, S> {
     ) -> Result<(), JpegError> {
         self.backend
             .fill_rgb_row_from_ycbcr(y_row, cb_row, cr_row, &mut self.rows.top_row);
-        self.sink.write_rgb_row(y, &self.rows.top_row)
+        self.sink.write_row(y, &self.rows.top_row)
     }
 
     fn write_gray_row(&mut self, y: u32, gray_row: &[u8]) -> Result<(), JpegError> {
         self.backend
             .fill_rgb_row_from_gray(gray_row, &mut self.rows.top_row);
-        self.sink.write_rgb_row(y, &self.rows.top_row)
+        self.sink.write_row(y, &self.rows.top_row)
     }
 }
 

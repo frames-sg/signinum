@@ -5,7 +5,7 @@
 //! A [`ScratchPool`] owns every `Vec` that the sequential scan decoder
 //! would otherwise allocate on each call: the three rolling MCU stripe
 //! buffers, the per-component DC predictor, the chroma upsample rows, and
-//! the RGB row buffers used by [`crate::decoder::RgbRowSink`] drivers.
+//! the RGB row buffers used by [`slidecodec_core::RowSink`] drivers.
 //!
 //! Use [`Decoder::decode_into_with_scratch`](crate::Decoder::decode_into_with_scratch)
 //! / [`decode_rows_with_scratch`](crate::Decoder::decode_rows_with_scratch)

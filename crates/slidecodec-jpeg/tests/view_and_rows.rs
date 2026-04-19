@@ -2,7 +2,7 @@
 
 //! Integration tests for the parsed-view API and row-streaming decode surface.
 
-use slidecodec_jpeg::{Decoder, JpegError, JpegView, OutputFormat, RgbRowSink};
+use slidecodec_jpeg::{Decoder, JpegError, JpegView, OutputFormat, RowSink};
 
 mod fixtures;
 use fixtures::{grayscale_8x8_jpeg, minimal_baseline_420_jpeg, rgb_app14_8x8_jpeg};
@@ -12,8 +12,10 @@ struct CollectRows {
     rows: Vec<(u32, Vec<u8>)>,
 }
 
-impl RgbRowSink for CollectRows {
-    fn write_rgb_row(&mut self, y: u32, row: &[u8]) -> Result<(), JpegError> {
+impl RowSink<u8> for CollectRows {
+    type Error = JpegError;
+
+    fn write_row(&mut self, y: u32, row: &[u8]) -> Result<(), JpegError> {
         self.rows.push((y, row.to_vec()));
         Ok(())
     }

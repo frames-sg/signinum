@@ -49,7 +49,7 @@ pub(crate) mod output;
 pub mod decoder;
 pub use decoder::{
     decode_tile_into, decode_tile_into_in_context, decode_tile_region_into_in_context,
-    DecodeOutcome, Decoder, JpegView, RgbRowSink,
+    DecodeOutcome, Decoder, JpegView,
 };
 
 pub use internal::scratch::ScratchPool;

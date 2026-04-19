@@ -28,7 +28,7 @@ performance signoff path.
   - `jpeg-decoder`: `Decoder::decode`
   - `zune-jpeg`: `JpegDecoder::decode` with Luma output
 - `decode_rows_rgb`
-  - `slidecodec-jpeg`: `Decoder::new` + `decode_rows`
+  - `slidecodec-jpeg`: `Decoder::new` + `decode_rows` into a `RowSink<u8>`
   - no cross-crate comparator; this exists for very large WSI JPEGs where
     full-frame output buffers are not representative of the intended API
 - `wsi_tile_batch_rgb`
@@ -41,19 +41,19 @@ performance signoff path.
   - `jpeg-decoder` / `zune-jpeg`: full RGB decode, then crop the centered
     `256×256` region in memory
 - `wsi_scaled_rgb_q4`
-  - `slidecodec-jpeg`: `decode_into(OutputFormat::Rgb8Scaled { factor: Quarter })`
+  - `slidecodec-jpeg`: `decode_scaled(PixelFormat::Rgb8, Downscale::Quarter)`
   - `jpeg-decoder` / `zune-jpeg`: full RGB decode, then spatially decimate by
     `4×` in memory
 - `wsi_scaled_rgb_q8`
-  - `slidecodec-jpeg`: `decode_into(OutputFormat::Rgb8Scaled { factor: Eighth })`
+  - `slidecodec-jpeg`: `decode_scaled(PixelFormat::Rgb8, Downscale::Eighth)`
   - `jpeg-decoder` / `zune-jpeg`: full RGB decode, then spatially decimate by
     `8×` in memory
 - `wsi_region_scaled_rgb_q4`
-  - `slidecodec-jpeg`: `decode_region_into(..., OutputFormat::Rgb8Scaled { factor: Quarter }, roi)`
+  - `slidecodec-jpeg`: `decode_region_scaled(PixelFormat::Rgb8, roi, Downscale::Quarter)`
   - `jpeg-decoder` / `zune-jpeg`: full RGB decode, crop the centered
     `256×256` region, then spatially decimate by `4×`
 - `wsi_region_scaled_rgb_q8`
-  - `slidecodec-jpeg`: `decode_region_into(..., OutputFormat::Rgb8Scaled { factor: Eighth }, roi)`
+  - `slidecodec-jpeg`: `decode_region_scaled(PixelFormat::Rgb8, roi, Downscale::Eighth)`
   - `jpeg-decoder` / `zune-jpeg`: full RGB decode, crop the centered
     `256×256` region, then spatially decimate by `8×`
 - `wsi_tile_batch_scaled_rgb_q4`

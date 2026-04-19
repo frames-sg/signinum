@@ -46,7 +46,7 @@ Rust 1.94. Bumps are minor-version events.
 ## Quick-start
 
 ```rust
-use slidecodec_jpeg::{Decoder, OutputFormat};
+use slidecodec_jpeg::{Decoder, Downscale, PixelFormat};
 
 let bytes = std::fs::read("tile.jpg")?;
 let info = Decoder::inspect(&bytes)?;
@@ -54,16 +54,18 @@ let info = Decoder::inspect(&bytes)?;
 let dec = Decoder::new(&bytes)?;
 let (w, h) = dec.info().dimensions;
 let mut rgb = vec![0u8; (w * h * 3) as usize];
-dec.decode_into(&mut rgb, (w * 3) as usize, OutputFormat::Rgb8)?;
+dec.decode_scaled_into(&mut rgb, (w * 3) as usize, PixelFormat::Rgb8, Downscale::None)?;
 ```
 
 ```rust
-use slidecodec_jpeg::{Decoder, JpegView, JpegError, RgbRowSink};
+use slidecodec_jpeg::{Decoder, JpegError, JpegView, RowSink};
 
 struct Sink;
 
-impl RgbRowSink for Sink {
-    fn write_rgb_row(&mut self, _y: u32, _row: &[u8]) -> Result<(), JpegError> {
+impl RowSink<u8> for Sink {
+    type Error = JpegError;
+
+    fn write_row(&mut self, _y: u32, _row: &[u8]) -> Result<(), JpegError> {
         Ok(())
     }
 }

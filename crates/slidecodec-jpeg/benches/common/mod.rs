@@ -8,7 +8,7 @@ pub(crate) use self::classification::DecodeMode;
 use self::classification::{classify_corpus_input, color_space_mode, CorpusInputClass};
 use slidecodec_jpeg::{
     decode_tile_into_in_context, decode_tile_region_into_in_context, Decoder, DecoderContext,
-    DownscaleFactor, JpegError, OutputFormat, Rect, RgbRowSink, ScratchPool,
+    Downscale, DownscaleFactor, JpegError, OutputFormat, PixelFormat, Rect, RowSink, ScratchPool,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -212,8 +212,10 @@ pub(crate) fn slidecodec_decode_with_scratch(
 #[derive(Default)]
 struct NullSink;
 
-impl RgbRowSink for NullSink {
-    fn write_rgb_row(&mut self, _y: u32, _row: &[u8]) -> Result<(), JpegError> {
+impl RowSink<u8> for NullSink {
+    type Error = JpegError;
+
+    fn write_row(&mut self, _y: u32, _row: &[u8]) -> Result<(), JpegError> {
         Ok(())
     }
 }
@@ -300,7 +302,7 @@ pub(crate) fn slidecodec_decode_region(bytes: &[u8], side: u32) {
 pub(crate) fn slidecodec_decode_scaled(bytes: &[u8], factor: DownscaleFactor) {
     let dec = Decoder::new(bytes).expect("slidecodec decoder");
     let (out, _) = dec
-        .decode(OutputFormat::Rgb8Scaled { factor })
+        .decode_scaled(PixelFormat::Rgb8, jpeg_downscale(factor))
         .expect("slidecodec scaled decode");
     std::hint::black_box(out);
 }
@@ -309,7 +311,7 @@ pub(crate) fn slidecodec_decode_region_scaled(bytes: &[u8], side: u32, factor: D
     let dec = Decoder::new(bytes).expect("slidecodec decoder");
     let roi = centered_roi(dec.info().dimensions, side);
     let (out, _) = dec
-        .decode_region(OutputFormat::Rgb8Scaled { factor }, roi)
+        .decode_region_scaled(PixelFormat::Rgb8, roi, jpeg_downscale(factor))
         .expect("slidecodec scaled region decode");
     std::hint::black_box(out);
 }
@@ -484,6 +486,15 @@ pub(crate) fn scaled_rect(rect: Rect, factor: DownscaleFactor) -> Rect {
         y: rect.y / denom,
         w: x_end.div_ceil(denom) - rect.x / denom,
         h: y_end.div_ceil(denom) - rect.y / denom,
+    }
+}
+
+fn jpeg_downscale(factor: DownscaleFactor) -> Downscale {
+    match factor {
+        DownscaleFactor::Full => Downscale::None,
+        DownscaleFactor::Half => Downscale::Half,
+        DownscaleFactor::Quarter => Downscale::Quarter,
+        DownscaleFactor::Eighth => Downscale::Eighth,
     }
 }
 

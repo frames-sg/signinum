@@ -211,28 +211,26 @@ Bench groups:
 Comparator policy:
 
 - `slidecodec-j2k` is benchmarked through its public API
-- OpenJPEG is benchmarked through the local `opj_decompress` binary
-- Grok is benchmarked through the local `grk_decompress` binary when present
+- OpenJPEG is benchmarked in-process through `openjpeg-sys`
+- Grok is benchmarked in-process through the local `libgrokj2k` shared library
+  plus a thin C shim compiled into `slidecodec-j2k-compare`
+- all three decoders produce packed `Gray8` or interleaved `Rgb8` output so
+  output-layout work is included equally in the timing
+- the OpenJPEG and Grok comparator paths are forced single-threaded
 - classic J2K bench inputs are generated through the local `opj_compress`
-  binary when available, so the OpenJPEG comparator always consumes its own
-  valid JP2 output
-- the binaries are discovered from `SLIDECODEC_OPENJPEG_BIN` and
-  `SLIDECODEC_OPENJPEG_COMPRESS_BIN`, otherwise
-  `/opt/homebrew/bin/opj_decompress` and `/opt/homebrew/bin/opj_compress`
-  are used when present
-- Grok is discovered from `SLIDECODEC_GROK_BIN`, otherwise
-  `/opt/homebrew/bin/grk_decompress` or `/usr/local/bin/grk_decompress`
-  are used when present
-- the OpenJPEG path is an end-to-end tool comparison, not an in-process FFI
-  microbenchmark
-- the Grok path is also an end-to-end CLI comparison; it is the stronger
-  open-source JPEG 2000 performance comparator
+  binary when available, so the RGB JP2 fixture path matches the OpenJPEG tool
+  chain; otherwise the bench falls back to the in-tree encoder path
+- `opj_compress` is discovered from `SLIDECODEC_OPENJPEG_COMPRESS_BIN`,
+  otherwise `/opt/homebrew/bin/opj_compress` is used when present
+- Grok library discovery is controlled by `SLIDECODEC_GROK_SOURCE` and
+  `SLIDECODEC_GROK_ROOT`; by default the bench looks for a local Grok build at
+  `/tmp/grok-slidecodec` with shared libraries under `/tmp/grok-slidecodec/build/bin`
 
 Region and scale mapping:
 
-- region decode uses `opj_decompress -d x0,y0,x1,y1`
-- scaled decode uses `opj_decompress -r <reduce factor>`
-- Grok uses `grk_decompress -d x0,y0,x1,y1` and `grk_decompress -r <reduce factor>`
+- region decode uses the native OpenJPEG decode-area API and Grok region fields
+- scaled decode uses native OpenJPEG reduction-factor decode and Grok reduction
+  decode
 - tile-batch decode is modeled as repeated decode invocations on the same tile
 
 Compile the J2K compare bench:
@@ -241,10 +239,9 @@ Compile the J2K compare bench:
 cargo bench -p slidecodec-j2k --bench compare --no-run
 ```
 
-Run it locally against OpenJPEG:
+Run it locally against in-process OpenJPEG:
 
 ```sh
-SLIDECODEC_OPENJPEG_BIN=/opt/homebrew/bin/opj_decompress \
 SLIDECODEC_OPENJPEG_COMPRESS_BIN=/opt/homebrew/bin/opj_compress \
   cargo bench -p slidecodec-j2k --bench compare
 ```
@@ -252,9 +249,9 @@ SLIDECODEC_OPENJPEG_COMPRESS_BIN=/opt/homebrew/bin/opj_compress \
 Run it locally against OpenJPEG and Grok:
 
 ```sh
-SLIDECODEC_OPENJPEG_BIN=/opt/homebrew/bin/opj_decompress \
 SLIDECODEC_OPENJPEG_COMPRESS_BIN=/opt/homebrew/bin/opj_compress \
-SLIDECODEC_GROK_BIN=/opt/homebrew/bin/grk_decompress \
+SLIDECODEC_GROK_SOURCE=/tmp/grok-slidecodec \
+SLIDECODEC_GROK_ROOT=/tmp/grok-slidecodec/build/bin \
   cargo bench -p slidecodec-j2k --bench compare
 ```
 

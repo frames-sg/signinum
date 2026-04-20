@@ -4,6 +4,7 @@
 
 use criterion::black_box;
 use dicom_toolkit_jpeg2000::{encode, encode_htj2k, EncodeOptions};
+use slidecodec_j2k_compare::{grok as grok_compare, openjpeg as openjpeg_compare};
 use slidecodec_j2k::{
     DecoderContext, Downscale, J2kCodec, J2kContext, J2kDecoder, J2kScratchPool, PixelFormat, Rect,
     TileBatchDecode,
@@ -131,11 +132,11 @@ pub(crate) fn slidecodec_decode_tile_batch(bytes: &[u8], mode: DecodeMode, count
 }
 
 pub(crate) fn openjpeg_available() -> bool {
-    openjpeg_bin().is_some() && openjpeg_compress_bin().is_some()
+    openjpeg_compare::is_available()
 }
 
 pub(crate) fn grok_available() -> bool {
-    grok_bin().is_some()
+    grok_compare::is_available()
 }
 
 pub(crate) fn openjpeg_decode(
@@ -144,9 +145,26 @@ pub(crate) fn openjpeg_decode(
     region: Option<Rect>,
     batch: usize,
 ) {
-    let harness = OpenJpegHarness::for_input(input);
     for _ in 0..batch {
-        harness.run(reduce, region);
+        let out = match (input.mode, reduce, region) {
+            (DecodeMode::Gray8, None, None) => openjpeg_compare::decode_gray(&input.bytes),
+            (DecodeMode::Gray8, Some(reduce), None) => {
+                openjpeg_compare::decode_gray_scaled(&input.bytes, reduce)
+            }
+            (DecodeMode::Gray8, None, Some(region)) => {
+                openjpeg_compare::decode_gray_region(&input.bytes, region)
+            }
+            (DecodeMode::Rgb8, None, None) => openjpeg_compare::decode_rgb(&input.bytes),
+            (DecodeMode::Rgb8, Some(reduce), None) => {
+                openjpeg_compare::decode_rgb_scaled(&input.bytes, reduce)
+            }
+            (DecodeMode::Rgb8, None, Some(region)) => {
+                openjpeg_compare::decode_rgb_region(&input.bytes, region)
+            }
+            _ => panic!("unsupported OpenJPEG bench shape"),
+        }
+        .expect("openjpeg decode");
+        black_box(out);
     }
 }
 
@@ -156,9 +174,26 @@ pub(crate) fn grok_decode(
     region: Option<Rect>,
     batch: usize,
 ) {
-    let harness = GrokHarness::for_input(input);
     for _ in 0..batch {
-        harness.run(reduce, region);
+        let out = match (input.mode, reduce, region) {
+            (DecodeMode::Gray8, None, None) => grok_compare::decode_gray(&input.bytes),
+            (DecodeMode::Gray8, Some(reduce), None) => {
+                grok_compare::decode_gray_scaled(&input.bytes, reduce)
+            }
+            (DecodeMode::Gray8, None, Some(region)) => {
+                grok_compare::decode_gray_region(&input.bytes, region)
+            }
+            (DecodeMode::Rgb8, None, None) => grok_compare::decode_rgb(&input.bytes),
+            (DecodeMode::Rgb8, Some(reduce), None) => {
+                grok_compare::decode_rgb_scaled(&input.bytes, reduce)
+            }
+            (DecodeMode::Rgb8, None, Some(region)) => {
+                grok_compare::decode_rgb_region(&input.bytes, region)
+            }
+            _ => panic!("unsupported Grok bench shape"),
+        }
+        .expect("grok decode");
+        black_box(out);
     }
 }
 
@@ -283,22 +318,6 @@ fn scaled_dims(dims: (u32, u32), scale: Downscale) -> (u32, u32) {
     (dims.0.div_ceil(denom), dims.1.div_ceil(denom))
 }
 
-fn openjpeg_bin() -> Option<PathBuf> {
-    static OPENJPEG: OnceLock<Option<PathBuf>> = OnceLock::new();
-    OPENJPEG
-        .get_or_init(|| {
-            if let Some(path) = std::env::var_os("SLIDECODEC_OPENJPEG_BIN") {
-                return Some(PathBuf::from(path));
-            }
-            let default = PathBuf::from("/opt/homebrew/bin/opj_decompress");
-            if default.exists() {
-                return Some(default);
-            }
-            None
-        })
-        .clone()
-}
-
 fn openjpeg_compress_bin() -> Option<PathBuf> {
     static OPENJPEG_COMPRESS: OnceLock<Option<PathBuf>> = OnceLock::new();
     OPENJPEG_COMPRESS
@@ -313,27 +332,6 @@ fn openjpeg_compress_bin() -> Option<PathBuf> {
             None
         })
         .clone()
-}
-
-fn grok_bin() -> Option<PathBuf> {
-    static GROK: OnceLock<Option<PathBuf>> = OnceLock::new();
-    GROK.get_or_init(discover_grok_bin).clone()
-}
-
-fn discover_grok_bin() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("SLIDECODEC_GROK_BIN") {
-        let path = PathBuf::from(path);
-        if path.exists() {
-            return Some(path);
-        }
-    }
-    [
-        "/opt/homebrew/bin/grk_decompress",
-        "/usr/local/bin/grk_decompress",
-    ]
-    .into_iter()
-    .map(PathBuf::from)
-    .find(|path| path.exists())
 }
 
 fn openjpeg_encode_jp2(
@@ -362,114 +360,6 @@ fn openjpeg_encode_jp2(
         return None;
     }
     fs::read(out_path).ok()
-}
-
-struct OpenJpegHarness {
-    bin: PathBuf,
-    input_path: PathBuf,
-    output_path: PathBuf,
-    mode: DecodeMode,
-}
-
-impl OpenJpegHarness {
-    fn for_input(input: &BenchInput) -> Self {
-        let bin = openjpeg_bin().expect("OpenJPEG binary");
-        let dir = openjpeg_temp_dir();
-        let input_path = dir.join(format!("{}.jp2", input.name));
-        let output_path = dir.join(match input.mode {
-            DecodeMode::Gray8 => format!("{}.pgm", input.name),
-            DecodeMode::Rgb8 => format!("{}.ppm", input.name),
-        });
-        fs::write(&input_path, &input.bytes).expect("write benchmark input");
-        Self {
-            bin,
-            input_path,
-            output_path,
-            mode: input.mode,
-        }
-    }
-
-    fn run(&self, reduce: Option<u32>, region: Option<Rect>) {
-        let mut command = Command::new(&self.bin);
-        command.arg("-i").arg(&self.input_path);
-        command.arg("-o").arg(&self.output_path);
-        if let Some(reduce) = reduce {
-            command.arg("-r").arg(reduce.to_string());
-        }
-        if let Some(region) = region {
-            command.arg("-d").arg(format!(
-                "{},{},{},{}",
-                region.x,
-                region.y,
-                region.x + region.w,
-                region.y + region.h
-            ));
-        }
-        if matches!(self.mode, DecodeMode::Rgb8) {
-            command.arg("-force-rgb");
-        }
-        let status = command.status().expect("run openjpeg");
-        assert!(status.success(), "OpenJPEG decode failed");
-        black_box(
-            fs::metadata(&self.output_path)
-                .expect("openjpeg output metadata")
-                .len(),
-        );
-    }
-}
-
-struct GrokHarness {
-    bin: PathBuf,
-    input_path: PathBuf,
-    output_path: PathBuf,
-    mode: DecodeMode,
-}
-
-impl GrokHarness {
-    fn for_input(input: &BenchInput) -> Self {
-        let bin = grok_bin().expect("Grok binary");
-        let dir = openjpeg_temp_dir();
-        let input_path = dir.join(format!("{}.jp2", input.name));
-        let output_path = dir.join(match input.mode {
-            DecodeMode::Gray8 => format!("{}.grok.pgm", input.name),
-            DecodeMode::Rgb8 => format!("{}.grok.ppm", input.name),
-        });
-        fs::write(&input_path, &input.bytes).expect("write benchmark input");
-        Self {
-            bin,
-            input_path,
-            output_path,
-            mode: input.mode,
-        }
-    }
-
-    fn run(&self, reduce: Option<u32>, region: Option<Rect>) {
-        let mut command = Command::new(&self.bin);
-        command.arg("-i").arg(&self.input_path);
-        command.arg("-o").arg(&self.output_path);
-        if let Some(reduce) = reduce {
-            command.arg("-r").arg(reduce.to_string());
-        }
-        if let Some(region) = region {
-            command.arg("-d").arg(format!(
-                "{},{},{},{}",
-                region.x,
-                region.y,
-                region.x + region.w,
-                region.y + region.h
-            ));
-        }
-        if matches!(self.mode, DecodeMode::Rgb8) {
-            command.arg("--force-rgb");
-        }
-        let status = command.status().expect("run grok");
-        assert!(status.success(), "Grok decode failed");
-        black_box(
-            fs::metadata(&self.output_path)
-                .expect("grok output metadata")
-                .len(),
-        );
-    }
 }
 
 fn openjpeg_temp_dir() -> &'static Path {

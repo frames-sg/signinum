@@ -465,6 +465,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
 
 [[package]]
+name = "openjpeg-sys"
+version = "1.0.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "92682cb92e7b01e2c020cf8ec12f3374558924bb24621df1112d8a7c93d419ef"
+dependencies = [
+ "cc",
+ "libc",
+]
+
+[[package]]
 name = "openjph-core"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -738,7 +748,17 @@ dependencies = [
  "dicom-toolkit-jpeg2000",
  "proptest",
  "slidecodec-core",
+ "slidecodec-j2k-compare",
  "thiserror",
+]
+
+[[package]]
+name = "slidecodec-j2k-compare"
+version = "1.0.0"
+dependencies = [
+ "cc",
+ "openjpeg-sys",
+ "slidecodec-core",
 ]
 
 [[package]]

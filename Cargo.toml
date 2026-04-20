@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/slidecodec-core",
+    "crates/slidecodec-j2k-compare",
     "crates/slidecodec-j2k",
     "crates/slidecodec-jpeg",
     "crates/slidecodec-tilecodec",

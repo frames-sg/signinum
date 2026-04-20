@@ -22,6 +22,7 @@ thiserror = { workspace = true }
 [dev-dependencies]
 proptest = { workspace = true }
 criterion = { workspace = true }
+slidecodec-j2k-compare = { path = "../slidecodec-j2k-compare" }
 
 [[bench]]
 name = "compare"

@@ -39,8 +39,8 @@ runtime.
 
 - Baseline and extended/lossless JPEG support already present in the crate
 - ROI, scaled decode, row streaming, and tile-batch decode APIs
-- WSI-focused benchmarking against `jpeg-decoder`, `zune-jpeg`, and
-  libjpeg-turbo-oriented workflows
+- WSI-focused benchmarking against `jpeg-decoder`, `zune-jpeg`, and direct
+  `libjpeg-turbo` decode paths
 
 ### `slidecodec-j2k`
 

@@ -3,9 +3,11 @@
 #![allow(dead_code)]
 
 pub(crate) mod classification;
+mod libjpeg_turbo;
 
 pub(crate) use self::classification::DecodeMode;
 use self::classification::{classify_corpus_input, color_space_mode, CorpusInputClass};
+pub(crate) use self::libjpeg_turbo::TurboJpegDecoder;
 use slidecodec_jpeg::{
     decode_tile_region_scaled_into_in_context, decode_tile_scaled_into_in_context, Decoder,
     DecoderContext, Downscale, JpegError, PixelFormat, Rect, RowSink, ScratchPool,
@@ -136,6 +138,15 @@ pub(crate) fn slidecodec_inspect(bytes: &[u8]) {
     std::hint::black_box(info);
 }
 
+pub(crate) fn libjpeg_turbo_available() -> bool {
+    libjpeg_turbo::is_available()
+}
+
+pub(crate) fn libjpeg_turbo_inspect(decoder: &mut TurboJpegDecoder, bytes: &[u8]) {
+    let info = decoder.inspect(bytes).expect("libjpeg-turbo inspect");
+    std::hint::black_box(info);
+}
+
 pub(crate) fn jpeg_decoder_inspect(bytes: &[u8]) {
     let mut decoder = jpeg_decoder::Decoder::new(std::io::Cursor::new(bytes));
     decoder.read_info().expect("jpeg-decoder read_info");
@@ -158,6 +169,15 @@ pub(crate) fn slidecodec_decode(bytes: &[u8], mode: DecodeMode) {
         DecodeMode::Rgb => PixelFormat::Rgb8,
     };
     let (out, _) = dec.decode(fmt).expect("slidecodec decode");
+    std::hint::black_box(out);
+}
+
+pub(crate) fn libjpeg_turbo_decode(decoder: &mut TurboJpegDecoder, bytes: &[u8], mode: DecodeMode) {
+    let out = match mode {
+        DecodeMode::Gray => decoder.decode_gray(bytes),
+        DecodeMode::Rgb => decoder.decode_rgb(bytes),
+    }
+    .expect("libjpeg-turbo decode");
     std::hint::black_box(out);
 }
 
@@ -236,6 +256,17 @@ pub(crate) fn slidecodec_decode_tile_batch(bytes: &[u8], batch_size: usize) {
     }
 }
 
+pub(crate) fn libjpeg_turbo_decode_batch(
+    decoder: &mut TurboJpegDecoder,
+    bytes: &[u8],
+    batch_size: usize,
+) {
+    for _ in 0..batch_size {
+        let out = decoder.decode_rgb(bytes).expect("libjpeg-turbo decode");
+        std::hint::black_box(out);
+    }
+}
+
 pub(crate) fn slidecodec_decode_tile_batch_scaled(
     bytes: &[u8],
     batch_size: usize,
@@ -301,11 +332,29 @@ pub(crate) fn slidecodec_decode_region(bytes: &[u8], side: u32) {
     std::hint::black_box(out);
 }
 
+pub(crate) fn libjpeg_turbo_decode_region(decoder: &mut TurboJpegDecoder, bytes: &[u8], roi: Rect) {
+    let out = decoder
+        .decode_region_rgb(bytes, roi)
+        .expect("libjpeg-turbo region decode");
+    std::hint::black_box(out);
+}
+
 pub(crate) fn slidecodec_decode_scaled(bytes: &[u8], factor: Downscale) {
     let dec = Decoder::new(bytes).expect("slidecodec decoder");
     let (out, _) = dec
         .decode_scaled(PixelFormat::Rgb8, factor)
         .expect("slidecodec scaled decode");
+    std::hint::black_box(out);
+}
+
+pub(crate) fn libjpeg_turbo_decode_scaled(
+    decoder: &mut TurboJpegDecoder,
+    bytes: &[u8],
+    factor: Downscale,
+) {
+    let out = decoder
+        .decode_scaled_rgb(bytes, factor)
+        .expect("libjpeg-turbo scaled decode");
     std::hint::black_box(out);
 }
 
@@ -315,6 +364,18 @@ pub(crate) fn slidecodec_decode_region_scaled(bytes: &[u8], side: u32, factor: D
     let (out, _) = dec
         .decode_region_scaled(PixelFormat::Rgb8, roi, factor)
         .expect("slidecodec scaled region decode");
+    std::hint::black_box(out);
+}
+
+pub(crate) fn libjpeg_turbo_decode_region_scaled(
+    decoder: &mut TurboJpegDecoder,
+    bytes: &[u8],
+    roi: Rect,
+    factor: Downscale,
+) {
+    let out = decoder
+        .decode_region_scaled_rgb(bytes, roi, factor)
+        .expect("libjpeg-turbo scaled region decode");
     std::hint::black_box(out);
 }
 
@@ -433,6 +494,35 @@ pub(crate) fn zune_decode_region_scaled(bytes: &[u8], side: u32, factor: Downsca
 pub(crate) fn jpeg_decoder_decode_batch_scaled(bytes: &[u8], batch_size: usize, factor: Downscale) {
     for _ in 0..batch_size {
         jpeg_decoder_decode_scaled(bytes, factor);
+    }
+}
+
+pub(crate) fn libjpeg_turbo_decode_batch_scaled(
+    decoder: &mut TurboJpegDecoder,
+    bytes: &[u8],
+    batch_size: usize,
+    factor: Downscale,
+) {
+    for _ in 0..batch_size {
+        let out = decoder
+            .decode_scaled_rgb(bytes, factor)
+            .expect("libjpeg-turbo scaled decode");
+        std::hint::black_box(out);
+    }
+}
+
+pub(crate) fn libjpeg_turbo_decode_batch_region_scaled(
+    decoder: &mut TurboJpegDecoder,
+    bytes: &[u8],
+    batch_size: usize,
+    roi: Rect,
+    factor: Downscale,
+) {
+    for _ in 0..batch_size {
+        let out = decoder
+            .decode_region_scaled_rgb(bytes, roi, factor)
+            .expect("libjpeg-turbo scaled region decode");
+        std::hint::black_box(out);
     }
 }
 

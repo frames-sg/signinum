@@ -3,16 +3,21 @@
 mod common;
 
 use common::{
+    centered_roi,
     classification::{should_bench_decode_rows_rgb, should_compare_full_frame, CorpusInputClass},
     jpeg_decoder_decode, jpeg_decoder_decode_batch_region_scaled, jpeg_decoder_decode_batch_scaled,
     jpeg_decoder_decode_region, jpeg_decoder_decode_region_scaled, jpeg_decoder_decode_scaled,
-    jpeg_decoder_inspect, load_bench_inputs, output_geometry, slidecodec_decode,
-    slidecodec_decode_region, slidecodec_decode_region_scaled, slidecodec_decode_reused,
-    slidecodec_decode_rows, slidecodec_decode_scaled, slidecodec_decode_tile_batch,
+    jpeg_decoder_inspect, libjpeg_turbo_available, libjpeg_turbo_decode,
+    libjpeg_turbo_decode_batch, libjpeg_turbo_decode_batch_region_scaled,
+    libjpeg_turbo_decode_batch_scaled, libjpeg_turbo_decode_region,
+    libjpeg_turbo_decode_region_scaled, libjpeg_turbo_decode_scaled, libjpeg_turbo_inspect,
+    load_bench_inputs, output_geometry, slidecodec_decode, slidecodec_decode_region,
+    slidecodec_decode_region_scaled, slidecodec_decode_reused, slidecodec_decode_rows,
+    slidecodec_decode_scaled, slidecodec_decode_tile_batch,
     slidecodec_decode_tile_batch_region_scaled, slidecodec_decode_tile_batch_scaled,
     slidecodec_decode_with_scratch, slidecodec_inspect, zune_decode,
     zune_decode_batch_region_scaled, zune_decode_batch_scaled, zune_decode_region,
-    zune_decode_region_scaled, zune_decode_scaled, zune_inspect, DecodeMode,
+    zune_decode_region_scaled, zune_decode_scaled, zune_inspect, DecodeMode, TurboJpegDecoder,
 };
 use criterion::{criterion_group, criterion_main, Criterion};
 use slidecodec_jpeg::{Decoder, Downscale, ScratchPool};
@@ -31,6 +36,12 @@ fn bench_compare(c: &mut Criterion) {
         inspect.bench_function(format!("zune-jpeg/{}", input.name), |b| {
             b.iter(|| zune_inspect(&input.bytes));
         });
+        if libjpeg_turbo_available() {
+            let mut turbo = TurboJpegDecoder::new().expect("libjpeg-turbo decoder");
+            inspect.bench_function(format!("libjpeg-turbo/{}", input.name), move |b| {
+                b.iter(|| libjpeg_turbo_inspect(&mut turbo, &input.bytes));
+            });
+        }
     }
     inspect.finish();
 
@@ -47,6 +58,12 @@ fn bench_compare(c: &mut Criterion) {
         decode_rgb.bench_function(format!("zune-jpeg/{}", input.name), |b| {
             b.iter(|| zune_decode(&input.bytes, DecodeMode::Rgb));
         });
+        if libjpeg_turbo_available() {
+            let mut turbo = TurboJpegDecoder::new().expect("libjpeg-turbo decoder");
+            decode_rgb.bench_function(format!("libjpeg-turbo/{}", input.name), move |b| {
+                b.iter(|| libjpeg_turbo_decode(&mut turbo, &input.bytes, DecodeMode::Rgb));
+            });
+        }
     }
     decode_rgb.finish();
 
@@ -63,6 +80,12 @@ fn bench_compare(c: &mut Criterion) {
         decode_gray.bench_function(format!("zune-jpeg/{}", input.name), |b| {
             b.iter(|| zune_decode(&input.bytes, DecodeMode::Gray));
         });
+        if libjpeg_turbo_available() {
+            let mut turbo = TurboJpegDecoder::new().expect("libjpeg-turbo decoder");
+            decode_gray.bench_function(format!("libjpeg-turbo/{}", input.name), move |b| {
+                b.iter(|| libjpeg_turbo_decode(&mut turbo, &input.bytes, DecodeMode::Gray));
+            });
+        }
     }
     decode_gray.finish();
 
@@ -139,6 +162,12 @@ fn bench_compare(c: &mut Criterion) {
         wsi_tile_batch_rgb.bench_function(format!("slidecodec/{}", input.name), |b| {
             b.iter(|| slidecodec_decode_tile_batch(&input.bytes, 64));
         });
+        if libjpeg_turbo_available() {
+            let mut turbo = TurboJpegDecoder::new().expect("libjpeg-turbo decoder");
+            wsi_tile_batch_rgb.bench_function(format!("libjpeg-turbo/{}", input.name), move |b| {
+                b.iter(|| libjpeg_turbo_decode_batch(&mut turbo, &input.bytes, 64));
+            });
+        }
     }
     wsi_tile_batch_rgb.finish();
 
@@ -146,6 +175,7 @@ fn bench_compare(c: &mut Criterion) {
     for input in inputs.iter().filter(|input| {
         input.mode == DecodeMode::Rgb && input.input_class == CorpusInputClass::BoundedFullFrame
     }) {
+        let roi = centered_roi(input.dimensions, 256);
         wsi_region_rgb.bench_function(format!("slidecodec/{}", input.name), |b| {
             b.iter(|| slidecodec_decode_region(&input.bytes, 256));
         });
@@ -155,6 +185,12 @@ fn bench_compare(c: &mut Criterion) {
         wsi_region_rgb.bench_function(format!("zune-jpeg/{}", input.name), |b| {
             b.iter(|| zune_decode_region(&input.bytes, 256));
         });
+        if libjpeg_turbo_available() {
+            let mut turbo = TurboJpegDecoder::new().expect("libjpeg-turbo decoder");
+            wsi_region_rgb.bench_function(format!("libjpeg-turbo/{}", input.name), move |b| {
+                b.iter(|| libjpeg_turbo_decode_region(&mut turbo, &input.bytes, roi));
+            });
+        }
     }
     wsi_region_rgb.finish();
 
@@ -171,6 +207,14 @@ fn bench_compare(c: &mut Criterion) {
         wsi_scaled_rgb_q4.bench_function(format!("zune-jpeg/{}", input.name), |b| {
             b.iter(|| zune_decode_scaled(&input.bytes, Downscale::Quarter));
         });
+        if libjpeg_turbo_available() {
+            let mut turbo = TurboJpegDecoder::new().expect("libjpeg-turbo decoder");
+            wsi_scaled_rgb_q4.bench_function(format!("libjpeg-turbo/{}", input.name), move |b| {
+                b.iter(|| {
+                    libjpeg_turbo_decode_scaled(&mut turbo, &input.bytes, Downscale::Quarter);
+                });
+            });
+        }
     }
     wsi_scaled_rgb_q4.finish();
 
@@ -187,6 +231,12 @@ fn bench_compare(c: &mut Criterion) {
         wsi_scaled_rgb_q8.bench_function(format!("zune-jpeg/{}", input.name), |b| {
             b.iter(|| zune_decode_scaled(&input.bytes, Downscale::Eighth));
         });
+        if libjpeg_turbo_available() {
+            let mut turbo = TurboJpegDecoder::new().expect("libjpeg-turbo decoder");
+            wsi_scaled_rgb_q8.bench_function(format!("libjpeg-turbo/{}", input.name), move |b| {
+                b.iter(|| libjpeg_turbo_decode_scaled(&mut turbo, &input.bytes, Downscale::Eighth));
+            });
+        }
     }
     wsi_scaled_rgb_q8.finish();
 
@@ -194,6 +244,7 @@ fn bench_compare(c: &mut Criterion) {
     for input in inputs.iter().filter(|input| {
         input.mode == DecodeMode::Rgb && input.input_class == CorpusInputClass::BoundedFullFrame
     }) {
+        let roi = centered_roi(input.dimensions, 256);
         wsi_region_scaled_rgb_q4.bench_function(format!("slidecodec/{}", input.name), |b| {
             b.iter(|| slidecodec_decode_region_scaled(&input.bytes, 256, Downscale::Quarter));
         });
@@ -205,6 +256,22 @@ fn bench_compare(c: &mut Criterion) {
         wsi_region_scaled_rgb_q4.bench_function(format!("zune-jpeg/{}", input.name), |b| {
             b.iter(|| zune_decode_region_scaled(&input.bytes, 256, Downscale::Quarter));
         });
+        if libjpeg_turbo_available() {
+            let mut turbo = TurboJpegDecoder::new().expect("libjpeg-turbo decoder");
+            wsi_region_scaled_rgb_q4.bench_function(
+                format!("libjpeg-turbo/{}", input.name),
+                move |b| {
+                    b.iter(|| {
+                        libjpeg_turbo_decode_region_scaled(
+                            &mut turbo,
+                            &input.bytes,
+                            roi,
+                            Downscale::Quarter,
+                        );
+                    });
+                },
+            );
+        }
     }
     wsi_region_scaled_rgb_q4.finish();
 
@@ -212,6 +279,7 @@ fn bench_compare(c: &mut Criterion) {
     for input in inputs.iter().filter(|input| {
         input.mode == DecodeMode::Rgb && input.input_class == CorpusInputClass::BoundedFullFrame
     }) {
+        let roi = centered_roi(input.dimensions, 256);
         wsi_region_scaled_rgb_q8.bench_function(format!("slidecodec/{}", input.name), |b| {
             b.iter(|| slidecodec_decode_region_scaled(&input.bytes, 256, Downscale::Eighth));
         });
@@ -223,6 +291,22 @@ fn bench_compare(c: &mut Criterion) {
         wsi_region_scaled_rgb_q8.bench_function(format!("zune-jpeg/{}", input.name), |b| {
             b.iter(|| zune_decode_region_scaled(&input.bytes, 256, Downscale::Eighth));
         });
+        if libjpeg_turbo_available() {
+            let mut turbo = TurboJpegDecoder::new().expect("libjpeg-turbo decoder");
+            wsi_region_scaled_rgb_q8.bench_function(
+                format!("libjpeg-turbo/{}", input.name),
+                move |b| {
+                    b.iter(|| {
+                        libjpeg_turbo_decode_region_scaled(
+                            &mut turbo,
+                            &input.bytes,
+                            roi,
+                            Downscale::Eighth,
+                        );
+                    });
+                },
+            );
+        }
     }
     wsi_region_scaled_rgb_q8.finish();
 
@@ -239,12 +323,29 @@ fn bench_compare(c: &mut Criterion) {
         wsi_tile_batch_scaled_rgb_q4.bench_function(format!("zune-jpeg/{}", input.name), |b| {
             b.iter(|| zune_decode_batch_scaled(&input.bytes, 64, Downscale::Quarter));
         });
+        if libjpeg_turbo_available() {
+            let mut turbo = TurboJpegDecoder::new().expect("libjpeg-turbo decoder");
+            wsi_tile_batch_scaled_rgb_q4.bench_function(
+                format!("libjpeg-turbo/{}", input.name),
+                move |b| {
+                    b.iter(|| {
+                        libjpeg_turbo_decode_batch_scaled(
+                            &mut turbo,
+                            &input.bytes,
+                            64,
+                            Downscale::Quarter,
+                        );
+                    });
+                },
+            );
+        }
     }
     wsi_tile_batch_scaled_rgb_q4.finish();
 
     let mut wsi_tile_batch_region_scaled_rgb_q4 =
         c.benchmark_group("wsi_tile_batch_region_scaled_rgb_q4");
     for input in inputs.iter().filter(|input| input.mode == DecodeMode::Rgb) {
+        let roi = centered_roi(input.dimensions, 256);
         wsi_tile_batch_region_scaled_rgb_q4.bench_function(
             format!("slidecodec/{}", input.name),
             |b| {
@@ -279,6 +380,23 @@ fn bench_compare(c: &mut Criterion) {
                 });
             },
         );
+        if libjpeg_turbo_available() {
+            let mut turbo = TurboJpegDecoder::new().expect("libjpeg-turbo decoder");
+            wsi_tile_batch_region_scaled_rgb_q4.bench_function(
+                format!("libjpeg-turbo/{}", input.name),
+                move |b| {
+                    b.iter(|| {
+                        libjpeg_turbo_decode_batch_region_scaled(
+                            &mut turbo,
+                            &input.bytes,
+                            64,
+                            roi,
+                            Downscale::Quarter,
+                        );
+                    });
+                },
+            );
+        }
     }
     wsi_tile_batch_region_scaled_rgb_q4.finish();
 }

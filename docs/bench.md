@@ -2,9 +2,10 @@
 
 `slidecodec-jpeg` carries two Criterion benchmark targets:
 
-- `compare` compares `slidecodec-jpeg` against `jpeg-decoder` and `zune-jpeg`
-  on the same JPEG byte streams, and also carries a slidecodec-only
-  `decode_rows_rgb` group for large WSI-oriented inputs.
+- `compare` compares `slidecodec-jpeg` against `jpeg-decoder`, `zune-jpeg`,
+  and direct `libjpeg-turbo` decode paths on the same JPEG byte streams, and
+  also carries a slidecodec-only `decode_rows_rgb` group for large
+  WSI-oriented inputs.
 - `micro` measures slidecodec-only hot paths that are useful when tuning
   regressions inside the crate: header inspect, Huffman symbol decode, and
   scalar IDCT.
@@ -19,49 +20,61 @@ performance signoff path.
   - `slidecodec-jpeg`: `Decoder::inspect`
   - `jpeg-decoder`: `Decoder::read_info`
   - `zune-jpeg`: `JpegDecoder::decode_headers`
+  - `libjpeg-turbo`: reused TurboJPEG handle + `tj3DecompressHeader`
 - `decode_rgb`
   - `slidecodec-jpeg`: `Decoder::new` + `decode_into(PixelFormat::Rgb8)`
   - `jpeg-decoder`: `Decoder::decode`
   - `zune-jpeg`: `JpegDecoder::decode` with RGB output
+  - `libjpeg-turbo`: reused TurboJPEG handle + `tj3Decompress8(..., TJPF_RGB)`
 - `decode_gray`
   - `slidecodec-jpeg`: `Decoder::new` + `decode_into(PixelFormat::Gray8)`
   - `jpeg-decoder`: `Decoder::decode`
   - `zune-jpeg`: `JpegDecoder::decode` with Luma output
+  - `libjpeg-turbo`: reused TurboJPEG handle + `tj3Decompress8(..., TJPF_GRAY)`
 - `decode_rows_rgb`
   - `slidecodec-jpeg`: `Decoder::new` + `decode_rows` into a `RowSink<u8>`
-  - no cross-crate comparator; this exists for very large WSI JPEGs where
-    full-frame output buffers are not representative of the intended API
+  - no cross-crate comparator; TurboJPEG is a packed-output API, so this
+    remains a slidecodec-only streaming benchmark for very large WSI JPEGs
 - `wsi_tile_batch_rgb`
   - `slidecodec-jpeg`: repeated `Decoder::decode_tile` with a shared
     `DecoderContext` and `ScratchPool`
-  - no cross-crate comparator; this is the parse+decode tile-batch path that
-    WSI readers actually use, including shared table-cache reuse
+  - `libjpeg-turbo`: repeated `tj3Decompress8(..., TJPF_RGB)` with one reused
+    TurboJPEG handle across the batch
 - `wsi_region_rgb`
   - `slidecodec-jpeg`: `Decoder::decode_region_into(..., PixelFormat::Rgb8, roi)`
   - `jpeg-decoder` / `zune-jpeg`: full RGB decode, then crop the centered
     `256×256` region in memory
+  - `libjpeg-turbo`: TurboJPEG cropped decode, aligning the left crop boundary
+    to the scaled iMCU width and trimming the over-read columns in Rust
 - `wsi_scaled_rgb_q4`
   - `slidecodec-jpeg`: `decode_scaled(PixelFormat::Rgb8, Downscale::Quarter)`
   - `jpeg-decoder` / `zune-jpeg`: full RGB decode, then spatially decimate by
     `4×` in memory
+  - `libjpeg-turbo`: reused TurboJPEG handle + `tj3SetScalingFactor(1/4)`
 - `wsi_scaled_rgb_q8`
   - `slidecodec-jpeg`: `decode_scaled(PixelFormat::Rgb8, Downscale::Eighth)`
   - `jpeg-decoder` / `zune-jpeg`: full RGB decode, then spatially decimate by
     `8×` in memory
+  - `libjpeg-turbo`: reused TurboJPEG handle + `tj3SetScalingFactor(1/8)`
 - `wsi_region_scaled_rgb_q4`
   - `slidecodec-jpeg`: `decode_region_scaled(PixelFormat::Rgb8, roi, Downscale::Quarter)`
   - `jpeg-decoder` / `zune-jpeg`: full RGB decode, crop the centered
     `256×256` region, then spatially decimate by `4×`
+  - `libjpeg-turbo`: `tj3SetScalingFactor(1/4)` + cropped decode + left-edge
+    trim when the ROI is not scaled-iMCU aligned
 - `wsi_region_scaled_rgb_q8`
   - `slidecodec-jpeg`: `decode_region_scaled(PixelFormat::Rgb8, roi, Downscale::Eighth)`
   - `jpeg-decoder` / `zune-jpeg`: full RGB decode, crop the centered
     `256×256` region, then spatially decimate by `8×`
+  - `libjpeg-turbo`: `tj3SetScalingFactor(1/8)` + cropped decode + left-edge
+    trim when the ROI is not scaled-iMCU aligned
 - `wsi_tile_batch_scaled_rgb_q4`
   - `slidecodec-jpeg`: repeated `decode_tile_scaled_into_in_context(..., PixelFormat::Rgb8, Downscale::Quarter)`
     with shared `DecoderContext`, shared `ScratchPool`, and one reused output
     buffer
   - `jpeg-decoder` / `zune-jpeg`: repeated fresh decode followed by in-memory
     `4×` decimation per tile
+  - `libjpeg-turbo`: repeated scaled TurboJPEG decode with one reused handle
 - `wsi_tile_batch_region_scaled_rgb_q4`
   - `slidecodec-jpeg`: repeated
     `decode_tile_region_scaled_into_in_context(..., PixelFormat::Rgb8, roi, Downscale::Quarter)`
@@ -69,6 +82,7 @@ performance signoff path.
     buffer
   - `jpeg-decoder` / `zune-jpeg`: repeated fresh decode, centered
     `256×256` crop, then `4×` in-memory decimation per tile
+  - `libjpeg-turbo`: repeated scaled cropped decode with one reused handle
 - `decode_reused_rgb` / `decode_reused_gray`
   - `slidecodec-jpeg`: `Decoder::new` once per input, then `decode_into` into a
     pre-allocated buffer for every iteration — isolates pure decode cost from
@@ -80,6 +94,11 @@ performance signoff path.
 
 `jpeg-decoder` is benchmarked with `default-features = false` so the comparison
 stays single-threaded and does not fold Rayon scheduling into the baseline.
+`libjpeg-turbo` is discovered through `pkg-config` at build time; if the local
+machine does not expose both `libturbojpeg` and `libjpeg`, the `libjpeg-turbo`
+rows are omitted from the compare bench. Set
+`SLIDECODEC_REQUIRE_LIBJPEG_TURBO=1` when running the direct comparator test on
+a signoff host to fail loudly instead of silently skipping the native path.
 
 For WSI signoff, the primary performance surface is the reduced-output and
 tile-batch groups:
@@ -331,6 +350,5 @@ is ≥2× over scalar, matching NEON.
 
 - Benchmark results are report-only for now; CI compiles the benches but does
   not fail on runtime performance deltas.
-- libjpeg-turbo remains the parity oracle. The comparison harness is for speed
-  and coarse behavior comparisons against Rust decoders, not for declaring a
-  new correctness oracle.
+- libjpeg-turbo remains the primary JPEG parity oracle, and it is now also a
+  direct speed comparator when available locally through `pkg-config`.

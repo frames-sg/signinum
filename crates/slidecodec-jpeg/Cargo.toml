@@ -10,6 +10,7 @@ homepage.workspace     = true
 keywords.workspace     = true
 categories.workspace   = true
 readme                 = "README.md"
+build                  = "build.rs"
 
 [lib]
 name = "slidecodec_jpeg"

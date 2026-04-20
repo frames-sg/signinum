@@ -4,9 +4,9 @@ use crate::J2kError;
 use alloc::string::ToString;
 use slidecodec_core::{Colorspace, Info};
 
-pub(crate) use dicom_toolkit_jpeg2000::{ColorSpace, DecodeSettings, Image, RawBitmap};
+pub(crate) use slidecodec_j2k_native::{ColorSpace, DecodeSettings, Image, RawBitmap};
 
-pub(crate) fn image<'a>(bytes: &'a [u8], settings: DecodeSettings) -> Result<Image<'a>, J2kError> {
+pub(crate) fn image(bytes: &[u8], settings: DecodeSettings) -> Result<Image<'_>, J2kError> {
     Image::new(bytes, &settings).map_err(|err| J2kError::Backend(err.to_string()))
 }
 

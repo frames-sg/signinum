@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use dicom_toolkit_jpeg2000::{encode, encode_htj2k, DecodeSettings, EncodeOptions, Image};
 use slidecodec_core::{
     BufferError, DecoderContext, Downscale, ImageDecodeRows, PixelFormat, Rect, RowSink,
     TileBatchDecode,
 };
 use slidecodec_j2k::{J2kCodec, J2kContext, J2kDecoder, J2kError};
+use slidecodec_j2k_native::{encode, encode_htj2k, DecodeSettings, EncodeOptions, Image};
 
 fn encode_codestream(
     pixels: &[u8],
@@ -106,27 +106,6 @@ fn crop_u8(full: &[u8], full_width: usize, channels: usize, roi: Rect) -> Vec<u8
     out
 }
 
-fn decimate_u8(
-    full: &[u8],
-    full_width: usize,
-    full_height: usize,
-    channels: usize,
-    denom: usize,
-) -> Vec<u8> {
-    let out_width = full_width.div_ceil(denom);
-    let out_height = full_height.div_ceil(denom);
-    let mut out = Vec::with_capacity(out_width * out_height * channels);
-    let row_bytes = full_width * channels;
-    for y in (0..full_height).step_by(denom) {
-        let row = &full[y * row_bytes..(y + 1) * row_bytes];
-        for x in (0..full_width).step_by(denom) {
-            let start = x * channels;
-            out.extend_from_slice(&row[start..start + channels]);
-        }
-    }
-    out
-}
-
 #[derive(Default)]
 struct CollectRowsU8 {
     rows: Vec<u8>,
@@ -167,6 +146,37 @@ fn decode_rgb8_codestream_roundtrips_reversible_pixels() {
         .expect("decode");
     assert_eq!(outcome.decoded, slidecodec_core::Rect::full((2, 2)));
     assert_eq!(out, expected.as_slice());
+}
+
+#[test]
+fn decoder_reuses_native_context_across_multiple_decode_calls() {
+    let pixels = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120];
+    let codestream = encode_codestream(&pixels, 2, 2, 3, 8, true);
+    let expected = backend_decode_u8(&codestream);
+    let mut decoder = J2kDecoder::new(&codestream).expect("decoder");
+
+    let mut full = [0_u8; 12];
+    decoder
+        .decode_into(&mut full, 2 * 3, PixelFormat::Rgb8)
+        .expect("first decode");
+    assert_eq!(full, expected.as_slice());
+
+    let mut scaled = [0_u8; 3];
+    decoder
+        .decode_scaled_into(
+            &mut slidecodec_j2k::J2kScratchPool::new(),
+            &mut scaled,
+            3,
+            PixelFormat::Rgb8,
+            Downscale::Half,
+        )
+        .expect("scaled decode");
+
+    let mut second = [0_u8; 12];
+    decoder
+        .decode_into(&mut second, 2 * 3, PixelFormat::Rgb8)
+        .expect("second decode");
+    assert_eq!(second, expected.as_slice());
 }
 
 #[test]
@@ -486,15 +496,11 @@ fn decode_htj2k_gray8_roundtrips_reversible_pixels() {
 }
 
 #[test]
-fn decode_htj2k_scaled_into_matches_full_decode_decimation() {
+fn decode_htj2k_scaled_into_matches_native_target_resolution_decode() {
     let pixels: Vec<u8> = (0_u8..16).collect();
     let codestream = encode_ht_codestream(&pixels, 4, 4, 1, 8);
+    let expected = backend_decode_u8_scaled(&codestream, (2, 2));
     let mut decoder = J2kDecoder::new(&codestream).expect("decoder");
-    let mut full = [0_u8; 16];
-    decoder
-        .decode_into(&mut full, 4, PixelFormat::Gray8)
-        .expect("full decode");
-    let expected = decimate_u8(&full, 4, 4, 1, 2);
     let mut pool = slidecodec_j2k::J2kScratchPool::new();
     let mut out = [0_u8; 4];
     decoder

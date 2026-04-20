@@ -5,7 +5,6 @@ use crate::{backend, J2kError, J2kScratchPool};
 use alloc::{string::ToString, vec::Vec};
 use core::convert::Infallible;
 use slidecodec_core::{BufferError, DecodeOutcome, Downscale, PixelFormat, Rect, Unsupported};
-
 pub(crate) type J2kDecodeOutcome = DecodeOutcome<Infallible>;
 
 pub(crate) fn decode_full_frame(

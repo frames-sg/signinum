@@ -8,8 +8,9 @@ Pathology codec stack for whole-slide imaging workloads.
 The core stack in this repository is:
 
 - `slidecodec-jpeg` — native JPEG decode for WSI tiles
-- `slidecodec-j2k` — native JPEG 2000 / HTJ2K inspect and decode, still under
-  rewrite and not release-complete
+- `slidecodec-j2k` — native in-repo JPEG 2000 / HTJ2K inspect and decode;
+  WSI-native ROI/context optimization milestones are still in progress, so the
+  workspace remains pre-1.0
 - `slidecodec-tilecodec` — tile decompression primitives for Deflate, Zstd,
   LZW, and Uncompressed payloads
 - `slidecodec-core` — shared traits, pixel/sample types, scratch/context
@@ -47,8 +48,8 @@ runtime.
 
 - JP2 / raw codestream inspect
 - full-frame, region, scaled, row-streaming, and tile-batch decode
-- Native rewrite in progress for JPEG 2000 / HTJ2K decode paths
-- HTJ2K handling through the current backend path
+- repo-local pure-Rust JPEG 2000 / HTJ2K decode engine
+- native ROI/context/performance rewrite still in progress
 - OpenJPEG-oriented parity and benchmark coverage
 
 ### `slidecodec-tilecodec`

@@ -3,12 +3,12 @@
 #![allow(dead_code)]
 
 use criterion::black_box;
-use dicom_toolkit_jpeg2000::{encode, encode_htj2k, EncodeOptions};
-use slidecodec_j2k_compare::{grok as grok_compare, openjpeg as openjpeg_compare};
 use slidecodec_j2k::{
     DecoderContext, Downscale, J2kCodec, J2kContext, J2kDecoder, J2kScratchPool, PixelFormat, Rect,
     TileBatchDecode,
 };
+use slidecodec_j2k_compare::{grok as grok_compare, openjpeg as openjpeg_compare};
+use slidecodec_j2k_native::{encode, encode_htj2k, EncodeOptions};
 use std::{
     fs,
     path::{Path, PathBuf},

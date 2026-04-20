@@ -17,7 +17,10 @@ fn main() {
             "cargo:rustc-link-search=native={}",
             staged_lib_dir.display()
         );
-        println!("cargo:rustc-link-search=native={}", config.lib_dir.display());
+        println!(
+            "cargo:rustc-link-search=native={}",
+            config.lib_dir.display()
+        );
         println!("cargo:rustc-link-lib=dylib=grokj2k");
         #[cfg(target_os = "macos")]
         println!(
@@ -35,9 +38,8 @@ fn main() {
 }
 
 fn stage_grok_runtime(lib_dir: &Path) -> Result<PathBuf, String> {
-    let out_dir = PathBuf::from(
-        std::env::var_os("OUT_DIR").ok_or_else(|| "OUT_DIR missing".to_string())?,
-    );
+    let out_dir =
+        PathBuf::from(std::env::var_os("OUT_DIR").ok_or_else(|| "OUT_DIR missing".to_string())?);
     #[cfg(target_os = "macos")]
     {
         stage_family(

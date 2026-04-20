@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use dicom_toolkit_jpeg2000::{encode_htj2k, EncodeOptions};
 use slidecodec_core::{Downscale, PixelFormat, Rect};
 use slidecodec_j2k::J2kDecoder;
+use slidecodec_j2k_native::{encode_htj2k, EncodeOptions};
 use std::{
     fs,
     path::{Path, PathBuf},

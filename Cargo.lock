@@ -63,6 +63,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c4512299f36f043ab09a583e57bceb5a5aab7a73db1805848e8fef3c9e8c78b3"
 
 [[package]]
+name = "bytemuck"
+version = "1.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c8efb64bd706a16a1bdde310ae86b351e4d21550d98d056f22f8a7f7a2183fec"
+
+[[package]]
 name = "cast"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -188,14 +194,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
-name = "dicom-toolkit-jpeg2000"
-version = "0.5.0"
-dependencies = [
- "log",
- "openjph-core",
-]
-
-[[package]]
 name = "either"
 version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -222,6 +220,15 @@ name = "fastrand"
 version = "2.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
+
+[[package]]
+name = "fearless_simd"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8fb2907d1f08b2b316b9223ced5b0e89d87028ba8deae9764741dba8ff7f3903"
+dependencies = [
+ "bytemuck",
+]
 
 [[package]]
 name = "find-msvc-tools"
@@ -455,13 +462,6 @@ checksum = "92682cb92e7b01e2c020cf8ec12f3374558924bb24621df1112d8a7c93d419ef"
 dependencies = [
  "cc",
  "libc",
-]
-
-[[package]]
-name = "openjph-core"
-version = "0.1.0"
-dependencies = [
- "thiserror",
 ]
 
 [[package]]
@@ -726,10 +726,10 @@ name = "slidecodec-j2k"
 version = "0.0.0"
 dependencies = [
  "criterion",
- "dicom-toolkit-jpeg2000",
  "proptest",
  "slidecodec-core",
  "slidecodec-j2k-compare",
+ "slidecodec-j2k-native",
  "thiserror",
 ]
 
@@ -740,6 +740,14 @@ dependencies = [
  "cc",
  "openjpeg-sys",
  "slidecodec-core",
+]
+
+[[package]]
+name = "slidecodec-j2k-native"
+version = "0.0.0"
+dependencies = [
+ "fearless_simd",
+ "log",
 ]
 
 [[package]]

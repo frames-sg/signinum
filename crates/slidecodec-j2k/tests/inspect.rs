@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use dicom_toolkit_jpeg2000::{encode_htj2k, EncodeOptions};
 use slidecodec_core::Colorspace;
 use slidecodec_j2k::{J2kDecoder, J2kError, J2kView};
+use slidecodec_j2k_native::{encode_htj2k, EncodeOptions};
 
 fn minimal_codestream() -> Vec<u8> {
     let mut bytes = vec![0xFF, 0x4F];

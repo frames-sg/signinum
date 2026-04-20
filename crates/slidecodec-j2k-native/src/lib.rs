@@ -1,5 +1,9 @@
 /*!
-A memory-safe, pure-Rust JPEG 2000 codec.
+Internal pure-Rust JPEG 2000 codec engine for `slidecodec`.
+
+This module tree was imported from the `dicom-toolkit-jpeg2000` 0.5.0 crate
+and adapted in-repo so `slidecodec-j2k` no longer depends on an external
+production decoder crate.
 
 `dicom-toolkit-jpeg2000` is the JPEG 2000 engine used by `dicom-toolkit-rs`.
 It is a maintained fork of the original `hayro-jpeg2000` project with
@@ -20,7 +24,7 @@ for emitting raw JPEG 2000 and HTJ2K codestreams.
 
 # Example
 ```rust,no_run
-use dicom_toolkit_jpeg2000::{DecodeSettings, Image};
+use slidecodec_j2k_native::{DecodeSettings, Image};
 
 let data = std::fs::read("image.jp2").unwrap();
 let image = Image::new(&data, &DecodeSettings::default()).unwrap();
@@ -88,8 +92,6 @@ pub mod error;
 #[macro_use]
 pub(crate) mod log;
 pub(crate) mod math;
-#[cfg(feature = "openjph-htj2k")]
-mod openjph_htj2k;
 pub(crate) mod writer;
 
 use crate::math::{dispatch, f32x8, Level, Simd, SIMD_WIDTH};
@@ -147,8 +149,6 @@ impl Default for DecodeSettings {
 pub struct Image<'a> {
     /// The tile-part payload used by the legacy JPEG 2000 decoder.
     pub(crate) codestream: &'a [u8],
-    /// The complete raw codestream (SOC..EOC), used by the HTJ2K backend.
-    pub(crate) encoded_codestream: &'a [u8],
     /// The header of the J2C codestream.
     pub(crate) header: Header<'a>,
     /// The JP2 boxes of the image. In the case of a raw codestream, we
@@ -156,8 +156,6 @@ pub struct Image<'a> {
     pub(crate) boxes: ImageBoxes,
     /// Settings that should be applied during decoding.
     pub(crate) settings: DecodeSettings,
-    /// Whether the codestream uses HT block coding and should be decoded by the HTJ2K backend.
-    pub(crate) uses_openjph_htj2k: bool,
     /// Whether the image has an alpha channel.
     pub(crate) has_alpha: bool,
     /// The color space of the image.
@@ -225,21 +223,17 @@ impl<'a> Image<'a> {
     /// This is essential for medical imaging (DICOM) where 12-bit and 16-bit
     /// images must preserve their full dynamic range.
     pub fn decode_native(&self) -> Result<RawBitmap> {
-        #[cfg(feature = "openjph-htj2k")]
-        if self.uses_openjph_htj2k {
-            return openjph_htj2k::decode_native(
-                self.encoded_codestream,
-                self.width(),
-                self.height(),
-                self.original_bit_depth(),
-                self.header.component_infos.len() as u8,
-                self.header.skipped_resolution_levels,
-            )
-            .map_err(|_| DecodeError::Decoding(DecodingError::UnsupportedFeature("HTJ2K decode")));
-        }
-
         let mut decoder_context = DecoderContext::default();
-        j2c::decode(self.codestream, &self.header, &mut decoder_context)?;
+        self.decode_native_with_context(&mut decoder_context)
+    }
+
+    /// Decode the image at native bit depth using a caller-provided decoder
+    /// context so allocations can be reused across repeated decodes.
+    pub fn decode_native_with_context(
+        &'a self,
+        decoder_context: &mut DecoderContext<'a>,
+    ) -> Result<RawBitmap> {
+        j2c::decode(self.codestream, &self.header, decoder_context)?;
 
         let components = &decoder_context.tile_decode_context.channel_data;
         let bit_depth = self.original_bit_depth();
@@ -304,9 +298,9 @@ impl<'a> Image<'a> {
     ///
     /// This method does the same as [`Image::decode`], but you can provide
     /// a custom buffer for the output, as well as a decoder context. Doing
-    /// so will allow `dicom-toolkit-jpeg2000` to reuse memory allocations, so this is
-    /// especially recommended if you plan on converting multiple images
-    /// in the same session.
+    /// so allows the internal decode engine to reuse memory allocations, so
+    /// this is especially recommended if you plan on converting multiple
+    /// images in the same session.
     ///
     /// The buffer must have the correct size.
     pub fn decode_into(
@@ -314,23 +308,6 @@ impl<'a> Image<'a> {
         buf: &mut [u8],
         decoder_context: &mut DecoderContext<'a>,
     ) -> Result<()> {
-        #[cfg(feature = "openjph-htj2k")]
-        if self.uses_openjph_htj2k {
-            if self.has_alpha
-                || self.boxes.palette.is_some()
-                || self.boxes.component_mapping.is_some()
-                || self.boxes.channel_definition.is_some()
-            {
-                return Err(DecodeError::Decoding(DecodingError::UnsupportedFeature(
-                    "HTJ2K JP2 palette/alpha handling",
-                )));
-            }
-
-            let raw = self.decode_native()?;
-            copy_raw_bitmap_to_u8(&raw, buf);
-            return Ok(());
-        }
-
         let settings = &self.settings;
         j2c::decode(self.codestream, &self.header, decoder_context)?;
         let mut decoded_image = DecodedImage {
@@ -371,23 +348,6 @@ impl<'a> Image<'a> {
         interleave_and_convert(&mut decoded_image, buf);
 
         Ok(())
-    }
-}
-
-fn copy_raw_bitmap_to_u8(raw: &RawBitmap, buf: &mut [u8]) {
-    let expected_len = raw.width as usize * raw.height as usize * raw.num_components as usize;
-    debug_assert_eq!(buf.len(), expected_len);
-
-    if raw.bytes_per_sample == 1 {
-        buf.copy_from_slice(&raw.data[..expected_len]);
-        return;
-    }
-
-    let max_value = ((1u32 << raw.bit_depth) - 1).max(1);
-    for (index, out) in buf.iter_mut().enumerate() {
-        let byte_offset = index * 2;
-        let sample = u16::from_le_bytes([raw.data[byte_offset], raw.data[byte_offset + 1]]) as u32;
-        *out = ((sample * 255 + (max_value / 2)) / max_value) as u8;
     }
 }
 
@@ -500,8 +460,8 @@ pub struct Bitmap {
     /// The color space of the image.
     pub color_space: ColorSpace,
     /// The raw pixel data of the image. The result will always be in
-    /// 8-bit (in case the original image had a different bit-depth,
-    /// dicom-toolkit-jpeg2000 always scales to 8-bit).
+    /// 8-bit (in case the original image had a different bit-depth, this
+    /// decode path scales it to 8-bit).
     ///
     /// The size is guaranteed to equal
     /// `width * height * (num_channels + (if has_alpha { 1 } else { 0 })`.

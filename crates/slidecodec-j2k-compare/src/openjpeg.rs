@@ -1,14 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use openjpeg_sys::{
-    opj_codec_set_threads, opj_create_decompress, opj_dparameters_t, opj_decode,
-    opj_destroy_codec, opj_end_decompress, opj_image, opj_image_destroy, opj_image_t,
-    opj_read_header, opj_set_decode_area, opj_set_decoded_resolution_factor,
-    opj_set_default_decoder_parameters, opj_setup_decoder, opj_stream_create,
-    opj_stream_destroy, opj_stream_set_read_function, opj_stream_set_seek_function,
-    opj_stream_set_skip_function, opj_stream_set_user_data, opj_stream_set_user_data_length,
-    opj_stream_t, OPJ_BOOL, OPJ_CODEC_FORMAT, OPJ_FALSE, OPJ_OFF_T, OPJ_SIZE_T,
-    OPJ_STREAM_READ, OPJ_TRUE,
+    opj_codec_set_threads, opj_create_decompress, opj_decode, opj_destroy_codec, opj_dparameters_t,
+    opj_end_decompress, opj_image, opj_image_destroy, opj_image_t, opj_read_header,
+    opj_set_decode_area, opj_set_decoded_resolution_factor, opj_set_default_decoder_parameters,
+    opj_setup_decoder, opj_stream_create, opj_stream_destroy, opj_stream_set_read_function,
+    opj_stream_set_seek_function, opj_stream_set_skip_function, opj_stream_set_user_data,
+    opj_stream_set_user_data_length, opj_stream_t, OPJ_BOOL, OPJ_CODEC_FORMAT, OPJ_FALSE,
+    OPJ_OFF_T, OPJ_SIZE_T, OPJ_STREAM_READ, OPJ_TRUE,
 };
 use slidecodec_core::Rect;
 use std::{ffi::c_void, ptr, slice};

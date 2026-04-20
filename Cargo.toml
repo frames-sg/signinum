@@ -3,12 +3,11 @@ resolver = "2"
 members = [
     "crates/slidecodec-core",
     "crates/slidecodec-j2k-compare",
+    "crates/slidecodec-j2k-native",
     "crates/slidecodec-j2k",
     "crates/slidecodec-jpeg",
     "crates/slidecodec-tilecodec",
     "crates/slidecodec-cli",
-    "crates/dicom-toolkit-jpeg2000",
-    "crates/openjph-core",
 ]
 
 [workspace.package]

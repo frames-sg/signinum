@@ -222,23 +222,6 @@ fn encode_impl(
         return Err("pixel data too short");
     }
 
-    #[cfg(feature = "openjph-htj2k")]
-    if block_coding_mode == BlockCodingMode::HighThroughput {
-        let mut openjph_options = options.clone();
-        openjph_options.num_decomposition_levels = options
-            .num_decomposition_levels
-            .min(max_decomposition_levels(width, height));
-        return crate::openjph_htj2k::encode(
-            pixels,
-            width,
-            height,
-            num_components,
-            bit_depth,
-            signed,
-            &openjph_options,
-        );
-    }
-
     // Step 1: Convert pixel bytes to f32 component arrays
     let mut components = deinterleave_to_f32(pixels, num_pixels, num_components, bit_depth, signed);
 

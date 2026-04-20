@@ -3,7 +3,7 @@
 mod common;
 
 use common::{
-    bench_fixture_rgb, slidecodec_rgb, slidecodec_rgb_region, slidecodec_rgb_scaled_q4, in_process,
+    bench_fixture_rgb, in_process, slidecodec_rgb, slidecodec_rgb_region, slidecodec_rgb_scaled_q4,
 };
 use slidecodec_core::Rect;
 

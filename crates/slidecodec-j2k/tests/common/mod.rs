@@ -2,7 +2,15 @@
 
 use slidecodec_core::{Downscale, PixelFormat, Rect};
 use slidecodec_j2k::J2kDecoder;
-use std::{fs, path::PathBuf, process::Command, sync::OnceLock};
+use std::{
+    fs,
+    path::PathBuf,
+    process::Command,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        OnceLock,
+    },
+};
 
 pub(crate) mod in_process;
 
@@ -68,8 +76,9 @@ fn gradient_u8(width: u32, height: u32, channels: usize) -> Vec<u8> {
 fn openjpeg_encode_jp2(name: &str, pixels: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
     let bin = openjpeg_compress_bin()?;
     let dir = openjpeg_temp_dir();
-    let src_path = dir.join(format!("{name}.ppm"));
-    let out_path = dir.join(format!("{name}.jp2"));
+    let unique = next_temp_suffix();
+    let src_path = dir.join(format!("{name}-{unique}.ppm"));
+    let out_path = dir.join(format!("{name}-{unique}.jp2"));
     write_ppm(&src_path, pixels, width, height).ok()?;
     let status = Command::new(bin)
         .arg("-i")
@@ -82,6 +91,11 @@ fn openjpeg_encode_jp2(name: &str, pixels: &[u8], width: u32, height: u32) -> Op
         return None;
     }
     fs::read(out_path).ok()
+}
+
+fn next_temp_suffix() -> usize {
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+    COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
 fn openjpeg_compress_bin() -> Option<PathBuf> {
@@ -110,7 +124,12 @@ fn openjpeg_temp_dir() -> PathBuf {
     .clone()
 }
 
-fn write_ppm(path: &std::path::Path, pixels: &[u8], width: u32, height: u32) -> std::io::Result<()> {
+fn write_ppm(
+    path: &std::path::Path,
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+) -> std::io::Result<()> {
     let mut bytes = format!("P6\n{width} {height}\n255\n").into_bytes();
     bytes.extend_from_slice(pixels);
     fs::write(path, bytes)

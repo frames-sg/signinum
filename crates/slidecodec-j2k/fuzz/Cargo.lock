@@ -33,16 +33,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
-name = "dicom-toolkit-jpeg2000"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f51888e27b226aeb853c5d1a839504c5f9afa995fad3c5ac9d55f15b19a972d"
-dependencies = [
- "fearless_simd",
- "openjph-core",
-]
-
-[[package]]
 name = "fearless_simd"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -96,15 +86,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "openjph-core"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c8b96ed12b3d41623a771af4af8131abf353bc822b7a567c6ef3b35ab967a36d"
-dependencies = [
- "thiserror",
-]
-
-[[package]]
 name = "proc-macro2"
 version = "1.0.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -136,17 +117,17 @@ checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
 name = "slidecodec-core"
-version = "1.0.0"
+version = "0.0.0"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "slidecodec-j2k"
-version = "1.0.0"
+version = "0.0.0"
 dependencies = [
- "dicom-toolkit-jpeg2000",
  "slidecodec-core",
+ "slidecodec-j2k-native",
  "thiserror",
 ]
 
@@ -156,6 +137,13 @@ version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
  "slidecodec-j2k",
+]
+
+[[package]]
+name = "slidecodec-j2k-native"
+version = "0.0.0"
+dependencies = [
+ "fearless_simd",
 ]
 
 [[package]]

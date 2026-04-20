@@ -16,13 +16,14 @@ path = "src/lib.rs"
 
 [dependencies]
 slidecodec-core = { path = "../slidecodec-core", version = "0.0.0" }
-dicom-toolkit-jpeg2000 = { path = "../dicom-toolkit-jpeg2000", default-features = true }
+slidecodec-j2k-native = { path = "../slidecodec-j2k-native", version = "0.0.0" }
 thiserror = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
 criterion = { workspace = true }
-slidecodec-j2k-compare = { path = "../slidecodec-j2k-compare" }
+slidecodec-j2k-compare = { path = "../slidecodec-j2k-compare", version = "0.0.0" }
+slidecodec-j2k-native = { path = "../slidecodec-j2k-native", version = "0.0.0" }
 
 [[bench]]
 name = "compare"

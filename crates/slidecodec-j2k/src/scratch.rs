@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use slidecodec_core::ScratchPool;
 use alloc::vec::Vec;
+use slidecodec_core::ScratchPool;
 
 /// Caller-owned reusable scratch for `slidecodec-j2k`.
 #[derive(Debug, Default, PartialEq, Eq)]

@@ -19,9 +19,11 @@ fn main() -> ExitCode {
             inspect(Path::new(&path))
         }
         Some("--help") | Some("-h") | Some("help") | None => {
-            eprintln!("slidecodec 0.0.0");
+            eprintln!("slidecodec {}", env!("CARGO_PKG_VERSION"));
             eprintln!("Usage:");
-            eprintln!("  slidecodec inspect <file>    Parse headers and print Info");
+            eprintln!(
+                "  slidecodec inspect <file>    Parse JPEG or JPEG 2000 headers and print Info"
+            );
             ExitCode::SUCCESS
         }
         Some(other) => {

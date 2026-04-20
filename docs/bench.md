@@ -223,6 +223,44 @@ SLIDECODEC_OPENJPEG_COMPRESS_BIN=/opt/homebrew/bin/opj_compress \
   cargo bench -p slidecodec-j2k --bench compare
 ```
 
+## `slidecodec-tilecodec`
+
+`slidecodec-tilecodec` carries a Criterion comparator bench at
+`crates/slidecodec-tilecodec/benches/compare.rs`.
+
+It benchmarks four decompression paths:
+
+- `DeflateCodec`
+- `ZstdCodec`
+- `LzwCodec`
+- `UncompressedCodec`
+
+Bench group:
+
+- `decompress_into`
+
+Comparator policy:
+
+- `slidecodec-tilecodec` is benchmarked through the public `TileDecompress`
+  implementations with reusable typed pools
+- Deflate is compared against direct `flate2` decode using the same zlib-backed
+  implementation family
+- Zstd is compared against direct `zstd` stream decode
+- LZW is compared against direct `weezl` decode
+- Uncompressed is compared against a plain `memcpy`
+
+Compile the tilecodec compare bench:
+
+```sh
+cargo bench -p slidecodec-tilecodec --bench compare --no-run
+```
+
+Run it locally:
+
+```sh
+cargo bench -p slidecodec-tilecodec --bench compare
+```
+
 ## Recorded baselines
 
 All numbers on `aarch64-apple-darwin`, Criterion `--quick`, committed

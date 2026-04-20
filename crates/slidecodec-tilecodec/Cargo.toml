@@ -1,6 +1,6 @@
 [package]
-name        = "slidecodec-j2k"
-description = "JPEG 2000 inspector and decoder for whole-slide images"
+name        = "slidecodec-tilecodec"
+description = "Tile decompression codecs for pathology image containers"
 version.workspace      = true
 edition.workspace      = true
 rust-version.workspace = true
@@ -11,16 +11,17 @@ keywords.workspace     = true
 categories.workspace   = true
 
 [lib]
-name = "slidecodec_j2k"
+name = "slidecodec_tilecodec"
 path = "src/lib.rs"
 
 [dependencies]
 slidecodec-core = { path = "../slidecodec-core", version = "1.0.0" }
-dicom-toolkit-jpeg2000 = { version = "0.5.0", default-features = true }
 thiserror = { workspace = true }
+flate2 = { workspace = true }
+zstd = { workspace = true }
+weezl = { workspace = true }
 
 [dev-dependencies]
-proptest = { workspace = true }
 criterion = { workspace = true }
 
 [[bench]]

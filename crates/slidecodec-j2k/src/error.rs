@@ -20,9 +20,7 @@ pub enum J2kError {
     #[error("backend decode failed: {0}")]
     Backend(String),
 
-    #[error(
-        "region ({x},{y} {w}x{h}) is outside image bounds {image_w}x{image_h}"
-    )]
+    #[error("region ({x},{y} {w}x{h}) is outside image bounds {image_w}x{image_h}")]
     InvalidRegion {
         x: u32,
         y: u32,

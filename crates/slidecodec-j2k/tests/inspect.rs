@@ -103,8 +103,8 @@ fn ht_jp2() -> Vec<u8> {
         b' ',
     ]);
     bytes.extend_from_slice(&[
-        0, 0, 0, 45, b'j', b'p', b'2', b'h', 0, 0, 0, 22, b'i', b'h', b'd', b'r', 0, 0, 0, 2, 0,
-        0, 0, 2, 0, 1, 7, 7, 0, 0, 0, 0, 0, 15, b'c', b'o', b'l', b'r', 1, 0, 0, 0, 0, 0, 17,
+        0, 0, 0, 45, b'j', b'p', b'2', b'h', 0, 0, 0, 22, b'i', b'h', b'd', b'r', 0, 0, 0, 2, 0, 0,
+        0, 2, 0, 1, 7, 7, 0, 0, 0, 0, 0, 15, b'c', b'o', b'l', b'r', 1, 0, 0, 0, 0, 0, 17,
     ]);
     let len = (8 + codestream.len()) as u32;
     bytes.extend_from_slice(&len.to_be_bytes());

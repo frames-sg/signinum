@@ -5,8 +5,8 @@
 use criterion::black_box;
 use dicom_toolkit_jpeg2000::{encode, encode_htj2k, EncodeOptions};
 use slidecodec_j2k::{
-    DecoderContext, Downscale, J2kCodec, J2kContext, J2kDecoder, J2kScratchPool, PixelFormat,
-    Rect, TileBatchDecode,
+    DecoderContext, Downscale, J2kCodec, J2kContext, J2kDecoder, J2kScratchPool, PixelFormat, Rect,
+    TileBatchDecode,
 };
 use std::{
     fs,
@@ -34,14 +34,26 @@ pub(crate) fn bench_inputs() -> Vec<BenchInput> {
     vec![
         BenchInput {
             name: "j2k_gray_512",
-            bytes: classic_bench_bytes("j2k_gray_512", &gradient_u8(512, 512, 1), 512, 512, DecodeMode::Gray8),
+            bytes: classic_bench_bytes(
+                "j2k_gray_512",
+                &gradient_u8(512, 512, 1),
+                512,
+                512,
+                DecodeMode::Gray8,
+            ),
             dimensions: (512, 512),
             mode: DecodeMode::Gray8,
             is_ht: false,
         },
         BenchInput {
             name: "j2k_rgb_256",
-            bytes: classic_bench_bytes("j2k_rgb_256", &gradient_u8(256, 256, 3), 256, 256, DecodeMode::Rgb8),
+            bytes: classic_bench_bytes(
+                "j2k_rgb_256",
+                &gradient_u8(256, 256, 3),
+                256,
+                256,
+                DecodeMode::Rgb8,
+            ),
             dimensions: (256, 256),
             mode: DecodeMode::Rgb8,
             is_ht: false,
@@ -140,7 +152,10 @@ fn encode_j2k(pixels: &[u8], width: u32, height: u32, components: u8, bit_depth:
         num_decomposition_levels: 3,
         ..EncodeOptions::default()
     };
-    encode(pixels, width, height, components, bit_depth, false, &options).expect("encode")
+    encode(
+        pixels, width, height, components, bit_depth, false, &options,
+    )
+    .expect("encode")
 }
 
 fn encode_ht(pixels: &[u8], width: u32, height: u32, components: u8, bit_depth: u8) -> Vec<u8> {
@@ -149,7 +164,10 @@ fn encode_ht(pixels: &[u8], width: u32, height: u32, components: u8, bit_depth: 
         num_decomposition_levels: 3,
         ..EncodeOptions::default()
     };
-    encode_htj2k(pixels, width, height, components, bit_depth, false, &options).expect("encode ht")
+    encode_htj2k(
+        pixels, width, height, components, bit_depth, false, &options,
+    )
+    .expect("encode ht")
 }
 
 fn classic_bench_bytes(
@@ -205,22 +223,7 @@ fn wrap_codestream_jp2(
 
     let bpc = bit_depth.saturating_sub(1);
     bytes.extend_from_slice(&[
-        0,
-        0,
-        0,
-        45,
-        b'j',
-        b'p',
-        b'2',
-        b'h',
-        0,
-        0,
-        0,
-        22,
-        b'i',
-        b'h',
-        b'd',
-        b'r',
+        0, 0, 0, 45, b'j', b'p', b'2', b'h', 0, 0, 0, 22, b'i', b'h', b'd', b'r',
     ]);
     bytes.extend_from_slice(&height.to_be_bytes());
     bytes.extend_from_slice(&width.to_be_bytes());
@@ -371,7 +374,11 @@ impl OpenJpegHarness {
         }
         let status = command.status().expect("run openjpeg");
         assert!(status.success(), "OpenJPEG decode failed");
-        black_box(fs::metadata(&self.output_path).expect("openjpeg output metadata").len());
+        black_box(
+            fs::metadata(&self.output_path)
+                .expect("openjpeg output metadata")
+                .len(),
+        );
     }
 }
 

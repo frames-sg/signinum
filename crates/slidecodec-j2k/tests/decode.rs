@@ -20,7 +20,10 @@ fn encode_codestream(
         num_decomposition_levels: 1,
         ..EncodeOptions::default()
     };
-    encode(pixels, width, height, components, bit_depth, false, &options).expect("encode")
+    encode(
+        pixels, width, height, components, bit_depth, false, &options,
+    )
+    .expect("encode")
 }
 
 fn encode_ht_codestream(
@@ -35,7 +38,10 @@ fn encode_ht_codestream(
         num_decomposition_levels: 1,
         ..EncodeOptions::default()
     };
-    encode_htj2k(pixels, width, height, components, bit_depth, false, &options).expect("encode ht")
+    encode_htj2k(
+        pixels, width, height, components, bit_depth, false, &options,
+    )
+    .expect("encode ht")
 }
 
 fn wrap_codestream_jp2(
@@ -55,22 +61,7 @@ fn wrap_codestream_jp2(
 
     let bpc = bit_depth.saturating_sub(1);
     bytes.extend_from_slice(&[
-        0,
-        0,
-        0,
-        45,
-        b'j',
-        b'p',
-        b'2',
-        b'h',
-        0,
-        0,
-        0,
-        22,
-        b'i',
-        b'h',
-        b'd',
-        b'r',
+        0, 0, 0, 45, b'j', b'p', b'2', b'h', 0, 0, 0, 22, b'i', b'h', b'd', b'r',
     ]);
     bytes.extend_from_slice(&height.to_be_bytes());
     bytes.extend_from_slice(&width.to_be_bytes());
@@ -115,7 +106,13 @@ fn crop_u8(full: &[u8], full_width: usize, channels: usize, roi: Rect) -> Vec<u8
     out
 }
 
-fn decimate_u8(full: &[u8], full_width: usize, full_height: usize, channels: usize, denom: usize) -> Vec<u8> {
+fn decimate_u8(
+    full: &[u8],
+    full_width: usize,
+    full_height: usize,
+    channels: usize,
+    denom: usize,
+) -> Vec<u8> {
     let out_width = full_width.div_ceil(denom);
     let out_height = full_height.div_ceil(denom);
     let mut out = Vec::with_capacity(out_width * out_height * channels);
@@ -290,7 +287,13 @@ fn decode_scaled_into_matches_backend_target_resolution_decode() {
     let mut pool = slidecodec_j2k::J2kScratchPool::new();
     let mut out = [0_u8; 12];
     let outcome = decoder
-        .decode_scaled_into(&mut pool, &mut out, 2 * 3, PixelFormat::Rgb8, Downscale::Half)
+        .decode_scaled_into(
+            &mut pool,
+            &mut out,
+            2 * 3,
+            PixelFormat::Rgb8,
+            Downscale::Half,
+        )
         .expect("scaled decode");
     assert_eq!(outcome.decoded, Rect::full((2, 2)));
     assert_eq!(out, expected.as_slice());
@@ -306,7 +309,12 @@ fn decode_region_into_matches_cropping_full_decode() {
         .decode_into(&mut full, 3, PixelFormat::Gray8)
         .expect("full decode");
 
-    let roi = Rect { x: 1, y: 1, w: 2, h: 2 };
+    let roi = Rect {
+        x: 1,
+        y: 1,
+        w: 2,
+        h: 2,
+    };
     let expected = crop_u8(&full, 3, 1, roi);
     let mut pool = slidecodec_j2k::J2kScratchPool::new();
     let mut out = [0_u8; 4];
@@ -381,7 +389,12 @@ fn tile_batch_decode_matches_borrowed_decoder_decode() {
 fn tile_batch_region_decode_matches_decoder_region_decode() {
     let pixels = [0_u8, 1, 2, 3, 4, 5, 6, 7, 8];
     let codestream = encode_codestream(&pixels, 3, 3, 1, 8, true);
-    let roi = Rect { x: 1, y: 1, w: 2, h: 2 };
+    let roi = Rect {
+        x: 1,
+        y: 1,
+        w: 2,
+        h: 2,
+    };
     let mut decoder = J2kDecoder::new(&codestream).expect("decoder");
     let mut pool = slidecodec_j2k::J2kScratchPool::new();
     let mut expected = [0_u8; 4];
@@ -412,7 +425,13 @@ fn tile_batch_scaled_decode_matches_decoder_scaled_decode() {
     let mut pool = slidecodec_j2k::J2kScratchPool::new();
     let mut expected = [0_u8; 12];
     decoder
-        .decode_scaled_into(&mut pool, &mut expected, 2 * 3, PixelFormat::Rgb8, Downscale::Half)
+        .decode_scaled_into(
+            &mut pool,
+            &mut expected,
+            2 * 3,
+            PixelFormat::Rgb8,
+            Downscale::Half,
+        )
         .expect("decoder scaled");
 
     let mut ctx = DecoderContext::<J2kContext>::new();
@@ -428,6 +447,30 @@ fn tile_batch_scaled_decode_matches_decoder_scaled_decode() {
     )
     .expect("tile scaled");
     assert_eq!(out, expected);
+}
+
+#[test]
+fn decode_region_into_rejects_out_of_bounds_roi() {
+    let pixels = [0_u8, 1, 2, 3];
+    let codestream = encode_codestream(&pixels, 2, 2, 1, 8, true);
+    let mut decoder = J2kDecoder::new(&codestream).expect("decoder");
+    let mut pool = slidecodec_j2k::J2kScratchPool::new();
+    let mut out = [0_u8; 4];
+    let err = decoder
+        .decode_region_into(
+            &mut pool,
+            &mut out,
+            2,
+            PixelFormat::Gray8,
+            Rect {
+                x: 1,
+                y: 1,
+                w: 2,
+                h: 2,
+            },
+        )
+        .unwrap_err();
+    assert!(matches!(err, J2kError::InvalidRegion { .. }));
 }
 
 #[test]

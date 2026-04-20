@@ -19,8 +19,8 @@ pub mod view;
 pub use view::{J2kCodec, J2kDecoder, J2kView};
 
 pub use slidecodec_core::{
-    BufferError, CodecError, DecodeOutcome, DecodeRowsError, DecoderContext, Downscale,
-    ImageCodec, ImageDecode, ImageDecodeRows, PixelFormat, Rect, RowSink, TileBatchDecode,
+    BufferError, CodecError, DecodeOutcome, DecodeRowsError, DecoderContext, Downscale, ImageCodec,
+    ImageDecode, ImageDecodeRows, PixelFormat, Rect, RowSink, TileBatchDecode,
 };
 
 pub(crate) mod parse;

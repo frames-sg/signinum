@@ -119,7 +119,9 @@ fn decode_image_into(
     let dims = (image.width(), image.height());
     match fmt {
         PixelFormat::Rgb8 | PixelFormat::Rgba8 | PixelFormat::Gray8 => {
-            let decoded = image.decode().map_err(|err| J2kError::Backend(err.to_string()))?;
+            let decoded = image
+                .decode()
+                .map_err(|err| J2kError::Backend(err.to_string()))?;
             write_u8_output(
                 image.color_space(),
                 image.has_alpha(),
@@ -134,7 +136,14 @@ fn decode_image_into(
             let raw = image
                 .decode_native()
                 .map_err(|err| J2kError::Backend(err.to_string()))?;
-            write_u16_output(image.color_space(), image.has_alpha(), &raw, out, stride, fmt)
+            write_u16_output(
+                image.color_space(),
+                image.has_alpha(),
+                &raw,
+                out,
+                stride,
+                fmt,
+            )
         }
         PixelFormat::Rgba16 => unreachable!("validated above"),
         _ => Err(Unsupported {
@@ -173,11 +182,10 @@ fn validate_buffer(
     stride: usize,
     fmt: PixelFormat,
 ) -> Result<(), J2kError> {
-    let row_bytes = dims
-        .0
-        .checked_mul(fmt.bytes_per_pixel() as u32)
-        .ok_or(J2kError::Backend("row byte count overflow".to_string()))?
-        as usize;
+    let row_bytes =
+        dims.0
+            .checked_mul(fmt.bytes_per_pixel() as u32)
+            .ok_or(J2kError::Backend("row byte count overflow".to_string()))? as usize;
     if stride < row_bytes {
         return Err(BufferError::StrideTooSmall { row_bytes, stride }.into());
     }
@@ -193,11 +201,10 @@ fn validate_buffer(
 }
 
 fn output_len(dims: (u32, u32), stride: usize, fmt: PixelFormat) -> Result<usize, J2kError> {
-    let row_bytes = dims
-        .0
-        .checked_mul(fmt.bytes_per_pixel() as u32)
-        .ok_or(J2kError::Backend("row byte count overflow".to_string()))?
-        as usize;
+    let row_bytes =
+        dims.0
+            .checked_mul(fmt.bytes_per_pixel() as u32)
+            .ok_or(J2kError::Backend("row byte count overflow".to_string()))? as usize;
     let height = dims.1 as usize;
     if height == 0 {
         return Ok(0);
@@ -211,7 +218,10 @@ fn output_len(dims: (u32, u32), stride: usize, fmt: PixelFormat) -> Result<usize
 fn scaled_dimensions(bytes: &[u8], scale: Downscale) -> Result<(u32, u32), J2kError> {
     let image = backend_image(bytes, DecodeSettings::default())?;
     let denom = scale.denominator();
-    Ok((image.width().div_ceil(denom), image.height().div_ceil(denom)))
+    Ok((
+        image.width().div_ceil(denom),
+        image.height().div_ceil(denom),
+    ))
 }
 
 fn decode_scaled_fallback(
@@ -397,7 +407,10 @@ fn add_opaque_alpha_u8(src: &[u8], out: &mut [u8], stride: usize, width: usize, 
         .zip(out.chunks_exact_mut(stride))
         .take(height)
     {
-        for (rgb, rgba) in src_row.chunks_exact(3).zip(dst_row[..dst_row_bytes].chunks_exact_mut(4)) {
+        for (rgb, rgba) in src_row
+            .chunks_exact(3)
+            .zip(dst_row[..dst_row_bytes].chunks_exact_mut(4))
+        {
             rgba[..3].copy_from_slice(rgb);
             rgba[3] = u8::MAX;
         }
@@ -412,7 +425,10 @@ fn drop_alpha_u8(src: &[u8], out: &mut [u8], stride: usize, width: usize, height
         .zip(out.chunks_exact_mut(stride))
         .take(height)
     {
-        for (rgba, rgb) in src_row.chunks_exact(4).zip(dst_row[..dst_row_bytes].chunks_exact_mut(3)) {
+        for (rgba, rgb) in src_row
+            .chunks_exact(4)
+            .zip(dst_row[..dst_row_bytes].chunks_exact_mut(3))
+        {
             rgb.copy_from_slice(&rgba[..3]);
         }
     }

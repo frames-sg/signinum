@@ -19,7 +19,7 @@ path = "src/lib.rs"
 scalar-only  = []   # retained for fuzz/reference decode until native SIMD backends land
 
 [dependencies]
-slidecodec-core = { path = "../slidecodec-core", version = "0.0.0" }
+slidecodec-core = { path = "../slidecodec-core", version = "1.0.0" }
 thiserror = { workspace = true }
 memchr = { version = "2.7.6", default-features = false }
 
@@ -47,10 +47,9 @@ harness = false
 # explicit there while the rest of the crate remains safe Rust.
 unsafe_code     = "allow"
 unreachable_pub = "warn"
-# `missing_docs` is deliberately *not* enabled pre-0.1 — the crate is still
-# growing its public surface and CI uses `-D warnings`, which would turn every
-# undocumented variant into a blocker. A dedicated documentation pass before
-# 0.1.0 promotes this to `warn` (tracked in docs/architecture.md).
+# `missing_docs` remains disabled for now because CI uses `-D warnings` and the
+# public surface is still being documented crate-by-crate after the 1.0
+# workspace integration.
 
 [lints.clippy]
 pedantic                     = { level = "warn", priority = -1 }
@@ -59,8 +58,8 @@ must_use_candidate           = "allow"
 # Style-only lints that conflict with the plan's explicit-over-idiomatic
 # choices in the marker/header parser (individual SOF-code OR patterns,
 # mixed `as` casts with compile-time-safe ranges, doc strings referring
-# to bit-precision acronyms, etc.). Promote back to warn in the pre-0.1
-# documentation pass.
+# to bit-precision acronyms, etc.). Promote these back to `warn` as the
+# post-integration documentation pass closes out.
 match_same_arms              = "allow"
 manual_range_patterns        = "allow"
 cast_possible_truncation     = "allow"

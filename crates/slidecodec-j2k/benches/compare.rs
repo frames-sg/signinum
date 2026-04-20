@@ -22,7 +22,10 @@ fn bench_compare(c: &mut Criterion) {
     inspect.finish();
 
     let mut decode_gray = c.benchmark_group("decode_gray");
-    for input in inputs.iter().filter(|input| input.mode == DecodeMode::Gray8) {
+    for input in inputs
+        .iter()
+        .filter(|input| input.mode == DecodeMode::Gray8)
+    {
         decode_gray.bench_function(format!("slidecodec/{}", input.name), |b| {
             b.iter(|| slidecodec_decode(&input.bytes, input.mode));
         });
@@ -48,7 +51,10 @@ fn bench_compare(c: &mut Criterion) {
     decode_rgb.finish();
 
     let mut wsi_region = c.benchmark_group("wsi_region_gray");
-    for input in inputs.iter().filter(|input| input.mode == DecodeMode::Gray8) {
+    for input in inputs
+        .iter()
+        .filter(|input| input.mode == DecodeMode::Gray8)
+    {
         let roi = centered_roi(input.dimensions, 256);
         wsi_region.bench_function(format!("slidecodec/{}", input.name), |b| {
             b.iter(|| slidecodec_decode_region(&input.bytes, input.mode, 256));
@@ -62,7 +68,10 @@ fn bench_compare(c: &mut Criterion) {
     wsi_region.finish();
 
     let mut wsi_scaled = c.benchmark_group("wsi_scaled_gray_q4");
-    for input in inputs.iter().filter(|input| input.mode == DecodeMode::Gray8) {
+    for input in inputs
+        .iter()
+        .filter(|input| input.mode == DecodeMode::Gray8)
+    {
         wsi_scaled.bench_function(format!("slidecodec/{}", input.name), |b| {
             b.iter(|| slidecodec_decode_scaled(&input.bytes, input.mode, Downscale::Quarter));
         });
@@ -75,7 +84,10 @@ fn bench_compare(c: &mut Criterion) {
     wsi_scaled.finish();
 
     let mut wsi_tile_batch = c.benchmark_group("wsi_tile_batch_gray");
-    for input in inputs.iter().filter(|input| input.mode == DecodeMode::Gray8) {
+    for input in inputs
+        .iter()
+        .filter(|input| input.mode == DecodeMode::Gray8)
+    {
         wsi_tile_batch.bench_function(format!("slidecodec/{}", input.name), |b| {
             b.iter(|| slidecodec_decode_tile_batch(&input.bytes, input.mode, 16));
         });

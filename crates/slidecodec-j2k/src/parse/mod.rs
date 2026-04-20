@@ -51,10 +51,9 @@ impl CodestreamInfo {
         Info {
             dimensions: self.siz.dimensions,
             components: self.siz.components,
-            colorspace: colorspace
-                .unwrap_or_else(|| {
-                    infer_colorspace(self.siz.components, self.cod.has_mct, self.cod.reversible)
-                }),
+            colorspace: colorspace.unwrap_or_else(|| {
+                infer_colorspace(self.siz.components, self.cod.has_mct, self.cod.reversible)
+            }),
             bit_depth: self.siz.bit_depth,
             tile_layout: Some(self.siz.tile_layout),
             resolution_levels: self.cod.resolution_levels,

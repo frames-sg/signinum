@@ -10,11 +10,11 @@ use crate::{
     J2kError,
 };
 use alloc::vec::Vec;
+use core::convert::Infallible;
 use slidecodec_core::{
     DecodeRowsError, DecoderContext, Downscale, ImageCodec, ImageDecode, ImageDecodeRows, Info,
     PixelFormat, Rect, RowSink, TileBatchDecode,
 };
-use core::convert::Infallible;
 
 #[derive(Debug)]
 pub struct J2kView<'a> {
@@ -191,13 +191,15 @@ impl<'a> ImageDecodeRows<'a, u8> for J2kDecoder<'a> {
     {
         let fmt = row_format_u8(self.info()).map_err(DecodeRowsError::Decode)?;
         let row_bytes = row_bytes_for(self.info(), fmt).map_err(DecodeRowsError::Decode)?;
-        let total_len = total_output_bytes(self.info(), row_bytes).map_err(DecodeRowsError::Decode)?;
+        let total_len =
+            total_output_bytes(self.info(), row_bytes).map_err(DecodeRowsError::Decode)?;
         let mut pool = J2kScratchPool::new();
         let packed = pool.packed_bytes(total_len);
         self.decode_into(packed, row_bytes, fmt)
             .map_err(DecodeRowsError::Decode)?;
         for (y, row) in packed.chunks_exact(row_bytes).enumerate() {
-            sink.write_row(y as u32, row).map_err(DecodeRowsError::Sink)?;
+            sink.write_row(y as u32, row)
+                .map_err(DecodeRowsError::Sink)?;
         }
         Ok(slidecodec_core::DecodeOutcome {
             decoded: Rect::full(self.info.dimensions),
@@ -215,7 +217,8 @@ impl<'a> ImageDecodeRows<'a, u16> for J2kDecoder<'a> {
         let fmt = row_format_u16(self.info()).map_err(DecodeRowsError::Decode)?;
         let row_bytes = row_bytes_for(self.info(), fmt).map_err(DecodeRowsError::Decode)?;
         let samples_per_row = row_samples_for(self.info(), fmt).map_err(DecodeRowsError::Decode)?;
-        let total_len = total_output_bytes(self.info(), row_bytes).map_err(DecodeRowsError::Decode)?;
+        let total_len =
+            total_output_bytes(self.info(), row_bytes).map_err(DecodeRowsError::Decode)?;
         let mut pool = J2kScratchPool::new();
         let (packed, row) = pool.packed_bytes_and_row_u16(total_len, samples_per_row);
         self.decode_into(packed, row_bytes, fmt)
@@ -224,7 +227,8 @@ impl<'a> ImageDecodeRows<'a, u16> for J2kDecoder<'a> {
             for (dst, src) in row.iter_mut().zip(row_bytes.chunks_exact(2)) {
                 *dst = u16::from_le_bytes([src[0], src[1]]);
             }
-            sink.write_row(y as u32, row).map_err(DecodeRowsError::Sink)?;
+            sink.write_row(y as u32, row)
+                .map_err(DecodeRowsError::Sink)?;
         }
         Ok(slidecodec_core::DecodeOutcome {
             decoded: Rect::full(self.info.dimensions),
@@ -339,8 +343,7 @@ fn should_retry_with_backend(error: &J2kError) -> bool {
     matches!(
         error,
         J2kError::InvalidMarker {
-            marker:
-                0x50
+            marker: 0x50
                 | 0x53
                 | 0x55
                 | 0x57

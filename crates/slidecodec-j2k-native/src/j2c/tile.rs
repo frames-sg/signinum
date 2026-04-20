@@ -130,7 +130,7 @@ impl<'a> Tile<'a> {
 /// Create the tiles and parse their constituent tile parts.
 pub(crate) fn parse<'a>(
     reader: &mut BitReader<'a>,
-    main_header: &'a Header<'a>,
+    main_header: &Header<'a>,
 ) -> Result<Vec<Tile<'a>>> {
     let mut tiles = (0..main_header.size_data.num_tiles() as usize)
         .map(|idx| Tile::new(idx as u32, main_header))
@@ -155,7 +155,7 @@ pub(crate) fn parse<'a>(
 
 fn parse_tile_part<'a>(
     reader: &mut BitReader<'a>,
-    main_header: &'a Header<'a>,
+    main_header: &Header<'a>,
     tiles: &mut [Tile<'a>],
     tile_part_idx: usize,
 ) -> Result<()> {

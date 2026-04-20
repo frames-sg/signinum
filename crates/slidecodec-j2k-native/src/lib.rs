@@ -204,14 +204,80 @@ impl<'a> Image<'a> {
     /// Decode the image and return its decoded result as a `Vec<u8>`, with each
     /// channel interleaved.
     pub fn decode(&self) -> Result<Vec<u8>> {
+        let bitmap = self.decode_with_context(&mut DecoderContext::default())?;
+        Ok(bitmap.data)
+    }
+
+    /// Decode the image and return its decoded result using a caller-provided
+    /// decoder context so allocations can be reused across repeated decodes.
+    pub fn decode_with_context(&self, decoder_context: &mut DecoderContext<'a>) -> Result<Bitmap> {
         let buffer_size = self.width() as usize
             * self.height() as usize
             * (self.color_space.num_channels() as usize + if self.has_alpha { 1 } else { 0 });
         let mut buf = vec![0; buffer_size];
-        let mut decoder_context = DecoderContext::default();
-        self.decode_into(&mut buf, &mut decoder_context)?;
+        self.decode_into(&mut buf, decoder_context)?;
 
-        Ok(buf)
+        Ok(Bitmap {
+            color_space: self.color_space.clone(),
+            data: buf,
+            has_alpha: self.has_alpha,
+            width: self.width(),
+            height: self.height(),
+            original_bit_depth: self.original_bit_depth(),
+        })
+    }
+
+    /// Decode the image into borrowed component planes using a caller-provided
+    /// decoder context so allocations can be reused across repeated decodes.
+    pub fn decode_components_with_context<'ctx>(
+        &self,
+        decoder_context: &'ctx mut DecoderContext<'a>,
+    ) -> Result<DecodedComponents<'ctx>> {
+        let decoded_image = self.prepare_decoded_image(decoder_context)?;
+        let planes = decoded_image
+            .decoded_components
+            .iter()
+            .map(|component| ComponentPlane {
+                samples: component.container.truncated(),
+                bit_depth: component.bit_depth,
+            })
+            .collect();
+
+        Ok(DecodedComponents {
+            dimensions: (self.width(), self.height()),
+            color_space: self.color_space.clone(),
+            has_alpha: self.has_alpha,
+            planes,
+        })
+    }
+
+    /// Decode a region of the image and return it as an 8-bit interleaved bitmap.
+    pub fn decode_region(&self, roi: (u32, u32, u32, u32)) -> Result<Bitmap> {
+        self.decode_region_with_context(roi, &mut DecoderContext::default())
+    }
+
+    /// Decode a region of the image and return it as an 8-bit interleaved bitmap
+    /// using a caller-provided decoder context.
+    pub fn decode_region_with_context(
+        &self,
+        roi: (u32, u32, u32, u32),
+        decoder_context: &mut DecoderContext<'a>,
+    ) -> Result<Bitmap> {
+        validate_roi((self.width(), self.height()), roi)?;
+        let mut decoded_image = self.prepare_decoded_image(decoder_context)?;
+        let (_x, _y, width, height) = roi;
+        let channels =
+            self.color_space.num_channels() as usize + if self.has_alpha { 1 } else { 0 };
+        let mut data = vec![0; width as usize * height as usize * channels];
+        interleave_and_convert_region(&mut decoded_image, self.width() as usize, roi, &mut data);
+        Ok(Bitmap {
+            color_space: self.color_space.clone(),
+            data,
+            has_alpha: self.has_alpha,
+            width,
+            height,
+            original_bit_depth: self.original_bit_depth(),
+        })
     }
 
     /// Decode the image at native bit depth without scaling to 8-bit.
@@ -227,10 +293,15 @@ impl<'a> Image<'a> {
         self.decode_native_with_context(&mut decoder_context)
     }
 
+    /// Decode a region of the image at native bit depth.
+    pub fn decode_native_region(&self, roi: (u32, u32, u32, u32)) -> Result<RawBitmap> {
+        self.decode_native_region_with_context(roi, &mut DecoderContext::default())
+    }
+
     /// Decode the image at native bit depth using a caller-provided decoder
     /// context so allocations can be reused across repeated decodes.
     pub fn decode_native_with_context(
-        &'a self,
+        &self,
         decoder_context: &mut DecoderContext<'a>,
     ) -> Result<RawBitmap> {
         j2c::decode(self.codestream, &self.header, decoder_context)?;
@@ -294,6 +365,58 @@ impl<'a> Image<'a> {
         }
     }
 
+    /// Decode a region of the image at native bit depth using a caller-provided
+    /// decoder context.
+    pub fn decode_native_region_with_context(
+        &self,
+        roi: (u32, u32, u32, u32),
+        decoder_context: &mut DecoderContext<'a>,
+    ) -> Result<RawBitmap> {
+        validate_roi((self.width(), self.height()), roi)?;
+        j2c::decode(self.codestream, &self.header, decoder_context)?;
+
+        let components = &decoder_context.tile_decode_context.channel_data;
+        let bit_depth = self.original_bit_depth();
+        let num_components = components.len() as u8;
+        let bytes_per_sample = if bit_depth <= 8 { 1 } else { 2 };
+        let (x, y, width, height) = roi;
+        let image_width = self.width() as usize;
+        let mut data = Vec::with_capacity(
+            width as usize * height as usize * num_components as usize * bytes_per_sample,
+        );
+        let max_val = ((1u32 << bit_depth) - 1) as f32;
+
+        for row in y as usize..(y + height) as usize {
+            for col in x as usize..(x + width) as usize {
+                let idx = row * image_width + col;
+                for component in components {
+                    let v = math::round_f32(component.container.truncated()[idx]);
+                    let clamped = if v < 0.0 {
+                        0.0
+                    } else if v > max_val {
+                        max_val
+                    } else {
+                        v
+                    };
+                    if bit_depth <= 8 {
+                        data.push(clamped as u8);
+                    } else {
+                        data.extend_from_slice(&(clamped as u16).to_le_bytes());
+                    }
+                }
+            }
+        }
+
+        Ok(RawBitmap {
+            data,
+            width,
+            height,
+            bit_depth,
+            num_components,
+            bytes_per_sample: bytes_per_sample as u8,
+        })
+    }
+
     /// Decode the image into the given buffer.
     ///
     /// This method does the same as [`Image::decode`], but you can provide
@@ -304,10 +427,20 @@ impl<'a> Image<'a> {
     ///
     /// The buffer must have the correct size.
     pub fn decode_into(
-        &'a self,
+        &self,
         buf: &mut [u8],
         decoder_context: &mut DecoderContext<'a>,
     ) -> Result<()> {
+        let mut decoded_image = self.prepare_decoded_image(decoder_context)?;
+        interleave_and_convert(&mut decoded_image, buf);
+
+        Ok(())
+    }
+
+    fn prepare_decoded_image<'ctx>(
+        &self,
+        decoder_context: &'ctx mut DecoderContext<'a>,
+    ) -> Result<DecodedImage<'ctx>> {
         let settings = &self.settings;
         j2c::decode(self.codestream, &self.header, decoder_context)?;
         let mut decoded_image = DecodedImage {
@@ -315,7 +448,6 @@ impl<'a> Image<'a> {
             boxes: self.boxes.clone(),
         };
 
-        // Resolve palette indices.
         if settings.resolve_palette_indices {
             let components = core::mem::take(decoded_image.decoded_components);
             *decoded_image.decoded_components =
@@ -323,8 +455,6 @@ impl<'a> Image<'a> {
         }
 
         if let Some(cdef) = &decoded_image.boxes.channel_definition {
-            // Sort by the channel association. Note that this will only work if
-            // each component is referenced only once.
             let mut components = decoded_image
                 .decoded_components
                 .iter()
@@ -342,12 +472,9 @@ impl<'a> Image<'a> {
             *decoded_image.decoded_components = components.into_iter().map(|c| c.0).collect();
         }
 
-        // Note that this is only valid if all images have the same bit depth.
         let bit_depth = decoded_image.decoded_components[0].bit_depth;
         convert_color_space(&mut decoded_image, bit_depth)?;
-        interleave_and_convert(&mut decoded_image, buf);
-
-        Ok(())
+        Ok(decoded_image)
     }
 }
 
@@ -502,6 +629,54 @@ pub struct RawBitmap {
     pub bytes_per_sample: u8,
 }
 
+/// A borrowed decoded component plane.
+pub struct ComponentPlane<'a> {
+    samples: &'a [f32],
+    bit_depth: u8,
+}
+
+impl<'a> ComponentPlane<'a> {
+    /// Component samples in row-major order.
+    pub fn samples(&self) -> &'a [f32] {
+        self.samples
+    }
+
+    /// Bit depth of this component plane.
+    pub fn bit_depth(&self) -> u8 {
+        self.bit_depth
+    }
+}
+
+/// Borrowed decoded component planes for an image.
+pub struct DecodedComponents<'a> {
+    dimensions: (u32, u32),
+    color_space: ColorSpace,
+    has_alpha: bool,
+    planes: Vec<ComponentPlane<'a>>,
+}
+
+impl<'a> DecodedComponents<'a> {
+    /// Dimensions of the decoded image represented by these planes.
+    pub fn dimensions(&self) -> (u32, u32) {
+        self.dimensions
+    }
+
+    /// Color space after JPEG 2000 color conversion has been applied.
+    pub fn color_space(&self) -> &ColorSpace {
+        &self.color_space
+    }
+
+    /// Whether the decoded image has an alpha channel.
+    pub fn has_alpha(&self) -> bool {
+        self.has_alpha
+    }
+
+    /// Borrowed decoded component planes in display order.
+    pub fn planes(&self) -> &[ComponentPlane<'a>] {
+        &self.planes
+    }
+}
+
 fn interleave_and_convert(image: &mut DecodedImage<'_>, buf: &mut [u8]) {
     let components = &mut *image.decoded_components;
     let num_components = components.len();
@@ -595,6 +770,66 @@ fn interleave_and_convert(image: &mut DecodedImage<'_>, buf: &mut [u8]) {
             }
         }
     }
+}
+
+fn interleave_and_convert_region(
+    image: &mut DecodedImage<'_>,
+    image_width: usize,
+    roi: (u32, u32, u32, u32),
+    buf: &mut [u8],
+) {
+    let components = &mut *image.decoded_components;
+    let num_components = components.len();
+    let (x, y, width, height) = roi;
+    let mut output_iter = buf.iter_mut();
+
+    let mut all_same_bit_depth = Some(components[0].bit_depth);
+    for component in components.iter().skip(1) {
+        if Some(component.bit_depth) != all_same_bit_depth {
+            all_same_bit_depth = None;
+        }
+    }
+
+    if all_same_bit_depth == Some(8) && num_components <= 4 {
+        for row in y as usize..(y + height) as usize {
+            let row_base = row * image_width;
+            for col in x as usize..(x + width) as usize {
+                let idx = row_base + col;
+                for component in components.iter() {
+                    *output_iter.next().unwrap() = math::round_f32(component.container[idx]) as u8;
+                }
+            }
+        }
+    } else {
+        let mul_factor = ((1 << 8) - 1) as f32;
+        for row in y as usize..(y + height) as usize {
+            let row_base = row * image_width;
+            for col in x as usize..(x + width) as usize {
+                let idx = row_base + col;
+                for component in components.iter() {
+                    *output_iter.next().unwrap() = math::round_f32(
+                        (component.container[idx] / ((1_u32 << component.bit_depth) - 1) as f32)
+                            * mul_factor,
+                    ) as u8;
+                }
+            }
+        }
+    }
+}
+
+fn validate_roi(dims: (u32, u32), roi: (u32, u32, u32, u32)) -> Result<()> {
+    let (image_width, image_height) = dims;
+    let (x, y, width, height) = roi;
+    let x_end = x
+        .checked_add(width)
+        .ok_or(ValidationError::InvalidDimensions)?;
+    let y_end = y
+        .checked_add(height)
+        .ok_or(ValidationError::InvalidDimensions)?;
+    if x_end > image_width || y_end > image_height {
+        return Err(ValidationError::InvalidDimensions.into());
+    }
+    Ok(())
 }
 
 fn convert_color_space(image: &mut DecodedImage<'_>, bit_depth: u8) -> Result<()> {

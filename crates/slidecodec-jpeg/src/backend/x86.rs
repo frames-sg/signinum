@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use alloc::vec::Vec;
 use core::arch::x86_64::{
     __m128i, __m256i, _mm256_add_epi32, _mm256_cvtepu8_epi32, _mm256_extracti128_si256,
     _mm256_mullo_epi32, _mm256_set1_epi32, _mm256_srai_epi32, _mm256_sub_epi32, _mm_cvtsi128_si64,
     _mm_loadl_epi64, _mm_packs_epi32, _mm_packus_epi16,
 };
-
-use alloc::vec;
+use core::cell::RefCell;
 
 use crate::color::upsample::{upsample_h2v2_fancy_row, upsample_h2v2_fancy_rows};
 
@@ -18,6 +18,78 @@ const FIX_0_71414: i32 = 46_802;
 const FIX_1_77200: i32 = 116_130;
 const ROUND: i32 = 1 << 15;
 const LANES: usize = 8;
+const RGB_UNROLL: usize = 8;
+
+#[derive(Default)]
+struct RowPairScratch {
+    cb_top: Vec<u8>,
+    cb_bottom: Vec<u8>,
+    cr_top: Vec<u8>,
+    cr_bottom: Vec<u8>,
+}
+
+impl RowPairScratch {
+    fn ensure_width(&mut self, width: usize) {
+        self.cb_top.resize(width, 0);
+        self.cb_bottom.resize(width, 0);
+        self.cr_top.resize(width, 0);
+        self.cr_bottom.resize(width, 0);
+    }
+}
+
+std::thread_local! {
+    static ROW_PAIR_SCRATCH: RefCell<RowPairScratch> = RefCell::new(RowPairScratch::default());
+}
+
+pub(crate) fn fill_rgb_row_from_gray(gray_row: &[u8], dst: &mut [u8]) {
+    debug_assert_eq!(dst.len(), gray_row.len() * 3);
+    let mut offset = 0;
+    while offset + RGB_UNROLL <= gray_row.len() {
+        let chunk = &gray_row[offset..offset + RGB_UNROLL];
+        let dst_chunk = &mut dst[offset * 3..(offset + RGB_UNROLL) * 3];
+        for (gray, pixel) in chunk.iter().zip(dst_chunk.chunks_exact_mut(3)) {
+            pixel[0] = *gray;
+            pixel[1] = *gray;
+            pixel[2] = *gray;
+        }
+        offset += RGB_UNROLL;
+    }
+    if offset < gray_row.len() {
+        scalar::fill_rgb_row_from_gray(&gray_row[offset..], &mut dst[offset * 3..]);
+    }
+}
+
+pub(crate) fn fill_rgb_row_from_rgb(r_row: &[u8], g_row: &[u8], b_row: &[u8], dst: &mut [u8]) {
+    debug_assert_eq!(r_row.len(), g_row.len());
+    debug_assert_eq!(r_row.len(), b_row.len());
+    debug_assert_eq!(dst.len(), r_row.len() * 3);
+    let mut offset = 0;
+    while offset + RGB_UNROLL <= r_row.len() {
+        let r_chunk = &r_row[offset..offset + RGB_UNROLL];
+        let g_chunk = &g_row[offset..offset + RGB_UNROLL];
+        let b_chunk = &b_row[offset..offset + RGB_UNROLL];
+        let dst_chunk = &mut dst[offset * 3..(offset + RGB_UNROLL) * 3];
+        for (((&r, &g), &b), pixel) in r_chunk
+            .iter()
+            .zip(g_chunk.iter())
+            .zip(b_chunk.iter())
+            .zip(dst_chunk.chunks_exact_mut(3))
+        {
+            pixel[0] = r;
+            pixel[1] = g;
+            pixel[2] = b;
+        }
+        offset += RGB_UNROLL;
+    }
+    if offset < r_row.len() {
+        scalar::fill_rgb_row_from_rgb(
+            &r_row[offset..],
+            &g_row[offset..],
+            &b_row[offset..],
+            &mut dst[offset * 3..],
+        );
+    }
+}
 
 pub(crate) fn fill_rgb_row_from_ycbcr(y_row: &[u8], cb_row: &[u8], cr_row: &[u8], dst: &mut [u8]) {
     debug_assert_eq!(y_row.len(), cb_row.len());
@@ -51,12 +123,25 @@ pub(crate) fn fill_rgb_row_pair_from_420(
     debug_assert_eq!(prev_cr.len(), curr_cr.len());
     debug_assert_eq!(prev_cr.len(), next_cr.len());
 
-    unsafe {
-        fill_rgb_row_pair_from_420_avx2(
-            y_top, y_bottom, prev_cb, curr_cb, next_cb, prev_cr, curr_cr, next_cr, dst_top,
-            dst_bottom,
-        );
-    }
+    ROW_PAIR_SCRATCH.with(|scratch| {
+        let mut scratch = scratch.borrow_mut();
+        scratch.ensure_width(y_top.len());
+        unsafe {
+            fill_rgb_row_pair_from_420_avx2(
+                y_top,
+                y_bottom,
+                prev_cb,
+                curr_cb,
+                next_cb,
+                prev_cr,
+                curr_cr,
+                next_cr,
+                dst_top,
+                dst_bottom,
+                &mut scratch,
+            );
+        }
+    });
 }
 
 #[target_feature(enable = "avx2")]
@@ -72,38 +157,25 @@ unsafe fn fill_rgb_row_pair_from_420_avx2(
     next_cr: &[u8],
     dst_top: &mut [u8],
     dst_bottom: Option<&mut [u8]>,
+    scratch: &mut RowPairScratch,
 ) {
     let width = y_top.len();
-    let mut cb_top = vec![0u8; width];
-    let mut cr_top = vec![0u8; width];
+    let cb_top = &mut scratch.cb_top[..width];
+    let cr_top = &mut scratch.cr_top[..width];
     if let (Some(y_bottom), Some(dst_bottom)) = (y_bottom, dst_bottom) {
-        let mut cb_bottom = vec![0u8; width];
-        let mut cr_bottom = vec![0u8; width];
-        upsample_h2v2_fancy_rows(
-            prev_cb,
-            curr_cb,
-            next_cb,
-            width,
-            &mut cb_top,
-            &mut cb_bottom,
-        );
-        upsample_h2v2_fancy_rows(
-            prev_cr,
-            curr_cr,
-            next_cr,
-            width,
-            &mut cr_top,
-            &mut cr_bottom,
-        );
+        let cb_bottom = &mut scratch.cb_bottom[..width];
+        let cr_bottom = &mut scratch.cr_bottom[..width];
+        upsample_h2v2_fancy_rows(prev_cb, curr_cb, next_cb, width, cb_top, cb_bottom);
+        upsample_h2v2_fancy_rows(prev_cr, curr_cr, next_cr, width, cr_top, cr_bottom);
         unsafe {
-            fill_rgb_row_from_ycbcr_avx2(y_top, &cb_top, &cr_top, dst_top);
-            fill_rgb_row_from_ycbcr_avx2(y_bottom, &cb_bottom, &cr_bottom, dst_bottom);
+            fill_rgb_row_from_ycbcr_avx2(y_top, cb_top, cr_top, dst_top);
+            fill_rgb_row_from_ycbcr_avx2(y_bottom, cb_bottom, cr_bottom, dst_bottom);
         }
     } else {
-        upsample_h2v2_fancy_row(prev_cb, curr_cb, next_cb, width, false, &mut cb_top);
-        upsample_h2v2_fancy_row(prev_cr, curr_cr, next_cr, width, false, &mut cr_top);
+        upsample_h2v2_fancy_row(prev_cb, curr_cb, next_cb, width, false, cb_top);
+        upsample_h2v2_fancy_row(prev_cr, curr_cr, next_cr, width, false, cr_top);
         unsafe {
-            fill_rgb_row_from_ycbcr_avx2(y_top, &cb_top, &cr_top, dst_top);
+            fill_rgb_row_from_ycbcr_avx2(y_top, cb_top, cr_top, dst_top);
         }
     }
 }
@@ -116,6 +188,21 @@ pub(super) fn fill_rgb_row_from_ycbcr_for_test(
     dst: &mut [u8],
 ) {
     fill_rgb_row_from_ycbcr(y_row, cb_row, cr_row, dst);
+}
+
+#[cfg(test)]
+pub(super) fn fill_rgb_row_from_gray_for_test(gray_row: &[u8], dst: &mut [u8]) {
+    fill_rgb_row_from_gray(gray_row, dst);
+}
+
+#[cfg(test)]
+pub(super) fn fill_rgb_row_from_rgb_for_test(
+    r_row: &[u8],
+    g_row: &[u8],
+    b_row: &[u8],
+    dst: &mut [u8],
+) {
+    fill_rgb_row_from_rgb(r_row, g_row, b_row, dst);
 }
 
 #[target_feature(enable = "avx2")]

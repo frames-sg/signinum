@@ -95,6 +95,15 @@ fn backend_decode_u8_scaled(bytes: &[u8], target_resolution: (u32, u32)) -> Vec<
         .expect("backend decode")
 }
 
+fn backend_decode_u8_region(bytes: &[u8], roi: Rect) -> Vec<u8> {
+    let mut context = slidecodec_j2k_native::DecoderContext::default();
+    Image::new(bytes, &DecodeSettings::default())
+        .expect("backend image")
+        .decode_region_with_context((roi.x, roi.y, roi.w, roi.h), &mut context)
+        .expect("backend region decode")
+        .data
+}
+
 fn crop_u8(full: &[u8], full_width: usize, channels: usize, roi: Rect) -> Vec<u8> {
     let mut out = Vec::with_capacity(roi.w as usize * roi.h as usize * channels);
     let row_bytes = full_width * channels;
@@ -333,6 +342,21 @@ fn decode_region_into_matches_cropping_full_decode() {
         .expect("region decode");
     assert_eq!(outcome.decoded, roi);
     assert_eq!(out, expected.as_slice());
+}
+
+#[test]
+fn native_backend_region_decode_matches_cropping_full_decode() {
+    let pixels = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120];
+    let codestream = encode_codestream(&pixels, 2, 2, 3, 8, true);
+    let roi = Rect {
+        x: 1,
+        y: 0,
+        w: 1,
+        h: 2,
+    };
+    let expected = crop_u8(&backend_decode_u8(&codestream), 2, 3, roi);
+    let actual = backend_decode_u8_region(&codestream, roi);
+    assert_eq!(actual, expected);
 }
 
 #[test]

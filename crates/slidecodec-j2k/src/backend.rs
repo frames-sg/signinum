@@ -12,15 +12,19 @@ pub(crate) fn image(bytes: &[u8], settings: DecodeSettings) -> Result<Image<'_>,
 
 pub(crate) fn inspect_info(bytes: &[u8]) -> Result<Info, J2kError> {
     let image = image(bytes, DecodeSettings::default())?;
+    Ok(inspect_info_from_image(&image))
+}
+
+pub(crate) fn inspect_info_from_image(image: &Image<'_>) -> Info {
     let components = image.color_space().num_channels() + u8::from(image.has_alpha());
-    Ok(Info {
+    Info {
         dimensions: (image.width(), image.height()),
         components,
         colorspace: map_colorspace(image.color_space()),
         bit_depth: image.original_bit_depth(),
         tile_layout: None,
         resolution_levels: 1,
-    })
+    }
 }
 
 pub(crate) fn map_colorspace(color_space: &ColorSpace) -> Colorspace {

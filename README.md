@@ -8,9 +8,16 @@ Pathology codec stack for whole-slide imaging workloads.
 The core stack in this repository is:
 
 - `slidecodec-jpeg` — native JPEG decode for WSI tiles
+- `slidecodec-jpeg-metal` — Apple Metal device-output adapter for JPEG tiles
+- `slidecodec-jpeg-cuda` — CUDA-facing JPEG device-output adapter with clean
+  CPU fallback on non-CUDA hosts
 - `slidecodec-j2k` — native in-repo JPEG 2000 / HTJ2K inspect and decode;
   WSI-native ROI/context optimization milestones are still in progress, so the
   workspace remains pre-1.0
+- `slidecodec-j2k-metal` — Apple Metal device-output adapter for JPEG 2000 /
+  HTJ2K tiles
+- `slidecodec-j2k-cuda` — CUDA-facing JPEG 2000 / HTJ2K device-output adapter
+  with clean CPU fallback on non-CUDA hosts
 - `slidecodec-tilecodec` — tile decompression primitives for Deflate, Zstd,
   LZW, and Uncompressed payloads
 - `slidecodec-core` — shared traits, pixel/sample types, scratch/context
@@ -18,6 +25,9 @@ The core stack in this repository is:
 - `slidecodec-cli` — CLI inspection entry point
 
 Target decode hosts are native `x86_64` and `aarch64`.
+Metal device-output adapters are validated on Apple Silicon macOS. CUDA crates
+compile and expose explicit unavailable/fallback behavior on this host, but
+runtime NVIDIA validation requires a separate CUDA machine.
 
 ## What this is
 
@@ -29,6 +39,7 @@ consumer-image decode:
 - decode-time ROI and reduced-resolution output
 - row-streaming output for large tiles and stripes
 - tile-batch APIs for repeated viewer workloads
+- additive device-output adapters for Metal and CUDA consumers
 - explicit separation between image codecs and tile decompression codecs
 
 The project is structured so WSI readers can compose their own threading and
@@ -43,6 +54,9 @@ runtime.
 - ROI, scaled decode, row streaming, and tile-batch decode APIs
 - WSI-focused benchmarking against `jpeg-decoder`, `zune-jpeg`, and direct
   `libjpeg-turbo` decode paths
+- Metal and CUDA adapter crates keep the core JPEG decoder pure-Rust CPU while
+  exposing device-output surfaces for downstream GPU pipelines; the Metal path
+  now runs compute kernels for color conversion and packing after CPU decode
 
 ### `slidecodec-j2k`
 
@@ -50,7 +64,11 @@ runtime.
 - full-frame, region, scaled, row-streaming, and tile-batch decode
 - repo-local pure-Rust JPEG 2000 / HTJ2K decode engine
 - native ROI/context/performance rewrite still in progress
-- OpenJPEG-oriented parity and benchmark coverage
+- parity and benchmark coverage against Grok and OpenJPEG on CPU
+- Metal and CUDA adapter crates expose device-output surfaces without moving
+  the core decoder crate onto GPU-specific dependencies; the Metal path now
+  runs compute kernels for component-plane interleave/clamp/pack after CPU
+  decode, with ROI staging still performed on CPU today
 
 ### `slidecodec-tilecodec`
 
@@ -119,6 +137,8 @@ The repo now carries dedicated compare benches for:
 
 - `slidecodec-jpeg`
 - `slidecodec-j2k`
+- `slidecodec-jpeg-metal`
+- `slidecodec-j2k-metal`
 - `slidecodec-tilecodec`
 
 ## License

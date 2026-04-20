@@ -5,7 +5,11 @@ members = [
     "crates/slidecodec-j2k-compare",
     "crates/slidecodec-j2k-native",
     "crates/slidecodec-j2k",
+    "crates/slidecodec-j2k-cuda",
+    "crates/slidecodec-j2k-metal",
     "crates/slidecodec-jpeg",
+    "crates/slidecodec-jpeg-cuda",
+    "crates/slidecodec-jpeg-metal",
     "crates/slidecodec-tilecodec",
     "crates/slidecodec-cli",
 ]

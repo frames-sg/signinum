@@ -255,6 +255,51 @@ SLIDECODEC_GROK_ROOT=/tmp/grok-slidecodec/build/bin \
   cargo bench -p slidecodec-j2k --bench compare
 ```
 
+## Device-output adapters
+
+`slidecodec-jpeg-metal` and `slidecodec-j2k-metal` carry Apple-host device
+benches that compare the CPU decode path against the corresponding
+Metal-surface path.
+
+Current v1 scope is explicit:
+
+- JPEG: CPU parse/entropy/IDCT stays in `slidecodec-jpeg`, then Metal compute
+  converts staged component rows to the requested packed surface
+- J2K: CPU codestream/decode still reconstructs component planes, then Metal
+  compute performs interleave/clamp/pack into the requested surface; ROI
+  staging is still done on CPU for the current region path
+- these benches now measure a real GPU compute stage plus device-surface
+  production, but they are still not full-GPU entropy or inverse-transform
+  decoders
+
+Bench names:
+
+- `cpu_decode_rgb8`
+- `metal_surface_rgb8`
+
+Compile the Metal benches:
+
+```sh
+cargo bench -p slidecodec-jpeg-metal --bench device_upload --no-run
+cargo bench -p slidecodec-j2k-metal --bench device_upload --no-run
+```
+
+Run them on Apple Silicon macOS:
+
+```sh
+cargo bench -p slidecodec-jpeg-metal --bench device_upload -- --noplot
+cargo bench -p slidecodec-j2k-metal --bench device_upload -- --noplot
+```
+
+`slidecodec-jpeg-cuda` and `slidecodec-j2k-cuda` expose the same device-output
+API surface, but on this Apple host they are verification stubs:
+
+- `BackendRequest::Cpu` returns a host-backed surface
+- `BackendRequest::Auto` falls back to the CPU surface
+- `BackendRequest::Cuda` fails explicitly as unavailable
+
+No CUDA runtime performance numbers are claimed from this machine.
+
 ## `slidecodec-tilecodec`
 
 `slidecodec-tilecodec` carries a Criterion comparator bench at

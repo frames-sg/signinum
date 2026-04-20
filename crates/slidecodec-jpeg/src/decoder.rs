@@ -50,6 +50,31 @@ pub struct DecodeOutcome {
     pub warnings: Vec<Warning>,
 }
 
+/// Receives decoded component rows before they are packed into the final
+/// interleaved pixel format.
+pub trait ComponentRowWriter {
+    /// Receive one grayscale row.
+    fn write_gray_row(&mut self, y: u32, gray_row: &[u8]) -> Result<(), JpegError>;
+
+    /// Receive one full-width Y/Cb/Cr row.
+    fn write_ycbcr_row(
+        &mut self,
+        y: u32,
+        y_row: &[u8],
+        cb_row: &[u8],
+        cr_row: &[u8],
+    ) -> Result<(), JpegError>;
+
+    /// Receive one full-width planar RGB row.
+    fn write_rgb_row(
+        &mut self,
+        y: u32,
+        r_row: &[u8],
+        g_row: &[u8],
+        b_row: &[u8],
+    ) -> Result<(), JpegError>;
+}
+
 /// A parsed borrowed view of a JPEG stream.
 #[derive(Debug)]
 pub struct JpegView<'a> {
@@ -425,6 +450,55 @@ impl<'a> Decoder<'a> {
         );
         pool.restore_sink_rows(writer.into_rows());
         result
+    }
+
+    /// Decode the full image into component rows.
+    pub fn decode_component_rows_with_scratch<W>(
+        &self,
+        pool: &mut ScratchPool,
+        writer: &mut W,
+    ) -> Result<DecodeOutcome, JpegError>
+    where
+        W: ComponentRowWriter,
+    {
+        self.decode_region_component_rows_with_scratch(
+            pool,
+            writer,
+            Rect::full(self.info.dimensions),
+            Downscale::None,
+        )
+    }
+
+    /// Decode `roi` into component rows, optionally at a reduced scale.
+    pub fn decode_region_component_rows_with_scratch<W>(
+        &self,
+        pool: &mut ScratchPool,
+        writer: &mut W,
+        roi: Rect,
+        scale: Downscale,
+    ) -> Result<DecodeOutcome, JpegError>
+    where
+        W: ComponentRowWriter,
+    {
+        if !roi.is_within(self.info.dimensions) {
+            return Err(JpegError::RectOutOfBounds {
+                rect: roi,
+                width: self.info.dimensions.0,
+                height: self.info.dimensions.1,
+            });
+        }
+
+        let downscale = jpeg_downscale(scale);
+        let scaled_roi = scaled_rect_covering(roi, downscale)?;
+        let mut adapter = ComponentWriterAdapter { inner: writer };
+
+        if roi == Rect::full(self.info.dimensions) {
+            self.decode_with_writer(pool, &mut adapter, downscale, roi)
+        } else {
+            let (scaled_width, _) = scaled_dimensions(self.info.dimensions, downscale);
+            let mut cropped = CroppedWriter::new(adapter, scaled_roi, scaled_width);
+            self.decode_with_writer(pool, &mut cropped, downscale, roi)
+        }
     }
 
     /// Decode a rectangular region of the image into the caller's buffer.
@@ -1180,6 +1254,36 @@ struct CroppedWriter<W> {
     source_width: u32,
     top_row: Vec<u8>,
     bottom_row: Vec<u8>,
+}
+
+struct ComponentWriterAdapter<'a, W> {
+    inner: &'a mut W,
+}
+
+impl<W: ComponentRowWriter> OutputWriter for ComponentWriterAdapter<'_, W> {
+    fn write_rgb_row(
+        &mut self,
+        y: u32,
+        r_row: &[u8],
+        g_row: &[u8],
+        b_row: &[u8],
+    ) -> Result<(), JpegError> {
+        self.inner.write_rgb_row(y, r_row, g_row, b_row)
+    }
+
+    fn write_ycbcr_row(
+        &mut self,
+        y: u32,
+        y_row: &[u8],
+        cb_row: &[u8],
+        cr_row: &[u8],
+    ) -> Result<(), JpegError> {
+        self.inner.write_ycbcr_row(y, y_row, cb_row, cr_row)
+    }
+
+    fn write_gray_row(&mut self, y: u32, gray_row: &[u8]) -> Result<(), JpegError> {
+        self.inner.write_gray_row(y, gray_row)
+    }
 }
 
 impl<W> CroppedWriter<W> {

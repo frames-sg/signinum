@@ -219,6 +219,42 @@ fn avx2_ycbcr_rows_match_scalar_reference_for_tail_widths() {
 
 #[cfg(target_arch = "x86_64")]
 #[test]
+fn avx2_gray_rows_match_scalar_reference() {
+    if !std::is_x86_feature_detected!("avx2") {
+        return;
+    }
+
+    let gray = [0u8, 16, 33, 64, 96, 127, 128, 129, 160, 192, 224, 255, 12];
+    let mut expected = vec![0u8; gray.len() * 3];
+    let mut actual = vec![0u8; gray.len() * 3];
+
+    scalar::fill_rgb_row_from_gray(&gray, &mut expected);
+    super::x86::fill_rgb_row_from_gray_for_test(&gray, &mut actual);
+
+    assert_eq!(actual, expected);
+}
+
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn avx2_rgb_rows_match_scalar_reference() {
+    if !std::is_x86_feature_detected!("avx2") {
+        return;
+    }
+
+    let r = [0u8, 16, 33, 64, 96, 127, 128, 129, 160, 192, 224, 255, 12];
+    let g = [255u8, 240, 200, 180, 160, 140, 128, 120, 96, 64, 32, 16, 0];
+    let b = [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
+    let mut expected = vec![0u8; r.len() * 3];
+    let mut actual = vec![0u8; r.len() * 3];
+
+    scalar::fill_rgb_row_from_rgb(&r, &g, &b, &mut expected);
+    super::x86::fill_rgb_row_from_rgb_for_test(&r, &g, &b, &mut actual);
+
+    assert_eq!(actual, expected);
+}
+
+#[cfg(target_arch = "x86_64")]
+#[test]
 fn avx2_ycbcr_rows_match_scalar_reference_across_multiple_chunks() {
     if !std::is_x86_feature_detected!("avx2") {
         return;

@@ -30,7 +30,7 @@ use core::ops::{DerefMut, Range};
 
 pub(crate) fn decode<'a>(
     data: &'a [u8],
-    header: &'a Header<'a>,
+    header: &Header<'a>,
     ctx: &mut DecoderContext<'a>,
 ) -> Result<()> {
     let mut reader = BitReader::new(data);

@@ -5,6 +5,22 @@ compile_error!("slidecodec-core only supports x86_64 and aarch64 targets");
 
 use core::sync::atomic::{AtomicU8, Ordering};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendKind {
+    Cpu,
+    Metal,
+    Cuda,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BackendRequest {
+    #[default]
+    Auto,
+    Cpu,
+    Metal,
+    Cuda,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CpuFeatures {
     pub avx2: bool,
@@ -31,8 +47,8 @@ impl CpuFeatures {
         #[cfg(target_arch = "x86_64")]
         {
             Self {
-                avx2: std::is_x86_feature_detected!("avx2"),
-                sse41: std::is_x86_feature_detected!("sse4.1"),
+                avx2: detect_x86_avx2(),
+                sse41: detect_x86_sse41(),
                 neon: false,
             }
         }
@@ -67,6 +83,82 @@ impl CpuFeatures {
             avx2: (bits & (1 << 1)) != 0,
             sse41: (bits & (1 << 2)) != 0,
             neon: (bits & (1 << 3)) != 0,
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+fn detect_x86_sse41() -> bool {
+    // SAFETY: CPUID is available on x86_64 by architecture guarantee.
+    let features = unsafe { core::arch::x86_64::__cpuid(1) };
+    (features.ecx & (1 << 19)) != 0
+}
+
+#[cfg(target_arch = "x86_64")]
+fn detect_x86_avx2() -> bool {
+    // SAFETY: CPUID is available on x86_64 by architecture guarantee.
+    let leaf1 = unsafe { core::arch::x86_64::__cpuid(1) };
+    let osxsave = (leaf1.ecx & (1 << 27)) != 0;
+    let avx = (leaf1.ecx & (1 << 28)) != 0;
+    if !(osxsave && avx) {
+        return false;
+    }
+
+    // SAFETY: XGETBV is only executed after CPUID reports OSXSAVE support.
+    let xcr0 = unsafe { core::arch::x86_64::_xgetbv(0) };
+    let xmm_enabled = (xcr0 & 0b10) != 0;
+    let ymm_enabled = (xcr0 & 0b100) != 0;
+    if !(xmm_enabled && ymm_enabled) {
+        return false;
+    }
+
+    // SAFETY: CPUID is available on x86_64 by architecture guarantee.
+    let leaf7 = unsafe { core::arch::x86_64::__cpuid_count(7, 0) };
+    (leaf7.ebx & (1 << 5)) != 0
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BackendCapabilities {
+    pub cpu: CpuFeatures,
+    pub metal: bool,
+    pub cuda: bool,
+}
+
+impl BackendCapabilities {
+    #[must_use]
+    pub fn detect() -> Self {
+        Self {
+            cpu: CpuFeatures::detect(),
+            metal: cfg!(target_os = "macos"),
+            cuda: false,
+        }
+    }
+
+    #[must_use]
+    pub const fn supports(self, request: BackendRequest) -> bool {
+        match request {
+            BackendRequest::Auto | BackendRequest::Cpu => true,
+            BackendRequest::Metal => self.metal,
+            BackendRequest::Cuda => self.cuda,
+        }
+    }
+
+    #[must_use]
+    pub fn resolve(self, request: BackendRequest) -> Option<BackendKind> {
+        match request {
+            BackendRequest::Auto => {
+                if self.metal {
+                    Some(BackendKind::Metal)
+                } else if self.cuda {
+                    Some(BackendKind::Cuda)
+                } else {
+                    Some(BackendKind::Cpu)
+                }
+            }
+            BackendRequest::Cpu => Some(BackendKind::Cpu),
+            BackendRequest::Metal if self.metal => Some(BackendKind::Metal),
+            BackendRequest::Cuda if self.cuda => Some(BackendKind::Cuda),
+            BackendRequest::Metal | BackendRequest::Cuda => None,
         }
     }
 }

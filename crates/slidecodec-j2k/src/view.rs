@@ -1,9 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    backend::inspect_info,
+    backend::{
+        image as backend_image, inspect_info, inspect_info_from_image, DecodeSettings, Image,
+    },
     context::J2kContext,
-    decode::{decode_full_frame, decode_region, decode_scaled, J2kDecodeOutcome},
+    decode::{
+        decode_image_into_with_native_context, decode_image_region_into_with_native_context,
+        decode_scaled_from_info, validate_buffer, validate_region, validate_supported_format,
+        J2kDecodeOutcome,
+    },
     parse::parse_info,
     scratch::J2kScratchPool,
     J2kError,
@@ -15,10 +21,10 @@ use slidecodec_core::{
     PixelFormat, Rect, RowSink, TileBatchDecode,
 };
 
-#[derive(Debug)]
 pub struct J2kView<'a> {
     bytes: &'a [u8],
     info: Info,
+    image: Option<Image<'a>>,
 }
 
 impl<'a> J2kView<'a> {
@@ -28,7 +34,12 @@ impl<'a> J2kView<'a> {
             Err(error) if should_retry_with_backend(&error) => inspect_info(input)?,
             Err(error) => return Err(error),
         };
-        Ok(Self { bytes: input, info })
+        let image = backend_image(input, DecodeSettings::default()).ok();
+        Ok(Self {
+            bytes: input,
+            info,
+            image,
+        })
     }
 
     pub fn info(&self) -> &Info {
@@ -40,10 +51,11 @@ impl<'a> J2kView<'a> {
     }
 }
 
-#[derive(Debug)]
 pub struct J2kDecoder<'a> {
     bytes: &'a [u8],
     info: Info,
+    image: Option<Image<'a>>,
+    native_context: slidecodec_j2k_native::DecoderContext<'a>,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -66,6 +78,8 @@ impl<'a> J2kDecoder<'a> {
         Ok(Self {
             bytes: view.bytes,
             info: view.info,
+            image: view.image,
+            native_context: slidecodec_j2k_native::DecoderContext::default(),
         })
     }
 
@@ -93,7 +107,19 @@ impl<'a> J2kDecoder<'a> {
         stride: usize,
         fmt: PixelFormat,
     ) -> Result<J2kDecodeOutcome, J2kError> {
-        decode_full_frame(self.bytes, out, stride, fmt)
+        validate_supported_format(fmt)?;
+        validate_buffer(self.info.dimensions, out.len(), stride, fmt)?;
+        self.ensure_image()?;
+        let (Some(image), native_context) = (self.image.as_ref(), &mut self.native_context) else {
+            return Err(J2kError::Backend(
+                "internal image cache missing".to_string(),
+            ));
+        };
+        decode_image_into_with_native_context(image, native_context, out, stride, fmt)?;
+        Ok(slidecodec_core::DecodeOutcome {
+            decoded: Rect::full(self.info.dimensions),
+            warnings: Vec::new(),
+        })
     }
 
     pub fn decode_region_into(
@@ -104,7 +130,21 @@ impl<'a> J2kDecoder<'a> {
         fmt: PixelFormat,
         roi: Rect,
     ) -> Result<J2kDecodeOutcome, J2kError> {
-        decode_region(self.bytes, pool, out, stride, fmt, roi)
+        let _ = pool;
+        validate_supported_format(fmt)?;
+        validate_region(roi, self.info.dimensions)?;
+        validate_buffer((roi.w, roi.h), out.len(), stride, fmt)?;
+        self.ensure_image()?;
+        let (Some(image), native_context) = (self.image.as_ref(), &mut self.native_context) else {
+            return Err(J2kError::Backend(
+                "internal image cache missing".to_string(),
+            ));
+        };
+        decode_image_region_into_with_native_context(image, native_context, out, stride, fmt, roi)?;
+        Ok(slidecodec_core::DecodeOutcome {
+            decoded: roi,
+            warnings: Vec::new(),
+        })
     }
 
     pub fn decode_scaled_into(
@@ -115,7 +155,34 @@ impl<'a> J2kDecoder<'a> {
         fmt: PixelFormat,
         scale: Downscale,
     ) -> Result<J2kDecodeOutcome, J2kError> {
-        decode_scaled(self.bytes, pool, out, stride, fmt, scale)
+        if scale == Downscale::None {
+            return self.decode_into_with_scratch(pool, out, stride, fmt);
+        }
+        decode_scaled_from_info(
+            self.bytes,
+            self.info.dimensions,
+            pool,
+            out,
+            stride,
+            fmt,
+            scale,
+        )
+    }
+
+    fn ensure_image(&mut self) -> Result<(), J2kError> {
+        if self.image.is_none() {
+            self.image = Some(backend_image(self.bytes, DecodeSettings::default())?);
+            if self.info.tile_layout.is_none() {
+                self.info = inspect_info_from_image(self.cached_image()?);
+            }
+        }
+        Ok(())
+    }
+
+    fn cached_image(&self) -> Result<&Image<'a>, J2kError> {
+        self.image
+            .as_ref()
+            .ok_or_else(|| J2kError::Backend("internal image cache missing".to_string()))
     }
 }
 

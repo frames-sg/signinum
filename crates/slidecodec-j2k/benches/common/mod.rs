@@ -32,7 +32,7 @@ pub(crate) struct BenchInput {
 }
 
 pub(crate) fn bench_inputs() -> Vec<BenchInput> {
-    vec![
+    let mut inputs = vec![
         BenchInput {
             name: "j2k_gray_512",
             bytes: classic_bench_bytes(
@@ -59,21 +59,20 @@ pub(crate) fn bench_inputs() -> Vec<BenchInput> {
             mode: DecodeMode::Rgb8,
             is_ht: false,
         },
-        BenchInput {
+    ];
+
+    match try_encode_ht(&gradient_u8(512, 512, 1), 512, 512, 1, 8) {
+        Ok(codestream) => inputs.push(BenchInput {
             name: "htj2k_gray_512",
-            bytes: wrap_codestream_jp2(
-                &encode_ht(&gradient_u8(512, 512, 1), 512, 512, 1, 8),
-                512,
-                512,
-                1,
-                8,
-                17,
-            ),
+            bytes: wrap_codestream_jp2(&codestream, 512, 512, 1, 8, 17),
             dimensions: (512, 512),
             mode: DecodeMode::Gray8,
             is_ht: true,
-        },
-    ]
+        }),
+        Err(error) => eprintln!("skipping htj2k_gray_512 bench input: {error}"),
+    }
+
+    inputs
 }
 
 pub(crate) fn slidecodec_inspect(bytes: &[u8]) {
@@ -209,7 +208,13 @@ fn encode_j2k(pixels: &[u8], width: u32, height: u32, components: u8, bit_depth:
     .expect("encode")
 }
 
-fn encode_ht(pixels: &[u8], width: u32, height: u32, components: u8, bit_depth: u8) -> Vec<u8> {
+fn try_encode_ht(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    components: u8,
+    bit_depth: u8,
+) -> Result<Vec<u8>, String> {
     let options = EncodeOptions {
         reversible: true,
         num_decomposition_levels: 3,
@@ -218,7 +223,7 @@ fn encode_ht(pixels: &[u8], width: u32, height: u32, components: u8, bit_depth: 
     encode_htj2k(
         pixels, width, height, components, bit_depth, false, &options,
     )
-    .expect("encode ht")
+    .map_err(std::string::ToString::to_string)
 }
 
 fn classic_bench_bytes(

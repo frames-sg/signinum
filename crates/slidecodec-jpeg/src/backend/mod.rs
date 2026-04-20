@@ -4,6 +4,7 @@
 //! inverse DCT.
 
 use crate::idct;
+use slidecodec_core::CpuFeatures;
 
 mod scalar;
 
@@ -32,9 +33,11 @@ pub(crate) struct Backend {
 
 impl Backend {
     pub(crate) fn detect() -> Self {
+        let cpu = CpuFeatures::detect();
+
         #[cfg(target_arch = "x86_64")]
         {
-            if !cfg!(feature = "scalar-only") && std::is_x86_feature_detected!("avx2") {
+            if !cfg!(feature = "scalar-only") && cpu.avx2 {
                 return Self {
                     kind: BackendKind::Avx2,
                 };
@@ -43,7 +46,7 @@ impl Backend {
 
         #[cfg(target_arch = "aarch64")]
         {
-            if !cfg!(feature = "scalar-only") {
+            if !cfg!(feature = "scalar-only") && cpu.neon {
                 return Self {
                     kind: BackendKind::Neon,
                 };
@@ -59,7 +62,7 @@ impl Backend {
         match self.kind {
             BackendKind::Scalar => scalar::fill_rgb_row_from_gray(gray_row, dst),
             #[cfg(target_arch = "x86_64")]
-            BackendKind::Avx2 => scalar::fill_rgb_row_from_gray(gray_row, dst),
+            BackendKind::Avx2 => x86::fill_rgb_row_from_gray(gray_row, dst),
             #[cfg(target_arch = "aarch64")]
             BackendKind::Neon => neon::fill_rgb_row_from_gray(gray_row, dst),
         }
@@ -75,7 +78,7 @@ impl Backend {
         match self.kind {
             BackendKind::Scalar => scalar::fill_rgb_row_from_rgb(r_row, g_row, b_row, dst),
             #[cfg(target_arch = "x86_64")]
-            BackendKind::Avx2 => scalar::fill_rgb_row_from_rgb(r_row, g_row, b_row, dst),
+            BackendKind::Avx2 => x86::fill_rgb_row_from_rgb(r_row, g_row, b_row, dst),
             #[cfg(target_arch = "aarch64")]
             BackendKind::Neon => neon::fill_rgb_row_from_rgb(r_row, g_row, b_row, dst),
         }

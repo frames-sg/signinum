@@ -1,4 +1,7 @@
-use slidecodec_core::{Downscale, PixelFormat, PixelLayout, Rect, SampleType};
+use slidecodec_core::{
+    BackendCapabilities, BackendKind, BackendRequest, CpuFeatures, DeviceSubmission, DeviceSurface,
+    Downscale, PixelFormat, PixelLayout, ReadySubmission, Rect, SampleType,
+};
 
 #[test]
 fn pixel_format_reports_layout_and_sample_type() {
@@ -34,4 +37,74 @@ fn rect_full_and_is_within_match_existing_jpeg_behavior() {
         h: 100,
     }
     .is_within((640, 480)));
+}
+
+#[test]
+fn backend_capabilities_resolve_auto_and_explicit_requests() {
+    let caps = BackendCapabilities {
+        cpu: CpuFeatures::default(),
+        metal: true,
+        cuda: false,
+    };
+    assert_eq!(caps.resolve(BackendRequest::Auto), Some(BackendKind::Metal));
+    assert_eq!(caps.resolve(BackendRequest::Cpu), Some(BackendKind::Cpu));
+    assert_eq!(
+        caps.resolve(BackendRequest::Metal),
+        Some(BackendKind::Metal)
+    );
+    assert_eq!(caps.resolve(BackendRequest::Cuda), None);
+    assert!(caps.supports(BackendRequest::Metal));
+    assert!(!caps.supports(BackendRequest::Cuda));
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DummySurface {
+    backend: BackendKind,
+    dims: (u32, u32),
+    fmt: PixelFormat,
+    len: usize,
+}
+
+impl DeviceSurface for DummySurface {
+    fn backend_kind(&self) -> BackendKind {
+        self.backend
+    }
+
+    fn dimensions(&self) -> (u32, u32) {
+        self.dims
+    }
+
+    fn pixel_format(&self) -> PixelFormat {
+        self.fmt
+    }
+
+    fn byte_len(&self) -> usize {
+        self.len
+    }
+}
+
+#[test]
+fn device_surface_contract_reports_metadata() {
+    let surface = DummySurface {
+        backend: BackendKind::Metal,
+        dims: (32, 16),
+        fmt: PixelFormat::Rgb8,
+        len: 32 * 16 * 3,
+    };
+    assert_eq!(surface.backend_kind(), BackendKind::Metal);
+    assert_eq!(surface.dimensions(), (32, 16));
+    assert_eq!(surface.pixel_format(), PixelFormat::Rgb8);
+    assert_eq!(surface.byte_len(), 32 * 16 * 3);
+}
+
+#[test]
+fn ready_submission_waits_immediate_success() {
+    let submission = ReadySubmission::<u32, &'static str>::from_result(Ok(7));
+    assert_eq!(submission.wait().expect("success"), 7);
+}
+
+#[test]
+fn ready_submission_waits_immediate_error() {
+    let submission = ReadySubmission::<u32, &'static str>::from_result(Err("nope"));
+    assert_eq!(submission.wait().expect_err("error"), "nope");
 }

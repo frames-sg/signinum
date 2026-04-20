@@ -7,17 +7,9 @@ use core::convert::Infallible;
 use slidecodec_core::{BufferError, DecodeOutcome, Downscale, PixelFormat, Rect, Unsupported};
 pub(crate) type J2kDecodeOutcome = DecodeOutcome<Infallible>;
 
-pub(crate) fn decode_full_frame(
+pub(crate) fn decode_scaled_from_info(
     bytes: &[u8],
-    out: &mut [u8],
-    stride: usize,
-    fmt: PixelFormat,
-) -> Result<J2kDecodeOutcome, J2kError> {
-    decode_with_settings(bytes, DecodeSettings::default(), out, stride, fmt)
-}
-
-pub(crate) fn decode_scaled(
-    bytes: &[u8],
+    full_dims: (u32, u32),
     pool: &mut J2kScratchPool,
     out: &mut [u8],
     stride: usize,
@@ -25,7 +17,10 @@ pub(crate) fn decode_scaled(
     scale: Downscale,
 ) -> Result<J2kDecodeOutcome, J2kError> {
     validate_supported_format(fmt)?;
-    let target_dims = scaled_dimensions(bytes, scale)?;
+    let target_dims = (
+        full_dims.0.div_ceil(scale.denominator()),
+        full_dims.1.div_ceil(scale.denominator()),
+    );
     let settings = DecodeSettings {
         target_resolution: Some(target_dims),
         ..DecodeSettings::default()
@@ -33,15 +28,16 @@ pub(crate) fn decode_scaled(
     match decode_with_settings(bytes, settings, out, stride, fmt) {
         Ok(outcome) => Ok(outcome),
         Err(error) if scale != Downscale::None && is_htj2k_scaled_decode_gap(&error) => {
-            decode_scaled_fallback(bytes, pool, out, stride, fmt, scale)
+            decode_scaled_fallback(bytes, full_dims, pool, out, stride, fmt, scale)
         }
         Err(error) => Err(error),
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn decode_region(
     bytes: &[u8],
-    pool: &mut J2kScratchPool,
+    _pool: &mut J2kScratchPool,
     out: &mut [u8],
     stride: usize,
     fmt: PixelFormat,
@@ -52,19 +48,7 @@ pub(crate) fn decode_region(
     let dims = (image.width(), image.height());
     validate_region(roi, dims)?;
     validate_buffer((roi.w, roi.h), out.len(), stride, fmt)?;
-
-    let full_stride = dims.0 as usize * fmt.bytes_per_pixel();
-    let full_len = output_len(dims, full_stride, fmt)?;
-    let scratch = pool.packed_bytes(full_len);
-    decode_image_into(&image, scratch, full_stride, fmt)?;
-    copy_region_bytes(
-        scratch,
-        full_stride,
-        out,
-        stride,
-        roi,
-        fmt.bytes_per_pixel(),
-    );
+    decode_image_region_into(&image, out, stride, fmt, roi)?;
 
     Ok(DecodeOutcome {
         decoded: roi,
@@ -72,7 +56,7 @@ pub(crate) fn decode_region(
     })
 }
 
-fn decode_with_settings(
+pub(crate) fn decode_with_settings(
     bytes: &[u8],
     settings: DecodeSettings,
     out: &mut [u8],
@@ -96,17 +80,28 @@ fn decode_image_into(
     stride: usize,
     fmt: PixelFormat,
 ) -> Result<(), J2kError> {
+    let mut native_context = slidecodec_j2k_native::DecoderContext::default();
+    decode_image_into_with_native_context(image, &mut native_context, out, stride, fmt)
+}
+
+pub(crate) fn decode_image_into_with_native_context<'a>(
+    image: &Image<'a>,
+    native_context: &mut slidecodec_j2k_native::DecoderContext<'a>,
+    out: &mut [u8],
+    stride: usize,
+    fmt: PixelFormat,
+) -> Result<(), J2kError> {
     let dims = (image.width(), image.height());
     match fmt {
         PixelFormat::Rgb8 | PixelFormat::Rgba8 | PixelFormat::Gray8 => {
             let decoded = image
-                .decode()
+                .decode_with_context(native_context)
                 .map_err(|err| J2kError::Backend(err.to_string()))?;
             write_u8_output(
                 image.color_space(),
                 image.has_alpha(),
                 dims,
-                &decoded,
+                &decoded.data,
                 out,
                 stride,
                 fmt,
@@ -114,7 +109,64 @@ fn decode_image_into(
         }
         PixelFormat::Rgb16 | PixelFormat::Gray16 => {
             let raw = image
-                .decode_native()
+                .decode_native_with_context(native_context)
+                .map_err(|err| J2kError::Backend(err.to_string()))?;
+            write_u16_output(
+                image.color_space(),
+                image.has_alpha(),
+                &raw,
+                out,
+                stride,
+                fmt,
+            )
+        }
+        PixelFormat::Rgba16 => unreachable!("validated above"),
+        _ => Err(Unsupported {
+            what: "pixel format is not yet supported by slidecodec-j2k",
+        }
+        .into()),
+    }
+}
+
+#[allow(dead_code)]
+fn decode_image_region_into(
+    image: &Image<'_>,
+    out: &mut [u8],
+    stride: usize,
+    fmt: PixelFormat,
+    roi: Rect,
+) -> Result<(), J2kError> {
+    let mut native_context = slidecodec_j2k_native::DecoderContext::default();
+    decode_image_region_into_with_native_context(image, &mut native_context, out, stride, fmt, roi)
+}
+
+pub(crate) fn decode_image_region_into_with_native_context<'a>(
+    image: &Image<'a>,
+    native_context: &mut slidecodec_j2k_native::DecoderContext<'a>,
+    out: &mut [u8],
+    stride: usize,
+    fmt: PixelFormat,
+    roi: Rect,
+) -> Result<(), J2kError> {
+    let dims = (roi.w, roi.h);
+    match fmt {
+        PixelFormat::Rgb8 | PixelFormat::Rgba8 | PixelFormat::Gray8 => {
+            let decoded = image
+                .decode_region_with_context((roi.x, roi.y, roi.w, roi.h), native_context)
+                .map_err(|err| J2kError::Backend(err.to_string()))?;
+            write_u8_output(
+                image.color_space(),
+                image.has_alpha(),
+                dims,
+                &decoded.data,
+                out,
+                stride,
+                fmt,
+            )
+        }
+        PixelFormat::Rgb16 | PixelFormat::Gray16 => {
+            let raw = image
+                .decode_native_region_with_context((roi.x, roi.y, roi.w, roi.h), native_context)
                 .map_err(|err| J2kError::Backend(err.to_string()))?;
             write_u16_output(
                 image.color_space(),
@@ -137,7 +189,7 @@ fn is_htj2k_scaled_decode_gap(error: &J2kError) -> bool {
     matches!(error, J2kError::Backend(message) if message.contains("HTJ2K decode"))
 }
 
-fn validate_supported_format(fmt: PixelFormat) -> Result<(), J2kError> {
+pub(crate) fn validate_supported_format(fmt: PixelFormat) -> Result<(), J2kError> {
     if matches!(fmt, PixelFormat::Rgba16) {
         return Err(Unsupported {
             what: "Rgba16 output is not supported by slidecodec-j2k M1",
@@ -147,7 +199,7 @@ fn validate_supported_format(fmt: PixelFormat) -> Result<(), J2kError> {
     Ok(())
 }
 
-fn validate_buffer(
+pub(crate) fn validate_buffer(
     dims: (u32, u32),
     out_len: usize,
     stride: usize,
@@ -186,24 +238,15 @@ fn output_len(dims: (u32, u32), stride: usize, fmt: PixelFormat) -> Result<usize
         .ok_or(J2kError::Backend("output size overflow".to_string()))
 }
 
-fn scaled_dimensions(bytes: &[u8], scale: Downscale) -> Result<(u32, u32), J2kError> {
-    let image = backend::image(bytes, DecodeSettings::default())?;
-    let denom = scale.denominator();
-    Ok((
-        image.width().div_ceil(denom),
-        image.height().div_ceil(denom),
-    ))
-}
-
 fn decode_scaled_fallback(
     bytes: &[u8],
+    full_dims: (u32, u32),
     pool: &mut J2kScratchPool,
     out: &mut [u8],
     stride: usize,
     fmt: PixelFormat,
     scale: Downscale,
 ) -> Result<J2kDecodeOutcome, J2kError> {
-    let full_dims = scaled_dimensions(bytes, Downscale::None)?;
     let scaled_dims = (
         full_dims.0.div_ceil(scale.denominator()),
         full_dims.1.div_ceil(scale.denominator()),
@@ -212,7 +255,7 @@ fn decode_scaled_fallback(
     let full_stride = full_dims.0 as usize * fmt.bytes_per_pixel();
     let full_len = output_len(full_dims, full_stride, fmt)?;
     let scratch = pool.packed_bytes(full_len);
-    decode_full_frame(bytes, scratch, full_stride, fmt)?;
+    decode_with_settings(bytes, DecodeSettings::default(), scratch, full_stride, fmt)?;
     decimate_bytes(scratch, full_dims, out, stride, fmt, scale.denominator());
     Ok(DecodeOutcome {
         decoded: Rect::full(scaled_dims),
@@ -220,7 +263,7 @@ fn decode_scaled_fallback(
     })
 }
 
-fn validate_region(roi: Rect, dims: (u32, u32)) -> Result<(), J2kError> {
+pub(crate) fn validate_region(roi: Rect, dims: (u32, u32)) -> Result<(), J2kError> {
     if roi.is_within(dims) {
         return Ok(());
     }
@@ -232,24 +275,6 @@ fn validate_region(roi: Rect, dims: (u32, u32)) -> Result<(), J2kError> {
         image_w: dims.0,
         image_h: dims.1,
     })
-}
-
-fn copy_region_bytes(
-    src: &[u8],
-    src_stride: usize,
-    dst: &mut [u8],
-    dst_stride: usize,
-    roi: Rect,
-    bytes_per_pixel: usize,
-) {
-    let src_offset = roi.x as usize * bytes_per_pixel;
-    let row_bytes = roi.w as usize * bytes_per_pixel;
-    for row_idx in 0..roi.h as usize {
-        let src_row_start = (roi.y as usize + row_idx) * src_stride + src_offset;
-        let dst_row_start = row_idx * dst_stride;
-        dst[dst_row_start..dst_row_start + row_bytes]
-            .copy_from_slice(&src[src_row_start..src_row_start + row_bytes]);
-    }
 }
 
 fn decimate_bytes(

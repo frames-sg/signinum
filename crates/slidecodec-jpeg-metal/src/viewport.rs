@@ -5,6 +5,10 @@ use slidecodec_jpeg::{Decoder as CpuDecoder, Rect as JpegRect, ScratchPool};
 
 use crate::{Error, Surface};
 
+const VIEWPORT_TILE_EDGE: u32 = 96;
+const VIEWPORT_TILE_COLS: u32 = 6;
+const VIEWPORT_TILE_ROWS: u32 = 2;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ViewportTile {
     pub source_roi: Rect,
@@ -25,48 +29,56 @@ pub fn suggest_viewport_workload(dimensions: (u32, u32)) -> Option<ViewportWorkl
         Downscale::Half,
         Downscale::None,
     ];
-    let tile_edges = [256u32, 128u32, 64u32];
-
+    let viewport_dims = (
+        VIEWPORT_TILE_EDGE * VIEWPORT_TILE_COLS,
+        VIEWPORT_TILE_EDGE * VIEWPORT_TILE_ROWS,
+    );
     for scale in scales {
         let denom = scale.denominator();
-        for tile_edge in tile_edges {
-            let src_tile = tile_edge.saturating_mul(denom);
-            if src_tile == 0 {
-                continue;
-            }
-
-            let cols = (dimensions.0 / src_tile).min(4);
-            let rows = (dimensions.1 / src_tile).min(4);
-            if cols.saturating_mul(rows) < 4 {
-                continue;
-            }
-
-            let mut tiles = Vec::with_capacity((cols * rows) as usize);
-            for row in 0..rows {
-                for col in 0..cols {
-                    tiles.push(ViewportTile {
-                        source_roi: Rect {
-                            x: col * src_tile,
-                            y: row * src_tile,
-                            w: src_tile,
-                            h: src_tile,
-                        },
-                        dest: Rect {
-                            x: col * tile_edge,
-                            y: row * tile_edge,
-                            w: tile_edge,
-                            h: tile_edge,
-                        },
-                    });
-                }
-            }
-
-            return Some(ViewportWorkload {
-                scale,
-                viewport_dims: (cols * tile_edge, rows * tile_edge),
-                tiles,
-            });
+        let Some(x) = viewport_origin(dimensions.0, viewport_dims.0.saturating_mul(denom), denom)
+        else {
+            continue;
+        };
+        let Some(y) = viewport_origin(dimensions.1, viewport_dims.1.saturating_mul(denom), denom)
+        else {
+            continue;
+        };
+        let source_viewport = Rect {
+            x,
+            y,
+            w: viewport_dims.0.saturating_mul(denom),
+            h: viewport_dims.1.saturating_mul(denom),
+        };
+        let scaled_source = scaled_rect_covering(source_viewport, scale);
+        if (scaled_source.w, scaled_source.h) != viewport_dims {
+            continue;
         }
+        let source_tile = VIEWPORT_TILE_EDGE.saturating_mul(denom);
+        let mut tiles = Vec::with_capacity((VIEWPORT_TILE_COLS * VIEWPORT_TILE_ROWS) as usize);
+        for row in 0..VIEWPORT_TILE_ROWS {
+            for col in 0..VIEWPORT_TILE_COLS {
+                tiles.push(ViewportTile {
+                    source_roi: Rect {
+                        x: source_viewport.x + col * source_tile,
+                        y: source_viewport.y + row * source_tile,
+                        w: source_tile,
+                        h: source_tile,
+                    },
+                    dest: Rect {
+                        x: col * VIEWPORT_TILE_EDGE,
+                        y: row * VIEWPORT_TILE_EDGE,
+                        w: VIEWPORT_TILE_EDGE,
+                        h: VIEWPORT_TILE_EDGE,
+                    },
+                });
+            }
+        }
+
+        return Some(ViewportWorkload {
+            scale,
+            viewport_dims,
+            tiles,
+        });
     }
 
     None
@@ -85,7 +97,8 @@ pub fn compose_viewport_cpu(
     let mut viewport = vec![0u8; viewport_stride * viewport_dims.1 as usize];
 
     for tile in tiles {
-        let tile_dims = scaled_dims((tile.source_roi.w, tile.source_roi.h), scale);
+        let scaled = scaled_rect_covering(tile.source_roi, scale);
+        let tile_dims = (scaled.w, scaled.h);
         if tile_dims != (tile.dest.w, tile.dest.h) {
             return Err(Error::MetalKernel {
                 message: format!(
@@ -160,17 +173,7 @@ pub fn compose_viewport_hybrid(
     viewport_dims: (u32, u32),
     tiles: &[ViewportTile],
 ) -> Result<Surface, Error> {
-    let mut stages = Vec::with_capacity(tiles.len());
-    for tile in tiles {
-        stages.push(crate::compute::decode_region_scaled_to_viewport_stage(
-            decoder,
-            pool,
-            to_jpeg_rect(tile.source_roi),
-            scale,
-            tile.dest,
-        )?);
-    }
-    crate::compute::compose_rgb_viewport(&stages, viewport_dims)
+    crate::compute::compose_rgb_viewport_from_regions(decoder, pool, scale, viewport_dims, tiles)
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -184,11 +187,29 @@ pub fn compose_viewport_hybrid(
     Err(Error::MetalUnavailable)
 }
 
-fn scaled_dims(full: (u32, u32), scale: Downscale) -> (u32, u32) {
-    (
-        full.0.div_ceil(scale.denominator()),
-        full.1.div_ceil(scale.denominator()),
-    )
+fn viewport_origin(full_extent: u32, viewport_extent: u32, align: u32) -> Option<u32> {
+    if viewport_extent > full_extent || align == 0 {
+        return None;
+    }
+
+    let centered = (full_extent - viewport_extent) / 2;
+    Some(centered - centered % align)
+}
+
+fn scaled_rect_covering(rect: Rect, scale: Downscale) -> Rect {
+    let denom = scale.denominator();
+    let x_end = rect.x + rect.w;
+    let y_end = rect.y + rect.h;
+    let x0 = rect.x / denom;
+    let y0 = rect.y / denom;
+    let x1 = x_end.div_ceil(denom);
+    let y1 = y_end.div_ceil(denom);
+    Rect {
+        x: x0,
+        y: y0,
+        w: x1.saturating_sub(x0),
+        h: y1.saturating_sub(y0),
+    }
 }
 
 fn to_jpeg_rect(rect: Rect) -> JpegRect {

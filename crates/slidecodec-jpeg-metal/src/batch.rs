@@ -18,6 +18,7 @@ pub(crate) struct BatchKey {
     fmt: PixelFormat,
     backend: BackendRequest,
     kind: BatchKind,
+    shape: BatchShape,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,6 +26,21 @@ pub(crate) enum BatchKind {
     Full,
     Region { dims: (u32, u32) },
     Scaled { scale: Downscale },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SamplingFamily {
+    Unknown,
+    Fast420,
+    Fast444,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BatchShape {
+    pub(crate) restart_interval: Option<u16>,
+    pub(crate) checkpoint_count: usize,
+    pub(crate) sampling_family: SamplingFamily,
 }
 
 #[derive(Clone)]
@@ -57,8 +73,11 @@ impl QueuedRequest {
         self
     }
 
-    pub(crate) fn key(&self) -> BatchKey {
-        BatchKey {
+    pub(crate) fn key(
+        &self,
+        session: &mut crate::session::SessionState,
+    ) -> Result<BatchKey, Error> {
+        Ok(BatchKey {
             fmt: self.fmt,
             backend: self.backend,
             kind: match self.op {
@@ -68,7 +87,8 @@ impl QueuedRequest {
                 },
                 BatchOp::Scaled(scale) => BatchKind::Scaled { scale },
             },
-        }
+            shape: session.resolve_batch_shape(&self.input, self.backend)?,
+        })
     }
 }
 
@@ -93,7 +113,7 @@ pub(crate) fn flush_if_needed(session: &mut crate::session::SessionState) {
         return;
     }
 
-    let batches = group_compatible_requests(std::mem::take(&mut session.queued));
+    let batches = group_compatible_requests(std::mem::take(&mut session.queued), session);
     for batch in batches {
         session.submissions = session.submissions.saturating_add(1);
         for request in batch {
@@ -108,10 +128,19 @@ pub(crate) fn flush_if_needed(session: &mut crate::session::SessionState) {
     }
 }
 
-fn group_compatible_requests(queued: Vec<QueuedRequest>) -> Vec<Vec<QueuedRequest>> {
+fn group_compatible_requests(
+    queued: Vec<QueuedRequest>,
+    session: &mut crate::session::SessionState,
+) -> Vec<Vec<QueuedRequest>> {
     let mut batches: Vec<(BatchKey, Vec<QueuedRequest>)> = Vec::new();
     for request in queued {
-        let key = request.key();
+        let key = match request.key(session) {
+            Ok(key) => key,
+            Err(err) => {
+                session.completed[request.output_slot] = Some(Err(err));
+                continue;
+            }
+        };
         if let Some((_, batch)) = batches.iter_mut().find(|(batch_key, _)| *batch_key == key) {
             batch.push(request);
         } else {

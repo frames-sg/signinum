@@ -27,6 +27,14 @@ pub struct DeviceDecodePlan {
     pub matches_fast_444: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeviceBatchSummary {
+    pub restart_interval: Option<u16>,
+    pub checkpoint_count: usize,
+    pub matches_fast_420: bool,
+    pub matches_fast_444: bool,
+}
+
 pub fn build_device_plan(
     decoder: &Decoder<'_>,
     cadence_mcus: u32,
@@ -60,6 +68,34 @@ pub fn build_device_plan(
         matches_fast_420: plan.matches_fast_tile_shape(),
         matches_fast_444: plan.matches_fast_rgb444_shape(),
     })
+}
+
+pub fn summarize_device_batch(decoder: &Decoder<'_>, cadence_mcus: u32) -> DeviceBatchSummary {
+    let plan = &decoder.plan;
+    let restart_interval = plan.restart_interval.filter(|&interval| interval > 0);
+    let total_mcus = total_mcus(plan);
+    let cadence_mcus = cadence_mcus.max(1);
+    let checkpoint_count = match restart_interval {
+        Some(restart) => 1usize.saturating_add(
+            total_mcus
+                .saturating_sub(1)
+                .checked_div(u32::from(restart))
+                .unwrap_or(0) as usize,
+        ),
+        None => 1usize.saturating_add(
+            total_mcus
+                .saturating_sub(1)
+                .checked_div(cadence_mcus)
+                .unwrap_or(0) as usize,
+        ),
+    };
+
+    DeviceBatchSummary {
+        restart_interval,
+        checkpoint_count,
+        matches_fast_420: plan.matches_fast_tile_shape(),
+        matches_fast_444: plan.matches_fast_rgb444_shape(),
+    }
 }
 
 fn scan_payload_bytes(
@@ -100,4 +136,12 @@ fn scan_payload_bytes(
     }
 
     Ok((scan.to_vec(), true))
+}
+
+fn total_mcus(plan: &crate::entropy::sequential::PreparedDecodePlan) -> u32 {
+    let mcu_width = u32::from(plan.sampling.max_h) * 8;
+    let mcu_height = u32::from(plan.sampling.max_v) * 8;
+    let mcus_per_row = plan.dimensions.0.div_ceil(mcu_width);
+    let mcu_rows = plan.dimensions.1.div_ceil(mcu_height);
+    mcus_per_row.saturating_mul(mcu_rows)
 }

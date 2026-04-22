@@ -299,9 +299,7 @@ fn grayscale_jpeg(width: u16, height: u16) -> Vec<u8> {
     let mcu_cols = u32::from(width).div_ceil(8);
     let mcu_rows = u32::from(height).div_ceil(8);
     let mcu_count = (mcu_cols * mcu_rows) as usize;
-    for _ in 0..mcu_count {
-        bytes.push(0x00);
-    }
+    bytes.extend(std::iter::repeat_n(0x00, mcu_count));
 
     bytes.extend_from_slice(&[0xff, 0xd9]);
     bytes

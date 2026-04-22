@@ -59,6 +59,29 @@ fn hidden_device_plan_checkpoint_cadence_handles_multi_mcu_inputs() {
     );
 }
 
+#[test]
+fn hidden_device_plan_rejects_non_eoi_marker_after_entropy() {
+    let mut bytes = restart_coded_grayscale_jpeg(24, 24);
+    let marker = bytes
+        .windows(2)
+        .position(|window| matches!(window, [0xff, 0xd0..=0xd7]))
+        .expect("restart marker");
+    bytes[marker + 1] = 0xe0;
+
+    let decoder = Decoder::new(&bytes).expect("restart-coded decoder");
+    let err = slidecodec_jpeg::__private::build_device_plan(&decoder, 2)
+        .expect_err("unexpected marker should fail");
+
+    assert!(matches!(
+        err,
+        slidecodec_jpeg::JpegError::UnexpectedMarker {
+            expected: slidecodec_jpeg::MarkerKind::Eoi,
+            found: 0xe0,
+            ..
+        }
+    ));
+}
+
 fn restart_coded_grayscale_jpeg(width: u16, height: u16) -> Vec<u8> {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(&[0xff, 0xd8]);

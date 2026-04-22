@@ -82,7 +82,14 @@ fn scan_payload_bytes(bytes: &[u8], scan_offset: usize) -> Result<Vec<u8>, JpegE
             0x00 | 0xd0..=0xd7 => {
                 index = next + 1;
             }
-            _ => return Ok(scan[..marker_start].to_vec()),
+            0xd9 => return Ok(scan[..marker_start].to_vec()),
+            found => {
+                return Err(JpegError::UnexpectedMarker {
+                    offset: scan_offset + marker_start,
+                    expected: MarkerKind::Eoi,
+                    found,
+                })
+            }
         }
     }
 

@@ -502,7 +502,7 @@ fn clear_buffer(buffer: &Buffer, len: usize) {
 }
 
 #[cfg(target_os = "macos")]
-fn cached_viewport_stage(
+fn cached_plane_stage(
     device: &Device,
     color_space: JpegColorSpace,
     dims: (u32, u32),
@@ -2260,7 +2260,7 @@ pub(crate) fn decode_region_to_surface(
             return Ok(surface);
         }
         let dims = (roi.w, roi.h);
-        let mut stage = PlaneStage::new(&runtime.device, decoder.info().color_space, dims)?;
+        let mut stage = cached_plane_stage(&runtime.device, decoder.info().color_space, dims)?;
         decoder.decode_region_component_rows_with_scratch(
             pool,
             &mut stage,
@@ -2307,7 +2307,7 @@ pub(crate) fn decode_scaled_to_surface(
             },
             scale,
         );
-        let mut stage = PlaneStage::new(
+        let mut stage = cached_plane_stage(
             &runtime.device,
             decoder.info().color_space,
             (scaled.w, scaled.h),
@@ -2376,7 +2376,7 @@ pub(crate) fn decode_region_scaled_to_surface(
             },
             scale,
         );
-        let mut stage = PlaneStage::new(
+        let mut stage = cached_plane_stage(
             &runtime.device,
             decoder.info().color_space,
             (scaled.w, scaled.h),
@@ -2396,7 +2396,7 @@ pub(crate) fn compose_rgb_viewport_from_regions(
 ) -> Result<Surface, Error> {
     with_runtime(|runtime| {
         let mut stage =
-            cached_viewport_stage(&runtime.device, decoder.info().color_space, viewport_dims)?;
+            cached_plane_stage(&runtime.device, decoder.info().color_space, viewport_dims)?;
         for tile in tiles {
             let dims = scaled_rect_covering(tile.source_roi, scale);
             if (dims.w, dims.h) != (tile.dest.w, tile.dest.h) {

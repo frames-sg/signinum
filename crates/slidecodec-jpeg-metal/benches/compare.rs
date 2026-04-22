@@ -12,6 +12,7 @@ use slidecodec_jpeg_metal::viewport::{
     compose_viewport_cpu, compose_viewport_cpu_to_surface, compose_viewport_hybrid,
     decode_viewport_region_cpu, decode_viewport_region_cpu_to_surface,
     decode_viewport_region_hybrid, decode_viewport_to_surface, suggest_viewport_workload,
+    ViewportTile, ViewportWorkload,
 };
 use slidecodec_jpeg_metal::{Codec, Decoder, MetalSession, ScratchPool};
 use std::fs;
@@ -364,6 +365,25 @@ fn scheduled_viewport_surface(
     std::hint::black_box(surface);
 }
 
+fn sparse_viewport_workload(workload: &ViewportWorkload) -> Option<ViewportWorkload> {
+    let first = *workload.tiles.first()?;
+    let last = *workload.tiles.last()?;
+    Some(ViewportWorkload {
+        scale: workload.scale,
+        viewport_dims: workload.viewport_dims,
+        tiles: vec![
+            ViewportTile {
+                source_roi: first.source_roi,
+                dest: first.dest,
+            },
+            ViewportTile {
+                source_roi: last.source_roi,
+                dest: last.dest,
+            },
+        ],
+    })
+}
+
 fn bench_compare(c: &mut Criterion) {
     let inputs = load_bench_inputs();
 
@@ -671,6 +691,51 @@ fn bench_compare(c: &mut Criterion) {
         );
     }
     viewer_best_region_scaled_rgb_device.finish();
+
+    let mut viewer_best_region_scaled_composite_rgb_device =
+        c.benchmark_group("viewer_best_region_scaled_composite_rgb_device");
+    for input in inputs.iter().filter(|input| {
+        input.mode == DecodeMode::Rgb
+            && input.input_class == CorpusInputClass::BoundedFullFrame
+            && suggest_viewport_workload(input.dimensions)
+                .and_then(|workload| sparse_viewport_workload(&workload))
+                .is_some()
+    }) {
+        let workload = sparse_viewport_workload(
+            &suggest_viewport_workload(input.dimensions).expect("viewport workload"),
+        )
+        .expect("sparse workload");
+        viewer_best_region_scaled_composite_rgb_device.bench_function(
+            format!("{}/cpu_only", input.name),
+            |b| {
+                let decoder = CpuDecoder::new(&input.bytes).expect("cpu decoder");
+                let mut pool = CpuScratchPool::new();
+                b.iter(|| {
+                    scheduled_viewport_surface(&decoder, &mut pool, &workload, BackendRequest::Cpu);
+                });
+            },
+        );
+        let workload = sparse_viewport_workload(
+            &suggest_viewport_workload(input.dimensions).expect("viewport workload"),
+        )
+        .expect("sparse workload");
+        viewer_best_region_scaled_composite_rgb_device.bench_function(
+            format!("{}/adaptive", input.name),
+            |b| {
+                let decoder = CpuDecoder::new(&input.bytes).expect("cpu decoder");
+                let mut pool = CpuScratchPool::new();
+                b.iter(|| {
+                    scheduled_viewport_surface(
+                        &decoder,
+                        &mut pool,
+                        &workload,
+                        BackendRequest::Auto,
+                    );
+                });
+            },
+        );
+    }
+    viewer_best_region_scaled_composite_rgb_device.finish();
 }
 
 criterion_group!(benches, bench_compare);

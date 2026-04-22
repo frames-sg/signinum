@@ -11,8 +11,6 @@ use crate::{Error, Surface};
 const VIEWPORT_TILE_EDGE: u32 = 96;
 const VIEWPORT_TILE_COLS: u32 = 6;
 const VIEWPORT_TILE_ROWS: u32 = 2;
-const AUTO_HYBRID_MIN_SOURCE_PIXELS: u64 = 1_000_000;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ViewportTile {
     pub source_roi: Rect,
@@ -154,15 +152,21 @@ fn choose_viewport_surface_strategy_for_decoder(
     #[cfg(target_os = "macos")]
     {
         let contiguous = is_contiguous_viewport_workload(workload);
-        let source = viewport_source_bounds(workload);
-        let source_pixels = u64::from(source.w) * u64::from(source.h);
-        let prefers_hybrid = decoder.info().restart_interval.is_some()
-            || source_pixels >= AUTO_HYBRID_MIN_SOURCE_PIXELS;
-        Ok(match (contiguous, prefers_hybrid) {
-            (true, true) => ViewportSurfaceStrategy::HybridContiguous,
-            (true, false) => ViewportSurfaceStrategy::CpuContiguous,
-            (false, true) => ViewportSurfaceStrategy::HybridComposite,
-            (false, false) => ViewportSurfaceStrategy::CpuComposite,
+        if !contiguous {
+            return Ok(ViewportSurfaceStrategy::CpuComposite);
+        }
+
+        let restart_coded = decoder.info().restart_interval.is_some();
+        if !restart_coded {
+            return Ok(ViewportSurfaceStrategy::CpuContiguous);
+        }
+
+        let has_direct_packet = build_metal_fast444_packet_for_decoder(decoder).is_ok()
+            || build_metal_fast420_packet_for_decoder(decoder).is_ok();
+        Ok(if has_direct_packet {
+            ViewportSurfaceStrategy::HybridContiguous
+        } else {
+            ViewportSurfaceStrategy::CpuContiguous
         })
     }
 
@@ -406,8 +410,13 @@ pub fn decode_viewport_region_hybrid(
     pool: &mut ScratchPool,
     workload: &ViewportWorkload,
 ) -> Result<Surface, Error> {
-    let fast444_packet = build_metal_fast444_packet_for_decoder(decoder).ok();
-    let fast420_packet = build_metal_fast420_packet_for_decoder(decoder).ok();
+    let use_direct_kernel = decoder.info().restart_interval.is_some();
+    let fast444_packet = use_direct_kernel
+        .then(|| build_metal_fast444_packet_for_decoder(decoder).ok())
+        .flatten();
+    let fast420_packet = use_direct_kernel
+        .then(|| build_metal_fast420_packet_for_decoder(decoder).ok())
+        .flatten();
     crate::compute::decode_region_scaled_to_surface(
         decoder,
         pool,
@@ -501,4 +510,92 @@ fn blit_into_viewport(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BASELINE_420: &[u8] =
+        include_bytes!("../../../corpus/conformance/baseline_420_16x16.jpg");
+    const BASELINE_420_RESTART: &[u8] =
+        include_bytes!("../../../corpus/conformance/baseline_420_restart_32x16.jpg");
+
+    fn sparse_workload_from(workload: &ViewportWorkload) -> ViewportWorkload {
+        ViewportWorkload {
+            scale: workload.scale,
+            viewport_dims: workload.viewport_dims,
+            tiles: vec![
+                *workload.tiles.first().expect("viewport tile"),
+                *workload.tiles.last().expect("viewport tile"),
+            ],
+        }
+    }
+
+    #[test]
+    fn auto_strategy_keeps_large_contiguous_nonrestart_workloads_on_cpu_contiguous() {
+        let decoder = CpuDecoder::new(BASELINE_420).expect("decoder");
+        let workload = suggest_viewport_workload((2_048, 1_024)).expect("contiguous workload");
+
+        assert_eq!(
+            choose_viewport_surface_strategy_for_decoder(&decoder, &workload, BackendRequest::Auto)
+                .expect("strategy"),
+            ViewportSurfaceStrategy::CpuContiguous
+        );
+    }
+
+    #[test]
+    fn auto_strategy_prefers_hybrid_for_restart_coded_contiguous_workloads() {
+        let decoder = CpuDecoder::new(BASELINE_420_RESTART).expect("decoder");
+        let workload = ViewportWorkload {
+            scale: Downscale::None,
+            viewport_dims: (32, 16),
+            tiles: vec![ViewportTile {
+                source_roi: Rect {
+                    x: 0,
+                    y: 0,
+                    w: 32,
+                    h: 16,
+                },
+                dest: Rect {
+                    x: 0,
+                    y: 0,
+                    w: 32,
+                    h: 16,
+                },
+            }],
+        };
+
+        assert_eq!(
+            choose_viewport_surface_strategy_for_decoder(&decoder, &workload, BackendRequest::Auto)
+                .expect("strategy"),
+            ViewportSurfaceStrategy::HybridContiguous
+        );
+    }
+
+    #[test]
+    fn auto_strategy_keeps_large_sparse_nonrestart_workloads_on_cpu_composite() {
+        let decoder = CpuDecoder::new(BASELINE_420).expect("decoder");
+        let contiguous = suggest_viewport_workload((2_048, 1_024)).expect("contiguous workload");
+        let workload = sparse_workload_from(&contiguous);
+
+        assert_eq!(
+            choose_viewport_surface_strategy_for_decoder(&decoder, &workload, BackendRequest::Auto)
+                .expect("strategy"),
+            ViewportSurfaceStrategy::CpuComposite
+        );
+    }
+
+    #[test]
+    fn auto_strategy_keeps_restart_coded_sparse_workloads_on_cpu_composite() {
+        let decoder = CpuDecoder::new(BASELINE_420_RESTART).expect("decoder");
+        let contiguous = suggest_viewport_workload((8_192, 2_048)).expect("contiguous workload");
+        let workload = sparse_workload_from(&contiguous);
+
+        assert_eq!(
+            choose_viewport_surface_strategy_for_decoder(&decoder, &workload, BackendRequest::Auto)
+                .expect("strategy"),
+            ViewportSurfaceStrategy::CpuComposite
+        );
+    }
 }

@@ -3,13 +3,17 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(unreachable_pub)]
 
+mod batch;
 #[cfg(target_os = "macos")]
 mod compute;
+mod session;
+
+use std::sync::Arc;
 
 use slidecodec_core::{
     BackendKind, BackendRequest, BufferError, CodecError, DecodeOutcome, DeviceSubmission,
     DeviceSurface, Downscale, ImageCodec, ImageDecode, ImageDecodeDevice, ImageDecodeSubmit,
-    PixelFormat, ReadySubmission, Rect, TileBatchDecodeDevice, TileBatchDecodeSubmit,
+    PixelFormat, Rect, TileBatchDecodeDevice, TileBatchDecodeSubmit,
 };
 use slidecodec_jpeg::{
     ColorSpace as JpegColorSpace, DecodeOutcome as JpegDecodeOutcome, Decoder as CpuDecoder,
@@ -124,39 +128,42 @@ impl DeviceSurface for Surface {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Default)]
 pub struct MetalSession {
-    submissions: u64,
+    shared: session::SharedSession,
 }
 
 impl MetalSession {
     pub fn submissions(&self) -> u64 {
-        self.submissions
+        self.shared.0.lock().expect("metal session").submissions
     }
+}
 
-    fn record_submit(&mut self) {
-        self.submissions = self.submissions.saturating_add(1);
+impl core::fmt::Debug for MetalSession {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("MetalSession")
+            .field("submissions", &self.submissions())
+            .finish()
     }
 }
 
 pub struct Decoder<'a> {
     inner: CpuDecoder<'a>,
-    pool: CpuScratchPool,
+    source: Arc<[u8]>,
 }
 
 impl<'a> Decoder<'a> {
     pub fn new(input: &'a [u8]) -> Result<Self, Error> {
         Ok(Self {
             inner: CpuDecoder::new(input)?,
-            pool: CpuScratchPool::new(),
+            source: Arc::<[u8]>::from(input),
         })
     }
 
     pub fn from_view(view: JpegView<'a>) -> Result<Self, Error> {
-        Ok(Self {
-            inner: CpuDecoder::from_view(view)?,
-            pool: CpuScratchPool::new(),
-        })
+        let inner = CpuDecoder::from_view(view)?;
+        let source = Arc::<[u8]>::from(slidecodec_jpeg::__private::decoder_bytes(&inner));
+        Ok(Self { inner, source })
     }
 
     pub fn inner(&self) -> &CpuDecoder<'a> {
@@ -165,115 +172,6 @@ impl<'a> Decoder<'a> {
 
     pub fn into_inner(self) -> CpuDecoder<'a> {
         self.inner
-    }
-
-    fn decode_to_surface_impl(
-        &mut self,
-        fmt: PixelFormat,
-        backend: BackendRequest,
-    ) -> Result<Surface, Error> {
-        #[cfg(not(target_os = "macos"))]
-        if matches!(backend, BackendRequest::Metal) {
-            return Err(Error::MetalUnavailable);
-        }
-        match backend {
-            BackendRequest::Cpu => {
-                let (bytes, _outcome) = self.inner.decode(fmt)?;
-                upload_surface(bytes, self.inner.info().dimensions, fmt, backend)
-            }
-            BackendRequest::Auto | BackendRequest::Metal => {
-                #[cfg(target_os = "macos")]
-                {
-                    compute::decode_to_surface(&self.inner, &mut self.pool, fmt)
-                }
-                #[cfg(not(target_os = "macos"))]
-                {
-                    let (bytes, _outcome) = self.inner.decode(fmt)?;
-                    upload_surface(
-                        bytes,
-                        self.inner.info().dimensions,
-                        fmt,
-                        BackendRequest::Cpu,
-                    )
-                }
-            }
-            BackendRequest::Cuda => Err(Error::UnsupportedBackend { request: backend }),
-        }
-    }
-
-    fn decode_region_to_surface_impl(
-        &mut self,
-        fmt: PixelFormat,
-        roi: Rect,
-        backend: BackendRequest,
-    ) -> Result<Surface, Error> {
-        #[cfg(not(target_os = "macos"))]
-        if matches!(backend, BackendRequest::Metal) {
-            return Err(Error::MetalUnavailable);
-        }
-        match backend {
-            BackendRequest::Cpu => {
-                let (bytes, outcome) = self.inner.decode_region(fmt, to_jpeg_rect(roi))?;
-                upload_surface(bytes, (outcome.decoded.w, outcome.decoded.h), fmt, backend)
-            }
-            BackendRequest::Auto | BackendRequest::Metal => {
-                #[cfg(target_os = "macos")]
-                {
-                    compute::decode_region_to_surface(
-                        &self.inner,
-                        &mut self.pool,
-                        fmt,
-                        to_jpeg_rect(roi),
-                    )
-                }
-                #[cfg(not(target_os = "macos"))]
-                {
-                    let (bytes, outcome) = self.inner.decode_region(fmt, to_jpeg_rect(roi))?;
-                    upload_surface(
-                        bytes,
-                        (outcome.decoded.w, outcome.decoded.h),
-                        fmt,
-                        BackendRequest::Cpu,
-                    )
-                }
-            }
-            BackendRequest::Cuda => Err(Error::UnsupportedBackend { request: backend }),
-        }
-    }
-
-    fn decode_scaled_to_surface_impl(
-        &mut self,
-        fmt: PixelFormat,
-        scale: Downscale,
-        backend: BackendRequest,
-    ) -> Result<Surface, Error> {
-        #[cfg(not(target_os = "macos"))]
-        if matches!(backend, BackendRequest::Metal) {
-            return Err(Error::MetalUnavailable);
-        }
-        match backend {
-            BackendRequest::Cpu => {
-                let (bytes, outcome) = self.inner.decode_scaled(fmt, scale)?;
-                upload_surface(bytes, (outcome.decoded.w, outcome.decoded.h), fmt, backend)
-            }
-            BackendRequest::Auto | BackendRequest::Metal => {
-                #[cfg(target_os = "macos")]
-                {
-                    compute::decode_scaled_to_surface(&self.inner, &mut self.pool, fmt, scale)
-                }
-                #[cfg(not(target_os = "macos"))]
-                {
-                    let (bytes, outcome) = self.inner.decode_scaled(fmt, scale)?;
-                    upload_surface(
-                        bytes,
-                        (outcome.decoded.w, outcome.decoded.h),
-                        fmt,
-                        BackendRequest::Cpu,
-                    )
-                }
-            }
-            BackendRequest::Cuda => Err(Error::UnsupportedBackend { request: backend }),
-        }
     }
 }
 
@@ -410,140 +308,10 @@ impl ImageCodec for Codec {
     type Pool = CpuScratchPool;
 }
 
-impl Codec {
-    fn decode_tile_to_surface_impl(
-        ctx: &mut slidecodec_core::DecoderContext<CpuDecoderContext>,
-        pool: &mut CpuScratchPool,
-        input: &[u8],
-        fmt: PixelFormat,
-        backend: BackendRequest,
-    ) -> Result<Surface, Error> {
-        let decoder = CpuDecoder::from_view_in_context(JpegView::parse(input)?, ctx.codec_mut())?;
-        #[cfg(not(target_os = "macos"))]
-        if matches!(backend, BackendRequest::Metal) {
-            return Err(Error::MetalUnavailable);
-        }
-        match backend {
-            BackendRequest::Cpu => {
-                let dims = decoder.info().dimensions;
-                let stride = dims.0 as usize * fmt.bytes_per_pixel();
-                let mut out = vec![0u8; stride * dims.1 as usize];
-                decoder.decode_into_with_scratch(pool, &mut out, stride, fmt)?;
-                upload_surface(out, dims, fmt, backend)
-            }
-            BackendRequest::Auto | BackendRequest::Metal => {
-                #[cfg(target_os = "macos")]
-                {
-                    compute::decode_to_surface(&decoder, pool, fmt)
-                }
-                #[cfg(not(target_os = "macos"))]
-                {
-                    let dims = decoder.info().dimensions;
-                    let stride = dims.0 as usize * fmt.bytes_per_pixel();
-                    let mut out = vec![0u8; stride * dims.1 as usize];
-                    decoder.decode_into_with_scratch(pool, &mut out, stride, fmt)?;
-                    upload_surface(out, dims, fmt, BackendRequest::Cpu)
-                }
-            }
-            BackendRequest::Cuda => Err(Error::UnsupportedBackend { request: backend }),
-        }
-    }
-
-    fn decode_tile_region_to_surface_impl(
-        ctx: &mut slidecodec_core::DecoderContext<CpuDecoderContext>,
-        pool: &mut CpuScratchPool,
-        input: &[u8],
-        fmt: PixelFormat,
-        roi: Rect,
-        backend: BackendRequest,
-    ) -> Result<Surface, Error> {
-        let decoder = CpuDecoder::from_view_in_context(JpegView::parse(input)?, ctx.codec_mut())?;
-        #[cfg(not(target_os = "macos"))]
-        if matches!(backend, BackendRequest::Metal) {
-            return Err(Error::MetalUnavailable);
-        }
-        match backend {
-            BackendRequest::Cpu => {
-                let dims = (roi.w, roi.h);
-                let stride = dims.0 as usize * fmt.bytes_per_pixel();
-                let mut out = vec![0u8; stride * dims.1 as usize];
-                decoder.decode_region_into_with_scratch(
-                    pool,
-                    &mut out,
-                    stride,
-                    fmt,
-                    to_jpeg_rect(roi),
-                )?;
-                upload_surface(out, dims, fmt, backend)
-            }
-            BackendRequest::Auto | BackendRequest::Metal => {
-                #[cfg(target_os = "macos")]
-                {
-                    compute::decode_region_to_surface(&decoder, pool, fmt, to_jpeg_rect(roi))
-                }
-                #[cfg(not(target_os = "macos"))]
-                {
-                    let dims = (roi.w, roi.h);
-                    let stride = dims.0 as usize * fmt.bytes_per_pixel();
-                    let mut out = vec![0u8; stride * dims.1 as usize];
-                    decoder.decode_region_into_with_scratch(
-                        pool,
-                        &mut out,
-                        stride,
-                        fmt,
-                        to_jpeg_rect(roi),
-                    )?;
-                    upload_surface(out, dims, fmt, BackendRequest::Cpu)
-                }
-            }
-            BackendRequest::Cuda => Err(Error::UnsupportedBackend { request: backend }),
-        }
-    }
-
-    fn decode_tile_scaled_to_surface_impl(
-        ctx: &mut slidecodec_core::DecoderContext<CpuDecoderContext>,
-        pool: &mut CpuScratchPool,
-        input: &[u8],
-        fmt: PixelFormat,
-        scale: Downscale,
-        backend: BackendRequest,
-    ) -> Result<Surface, Error> {
-        let decoder = CpuDecoder::from_view_in_context(JpegView::parse(input)?, ctx.codec_mut())?;
-        #[cfg(not(target_os = "macos"))]
-        if matches!(backend, BackendRequest::Metal) {
-            return Err(Error::MetalUnavailable);
-        }
-        match backend {
-            BackendRequest::Cpu => {
-                let dims = scaled_dims(decoder.info().dimensions, scale);
-                let stride = dims.0 as usize * fmt.bytes_per_pixel();
-                let mut out = vec![0u8; stride * dims.1 as usize];
-                decoder.decode_scaled_into_with_scratch(pool, &mut out, stride, fmt, scale)?;
-                upload_surface(out, dims, fmt, backend)
-            }
-            BackendRequest::Auto | BackendRequest::Metal => {
-                #[cfg(target_os = "macos")]
-                {
-                    compute::decode_scaled_to_surface(&decoder, pool, fmt, scale)
-                }
-                #[cfg(not(target_os = "macos"))]
-                {
-                    let dims = scaled_dims(decoder.info().dimensions, scale);
-                    let stride = dims.0 as usize * fmt.bytes_per_pixel();
-                    let mut out = vec![0u8; stride * dims.1 as usize];
-                    decoder.decode_scaled_into_with_scratch(pool, &mut out, stride, fmt, scale)?;
-                    upload_surface(out, dims, fmt, BackendRequest::Cpu)
-                }
-            }
-            BackendRequest::Cuda => Err(Error::UnsupportedBackend { request: backend }),
-        }
-    }
-}
-
 impl<'a> ImageDecodeSubmit<'a> for Decoder<'a> {
     type Session = MetalSession;
     type DeviceSurface = Surface;
-    type SubmittedSurface = ReadySubmission<Surface, Error>;
+    type SubmittedSurface = batch::MetalSubmission;
 
     fn submit_to_device(
         &mut self,
@@ -551,10 +319,21 @@ impl<'a> ImageDecodeSubmit<'a> for Decoder<'a> {
         fmt: PixelFormat,
         backend: BackendRequest,
     ) -> Result<Self::SubmittedSurface, Self::Error> {
-        session.record_submit();
-        Ok(ReadySubmission::from_result(
-            self.decode_to_surface_impl(fmt, backend),
-        ))
+        let slot = session
+            .shared
+            .0
+            .lock()
+            .expect("metal session")
+            .queue_request(batch::QueuedRequest::new(
+                Arc::clone(&self.source),
+                fmt,
+                backend,
+                batch::BatchOp::Full,
+            ));
+        Ok(batch::MetalSubmission {
+            session: session.shared.clone(),
+            slot,
+        })
     }
 
     fn submit_region_to_device(
@@ -564,10 +343,21 @@ impl<'a> ImageDecodeSubmit<'a> for Decoder<'a> {
         roi: Rect,
         backend: BackendRequest,
     ) -> Result<Self::SubmittedSurface, Self::Error> {
-        session.record_submit();
-        Ok(ReadySubmission::from_result(
-            self.decode_region_to_surface_impl(fmt, roi, backend),
-        ))
+        let slot = session
+            .shared
+            .0
+            .lock()
+            .expect("metal session")
+            .queue_request(batch::QueuedRequest::new(
+                Arc::clone(&self.source),
+                fmt,
+                backend,
+                batch::BatchOp::Region(roi),
+            ));
+        Ok(batch::MetalSubmission {
+            session: session.shared.clone(),
+            slot,
+        })
     }
 
     fn submit_scaled_to_device(
@@ -577,10 +367,21 @@ impl<'a> ImageDecodeSubmit<'a> for Decoder<'a> {
         scale: Downscale,
         backend: BackendRequest,
     ) -> Result<Self::SubmittedSurface, Self::Error> {
-        session.record_submit();
-        Ok(ReadySubmission::from_result(
-            self.decode_scaled_to_surface_impl(fmt, scale, backend),
-        ))
+        let slot = session
+            .shared
+            .0
+            .lock()
+            .expect("metal session")
+            .queue_request(batch::QueuedRequest::new(
+                Arc::clone(&self.source),
+                fmt,
+                backend,
+                batch::BatchOp::Scaled(scale),
+            ));
+        Ok(batch::MetalSubmission {
+            session: session.shared.clone(),
+            slot,
+        })
     }
 }
 
@@ -588,7 +389,7 @@ impl TileBatchDecodeSubmit for Codec {
     type Context = CpuDecoderContext;
     type Session = MetalSession;
     type DeviceSurface = Surface;
-    type SubmittedSurface = ReadySubmission<Surface, Error>;
+    type SubmittedSurface = batch::MetalSubmission;
 
     fn submit_tile_to_device(
         ctx: &mut slidecodec_core::DecoderContext<Self::Context>,
@@ -598,10 +399,22 @@ impl TileBatchDecodeSubmit for Codec {
         fmt: PixelFormat,
         backend: BackendRequest,
     ) -> Result<Self::SubmittedSurface, Self::Error> {
-        session.record_submit();
-        Ok(ReadySubmission::from_result(
-            Self::decode_tile_to_surface_impl(ctx, pool, input, fmt, backend),
-        ))
+        let _ = (ctx, pool);
+        let slot = session
+            .shared
+            .0
+            .lock()
+            .expect("metal session")
+            .queue_request(batch::QueuedRequest::new(
+                Arc::<[u8]>::from(input),
+                fmt,
+                backend,
+                batch::BatchOp::Full,
+            ));
+        Ok(batch::MetalSubmission {
+            session: session.shared.clone(),
+            slot,
+        })
     }
 
     fn submit_tile_region_to_device(
@@ -613,10 +426,22 @@ impl TileBatchDecodeSubmit for Codec {
         roi: Rect,
         backend: BackendRequest,
     ) -> Result<Self::SubmittedSurface, Self::Error> {
-        session.record_submit();
-        Ok(ReadySubmission::from_result(
-            Self::decode_tile_region_to_surface_impl(ctx, pool, input, fmt, roi, backend),
-        ))
+        let _ = (ctx, pool);
+        let slot = session
+            .shared
+            .0
+            .lock()
+            .expect("metal session")
+            .queue_request(batch::QueuedRequest::new(
+                Arc::<[u8]>::from(input),
+                fmt,
+                backend,
+                batch::BatchOp::Region(roi),
+            ));
+        Ok(batch::MetalSubmission {
+            session: session.shared.clone(),
+            slot,
+        })
     }
 
     fn submit_tile_scaled_to_device(
@@ -628,10 +453,22 @@ impl TileBatchDecodeSubmit for Codec {
         scale: Downscale,
         backend: BackendRequest,
     ) -> Result<Self::SubmittedSurface, Self::Error> {
-        session.record_submit();
-        Ok(ReadySubmission::from_result(
-            Self::decode_tile_scaled_to_surface_impl(ctx, pool, input, fmt, scale, backend),
-        ))
+        let _ = (ctx, pool);
+        let slot = session
+            .shared
+            .0
+            .lock()
+            .expect("metal session")
+            .queue_request(batch::QueuedRequest::new(
+                Arc::<[u8]>::from(input),
+                fmt,
+                backend,
+                batch::BatchOp::Scaled(scale),
+            ));
+        Ok(batch::MetalSubmission {
+            session: session.shared.clone(),
+            slot,
+        })
     }
 }
 
@@ -698,6 +535,117 @@ impl TileBatchDecodeDevice for Codec {
             backend,
         )?
         .wait()
+    }
+}
+
+pub(crate) fn decode_surface_from_bytes(
+    input: &[u8],
+    fmt: PixelFormat,
+    backend: BackendRequest,
+    op: batch::BatchOp,
+) -> Result<Surface, Error> {
+    let decoder = CpuDecoder::new(input)?;
+    let mut pool = CpuScratchPool::new();
+    decode_surface_from_decoder(&decoder, &mut pool, fmt, backend, op)
+}
+
+fn decode_surface_from_decoder(
+    decoder: &CpuDecoder<'_>,
+    pool: &mut CpuScratchPool,
+    fmt: PixelFormat,
+    backend: BackendRequest,
+    op: batch::BatchOp,
+) -> Result<Surface, Error> {
+    #[cfg(not(target_os = "macos"))]
+    if matches!(backend, BackendRequest::Metal) {
+        return Err(Error::MetalUnavailable);
+    }
+
+    match op {
+        batch::BatchOp::Full => match backend {
+            BackendRequest::Cpu => {
+                let dims = decoder.info().dimensions;
+                let stride = dims.0 as usize * fmt.bytes_per_pixel();
+                let mut out = vec![0u8; stride * dims.1 as usize];
+                decoder.decode_into_with_scratch(pool, &mut out, stride, fmt)?;
+                upload_surface(out, dims, fmt, backend)
+            }
+            BackendRequest::Auto | BackendRequest::Metal => {
+                #[cfg(target_os = "macos")]
+                {
+                    compute::decode_to_surface(decoder, pool, fmt)
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    let dims = decoder.info().dimensions;
+                    let stride = dims.0 as usize * fmt.bytes_per_pixel();
+                    let mut out = vec![0u8; stride * dims.1 as usize];
+                    decoder.decode_into_with_scratch(pool, &mut out, stride, fmt)?;
+                    upload_surface(out, dims, fmt, BackendRequest::Cpu)
+                }
+            }
+            BackendRequest::Cuda => Err(Error::UnsupportedBackend { request: backend }),
+        },
+        batch::BatchOp::Region(roi) => match backend {
+            BackendRequest::Cpu => {
+                let dims = (roi.w, roi.h);
+                let stride = dims.0 as usize * fmt.bytes_per_pixel();
+                let mut out = vec![0u8; stride * dims.1 as usize];
+                decoder.decode_region_into_with_scratch(
+                    pool,
+                    &mut out,
+                    stride,
+                    fmt,
+                    to_jpeg_rect(roi),
+                )?;
+                upload_surface(out, dims, fmt, backend)
+            }
+            BackendRequest::Auto | BackendRequest::Metal => {
+                #[cfg(target_os = "macos")]
+                {
+                    compute::decode_region_to_surface(decoder, pool, fmt, to_jpeg_rect(roi))
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    let dims = (roi.w, roi.h);
+                    let stride = dims.0 as usize * fmt.bytes_per_pixel();
+                    let mut out = vec![0u8; stride * dims.1 as usize];
+                    decoder.decode_region_into_with_scratch(
+                        pool,
+                        &mut out,
+                        stride,
+                        fmt,
+                        to_jpeg_rect(roi),
+                    )?;
+                    upload_surface(out, dims, fmt, BackendRequest::Cpu)
+                }
+            }
+            BackendRequest::Cuda => Err(Error::UnsupportedBackend { request: backend }),
+        },
+        batch::BatchOp::Scaled(scale) => match backend {
+            BackendRequest::Cpu => {
+                let dims = scaled_dims(decoder.info().dimensions, scale);
+                let stride = dims.0 as usize * fmt.bytes_per_pixel();
+                let mut out = vec![0u8; stride * dims.1 as usize];
+                decoder.decode_scaled_into_with_scratch(pool, &mut out, stride, fmt, scale)?;
+                upload_surface(out, dims, fmt, backend)
+            }
+            BackendRequest::Auto | BackendRequest::Metal => {
+                #[cfg(target_os = "macos")]
+                {
+                    compute::decode_scaled_to_surface(decoder, pool, fmt, scale)
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    let dims = scaled_dims(decoder.info().dimensions, scale);
+                    let stride = dims.0 as usize * fmt.bytes_per_pixel();
+                    let mut out = vec![0u8; stride * dims.1 as usize];
+                    decoder.decode_scaled_into_with_scratch(pool, &mut out, stride, fmt, scale)?;
+                    upload_surface(out, dims, fmt, BackendRequest::Cpu)
+                }
+            }
+            BackendRequest::Cuda => Err(Error::UnsupportedBackend { request: backend }),
+        },
     }
 }
 

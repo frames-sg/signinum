@@ -22,7 +22,10 @@ pub(crate) fn build_checkpoint_plan(
 ) -> Result<Vec<DeviceCheckpoint>, JpegError> {
     let total_mcus = total_mcus(plan);
     let cadence_mcus = cadence_mcus.max(1);
-    let restart_interval = plan.restart_interval.filter(|&interval| interval > 0).map(u32::from);
+    let restart_interval = plan
+        .restart_interval
+        .filter(|&interval| interval > 0)
+        .map(u32::from);
     validate_scan_bytes(scan_bytes, restart_interval.is_some())?;
 
     let reader_bytes = terminated_scan_bytes(scan_bytes);
@@ -57,20 +60,10 @@ pub(crate) fn build_checkpoint_plan(
                     br.reset_at_restart();
                     prev_dc.fill(0);
                     mcus_since_restart = 0;
-                    checkpoints.push(snapshot_checkpoint(
-                        mcu_index,
-                        &br,
-                        prev_dc,
-                        expected_rst,
-                    ));
+                    checkpoints.push(snapshot_checkpoint(mcu_index, &br, prev_dc, expected_rst));
                 }
             } else if mcu_index.is_multiple_of(cadence_mcus) {
-                checkpoints.push(snapshot_checkpoint(
-                    mcu_index,
-                    &br,
-                    prev_dc,
-                    expected_rst,
-                ));
+                checkpoints.push(snapshot_checkpoint(mcu_index, &br, prev_dc, expected_rst));
             }
         }
 
@@ -211,7 +204,8 @@ mod tests {
             );
 
             decode_one_mcu(plan, &mut br, &mut coeff, &mut prev_dc).expect("decode one mcu");
-            let resumed = snapshot_checkpoint(pair[1].mcu_index, &br, prev_dc, pair[0].expected_rst);
+            let resumed =
+                snapshot_checkpoint(pair[1].mcu_index, &br, prev_dc, pair[0].expected_rst);
 
             assert_eq!(resumed.scan_offset, pair[1].scan_offset);
             assert_eq!(resumed.bit_accumulator, pair[1].bit_accumulator);

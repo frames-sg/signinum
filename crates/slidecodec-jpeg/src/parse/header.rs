@@ -92,8 +92,10 @@ pub(crate) fn parse_info(bytes: &[u8]) -> Result<Info, JpegError> {
                             length: (m.payload.len() + 2) as u16,
                         });
                     }
-                    restart_interval =
-                        normalize_restart_interval(u16::from_be_bytes([m.payload[0], m.payload[1]]));
+                    restart_interval = normalize_restart_interval(u16::from_be_bytes([
+                        m.payload[0],
+                        m.payload[1],
+                    ]));
                 }
                 0xDA => {
                     let parsed = parse_scan_header(m.payload, m.offset + 4)?;
@@ -184,8 +186,10 @@ pub(crate) fn parse_header(bytes: &[u8]) -> Result<ParsedHeader, JpegError> {
                             length: (m.payload.len() + 2) as u16,
                         });
                     }
-                    restart_interval =
-                        normalize_restart_interval(u16::from_be_bytes([m.payload[0], m.payload[1]]));
+                    restart_interval = normalize_restart_interval(u16::from_be_bytes([
+                        m.payload[0],
+                        m.payload[1],
+                    ]));
                 }
                 0xDA => {
                     let parsed = parse_scan_header(m.payload, m.offset + 4)?;

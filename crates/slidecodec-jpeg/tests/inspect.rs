@@ -55,7 +55,14 @@ fn minimal_baseline_jpeg_with_restart_interval(interval: u16) -> Vec<u8> {
         .expect("SOS marker");
     bytes.splice(
         sos_pos..sos_pos,
-        [0xff, 0xdd, 0x00, 0x04, (interval >> 8) as u8, interval as u8],
+        [
+            0xff,
+            0xdd,
+            0x00,
+            0x04,
+            (interval >> 8) as u8,
+            interval as u8,
+        ],
     );
     bytes
 }

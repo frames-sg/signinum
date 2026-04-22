@@ -102,3 +102,32 @@ fn submit_to_device_returns_surface_and_updates_session() {
     assert_eq!(surface.backend_kind(), BackendKind::Metal);
     assert!(session.submissions() >= 1);
 }
+
+#[test]
+fn multiple_submits_share_one_session_flush() {
+    let mut session = MetalSession::default();
+    let mut a = Decoder::new(BASELINE_420).expect("decoder a");
+    let mut b = Decoder::new(BASELINE_420).expect("decoder b");
+
+    let first = <Decoder<'_> as ImageDecodeSubmit<'_>>::submit_to_device(
+        &mut a,
+        &mut session,
+        PixelFormat::Rgb8,
+        BackendRequest::Metal,
+    )
+    .expect("submit a");
+    let second = <Decoder<'_> as ImageDecodeSubmit<'_>>::submit_to_device(
+        &mut b,
+        &mut session,
+        PixelFormat::Rgb8,
+        BackendRequest::Metal,
+    )
+    .expect("submit b");
+
+    let second_surface = second.wait().expect("wait b");
+    let first_surface = first.wait().expect("wait a");
+
+    assert_eq!(second_surface.backend_kind(), BackendKind::Metal);
+    assert_eq!(first_surface.backend_kind(), BackendKind::Metal);
+    assert_eq!(session.submissions(), 1);
+}

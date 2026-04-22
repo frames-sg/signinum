@@ -70,13 +70,13 @@ fn hidden_device_plan_checkpoint_cadence_handles_multi_mcu_inputs() {
         .map(|checkpoint| checkpoint.scan_offset)
         .collect::<Vec<_>>();
     assert_eq!(cadence_two_offsets.first(), Some(&0));
-    assert!(cadence_two_offsets.windows(2).all(|pair| pair[0] <= pair[1]));
-    assert!(
-        cadence_two
-            .checkpoints
-            .iter()
-            .all(|checkpoint| checkpoint.bits_buffered <= 64 && checkpoint.expected_rst == 0)
-    );
+    assert!(cadence_two_offsets
+        .windows(2)
+        .all(|pair| pair[0] <= pair[1]));
+    assert!(cadence_two
+        .checkpoints
+        .iter()
+        .all(|checkpoint| checkpoint.bits_buffered <= 64 && checkpoint.expected_rst == 0));
 }
 
 #[test]
@@ -106,11 +106,10 @@ fn hidden_device_plan_restart_checkpoints_capture_resume_state() {
             .collect::<Vec<_>>(),
         vec![0, 1, 2, 3, 4, 5, 6, 7, 0]
     );
-    assert!(
-        plan.checkpoints
-            .iter()
-            .all(|checkpoint| checkpoint.bits_buffered == 0 && checkpoint.prev_dc == [0; 4])
-    );
+    assert!(plan
+        .checkpoints
+        .iter()
+        .all(|checkpoint| checkpoint.bits_buffered == 0 && checkpoint.prev_dc == [0; 4]));
 }
 
 #[test]
@@ -333,7 +332,14 @@ fn insert_restart_interval(mut bytes: Vec<u8>, interval: u16) -> Vec<u8> {
         .expect("SOS marker");
     bytes.splice(
         sos..sos,
-        [0xff, 0xdd, 0x00, 0x04, (interval >> 8) as u8, interval as u8],
+        [
+            0xff,
+            0xdd,
+            0x00,
+            0x04,
+            (interval >> 8) as u8,
+            interval as u8,
+        ],
     );
     bytes
 }

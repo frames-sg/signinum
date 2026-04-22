@@ -57,4 +57,7 @@ pub use internal::scratch::ScratchPool;
 pub struct JpegCodec;
 
 #[doc(hidden)]
+pub mod __private;
+
+#[doc(hidden)]
 pub mod bench_support;

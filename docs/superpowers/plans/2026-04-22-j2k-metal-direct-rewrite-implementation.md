@@ -32,7 +32,7 @@
 - `crates/slidecodec-j2k-metal/src/lib.rs`
   - Strict strategy split between `CpuOnly` and `MetalDirect`; remove CPU-upload contamination from explicit `Metal`.
 - `crates/slidecodec-j2k-metal/src/compute.rs`
-  - Reuse existing kernels from a direct executor boundary and add helper entrypoints that operate on owned plan data instead of borrowed host slices.
+  - Expose low-level Metal kernel helpers only. Keep CPU-upload helpers separate from the new direct executor orchestration.
 - `crates/slidecodec-j2k/benches/compare.rs`
   - Keep the direct path benchmarkable after the strict strategy split.
 
@@ -296,7 +296,11 @@ git commit -m "feat: build native grayscale j2k direct plans"
 
 - [ ] **Step 1: Write the failing direct parity test for classic grayscale**
 
-Create a new integration test that asks explicit `BackendRequest::Metal` for a grayscale full decode and compares the downloaded bytes to CPU output.
+Create new integration tests that:
+
+- ask explicit `BackendRequest::Metal` for a grayscale full decode and compare the downloaded bytes to CPU output
+- prove explicit `BackendRequest::Metal` does not route through the CPU-upload path for the supported grayscale slice
+- reject unsupported first-cut scope such as RGB or region/scaled direct requests instead of silently widening the direct path
 
 ```rust
 #[test]
@@ -319,15 +323,48 @@ fn explicit_metal_direct_gray8_matches_cpu_for_classic_j2k() {
 }
 ```
 
+```rust
+#[test]
+fn explicit_metal_gray8_does_not_use_cpu_upload_strategy() {
+    let input = fixture_j2k_gray8();
+    let mut decoder = J2kDecoder::new(&input).expect("decoder");
+
+    let surface = decoder
+        .decode_to_device(PixelFormat::Gray8, BackendRequest::Metal)
+        .expect("metal direct decode");
+
+    assert_eq!(surface.backend_kind(), BackendKind::Metal);
+    assert!(
+        !decoder.debug_last_surface_strategy().is_cpu_upload(),
+        "explicit Metal must not route through CpuUpload"
+    );
+}
+```
+
+```rust
+#[test]
+fn explicit_metal_rejects_first_cut_unsupported_scope() {
+    let input = fixture_j2k_rgb8();
+    let mut decoder = J2kDecoder::new(&input).expect("decoder");
+    let error = decoder
+        .decode_to_device(PixelFormat::Rgb8, BackendRequest::Metal)
+        .expect_err("first-cut direct metal should reject rgb");
+
+    assert!(error.is_unsupported());
+}
+```
+
 - [ ] **Step 2: Run the test to verify it fails**
 
 Run: `cargo test -p slidecodec-j2k-metal explicit_metal_direct_gray8_matches_cpu_for_classic_j2k -- --exact`
 
-Expected: FAIL because explicit `Metal` still routes through the old contaminated strategy or because the direct executor does not exist.
+Expected: FAIL because explicit `Metal` still routes through the old contaminated strategy, because the debug strategy helper does not exist yet, or because unsupported scope is not rejected explicitly.
 
 - [ ] **Step 3: Implement the direct executor**
 
-Create `direct.rs` with a narrow grayscale executor that consumes `J2kDirectGrayscalePlan`, allocates device coefficient buffers per step, reuses existing classic/HT/IDWT/store kernels from `compute.rs`, and finishes with the existing pack kernel.
+First split explicit `Metal` away from CPU-upload routing in `lib.rs`, then create `direct.rs` with a narrow grayscale executor that consumes `J2kDirectGrayscalePlan`, allocates device coefficient buffers per step, reuses existing classic/HT/IDWT/store kernels from `compute.rs`, and finishes with the existing pack kernel.
+
+`direct.rs` must be the orchestration boundary for `MetalDirect`. It may call low-level kernel helpers from `compute.rs`, but it may not call any CPU-upload or host-plane staging helpers.
 
 ```rust
 // crates/slidecodec-j2k-metal/src/direct.rs
@@ -336,6 +373,21 @@ pub(crate) fn decode_grayscale_plan_to_surface(
     fmt: PixelFormat,
 ) -> Result<Surface, Error> {
     compute::decode_direct_grayscale_plan(plan, fmt)
+}
+```
+
+```rust
+// crates/slidecodec-j2k-metal/src/lib.rs
+fn decode_to_surface_via_direct_metal(&mut self, fmt: PixelFormat) -> Result<Surface, Error> {
+    self.ensure_native_image()?;
+    let image = self
+        .native_image
+        .as_ref()
+        .ok_or_else(|| Error::MetalKernel { message: "native image cache missing".to_string() })?;
+    let plan = image
+        .build_direct_grayscale_plan_with_context(&mut self.native_context)
+        .map_err(|error| Error::Decode(slidecodec_j2k::J2kError::Backend(error.to_string())))?;
+    direct::decode_grayscale_plan_to_surface(&plan, fmt)
 }
 ```
 
@@ -370,9 +422,9 @@ pub(crate) fn decode_direct_grayscale_plan(
 
 - [ ] **Step 4: Run the direct parity test to verify it passes**
 
-Run: `cargo test -p slidecodec-j2k-metal direct_gray8_matches_cpu -- --nocapture`
+Run: `cargo test -p slidecodec-j2k-metal 'explicit_metal_direct_gray8_matches_cpu_for_classic_j2k|explicit_metal_gray8_does_not_use_cpu_upload_strategy|explicit_metal_rejects_first_cut_unsupported_scope' -- --nocapture`
 
-Expected: PASS for the classic grayscale direct parity test.
+Expected: PASS for classic grayscale parity, PASS for the no-CPU-upload structural test, and PASS for unsupported-scope rejection.
 
 - [ ] **Step 5: Commit**
 
@@ -394,6 +446,7 @@ Add tests that:
 
 - compare explicit `BackendRequest::Metal` against CPU for HTJ2K grayscale
 - prove explicit `Metal` no longer routes through CPU-upload helpers
+- prove explicit `Metal` rejects region/scaled direct requests in the first grayscale-only full-decode slice
 
 ```rust
 #[test]
@@ -431,11 +484,28 @@ fn explicit_metal_path_does_not_use_cpu_upload_strategy() {
 }
 ```
 
+```rust
+#[test]
+fn explicit_metal_region_is_rejected_in_first_direct_slice() {
+    let input = fixture_htj2k_gray8();
+    let mut decoder = J2kDecoder::new(&input).expect("decoder");
+    let error = decoder
+        .decode_region_to_device(
+            PixelFormat::Gray8,
+            Rect { x: 0, y: 0, w: 1, h: 1 },
+            BackendRequest::Metal,
+        )
+        .expect_err("first-cut direct metal should reject region decode");
+
+    assert!(error.is_unsupported());
+}
+```
+
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `cargo test -p slidecodec-j2k-metal 'explicit_metal_direct_gray8_matches_cpu_for_htj2k|explicit_metal_path_does_not_use_cpu_upload_strategy' -- --nocapture`
 
-Expected: FAIL because explicit `Metal` still routes through the old strategy split.
+Expected: FAIL because explicit `Metal` still routes through the old strategy split or because region rejection is not enforced yet.
 
 - [ ] **Step 3: Refactor strategy dispatch**
 

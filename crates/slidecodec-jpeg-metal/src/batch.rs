@@ -13,6 +13,20 @@ pub(crate) enum BatchOp {
     Scaled(Downscale),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BatchKey {
+    fmt: PixelFormat,
+    backend: BackendRequest,
+    kind: BatchKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BatchKind {
+    Full,
+    Region { dims: (u32, u32) },
+    Scaled { scale: Downscale },
+}
+
 #[derive(Clone)]
 pub(crate) struct QueuedRequest {
     pub(crate) input: Arc<[u8]>,
@@ -42,6 +56,20 @@ impl QueuedRequest {
         self.output_slot = output_slot;
         self
     }
+
+    pub(crate) fn key(&self) -> BatchKey {
+        BatchKey {
+            fmt: self.fmt,
+            backend: self.backend,
+            kind: match self.op {
+                BatchOp::Full => BatchKind::Full,
+                BatchOp::Region(roi) => BatchKind::Region {
+                    dims: (roi.w, roi.h),
+                },
+                BatchOp::Scaled(scale) => BatchKind::Scaled { scale },
+            },
+        }
+    }
 }
 
 pub struct MetalSubmission {
@@ -65,17 +93,32 @@ pub(crate) fn flush_if_needed(session: &mut crate::session::SessionState) {
         return;
     }
 
-    let queued = std::mem::take(&mut session.queued);
-    session.submissions = session.submissions.saturating_add(1);
-    for request in queued {
-        let result = crate::decode_surface_from_bytes(
-            request.input.as_ref(),
-            request.fmt,
-            request.backend,
-            request.op,
-        );
-        session.completed[request.output_slot] = Some(result);
+    let batches = group_compatible_requests(std::mem::take(&mut session.queued));
+    for batch in batches {
+        session.submissions = session.submissions.saturating_add(1);
+        for request in batch {
+            let result = crate::decode_surface_from_bytes(
+                request.input.as_ref(),
+                request.fmt,
+                request.backend,
+                request.op,
+            );
+            session.completed[request.output_slot] = Some(result);
+        }
     }
+}
+
+fn group_compatible_requests(queued: Vec<QueuedRequest>) -> Vec<Vec<QueuedRequest>> {
+    let mut batches: Vec<(BatchKey, Vec<QueuedRequest>)> = Vec::new();
+    for request in queued {
+        let key = request.key();
+        if let Some((_, batch)) = batches.iter_mut().find(|(batch_key, _)| *batch_key == key) {
+            batch.push(request);
+        } else {
+            batches.push((key, vec![request]));
+        }
+    }
+    batches.into_iter().map(|(_, batch)| batch).collect()
 }
 
 fn take_surface(session: &mut crate::session::SessionState, slot: usize) -> Result<Surface, Error> {

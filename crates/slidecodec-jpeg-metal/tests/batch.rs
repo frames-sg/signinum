@@ -1,9 +1,9 @@
 use slidecodec_core::{
-    BackendKind, BackendRequest, DecoderContext, DeviceSurface, Downscale, PixelFormat, Rect,
-    TileBatchDecodeDevice,
+    BackendKind, BackendRequest, DecoderContext, DeviceSubmission, DeviceSurface, Downscale,
+    PixelFormat, Rect, TileBatchDecodeDevice, TileBatchDecodeSubmit,
 };
 use slidecodec_jpeg::DecoderContext as JpegDecoderContext;
-use slidecodec_jpeg_metal::{Codec, ScratchPool};
+use slidecodec_jpeg_metal::{Codec, MetalSession, ScratchPool};
 
 const BASELINE_420: &[u8] = include_bytes!("../../../corpus/conformance/baseline_420_16x16.jpg");
 
@@ -64,4 +64,64 @@ fn tile_region_device_decode_has_expected_dimensions() {
     )
     .expect("tile region device decode");
     assert_eq!(surface.dimensions(), (8, 8));
+}
+
+#[test]
+fn compatible_tile_submits_flush_once() {
+    let mut ctx = DecoderContext::<JpegDecoderContext>::new();
+    let mut pool = ScratchPool::new();
+    let mut session = MetalSession::default();
+
+    let submissions = (0..4)
+        .map(|_| {
+            <Codec as TileBatchDecodeSubmit>::submit_tile_to_device(
+                &mut ctx,
+                &mut session,
+                &mut pool,
+                BASELINE_420,
+                PixelFormat::Rgb8,
+                BackendRequest::Metal,
+            )
+            .expect("submit")
+        })
+        .collect::<Vec<_>>();
+
+    for submission in submissions {
+        let surface = submission.wait().expect("surface");
+        assert_eq!(surface.backend_kind(), BackendKind::Metal);
+    }
+
+    assert_eq!(session.submissions(), 1);
+}
+
+#[test]
+fn incompatible_shapes_split_batches() {
+    let mut ctx = DecoderContext::<JpegDecoderContext>::new();
+    let mut pool = ScratchPool::new();
+    let mut session = MetalSession::default();
+
+    let full = <Codec as TileBatchDecodeSubmit>::submit_tile_to_device(
+        &mut ctx,
+        &mut session,
+        &mut pool,
+        BASELINE_420,
+        PixelFormat::Rgb8,
+        BackendRequest::Metal,
+    )
+    .expect("full");
+    let scaled = <Codec as TileBatchDecodeSubmit>::submit_tile_scaled_to_device(
+        &mut ctx,
+        &mut session,
+        &mut pool,
+        BASELINE_420,
+        PixelFormat::Rgb8,
+        Downscale::Quarter,
+        BackendRequest::Metal,
+    )
+    .expect("scaled");
+
+    let _ = full.wait().expect("full wait");
+    let _ = scaled.wait().expect("scaled wait");
+
+    assert_eq!(session.submissions(), 2);
 }

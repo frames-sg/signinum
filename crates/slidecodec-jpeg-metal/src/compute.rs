@@ -10,6 +10,7 @@ use metal::{
 use slidecodec_core::{PixelFormat, Rect};
 use slidecodec_jpeg::{ColorSpace as JpegColorSpace, ComponentRowWriter, Decoder as CpuDecoder};
 
+use crate::viewport::ViewportTile;
 use crate::{Error, Surface};
 
 #[cfg(target_os = "macos")]
@@ -92,60 +93,6 @@ kernel void jpeg_pack(
     }
 }
 
-struct JpegViewportParams {
-    uint tile_width;
-    uint tile_height;
-    uint viewport_width;
-    uint viewport_height;
-    uint viewport_stride;
-    uint dest_x;
-    uint dest_y;
-    uint mode;
-};
-
-kernel void jpeg_pack_into_viewport_rgb(
-    device const uchar *plane0 [[buffer(0)]],
-    device const uchar *plane1 [[buffer(1)]],
-    device const uchar *plane2 [[buffer(2)]],
-    device uchar *out [[buffer(3)]],
-    constant JpegViewportParams &params [[buffer(4)]],
-    uint2 gid [[thread_position_in_grid]]
-) {
-    if (gid.x >= params.tile_width || gid.y >= params.tile_height) {
-        return;
-    }
-
-    const uint dst_x = params.dest_x + gid.x;
-    const uint dst_y = params.dest_y + gid.y;
-    if (dst_x >= params.viewport_width || dst_y >= params.viewport_height) {
-        return;
-    }
-
-    const uint idx = gid.y * params.tile_width + gid.x;
-    const uint out_idx = dst_y * params.viewport_stride + dst_x * 3u;
-
-    if (params.mode == MODE_GRAY) {
-        const uchar gray = plane0[idx];
-        out[out_idx] = gray;
-        out[out_idx + 1] = gray;
-        out[out_idx + 2] = gray;
-        return;
-    }
-
-    if (params.mode == MODE_RGB) {
-        out[out_idx] = plane0[idx];
-        out[out_idx + 1] = plane1[idx];
-        out[out_idx + 2] = plane2[idx];
-        return;
-    }
-
-    const int y = int(plane0[idx]);
-    const int cb = int(plane1[idx]) - 128;
-    const int cr = int(plane2[idx]) - 128;
-    out[out_idx] = clamp_u8(y + ((91881 * cr + (1 << 15)) >> 16));
-    out[out_idx + 1] = clamp_u8(y - ((22554 * cb + 46802 * cr + (1 << 15)) >> 16));
-    out[out_idx + 2] = clamp_u8(y + ((116130 * cb + (1 << 15)) >> 16));
-}
 ";
 
 #[cfg(target_os = "macos")]
@@ -175,22 +122,9 @@ struct JpegPackParams {
 }
 
 #[cfg(target_os = "macos")]
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct JpegViewportParams {
-    tile_width: u32,
-    tile_height: u32,
-    viewport_width: u32,
-    viewport_height: u32,
-    viewport_stride: u32,
-    dest_x: u32,
-    dest_y: u32,
-    mode: u32,
-}
-
-#[cfg(target_os = "macos")]
 thread_local! {
     static METAL_RUNTIME: RefCell<Option<Result<MetalRuntime, String>>> = const { RefCell::new(None) };
+    static VIEWPORT_PLANE_CACHE: RefCell<Option<CachedViewportPlanes>> = const { RefCell::new(None) };
 }
 
 #[cfg(target_os = "macos")]
@@ -198,7 +132,6 @@ struct MetalRuntime {
     device: Device,
     queue: CommandQueue,
     pack_pipeline: ComputePipelineState,
-    viewport_rgb_pipeline: ComputePipelineState,
 }
 
 #[cfg(target_os = "macos")]
@@ -210,15 +143,11 @@ impl MetalRuntime {
         let library = device.new_library_with_source(SHADER_SOURCE, &options)?;
         let pack_function = library.get_function("jpeg_pack", None)?;
         let pack_pipeline = device.new_compute_pipeline_state_with_function(&pack_function)?;
-        let viewport_function = library.get_function("jpeg_pack_into_viewport_rgb", None)?;
-        let viewport_rgb_pipeline =
-            device.new_compute_pipeline_state_with_function(&viewport_function)?;
         let queue = device.new_command_queue();
         Ok(Self {
             device,
             queue,
             pack_pipeline,
-            viewport_rgb_pipeline,
         })
     }
 }
@@ -240,7 +169,7 @@ fn with_runtime<R>(f: impl FnOnce(&MetalRuntime) -> Result<R, Error>) -> Result<
 }
 
 #[cfg(target_os = "macos")]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum PlaneMode {
     Gray,
     YCbCr,
@@ -257,9 +186,18 @@ struct PlaneStage {
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) struct ViewportTileStage {
+struct ViewportPlaneWriter<'a> {
+    stage: &'a mut PlaneStage,
     dest: Rect,
-    stage: PlaneStage,
+}
+
+#[cfg(target_os = "macos")]
+struct CachedViewportPlanes {
+    dims: (u32, u32),
+    mode: PlaneMode,
+    plane0: Buffer,
+    plane1: Option<Buffer>,
+    plane2: Option<Buffer>,
 }
 
 #[cfg(target_os = "macos")]
@@ -442,6 +380,168 @@ fn write_row_u8(buffer: &Buffer, y: u32, width: usize, src: &[u8]) {
 }
 
 #[cfg(target_os = "macos")]
+fn write_row_u8_at(buffer: &Buffer, y: u32, x: u32, full_width: usize, src: &[u8]) {
+    let row_start = y as usize * full_width + x as usize;
+    let row_end = row_start + src.len();
+    let len = full_width * (y as usize + 1);
+    let dst = unsafe {
+        core::slice::from_raw_parts_mut(buffer.contents().cast::<u8>(), len.max(row_end))
+    };
+    dst[row_start..row_end].copy_from_slice(src);
+}
+
+#[cfg(target_os = "macos")]
+fn plane_mode_for_color_space(color_space: JpegColorSpace) -> Result<PlaneMode, Error> {
+    match color_space {
+        JpegColorSpace::Grayscale => Ok(PlaneMode::Gray),
+        JpegColorSpace::YCbCr => Ok(PlaneMode::YCbCr),
+        JpegColorSpace::Rgb => Ok(PlaneMode::Rgb),
+        JpegColorSpace::Cmyk | JpegColorSpace::Ycck => Err(Error::MetalKernel {
+            message: "Metal compute path does not support CMYK/YCCK JPEG output".to_string(),
+        }),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn clear_buffer(buffer: &Buffer, len: usize) {
+    unsafe {
+        core::ptr::write_bytes(buffer.contents().cast::<u8>(), 0, len);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn cached_viewport_stage(
+    device: &Device,
+    color_space: JpegColorSpace,
+    dims: (u32, u32),
+) -> Result<PlaneStage, Error> {
+    let mode = plane_mode_for_color_space(color_space)?;
+    VIEWPORT_PLANE_CACHE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let len = dims.0 as usize * dims.1 as usize;
+        let refresh = slot
+            .as_ref()
+            .is_none_or(|cached| cached.dims != dims || cached.mode != mode);
+        if refresh {
+            let plane0 = device.new_buffer(len as u64, MTLResourceOptions::StorageModeShared);
+            let (plane1, plane2) = match mode {
+                PlaneMode::Gray => (None, None),
+                PlaneMode::YCbCr | PlaneMode::Rgb => (
+                    Some(device.new_buffer(len as u64, MTLResourceOptions::StorageModeShared)),
+                    Some(device.new_buffer(len as u64, MTLResourceOptions::StorageModeShared)),
+                ),
+            };
+            *slot = Some(CachedViewportPlanes {
+                dims,
+                mode,
+                plane0,
+                plane1,
+                plane2,
+            });
+        }
+
+        let cached = slot.as_ref().expect("viewport plane cache");
+        let stage = PlaneStage {
+            dims,
+            mode,
+            plane0: cached.plane0.clone(),
+            plane1: cached.plane1.clone(),
+            plane2: cached.plane2.clone(),
+        };
+        clear_buffer(&stage.plane0, len);
+        if let Some(plane1) = &stage.plane1 {
+            clear_buffer(plane1, len);
+        }
+        if let Some(plane2) = &stage.plane2 {
+            clear_buffer(plane2, len);
+        }
+        Ok(stage)
+    })
+}
+
+#[cfg(target_os = "macos")]
+impl ComponentRowWriter for ViewportPlaneWriter<'_> {
+    fn write_gray_row(
+        &mut self,
+        y: u32,
+        gray_row: &[u8],
+    ) -> Result<(), slidecodec_jpeg::JpegError> {
+        write_row_u8_at(
+            &self.stage.plane0,
+            self.dest.y + y,
+            self.dest.x,
+            self.stage.dims.0 as usize,
+            gray_row,
+        );
+        Ok(())
+    }
+
+    fn write_ycbcr_row(
+        &mut self,
+        y: u32,
+        y_row: &[u8],
+        chroma_blue_row: &[u8],
+        chroma_red_row: &[u8],
+    ) -> Result<(), slidecodec_jpeg::JpegError> {
+        let width = self.stage.dims.0 as usize;
+        write_row_u8_at(
+            &self.stage.plane0,
+            self.dest.y + y,
+            self.dest.x,
+            width,
+            y_row,
+        );
+        write_row_u8_at(
+            self.stage.plane1.as_ref().expect("Cb plane"),
+            self.dest.y + y,
+            self.dest.x,
+            width,
+            chroma_blue_row,
+        );
+        write_row_u8_at(
+            self.stage.plane2.as_ref().expect("Cr plane"),
+            self.dest.y + y,
+            self.dest.x,
+            width,
+            chroma_red_row,
+        );
+        Ok(())
+    }
+
+    fn write_rgb_row(
+        &mut self,
+        y: u32,
+        r_row: &[u8],
+        g_row: &[u8],
+        b_row: &[u8],
+    ) -> Result<(), slidecodec_jpeg::JpegError> {
+        let width = self.stage.dims.0 as usize;
+        write_row_u8_at(
+            &self.stage.plane0,
+            self.dest.y + y,
+            self.dest.x,
+            width,
+            r_row,
+        );
+        write_row_u8_at(
+            self.stage.plane1.as_ref().expect("G plane"),
+            self.dest.y + y,
+            self.dest.x,
+            width,
+            g_row,
+        );
+        write_row_u8_at(
+            self.stage.plane2.as_ref().expect("B plane"),
+            self.dest.y + y,
+            self.dest.x,
+            width,
+            b_row,
+        );
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn scaled_rect_covering(rect: Rect, scale: slidecodec_core::Downscale) -> Rect {
     let denom = scale.denominator();
     let x_end = rect.x + rect.w;
@@ -530,110 +630,43 @@ pub(crate) fn decode_scaled_to_surface(
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) fn decode_region_scaled_to_viewport_stage(
+pub(crate) fn compose_rgb_viewport_from_regions(
     decoder: &CpuDecoder<'_>,
     pool: &mut slidecodec_jpeg::ScratchPool,
-    roi: slidecodec_jpeg::Rect,
     scale: slidecodec_core::Downscale,
-    dest: Rect,
-) -> Result<ViewportTileStage, Error> {
-    with_runtime(|runtime| {
-        let dims = (
-            roi.w.div_ceil(scale.denominator()),
-            roi.h.div_ceil(scale.denominator()),
-        );
-        if dims != (dest.w, dest.h) {
-            return Err(Error::MetalKernel {
-                message: format!(
-                    "viewport tile dims {dims:?} do not match destination rect {dest:?}"
-                ),
-            });
-        }
-        let mut stage = PlaneStage::new(&runtime.device, decoder.info().color_space, dims)?;
-        decoder.decode_region_component_rows_with_scratch(pool, &mut stage, roi, scale)?;
-        Ok(ViewportTileStage { dest, stage })
-    })
-}
-
-#[cfg(target_os = "macos")]
-pub(crate) fn compose_rgb_viewport(
-    stages: &[ViewportTileStage],
     viewport_dims: (u32, u32),
+    tiles: &[ViewportTile],
 ) -> Result<Surface, Error> {
     with_runtime(|runtime| {
-        let pitch_bytes = viewport_dims.0 as usize * PixelFormat::Rgb8.bytes_per_pixel();
-        let out_buffer = runtime.device.new_buffer(
-            (pitch_bytes * viewport_dims.1 as usize) as u64,
-            MTLResourceOptions::StorageModeShared,
-        );
-
-        let command_buffer = runtime.queue.new_command_buffer();
-        for tile in stages {
-            let params = JpegViewportParams {
-                tile_width: tile.stage.dims.0,
-                tile_height: tile.stage.dims.1,
-                viewport_width: viewport_dims.0,
-                viewport_height: viewport_dims.1,
-                viewport_stride: u32::try_from(pitch_bytes).expect("viewport stride fits in u32"),
-                dest_x: tile.dest.x,
-                dest_y: tile.dest.y,
-                mode: match tile.stage.mode {
-                    PlaneMode::Gray => MODE_GRAY,
-                    PlaneMode::YCbCr => MODE_YCBCR,
-                    PlaneMode::Rgb => MODE_RGB,
-                },
+        let mut stage =
+            cached_viewport_stage(&runtime.device, decoder.info().color_space, viewport_dims)?;
+        for tile in tiles {
+            let dims = scaled_rect_covering(tile.source_roi, scale);
+            if (dims.w, dims.h) != (tile.dest.w, tile.dest.h) {
+                return Err(Error::MetalKernel {
+                    message: format!(
+                        "viewport tile dims {:?} do not match destination rect {:?}",
+                        (dims.w, dims.h),
+                        tile.dest
+                    ),
+                });
+            }
+            let mut writer = ViewportPlaneWriter {
+                stage: &mut stage,
+                dest: tile.dest,
             };
-
-            let encoder = command_buffer.new_compute_command_encoder();
-            encoder.set_compute_pipeline_state(&runtime.viewport_rgb_pipeline);
-            encoder.set_buffer(0, Some(&tile.stage.plane0), 0);
-            encoder.set_buffer(
-                1,
-                tile.stage.plane1.as_ref().map(std::convert::AsRef::as_ref),
-                0,
-            );
-            encoder.set_buffer(
-                2,
-                tile.stage.plane2.as_ref().map(std::convert::AsRef::as_ref),
-                0,
-            );
-            encoder.set_buffer(3, Some(&out_buffer), 0);
-            encoder.set_bytes(
-                4,
-                size_of::<JpegViewportParams>() as u64,
-                (&raw const params).cast(),
-            );
-
-            let width = runtime
-                .viewport_rgb_pipeline
-                .thread_execution_width()
-                .max(1);
-            let max_threads = runtime
-                .viewport_rgb_pipeline
-                .max_total_threads_per_threadgroup()
-                .max(width);
-            let height = (max_threads / width).max(1);
-            encoder.dispatch_threads(
-                MTLSize {
-                    width: u64::from(tile.stage.dims.0),
-                    height: u64::from(tile.stage.dims.1),
-                    depth: 1,
+            decoder.decode_region_component_rows_with_scratch(
+                pool,
+                &mut writer,
+                slidecodec_jpeg::Rect {
+                    x: tile.source_roi.x,
+                    y: tile.source_roi.y,
+                    w: tile.source_roi.w,
+                    h: tile.source_roi.h,
                 },
-                MTLSize {
-                    width,
-                    height,
-                    depth: 1,
-                },
-            );
-            encoder.end_encoding();
+                scale,
+            )?;
         }
-
-        command_buffer.commit();
-        command_buffer.wait_until_completed();
-        Ok(Surface::from_metal_buffer(
-            out_buffer,
-            viewport_dims,
-            PixelFormat::Rgb8,
-        ))
+        stage.finish_with_runtime(runtime, PixelFormat::Rgb8)
     })
 }

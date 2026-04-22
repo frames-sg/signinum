@@ -1,0 +1,329 @@
+// SPDX-License-Identifier: Apache-2.0
+
+use criterion::{criterion_group, criterion_main, Criterion};
+use slidecodec_core::{
+    BackendRequest, DecoderContext, DeviceSubmission, Downscale, ImageDecodeSubmit, PixelFormat,
+    Rect, TileBatchDecodeSubmit,
+};
+use slidecodec_jpeg::{
+    Decoder as CpuDecoder, DecoderContext as JpegDecoderContext, ScratchPool as CpuScratchPool,
+};
+use slidecodec_jpeg_metal::{Codec, Decoder, MetalSession, ScratchPool};
+use std::fs;
+use std::path::{Path, PathBuf};
+
+const FULL_FRAME_MAX_OUTPUT_BYTES: usize = 512 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DecodeMode {
+    Gray,
+    Rgb,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CorpusInputClass {
+    BoundedFullFrame,
+    VeryLarge,
+}
+
+#[derive(Clone)]
+struct BenchInput {
+    name: String,
+    bytes: Vec<u8>,
+    mode: DecodeMode,
+    input_class: CorpusInputClass,
+}
+
+fn load_bench_inputs() -> Vec<BenchInput> {
+    let mut inputs = vec![
+        BenchInput {
+            name: "repo/baseline_420_16x16".to_string(),
+            bytes: include_bytes!("../../../corpus/conformance/baseline_420_16x16.jpg").to_vec(),
+            mode: DecodeMode::Rgb,
+            input_class: CorpusInputClass::BoundedFullFrame,
+        },
+        BenchInput {
+            name: "repo/grayscale_8x8".to_string(),
+            bytes: include_bytes!("../../../corpus/conformance/grayscale_8x8.jpg").to_vec(),
+            mode: DecodeMode::Gray,
+            input_class: CorpusInputClass::BoundedFullFrame,
+        },
+    ];
+
+    let mut seen = inputs
+        .iter()
+        .map(|input| input.name.clone())
+        .collect::<Vec<_>>();
+    for path in
+        std::env::split_paths(&std::env::var_os("SLIDECODEC_BENCH_INPUTS").unwrap_or_default())
+    {
+        collect_jpegs(&path, &mut inputs, &mut seen);
+    }
+    inputs.sort_by(|a, b| a.name.cmp(&b.name));
+    inputs
+}
+
+fn collect_jpegs(path: &Path, inputs: &mut Vec<BenchInput>, seen: &mut Vec<String>) {
+    if path.is_file() {
+        push_jpeg(path, inputs, seen);
+        return;
+    }
+    if !path.is_dir() {
+        return;
+    }
+
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let child = entry.path();
+            if child.is_dir() {
+                stack.push(child);
+            } else {
+                push_jpeg(&child, inputs, seen);
+            }
+        }
+    }
+}
+
+fn push_jpeg(path: &Path, inputs: &mut Vec<BenchInput>, seen: &mut Vec<String>) {
+    if !is_jpeg(path) {
+        return;
+    }
+    let Ok(bytes) = fs::read(path) else {
+        return;
+    };
+    let Ok(decoder) = CpuDecoder::new(&bytes) else {
+        return;
+    };
+    let Some(mode) = color_space_mode(decoder.info().color_space) else {
+        return;
+    };
+    let name = relative_name(path);
+    if seen.contains(&name) {
+        return;
+    }
+
+    seen.push(name.clone());
+    let dimensions = decoder.info().dimensions;
+    inputs.push(BenchInput {
+        name,
+        bytes,
+        mode,
+        input_class: classify_corpus_input(dimensions, mode),
+    });
+}
+
+fn is_jpeg(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| matches!(ext.to_ascii_lowercase().as_str(), "jpg" | "jpeg"))
+}
+
+fn relative_name(path: &Path) -> String {
+    let absolute = path.canonicalize().unwrap_or_else(|_| PathBuf::from(path));
+    if let Some(prefix) = std::env::var_os("HOME") {
+        let prefix = PathBuf::from(prefix);
+        if let Ok(stripped) = absolute.strip_prefix(prefix) {
+            return stripped.display().to_string();
+        }
+    }
+    absolute.display().to_string()
+}
+
+fn color_space_mode(color_space: slidecodec_jpeg::ColorSpace) -> Option<DecodeMode> {
+    match color_space {
+        slidecodec_jpeg::ColorSpace::Grayscale => Some(DecodeMode::Gray),
+        slidecodec_jpeg::ColorSpace::YCbCr | slidecodec_jpeg::ColorSpace::Rgb => {
+            Some(DecodeMode::Rgb)
+        }
+        slidecodec_jpeg::ColorSpace::Cmyk | slidecodec_jpeg::ColorSpace::Ycck => None,
+    }
+}
+
+fn classify_corpus_input(dimensions: (u32, u32), mode: DecodeMode) -> CorpusInputClass {
+    let bpp = match mode {
+        DecodeMode::Gray => 1usize,
+        DecodeMode::Rgb => 3usize,
+    };
+    let bytes = usize::try_from(dimensions.0)
+        .ok()
+        .and_then(|width| {
+            usize::try_from(dimensions.1)
+                .ok()
+                .map(|height| (width, height))
+        })
+        .and_then(|(width, height)| width.checked_mul(height))
+        .and_then(|pixels| pixels.checked_mul(bpp));
+    match bytes {
+        Some(bytes) if bytes <= FULL_FRAME_MAX_OUTPUT_BYTES => CorpusInputClass::BoundedFullFrame,
+        _ => CorpusInputClass::VeryLarge,
+    }
+}
+
+fn centered_roi((width, height): (u32, u32), side: u32) -> Rect {
+    let w = side.min(width);
+    let h = side.min(height);
+    Rect {
+        x: (width - w) / 2,
+        y: (height - h) / 2,
+        w,
+        h,
+    }
+}
+
+fn cpu_decode_tile_batch(bytes: &[u8], batch_size: usize) {
+    let mut ctx = JpegDecoderContext::new();
+    let mut pool = CpuScratchPool::new();
+    let mut out = Vec::new();
+    for _ in 0..batch_size {
+        let decoder = CpuDecoder::from_view_in_context(
+            slidecodec_jpeg::JpegView::parse(bytes).expect("view"),
+            &mut ctx,
+        )
+        .expect("decoder");
+        let dims = decoder.info().dimensions;
+        let stride = dims.0 as usize * 3;
+        out.resize(stride * dims.1 as usize, 0);
+        decoder
+            .decode_into_with_scratch(&mut pool, &mut out, stride, PixelFormat::Rgb8)
+            .expect("cpu tile batch decode");
+    }
+    std::hint::black_box(out);
+}
+
+fn cpu_decode_region(bytes: &[u8], side: u32) {
+    let decoder = CpuDecoder::new(bytes).expect("cpu decoder");
+    let roi = centered_roi(decoder.info().dimensions, side);
+    let (out, _) = decoder
+        .decode_region(
+            PixelFormat::Rgb8,
+            slidecodec_jpeg::Rect {
+                x: roi.x,
+                y: roi.y,
+                w: roi.w,
+                h: roi.h,
+            },
+        )
+        .expect("cpu region decode");
+    std::hint::black_box(out);
+}
+
+fn cpu_decode_scaled(bytes: &[u8], factor: Downscale) {
+    let decoder = CpuDecoder::new(bytes).expect("cpu decoder");
+    let (out, _) = decoder
+        .decode_scaled(PixelFormat::Rgb8, factor)
+        .expect("cpu scaled decode");
+    std::hint::black_box(out);
+}
+
+fn metal_decode_tile_batch(bytes: &[u8], batch_size: usize) {
+    let mut ctx = DecoderContext::<JpegDecoderContext>::new();
+    let mut pool = ScratchPool::new();
+    let mut session = MetalSession::default();
+    let submissions = (0..batch_size)
+        .map(|_| {
+            <Codec as TileBatchDecodeSubmit>::submit_tile_to_device(
+                &mut ctx,
+                &mut session,
+                &mut pool,
+                bytes,
+                PixelFormat::Rgb8,
+                BackendRequest::Metal,
+            )
+            .expect("submit")
+        })
+        .collect::<Vec<_>>();
+    for submission in submissions {
+        std::hint::black_box(submission.wait().expect("surface"));
+    }
+}
+
+fn metal_decode_region(bytes: &[u8], side: u32) {
+    let cpu = CpuDecoder::new(bytes).expect("cpu decoder");
+    let roi = centered_roi(cpu.info().dimensions, side);
+    let mut decoder = Decoder::new(bytes).expect("metal decoder");
+    let mut session = MetalSession::default();
+    let submission = <Decoder<'_> as ImageDecodeSubmit<'_>>::submit_region_to_device(
+        &mut decoder,
+        &mut session,
+        PixelFormat::Rgb8,
+        roi,
+        BackendRequest::Metal,
+    )
+    .expect("region submit");
+    std::hint::black_box(submission.wait().expect("surface"));
+}
+
+fn metal_decode_scaled(bytes: &[u8], factor: Downscale) {
+    let mut decoder = Decoder::new(bytes).expect("metal decoder");
+    let mut session = MetalSession::default();
+    let submission = <Decoder<'_> as ImageDecodeSubmit<'_>>::submit_scaled_to_device(
+        &mut decoder,
+        &mut session,
+        PixelFormat::Rgb8,
+        factor,
+        BackendRequest::Metal,
+    )
+    .expect("scaled submit");
+    std::hint::black_box(submission.wait().expect("surface"));
+}
+
+fn bench_compare(c: &mut Criterion) {
+    let inputs = load_bench_inputs();
+
+    let mut wsi_tile_batch_rgb = c.benchmark_group("wsi_tile_batch_rgb");
+    for input in inputs.iter().filter(|input| input.mode == DecodeMode::Rgb) {
+        wsi_tile_batch_rgb.bench_function(format!("{}/cpu", input.name), |b| {
+            b.iter(|| cpu_decode_tile_batch(&input.bytes, 64));
+        });
+        wsi_tile_batch_rgb.bench_function(format!("{}/metal", input.name), |b| {
+            b.iter(|| metal_decode_tile_batch(&input.bytes, 64));
+        });
+    }
+    wsi_tile_batch_rgb.finish();
+
+    let mut wsi_region_rgb = c.benchmark_group("wsi_region_rgb");
+    for input in inputs.iter().filter(|input| {
+        input.mode == DecodeMode::Rgb && input.input_class == CorpusInputClass::BoundedFullFrame
+    }) {
+        wsi_region_rgb.bench_function(format!("{}/cpu", input.name), |b| {
+            b.iter(|| cpu_decode_region(&input.bytes, 256));
+        });
+        wsi_region_rgb.bench_function(format!("{}/metal", input.name), |b| {
+            b.iter(|| metal_decode_region(&input.bytes, 256));
+        });
+    }
+    wsi_region_rgb.finish();
+
+    let mut wsi_scaled_rgb_q4 = c.benchmark_group("wsi_scaled_rgb_q4");
+    for input in inputs.iter().filter(|input| {
+        input.mode == DecodeMode::Rgb && input.input_class == CorpusInputClass::BoundedFullFrame
+    }) {
+        wsi_scaled_rgb_q4.bench_function(format!("{}/cpu", input.name), |b| {
+            b.iter(|| cpu_decode_scaled(&input.bytes, Downscale::Quarter));
+        });
+        wsi_scaled_rgb_q4.bench_function(format!("{}/metal", input.name), |b| {
+            b.iter(|| metal_decode_scaled(&input.bytes, Downscale::Quarter));
+        });
+    }
+    wsi_scaled_rgb_q4.finish();
+
+    let mut wsi_scaled_rgb_q8 = c.benchmark_group("wsi_scaled_rgb_q8");
+    for input in inputs.iter().filter(|input| {
+        input.mode == DecodeMode::Rgb && input.input_class == CorpusInputClass::BoundedFullFrame
+    }) {
+        wsi_scaled_rgb_q8.bench_function(format!("{}/cpu", input.name), |b| {
+            b.iter(|| cpu_decode_scaled(&input.bytes, Downscale::Eighth));
+        });
+        wsi_scaled_rgb_q8.bench_function(format!("{}/metal", input.name), |b| {
+            b.iter(|| metal_decode_scaled(&input.bytes, Downscale::Eighth));
+        });
+    }
+    wsi_scaled_rgb_q8.finish();
+}
+
+criterion_group!(benches, bench_compare);
+criterion_main!(benches);

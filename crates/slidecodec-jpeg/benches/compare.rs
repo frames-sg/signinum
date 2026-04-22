@@ -146,6 +146,8 @@ fn bench_compare(c: &mut Criterion) {
     }
     decode_scratch_gray.finish();
 
+    // CPU-first JPEG proving groups start here. These WSI-shaped benches are
+    // the acceptance contract for Apple Silicon and other non-Metal hosts.
     let mut decode_rows_rgb = c.benchmark_group("decode_rows_rgb");
     for input in inputs
         .iter()

@@ -559,7 +559,7 @@ unsafe fn fill_rgb_row_pair_from_420_tail_neon_dual(
         );
     }
 
-    if width % 2 == 0 {
+    if width.is_multiple_of(2) {
         let last = width - 1;
         let sample = curr_cb.len() - 1;
         let top_cb = ((u32::from(prev_cb[sample]) + 3 * u32::from(curr_cb[sample])) * 4 + 7) >> 4;
@@ -611,7 +611,7 @@ unsafe fn fill_rgb_row_pair_from_420_tail_neon_top_only(
         fill_chunk_from_vectors_u16(y_hi, cb.1, cr.1, &mut rgb[LANES * 3..]);
     }
 
-    if width % 2 == 0 {
+    if width.is_multiple_of(2) {
         let last = width - 1;
         let sample = curr_cb.len() - 1;
         let cb_last = ((u32::from(prev_cb[sample]) + 3 * u32::from(curr_cb[sample])) * 4 + 7) >> 4;

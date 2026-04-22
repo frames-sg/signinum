@@ -112,6 +112,23 @@ DCT-domain downscale, decode-time crop, and shared decode-state reuse across a
 tile stream. Fresh full-frame `decode_rgb` remains a useful generic JPEG
 comparison, but it is not the decisive WSI-viewer workload.
 
+## CPU-first JPEG proving policy
+
+- Apple Silicon CPU (`aarch64/NEON`) is the first proving host for JPEG
+  optimization work.
+- The acceptance groups for CPU-first JPEG work are:
+  - `decode_rows_rgb`
+  - `wsi_region_rgb`
+  - `wsi_scaled_rgb_q4`
+  - `wsi_scaled_rgb_q8`
+  - `wsi_region_scaled_rgb_q4`
+  - `wsi_region_scaled_rgb_q8`
+  - `wsi_tile_batch_rgb`
+  - `wsi_tile_batch_scaled_rgb_q4`
+  - `wsi_tile_batch_region_scaled_rgb_q4`
+- Tiny committed fixtures remain useful for `micro_*` and correctness
+  regression only; they are not valid evidence for WSI performance claims.
+
 ## Inputs
 
 The benchmark harness always includes the committed conformance fixtures:

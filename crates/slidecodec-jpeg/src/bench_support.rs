@@ -19,6 +19,7 @@ use core::ptr;
 // source file here so bench/test helpers call the real scalar row-pair kernel
 // without carrying a second handwritten copy of the algorithm.
 #[allow(dead_code)]
+#[allow(clippy::duplicate_mod)]
 #[path = "backend/scalar.rs"]
 mod bench_scalar_backend;
 
@@ -90,7 +91,7 @@ pub(crate) fn record_420_dispatch_neon_tail_chunk() {
 fn with_420_dispatch_stats<R>(stats: &mut Bench420DispatchStats, f: impl FnOnce() -> R) -> R {
     BENCH_420_DISPATCH_STATS.with(|slot| {
         let guard = Bench420DispatchStatsGuard {
-            prev: slot.replace(stats as *mut Bench420DispatchStats),
+            prev: slot.replace(ptr::from_mut(stats)),
         };
         let out = f();
         drop(guard);
@@ -285,7 +286,7 @@ pub fn bench_rgb_row_pair_from_420_with_stats(
         bench_rgb_row_pair_from_420(
             y_top, y_bottom, prev_cb, curr_cb, next_cb, prev_cr, curr_cr, next_cr, dst_top,
             dst_bottom,
-        )
+        );
     });
 }
 

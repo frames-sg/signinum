@@ -2073,7 +2073,9 @@ fn dispatch_classic_cleanup_batched(
     let jobs_buffer = borrow_slice_buffer(&runtime.device, jobs);
     let segments_buffer = borrow_slice_buffer(&runtime.device, segments);
     let coefficients_scratch = classic_coefficients_scratch_buffer(&runtime.device, jobs.len())?;
-    let pipeline = if classic_batch_uses_plain_fast_path(jobs, segments) {
+    let use_plain_fast_path = classic_batch_uses_plain_fast_path(jobs, segments)
+        && runtime.classic_cleanup_plain_batched.max_total_threads_per_threadgroup() >= 32;
+    let pipeline = if use_plain_fast_path {
         &runtime.classic_cleanup_plain_batched
     } else {
         &runtime.classic_cleanup_batched
@@ -2092,22 +2094,37 @@ fn dispatch_classic_cleanup_batched(
     encoder.set_buffer(3, Some(&segments_buffer), 0);
     encoder.set_buffer(4, Some(&status_buffer), 0);
     encoder.set_buffer(5, Some(&coefficients_scratch), 0);
-    let width = pipeline
-        .thread_execution_width()
-        .max(1)
-        .min(jobs.len() as u64);
-    encoder.dispatch_threads(
-        MTLSize {
-            width: jobs.len() as u64,
-            height: 1,
-            depth: 1,
-        },
-        MTLSize {
-            width,
-            height: 1,
-            depth: 1,
-        },
-    );
+    if use_plain_fast_path {
+        encoder.dispatch_thread_groups(
+            MTLSize {
+                width: jobs.len() as u64,
+                height: 1,
+                depth: 1,
+            },
+            MTLSize {
+                width: 32,
+                height: 1,
+                depth: 1,
+            },
+        );
+    } else {
+        let width = pipeline
+            .thread_execution_width()
+            .max(1)
+            .min(jobs.len() as u64);
+        encoder.dispatch_threads(
+            MTLSize {
+                width: jobs.len() as u64,
+                height: 1,
+                depth: 1,
+            },
+            MTLSize {
+                width,
+                height: 1,
+                depth: 1,
+            },
+        );
+    }
     encoder.end_encoding();
     command_buffer.commit();
     command_buffer.wait_until_completed();
@@ -2141,7 +2158,7 @@ fn dispatch_classic_cleanup_batched_in_command_buffer(
     segments: &Buffer,
     decoded: &Buffer,
     coefficients_scratch: &Buffer,
-) -> DirectStatusCheck {
+) -> (DirectStatusCheck, Option<Buffer>) {
     let pipeline = if use_plain_fast_path {
         &runtime.classic_cleanup_plain_batched
     } else {
@@ -2160,28 +2177,46 @@ fn dispatch_classic_cleanup_batched_in_command_buffer(
     encoder.set_buffer(3, Some(segments), 0);
     encoder.set_buffer(4, Some(&status_buffer), 0);
     encoder.set_buffer(5, Some(coefficients_scratch), 0);
-    let width = pipeline
-        .thread_execution_width()
-        .max(1)
-        .min(job_count as u64);
-    encoder.dispatch_threads(
-        MTLSize {
-            width: job_count as u64,
-            height: 1,
-            depth: 1,
-        },
-        MTLSize {
-            width,
-            height: 1,
-            depth: 1,
-        },
-    );
+    if use_plain_fast_path {
+        encoder.dispatch_thread_groups(
+            MTLSize {
+                width: job_count as u64,
+                height: 1,
+                depth: 1,
+            },
+            MTLSize {
+                width: 32,
+                height: 1,
+                depth: 1,
+            },
+        );
+    } else {
+        let width = pipeline
+            .thread_execution_width()
+            .max(1)
+            .min(job_count as u64);
+        encoder.dispatch_threads(
+            MTLSize {
+                width: job_count as u64,
+                height: 1,
+                depth: 1,
+            },
+            MTLSize {
+                width,
+                height: 1,
+                depth: 1,
+            },
+        );
+    }
     encoder.end_encoding();
 
-    DirectStatusCheck::Classic {
-        buffer: status_buffer,
-        len: job_count,
-    }
+    (
+        DirectStatusCheck::Classic {
+            buffer: status_buffer,
+            len: job_count,
+        },
+        None,
+    )
 }
 
 #[cfg(target_os = "macos")]
@@ -2344,7 +2379,7 @@ fn encode_classic_sub_band_to_buffer_in_command_buffer(
     let segments_buffer = borrow_slice_buffer(&runtime.device, &segments);
     let coefficients_scratch = classic_coefficients_scratch_buffer(&runtime.device, jobs.len())?;
     let use_plain_fast_path = classic_batch_uses_plain_fast_path(&jobs, &segments);
-    let status_check = dispatch_classic_cleanup_batched_in_command_buffer(
+    let (status_check, states_scratch) = dispatch_classic_cleanup_batched_in_command_buffer(
         runtime,
         command_buffer,
         &coded_buffer,
@@ -2355,18 +2390,22 @@ fn encode_classic_sub_band_to_buffer_in_command_buffer(
         output,
         &coefficients_scratch,
     );
+    let mut retained_buffers = vec![
+        coded_buffer,
+        jobs_buffer,
+        segments_buffer,
+        coefficients_scratch,
+    ];
+    if let Some(states_scratch) = states_scratch {
+        retained_buffers.push(states_scratch);
+    }
     Ok((
         vec![
             DirectHostRetention::Bytes(coded_data),
             DirectHostRetention::ClassicJobs(jobs),
             DirectHostRetention::ClassicSegments(segments),
         ],
-        vec![
-            coded_buffer,
-            jobs_buffer,
-            segments_buffer,
-            coefficients_scratch,
-        ],
+        retained_buffers,
         status_check,
     ))
 }

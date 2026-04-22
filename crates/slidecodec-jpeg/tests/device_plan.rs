@@ -1,4 +1,4 @@
-use slidecodec_jpeg::{ColorSpace, Decoder};
+use slidecodec_jpeg::{ColorSpace, Decoder, Warning};
 
 const BASELINE_420: &[u8] = include_bytes!("../../../corpus/conformance/baseline_420_16x16.jpg");
 
@@ -126,20 +126,15 @@ fn hidden_device_plan_handles_restart_after_partial_entropy_byte() {
 }
 
 #[test]
-fn hidden_device_plan_requires_terminal_eoi_marker() {
+fn hidden_device_plan_surfaces_missing_eoi_warning() {
     let mut bytes = grayscale_jpeg(24, 24);
     bytes.truncate(bytes.len() - 2);
 
     let decoder = Decoder::new(&bytes).expect("decoder");
-    let err = slidecodec_jpeg::__private::build_device_plan(&decoder, 2)
-        .expect_err("missing EOI should fail");
+    let plan = slidecodec_jpeg::__private::build_device_plan(&decoder, 2)
+        .expect("missing EOI should remain decodable");
 
-    assert!(matches!(
-        err,
-        slidecodec_jpeg::JpegError::MissingMarker {
-            marker: slidecodec_jpeg::MarkerKind::Eoi,
-        }
-    ));
+    assert!(plan.warnings.contains(&Warning::MissingEoi));
 }
 
 #[test]

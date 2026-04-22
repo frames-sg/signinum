@@ -4,6 +4,7 @@ use crate::decoder::Decoder;
 use crate::error::{JpegError, MarkerKind};
 use crate::info::ColorSpace;
 use crate::internal::checkpoint::{build_checkpoint_plan, DeviceCheckpoint};
+use crate::Warning;
 use alloc::vec::Vec;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,6 +19,7 @@ pub struct DeviceDecodePlan {
     pub dimensions: (u32, u32),
     pub color_space: ColorSpace,
     pub restart_interval: Option<u16>,
+    pub warnings: Vec<Warning>,
     pub scan_bytes: Vec<u8>,
     pub components: Vec<DeviceComponentPlan>,
     pub checkpoints: Vec<DeviceCheckpoint>,
@@ -30,13 +32,18 @@ pub fn build_device_plan(
     cadence_mcus: u32,
 ) -> Result<DeviceDecodePlan, JpegError> {
     let plan = &decoder.plan;
-    let scan_bytes = scan_payload_bytes(decoder.bytes, plan.scan_offset)?;
+    let (scan_bytes, missing_eoi) = scan_payload_bytes(decoder.bytes, plan.scan_offset)?;
     let checkpoints = build_checkpoint_plan(plan, &scan_bytes, cadence_mcus)?;
+    let mut warnings = decoder.warnings.to_vec();
+    if missing_eoi {
+        warnings.push(Warning::MissingEoi);
+    }
 
     Ok(DeviceDecodePlan {
         dimensions: plan.dimensions,
         color_space: plan.color_space,
         restart_interval: plan.restart_interval,
+        warnings,
         scan_bytes,
         components: plan
             .components
@@ -53,7 +60,7 @@ pub fn build_device_plan(
     })
 }
 
-fn scan_payload_bytes(bytes: &[u8], scan_offset: usize) -> Result<Vec<u8>, JpegError> {
+fn scan_payload_bytes(bytes: &[u8], scan_offset: usize) -> Result<(Vec<u8>, bool), JpegError> {
     let scan = &bytes[scan_offset..];
     let mut index = 0usize;
     while index < scan.len() {
@@ -77,7 +84,7 @@ fn scan_payload_bytes(bytes: &[u8], scan_offset: usize) -> Result<Vec<u8>, JpegE
             0x00 | 0xd0..=0xd7 => {
                 index = next + 1;
             }
-            0xd9 => return Ok(scan[..marker_start].to_vec()),
+            0xd9 => return Ok((scan[..marker_start].to_vec(), false)),
             found => {
                 return Err(JpegError::UnexpectedMarker {
                     offset: scan_offset + marker_start,
@@ -88,7 +95,5 @@ fn scan_payload_bytes(bytes: &[u8], scan_offset: usize) -> Result<Vec<u8>, JpegE
         }
     }
 
-    Err(JpegError::MissingMarker {
-        marker: MarkerKind::Eoi,
-    })
+    Ok((scan.to_vec(), true))
 }

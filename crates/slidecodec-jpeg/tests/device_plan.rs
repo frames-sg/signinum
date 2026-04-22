@@ -138,6 +138,19 @@ fn hidden_device_plan_surfaces_missing_eoi_warning() {
 }
 
 #[test]
+fn hidden_device_plan_treats_trailing_ff_as_missing_eoi() {
+    let mut bytes = grayscale_jpeg(24, 24);
+    bytes.truncate(bytes.len() - 1);
+
+    let decoder = Decoder::new(&bytes).expect("decoder");
+    let plan = slidecodec_jpeg::__private::build_device_plan(&decoder, 2)
+        .expect("trailing FF should remain decodable");
+
+    assert!(plan.warnings.contains(&Warning::MissingEoi));
+    assert_eq!(plan.scan_bytes.last(), Some(&0xff));
+}
+
+#[test]
 fn hidden_device_plan_rejects_non_eoi_marker_after_entropy() {
     let mut bytes = restart_coded_grayscale_jpeg(24, 24);
     let marker = bytes
@@ -155,6 +168,25 @@ fn hidden_device_plan_rejects_non_eoi_marker_after_entropy() {
         slidecodec_jpeg::JpegError::UnexpectedMarker {
             expected: slidecodec_jpeg::MarkerKind::Eoi,
             found: 0xe0,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn hidden_device_plan_rejects_doubled_ff_before_terminal_eoi() {
+    let mut bytes = grayscale_jpeg(24, 24);
+    bytes.insert(bytes.len() - 1, 0xff);
+
+    let decoder = Decoder::new(&bytes).expect("decoder");
+    let err = slidecodec_jpeg::__private::build_device_plan(&decoder, 2)
+        .expect_err("double-FF terminal marker should fail");
+
+    assert!(matches!(
+        err,
+        slidecodec_jpeg::JpegError::UnexpectedMarker {
+            expected: slidecodec_jpeg::MarkerKind::Eoi,
+            found: 0xff,
             ..
         }
     ));

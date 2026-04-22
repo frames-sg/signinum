@@ -70,14 +70,9 @@ fn scan_payload_bytes(bytes: &[u8], scan_offset: usize) -> Result<(Vec<u8>, bool
         }
 
         let marker_start = index;
-        let mut next = index + 1;
-        while next < scan.len() && scan[next] == 0xff {
-            next += 1;
-        }
+        let next = index + 1;
         if next >= scan.len() {
-            return Err(JpegError::MissingMarker {
-                marker: MarkerKind::Eoi,
-            });
+            return Ok((scan.to_vec(), true));
         }
 
         match scan[next] {

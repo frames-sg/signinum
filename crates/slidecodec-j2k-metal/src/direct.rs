@@ -1,39 +1,41 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #[cfg(target_os = "macos")]
-use metal::Buffer;
-#[cfg(target_os = "macos")]
 use slidecodec_core::PixelFormat;
 #[cfg(target_os = "macos")]
 use slidecodec_j2k::J2kError;
 #[cfg(target_os = "macos")]
+use slidecodec_j2k_native::{DecoderContext as NativeDecoderContext, Image as NativeImage};
+#[cfg(all(target_os = "macos", test))]
 use slidecodec_j2k_native::{
-    DecoderContext as NativeDecoderContext, HtCodeBlockBatchJob, HtCodeBlockDecodeJob,
-    HtOwnedCodeBlockBatchJob, HtOwnedSubBandPlan, Image as NativeImage, J2kCodeBlockBatchJob,
-    J2kCodeBlockDecodeJob, J2kDirectBandId, J2kDirectGrayscalePlan, J2kDirectGrayscaleStep,
-    J2kIdwtBand, J2kOwnedCodeBlockBatchJob, J2kOwnedSubBandPlan, J2kRect,
+    HtCodeBlockBatchJob, HtCodeBlockDecodeJob, HtOwnedCodeBlockBatchJob, HtOwnedSubBandPlan,
+    J2kCodeBlockBatchJob, J2kCodeBlockDecodeJob, J2kDirectBandId, J2kDirectGrayscalePlan,
+    J2kDirectGrayscaleStep, J2kIdwtBand, J2kOwnedCodeBlockBatchJob, J2kOwnedSubBandPlan, J2kRect,
     J2kSingleDecompositionIdwtJob,
 };
 
+#[cfg(all(target_os = "macos", test))]
+use crate::compute;
 #[cfg(target_os = "macos")]
-use crate::{compute, Error, Surface};
+use crate::{Error, Surface};
 
 #[cfg(target_os = "macos")]
+#[cfg(test)]
 #[derive(Default)]
 struct DirectExecutionState {
     bands: Vec<(J2kDirectBandId, Vec<f32>)>,
-    captured_plane: Option<Buffer>,
     captured_plane_storage: Option<Vec<f32>>,
 }
 
 #[cfg(target_os = "macos")]
+#[cfg(test)]
 struct ExecutedGrayscalePlane {
-    captured_plane: Buffer,
     #[allow(dead_code)]
     storage: Vec<f32>,
 }
 
 #[cfg(target_os = "macos")]
+#[cfg(test)]
 impl DirectExecutionState {
     fn insert_band(&mut self, band_id: J2kDirectBandId, coefficients: Vec<f32>) {
         self.bands.retain(|(existing, _)| *existing != band_id);
@@ -55,6 +57,7 @@ impl DirectExecutionState {
 }
 
 #[cfg(target_os = "macos")]
+#[allow(dead_code)]
 pub(crate) fn try_decode_image_to_surface<'a>(
     image: &NativeImage<'a>,
     context: &mut NativeDecoderContext<'a>,
@@ -74,24 +77,13 @@ pub(crate) fn try_decode_image_to_surface<'a>(
         }
     };
 
-    Ok(Some(execute_grayscale_plan(&plan, fmt)?))
+    Ok(Some(crate::compute::execute_direct_grayscale_plan(
+        &plan, fmt,
+    )?))
 }
 
 #[cfg(target_os = "macos")]
-fn execute_grayscale_plan(
-    plan: &J2kDirectGrayscalePlan,
-    fmt: PixelFormat,
-) -> Result<Surface, Error> {
-    let executed = execute_grayscale_plan_to_plane(plan)?;
-    compute::pack_gray_plane_to_surface(
-        executed.captured_plane,
-        plan.dimensions,
-        plan.bit_depth,
-        fmt,
-    )
-}
-
-#[cfg(target_os = "macos")]
+#[cfg(test)]
 fn execute_grayscale_plan_to_plane(
     plan: &J2kDirectGrayscalePlan,
 ) -> Result<ExecutedGrayscalePlane, Error> {
@@ -163,28 +155,22 @@ fn execute_grayscale_plan_to_plane(
                     output_y: store.output_y,
                     addend: store.addend,
                 };
-                state.captured_plane = Some(compute::decode_store_component_and_capture(job)?);
+                let _captured_plane = compute::decode_store_component_and_capture(job)?;
                 state.captured_plane_storage = Some(output);
             }
         }
     }
 
-    let plane = state.captured_plane.ok_or_else(|| Error::MetalKernel {
-        message: "J2K MetalDirect grayscale plan did not produce a captured output plane"
-            .to_string(),
-    })?;
     let storage = state
         .captured_plane_storage
         .ok_or_else(|| Error::MetalKernel {
             message: "J2K MetalDirect grayscale plan did not retain host plane storage".to_string(),
         })?;
-    Ok(ExecutedGrayscalePlane {
-        captured_plane: plane,
-        storage,
-    })
+    Ok(ExecutedGrayscalePlane { storage })
 }
 
 #[cfg(target_os = "macos")]
+#[cfg(test)]
 fn decode_classic_sub_band(plan: &J2kOwnedSubBandPlan, output: &mut [f32]) -> Result<(), Error> {
     if let [block] = plan.jobs.as_slice() {
         let start = block.output_y as usize * plan.width as usize + block.output_x as usize;
@@ -214,6 +200,7 @@ fn decode_classic_sub_band(plan: &J2kOwnedSubBandPlan, output: &mut [f32]) -> Re
 }
 
 #[cfg(target_os = "macos")]
+#[cfg(test)]
 fn decode_ht_sub_band(plan: &HtOwnedSubBandPlan, output: &mut [f32]) -> Result<(), Error> {
     if let [block] = plan.jobs.as_slice() {
         let start = block.output_y as usize * plan.width as usize + block.output_x as usize;
@@ -240,6 +227,7 @@ fn decode_ht_sub_band(plan: &HtOwnedSubBandPlan, output: &mut [f32]) -> Result<(
 }
 
 #[cfg(target_os = "macos")]
+#[cfg(test)]
 fn classic_job(owned: &J2kOwnedCodeBlockBatchJob) -> J2kCodeBlockDecodeJob<'_> {
     J2kCodeBlockDecodeJob {
         data: &owned.data,
@@ -258,6 +246,7 @@ fn classic_job(owned: &J2kOwnedCodeBlockBatchJob) -> J2kCodeBlockDecodeJob<'_> {
 }
 
 #[cfg(target_os = "macos")]
+#[cfg(test)]
 fn ht_job(owned: &HtOwnedCodeBlockBatchJob) -> HtCodeBlockDecodeJob<'_> {
     HtCodeBlockDecodeJob {
         data: &owned.data,
@@ -276,7 +265,7 @@ fn ht_job(owned: &HtOwnedCodeBlockBatchJob) -> HtCodeBlockDecodeJob<'_> {
 }
 
 #[cfg(target_os = "macos")]
-fn is_unsupported_direct_plan_error(message: &str) -> bool {
+pub(crate) fn is_unsupported_direct_plan_error(message: &str) -> bool {
     message.contains("direct grayscale plan only supports")
         || message.contains("UnsupportedColorSpace")
         || message.contains("Unsupported color space")
@@ -286,11 +275,11 @@ fn is_unsupported_direct_plan_error(message: &str) -> bool {
 mod tests {
     use super::{
         decode_classic_sub_band, decode_ht_sub_band, execute_grayscale_plan_to_plane,
-        DirectExecutionState, J2kDirectGrayscalePlan,
+        DirectExecutionState,
     };
     use slidecodec_j2k_native::{
         encode, encode_htj2k, DecodeSettings, DecoderContext, EncodeOptions, HtCodeBlockDecoder,
-        Image, J2kDirectGrayscaleStep, J2kSingleDecompositionIdwtJob,
+        Image, J2kDirectGrayscalePlan, J2kDirectGrayscaleStep, J2kSingleDecompositionIdwtJob,
     };
 
     fn classic_plan() -> slidecodec_j2k_native::J2kDirectGrayscalePlan {

@@ -215,6 +215,16 @@ pub(crate) fn slidecodec_metal_supports_scaled(
 }
 
 pub(crate) fn slidecodec_metal_decode_tile_batch(bytes: &[u8], mode: DecodeMode, count: usize) {
+    #[cfg(target_os = "macos")]
+    if matches!(mode, DecodeMode::Gray8) {
+        let mut decoder = MetalJ2kDecoder::new(bytes).expect("slidecodec metal decoder");
+        let surfaces = decoder
+            .decode_repeated_grayscale_direct_to_device(mode_format(mode), count)
+            .expect("slidecodec metal repeated grayscale batch decode");
+        black_box(surfaces);
+        return;
+    }
+
     let mut ctx = DecoderContext::<J2kContext>::new();
     let mut pool = MetalJ2kScratchPool::new();
     for _ in 0..count {

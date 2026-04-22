@@ -14,6 +14,11 @@ mod mct;
 mod store;
 
 use core::convert::Infallible;
+#[cfg(target_os = "macos")]
+use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
+};
 
 use slidecodec_core::{
     BackendKind, BackendRequest, BufferError, CodecError, DecodeOutcome, DeviceSubmission,
@@ -28,7 +33,7 @@ use slidecodec_j2k::{
 #[cfg(target_os = "macos")]
 use slidecodec_j2k_native::{
     DecodeSettings as NativeDecodeSettings, DecoderContext as NativeDecoderContext,
-    Image as NativeImage,
+    Image as NativeImage, J2kDirectGrayscalePlan,
 };
 
 #[cfg(target_os = "macos")]
@@ -160,6 +165,8 @@ pub struct J2kDecoder<'a> {
     native_image: Option<NativeImage<'a>>,
     #[cfg(target_os = "macos")]
     native_context: NativeDecoderContext<'a>,
+    #[cfg(target_os = "macos")]
+    native_direct_gray_plan: Option<J2kDirectGrayscalePlan>,
 }
 
 impl<'a> J2kDecoder<'a> {
@@ -171,6 +178,8 @@ impl<'a> J2kDecoder<'a> {
             native_image: None,
             #[cfg(target_os = "macos")]
             native_context: NativeDecoderContext::default(),
+            #[cfg(target_os = "macos")]
+            native_direct_gray_plan: None,
         })
     }
 
@@ -182,6 +191,8 @@ impl<'a> J2kDecoder<'a> {
             native_image: None,
             #[cfg(target_os = "macos")]
             native_context: NativeDecoderContext::default(),
+            #[cfg(target_os = "macos")]
+            native_direct_gray_plan: None,
         })
     }
 
@@ -203,13 +214,75 @@ impl<'a> J2kDecoder<'a> {
     #[cfg(target_os = "macos")]
     fn decode_direct_to_surface(&mut self, fmt: PixelFormat) -> Result<Option<Surface>, Error> {
         self.ensure_native_image()?;
-        let (Some(image), native_context) = (self.native_image.as_ref(), &mut self.native_context)
-        else {
-            return Err(Error::Decode(J2kError::Backend(
-                "native image cache missing".to_string(),
-            )));
+        if self.native_direct_gray_plan.is_none() {
+            let (Some(image), native_context) =
+                (self.native_image.as_ref(), &mut self.native_context)
+            else {
+                return Err(Error::Decode(J2kError::Backend(
+                    "native image cache missing".to_string(),
+                )));
+            };
+
+            let plan = match image.build_direct_grayscale_plan_with_context(native_context) {
+                Ok(plan) => plan,
+                Err(error) if direct::is_unsupported_direct_plan_error(&error.to_string()) => {
+                    return Ok(None);
+                }
+                Err(error) => {
+                    return Err(Error::Decode(J2kError::Backend(format!(
+                        "failed to build J2K MetalDirect grayscale plan: {error}"
+                    ))));
+                }
+            };
+            self.native_direct_gray_plan = Some(plan);
+        }
+
+        let Some(plan) = self.native_direct_gray_plan.as_ref() else {
+            return Ok(None);
         };
-        direct::try_decode_image_to_surface(image, native_context, fmt)
+        Ok(Some(crate::compute::execute_direct_grayscale_plan(
+            plan, fmt,
+        )?))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn seed_direct_gray_plan(&mut self, plan: J2kDirectGrayscalePlan) {
+        self.native_direct_gray_plan = Some(plan);
+    }
+
+    #[cfg(target_os = "macos")]
+    fn direct_gray_plan(&self) -> Option<&J2kDirectGrayscalePlan> {
+        self.native_direct_gray_plan.as_ref()
+    }
+
+    #[cfg(target_os = "macos")]
+    #[doc(hidden)]
+    pub fn decode_repeated_grayscale_direct_to_device(
+        &mut self,
+        fmt: PixelFormat,
+        count: usize,
+    ) -> Result<Vec<Surface>, Error> {
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        self.ensure_native_image()?;
+        if self.native_direct_gray_plan.is_none() {
+            let (Some(image), native_context) =
+                (self.native_image.as_ref(), &mut self.native_context)
+            else {
+                return Err(Error::Decode(J2kError::Backend(
+                    "native image cache missing".to_string(),
+                )));
+            };
+            let plan = image
+                .build_direct_grayscale_plan_with_context(native_context)
+                .map_err(|error| J2kError::Backend(error.to_string()))?;
+            self.native_direct_gray_plan = Some(plan);
+        }
+        let Some(plan) = self.native_direct_gray_plan.as_ref() else {
+            return Ok(Vec::new());
+        };
+        crate::compute::execute_repeated_direct_grayscale_plan(plan, fmt, count)
     }
 
     fn decode_to_cpu_surface(&mut self, fmt: PixelFormat) -> Result<Surface, Error> {
@@ -363,6 +436,13 @@ impl<'a> J2kDecoder<'a> {
             BackendRequest::Cuda => Err(Error::UnsupportedBackend { request: backend }),
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+fn direct_gray_plan_cache_key(bytes: &[u8]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    hasher.finish()
 }
 
 impl ImageCodec for J2kDecoder<'_> {
@@ -546,14 +626,35 @@ impl TileBatchDecodeSubmit for Codec {
         fmt: PixelFormat,
         backend: BackendRequest,
     ) -> Result<Self::SubmittedSurface, Self::Error> {
-        let _ = (ctx, pool);
+        let _ = pool;
         let mut decoder = J2kDecoder::new(input)?;
-        <J2kDecoder<'_> as ImageDecodeSubmit<'_>>::submit_to_device(
+        #[cfg(target_os = "macos")]
+        let cache_key = if matches!(fmt, PixelFormat::Gray8 | PixelFormat::Gray16)
+            && matches!(backend, BackendRequest::Metal | BackendRequest::Auto)
+        {
+            Some(direct_gray_plan_cache_key(input))
+        } else {
+            None
+        };
+        #[cfg(target_os = "macos")]
+        if let Some(key) = cache_key {
+            if let Some(plan) = ctx.codec_mut().cached_direct_gray_plan(key) {
+                decoder.seed_direct_gray_plan(plan);
+            }
+        }
+        let submitted = <J2kDecoder<'_> as ImageDecodeSubmit<'_>>::submit_to_device(
             &mut decoder,
             session,
             fmt,
             backend,
-        )
+        )?;
+        #[cfg(target_os = "macos")]
+        if let Some(key) = cache_key {
+            if let Some(plan) = decoder.direct_gray_plan().cloned() {
+                ctx.codec_mut().store_direct_gray_plan(key, plan);
+            }
+        }
+        Ok(submitted)
     }
 
     fn submit_tile_region_to_device(

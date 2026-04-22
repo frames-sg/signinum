@@ -32,7 +32,9 @@ pub fn build_device_plan(
     cadence_mcus: u32,
 ) -> Result<DeviceDecodePlan, JpegError> {
     let plan = &decoder.plan;
-    let (scan_bytes, missing_eoi) = scan_payload_bytes(decoder.bytes, plan.scan_offset)?;
+    let restart_interval = plan.restart_interval.filter(|&interval| interval > 0);
+    let (scan_bytes, missing_eoi) =
+        scan_payload_bytes(decoder.bytes, plan.scan_offset, restart_interval.is_some())?;
     let checkpoints = build_checkpoint_plan(plan, &scan_bytes, cadence_mcus)?;
     let mut warnings = decoder.warnings.to_vec();
     if missing_eoi {
@@ -42,7 +44,7 @@ pub fn build_device_plan(
     Ok(DeviceDecodePlan {
         dimensions: plan.dimensions,
         color_space: plan.color_space,
-        restart_interval: plan.restart_interval,
+        restart_interval,
         warnings,
         scan_bytes,
         components: plan
@@ -60,7 +62,11 @@ pub fn build_device_plan(
     })
 }
 
-fn scan_payload_bytes(bytes: &[u8], scan_offset: usize) -> Result<(Vec<u8>, bool), JpegError> {
+fn scan_payload_bytes(
+    bytes: &[u8],
+    scan_offset: usize,
+    allow_restart_markers: bool,
+) -> Result<(Vec<u8>, bool), JpegError> {
     let scan = &bytes[scan_offset..];
     let mut index = 0usize;
     while index < scan.len() {
@@ -76,10 +82,13 @@ fn scan_payload_bytes(bytes: &[u8], scan_offset: usize) -> Result<(Vec<u8>, bool
         }
 
         match scan[next] {
-            0x00 | 0xd0..=0xd7 => {
+            0x00 => {
                 index = next + 1;
             }
-            0xd9 => return Ok((scan[..marker_start].to_vec(), false)),
+            0xd0..=0xd7 if allow_restart_markers => {
+                index = next + 1;
+            }
+            0xd9 => return Ok((scan[..=next].to_vec(), false)),
             found => {
                 return Err(JpegError::UnexpectedMarker {
                     offset: scan_offset + marker_start,

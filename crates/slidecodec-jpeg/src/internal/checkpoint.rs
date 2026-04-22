@@ -2,7 +2,7 @@
 
 use crate::entropy::block::{decode_block_with_activity, CoefficientBlock};
 use crate::entropy::sequential::PreparedDecodePlan;
-use crate::error::JpegError;
+use crate::error::{JpegError, MarkerKind};
 use crate::internal::bit_reader::BitReader;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,10 +23,9 @@ pub(crate) fn build_checkpoint_plan(
     let total_mcus = total_mcus(plan);
     let cadence_mcus = cadence_mcus.max(1);
     let restart_interval = plan.restart_interval.filter(|&interval| interval > 0).map(u32::from);
+    validate_scan_bytes(scan_bytes, restart_interval.is_some())?;
 
-    let mut reader_bytes = Vec::with_capacity(scan_bytes.len() + 2);
-    reader_bytes.extend_from_slice(scan_bytes);
-    reader_bytes.extend_from_slice(&[0xff, 0xd9]);
+    let reader_bytes = terminated_scan_bytes(scan_bytes);
 
     let mut checkpoints = Vec::with_capacity(total_mcus as usize);
     let mut br = BitReader::new(&reader_bytes);
@@ -79,7 +78,62 @@ pub(crate) fn build_checkpoint_plan(
         mcus_since_restart += 1;
     }
 
+    match br.take_marker() {
+        Some(0xd9) | None => {}
+        Some(found) => {
+            return Err(JpegError::UnexpectedMarker {
+                offset: br.position().saturating_sub(2),
+                expected: MarkerKind::Eoi,
+                found,
+            })
+        }
+    }
+
     Ok(checkpoints)
+}
+
+fn terminated_scan_bytes(scan_bytes: &[u8]) -> Vec<u8> {
+    let mut reader_bytes = Vec::with_capacity(scan_bytes.len() + 2);
+    reader_bytes.extend_from_slice(scan_bytes);
+    if !reader_bytes.ends_with(&[0xff, 0xd9]) {
+        if reader_bytes.last() == Some(&0xff) {
+            reader_bytes.push(0xd9);
+        } else {
+            reader_bytes.extend_from_slice(&[0xff, 0xd9]);
+        }
+    }
+    reader_bytes
+}
+
+fn validate_scan_bytes(scan_bytes: &[u8], allow_restart_markers: bool) -> Result<(), JpegError> {
+    let mut index = 0usize;
+    while index < scan_bytes.len() {
+        if scan_bytes[index] != 0xff {
+            index += 1;
+            continue;
+        }
+
+        let marker_start = index;
+        let next = index + 1;
+        if next >= scan_bytes.len() {
+            return Ok(());
+        }
+
+        match scan_bytes[next] {
+            0x00 => index = next + 1,
+            0xd0..=0xd7 if allow_restart_markers => index = next + 1,
+            0xd9 => return Ok(()),
+            found => {
+                return Err(JpegError::UnexpectedMarker {
+                    offset: marker_start,
+                    expected: MarkerKind::Eoi,
+                    found,
+                })
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn snapshot_checkpoint(
@@ -140,11 +194,9 @@ mod tests {
         let bytes = grayscale_jpeg(24, 24);
         let decoder = Decoder::new(&bytes).expect("decoder");
         let plan = &decoder.plan;
-        let scan_bytes = &decoder.bytes[plan.scan_offset..decoder.bytes.len() - 2];
+        let scan_bytes = &decoder.bytes[plan.scan_offset..];
         let checkpoints = build_checkpoint_plan(plan, scan_bytes, 1).expect("checkpoints");
-
-        let mut reader_bytes = scan_bytes.to_vec();
-        reader_bytes.extend_from_slice(&[0xff, 0xd9]);
+        let reader_bytes = terminated_scan_bytes(scan_bytes);
 
         for pair in checkpoints.windows(2) {
             let mut prev_dc = pair[0].prev_dc;
@@ -167,6 +219,27 @@ mod tests {
             assert_eq!(resumed.prev_dc, pair[1].prev_dc);
             assert_eq!(resumed.expected_rst, pair[1].expected_rst);
         }
+    }
+
+    #[test]
+    fn checkpoint_plan_rejects_non_eoi_terminal_marker() {
+        let mut bytes = grayscale_jpeg(24, 24);
+        let tail = bytes.len() - 1;
+        bytes[tail] = 0xe0;
+
+        let decoder = Decoder::new(&bytes).expect("decoder");
+        let plan = &decoder.plan;
+        let scan_bytes = &decoder.bytes[plan.scan_offset..];
+        let err = build_checkpoint_plan(plan, scan_bytes, 1).expect_err("terminal APPn must fail");
+
+        assert!(matches!(
+            err,
+            JpegError::UnexpectedMarker {
+                expected: MarkerKind::Eoi,
+                found: 0xe0,
+                ..
+            }
+        ));
     }
 
     fn grayscale_jpeg(width: u16, height: u16) -> Vec<u8> {

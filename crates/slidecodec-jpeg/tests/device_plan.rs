@@ -24,11 +24,11 @@ fn hidden_device_plan_keeps_fast_420_shape_information() {
 }
 
 #[test]
-fn hidden_device_plan_scan_bytes_stop_before_terminal_marker() {
+fn hidden_device_plan_scan_bytes_keep_terminal_eoi() {
     let decoder = Decoder::new(BASELINE_420).expect("decoder");
     let plan = slidecodec_jpeg::__private::build_device_plan(&decoder, 4).expect("device plan");
 
-    assert!(!plan.scan_bytes.ends_with(&[0xff, 0xd9]));
+    assert!(plan.scan_bytes.ends_with(&[0xff, 0xd9]));
 }
 
 #[test]
@@ -191,6 +191,23 @@ fn hidden_device_plan_rejects_non_eoi_marker_after_entropy() {
 }
 
 #[test]
+fn hidden_device_plan_rejects_restart_marker_without_dri() {
+    let bytes = insert_entropy_marker(BASELINE_420.to_vec(), 0xd0);
+    let decoder = Decoder::new(&bytes).expect("decoder");
+    let err = slidecodec_jpeg::__private::build_device_plan(&decoder, 2)
+        .expect_err("restart marker without DRI must fail");
+
+    assert!(matches!(
+        err,
+        slidecodec_jpeg::JpegError::UnexpectedMarker {
+            expected: slidecodec_jpeg::MarkerKind::Eoi,
+            found: 0xd0,
+            ..
+        }
+    ));
+}
+
+#[test]
 fn hidden_device_plan_rejects_doubled_ff_before_terminal_eoi() {
     let mut bytes = grayscale_jpeg(24, 24);
     bytes.insert(bytes.len() - 1, 0xff);
@@ -318,5 +335,10 @@ fn insert_restart_interval(mut bytes: Vec<u8>, interval: u16) -> Vec<u8> {
         sos..sos,
         [0xff, 0xdd, 0x00, 0x04, (interval >> 8) as u8, interval as u8],
     );
+    bytes
+}
+
+fn insert_entropy_marker(mut bytes: Vec<u8>, marker: u8) -> Vec<u8> {
+    bytes.splice(bytes.len() - 2..bytes.len() - 2, [0xff, marker]);
     bytes
 }

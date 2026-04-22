@@ -10,7 +10,8 @@ use slidecodec_jpeg::{
 };
 use slidecodec_jpeg_metal::viewport::{
     compose_viewport_cpu, compose_viewport_cpu_to_surface, compose_viewport_hybrid,
-    suggest_viewport_workload,
+    decode_viewport_region_cpu, decode_viewport_region_cpu_to_surface,
+    decode_viewport_region_hybrid, suggest_viewport_workload,
 };
 use slidecodec_jpeg_metal::{Codec, Decoder, MetalSession, ScratchPool};
 use std::fs;
@@ -552,6 +553,77 @@ fn bench_compare(c: &mut Criterion) {
         );
     }
     viewer_region_scaled_composite_rgb_device_warm.finish();
+
+    let mut viewer_contiguous_region_scaled_rgb =
+        c.benchmark_group("viewer_contiguous_region_scaled_rgb");
+    for input in inputs.iter().filter(|input| {
+        input.mode == DecodeMode::Rgb
+            && input.input_class == CorpusInputClass::BoundedFullFrame
+            && suggest_viewport_workload(input.dimensions).is_some()
+    }) {
+        let workload = suggest_viewport_workload(input.dimensions).expect("viewport workload");
+        viewer_contiguous_region_scaled_rgb.bench_function(format!("{}/cpu", input.name), |b| {
+            let decoder = CpuDecoder::new(&input.bytes).expect("cpu decoder");
+            let mut pool = CpuScratchPool::new();
+            b.iter(|| {
+                let out =
+                    decode_viewport_region_cpu(&decoder, &mut pool, PixelFormat::Rgb8, &workload)
+                        .expect("cpu contiguous viewport");
+                std::hint::black_box(out);
+            });
+        });
+        viewer_contiguous_region_scaled_rgb.bench_function(format!("{}/hybrid", input.name), |b| {
+            let decoder = CpuDecoder::new(&input.bytes).expect("cpu decoder");
+            let mut pool = CpuScratchPool::new();
+            let stride = workload.viewport_dims.0 as usize * PixelFormat::Rgb8.bytes_per_pixel();
+            let mut out = vec![0u8; stride * workload.viewport_dims.1 as usize];
+            b.iter(|| {
+                let surface = decode_viewport_region_hybrid(&decoder, &mut pool, &workload)
+                    .expect("hybrid contiguous viewport");
+                surface
+                    .download_into(&mut out, stride)
+                    .expect("hybrid contiguous download");
+                std::hint::black_box(&out);
+            });
+        });
+    }
+    viewer_contiguous_region_scaled_rgb.finish();
+
+    let mut viewer_contiguous_region_scaled_rgb_device =
+        c.benchmark_group("viewer_contiguous_region_scaled_rgb_device");
+    for input in inputs.iter().filter(|input| {
+        input.mode == DecodeMode::Rgb
+            && input.input_class == CorpusInputClass::BoundedFullFrame
+            && suggest_viewport_workload(input.dimensions).is_some()
+    }) {
+        let workload = suggest_viewport_workload(input.dimensions).expect("viewport workload");
+        viewer_contiguous_region_scaled_rgb_device.bench_function(
+            format!("{}/cpu", input.name),
+            |b| {
+                let decoder = CpuDecoder::new(&input.bytes).expect("cpu decoder");
+                let mut pool = CpuScratchPool::new();
+                b.iter(|| {
+                    let surface =
+                        decode_viewport_region_cpu_to_surface(&decoder, &mut pool, &workload)
+                            .expect("cpu contiguous upload");
+                    std::hint::black_box(surface);
+                });
+            },
+        );
+        viewer_contiguous_region_scaled_rgb_device.bench_function(
+            format!("{}/hybrid", input.name),
+            |b| {
+                let decoder = CpuDecoder::new(&input.bytes).expect("cpu decoder");
+                let mut pool = CpuScratchPool::new();
+                b.iter(|| {
+                    let surface = decode_viewport_region_hybrid(&decoder, &mut pool, &workload)
+                        .expect("hybrid contiguous viewport");
+                    std::hint::black_box(surface);
+                });
+            },
+        );
+    }
+    viewer_contiguous_region_scaled_rgb_device.finish();
 }
 
 criterion_group!(benches, bench_compare);

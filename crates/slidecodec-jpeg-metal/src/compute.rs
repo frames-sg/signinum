@@ -630,6 +630,34 @@ pub(crate) fn decode_scaled_to_surface(
 }
 
 #[cfg(target_os = "macos")]
+pub(crate) fn decode_region_scaled_to_surface(
+    decoder: &CpuDecoder<'_>,
+    pool: &mut slidecodec_jpeg::ScratchPool,
+    fmt: PixelFormat,
+    roi: slidecodec_jpeg::Rect,
+    scale: slidecodec_core::Downscale,
+) -> Result<Surface, Error> {
+    with_runtime(|runtime| {
+        let scaled = scaled_rect_covering(
+            Rect {
+                x: roi.x,
+                y: roi.y,
+                w: roi.w,
+                h: roi.h,
+            },
+            scale,
+        );
+        let mut stage = PlaneStage::new(
+            &runtime.device,
+            decoder.info().color_space,
+            (scaled.w, scaled.h),
+        )?;
+        decoder.decode_region_component_rows_with_scratch(pool, &mut stage, roi, scale)?;
+        stage.finish_with_runtime(runtime, fmt)
+    })
+}
+
+#[cfg(target_os = "macos")]
 pub(crate) fn compose_rgb_viewport_from_regions(
     decoder: &CpuDecoder<'_>,
     pool: &mut slidecodec_jpeg::ScratchPool,

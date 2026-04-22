@@ -22,6 +22,26 @@ pub struct ViewportWorkload {
     pub tiles: Vec<ViewportTile>,
 }
 
+pub fn viewport_source_bounds(workload: &ViewportWorkload) -> Rect {
+    let mut min_x = u32::MAX;
+    let mut min_y = u32::MAX;
+    let mut max_x = 0u32;
+    let mut max_y = 0u32;
+    for tile in &workload.tiles {
+        min_x = min_x.min(tile.source_roi.x);
+        min_y = min_y.min(tile.source_roi.y);
+        max_x = max_x.max(tile.source_roi.x.saturating_add(tile.source_roi.w));
+        max_y = max_y.max(tile.source_roi.y.saturating_add(tile.source_roi.h));
+    }
+
+    Rect {
+        x: min_x,
+        y: min_y,
+        w: max_x.saturating_sub(min_x),
+        h: max_y.saturating_sub(min_y),
+    }
+}
+
 pub fn suggest_viewport_workload(dimensions: (u32, u32)) -> Option<ViewportWorkload> {
     let scales = [
         Downscale::Eighth,
@@ -130,6 +150,50 @@ pub fn compose_viewport_cpu(
     Ok(viewport)
 }
 
+pub fn decode_viewport_region_cpu(
+    decoder: &CpuDecoder<'_>,
+    pool: &mut ScratchPool,
+    fmt: PixelFormat,
+    workload: &ViewportWorkload,
+) -> Result<Vec<u8>, Error> {
+    let source = viewport_source_bounds(workload);
+    let stride = workload.viewport_dims.0 as usize * fmt.bytes_per_pixel();
+    let mut viewport = vec![0u8; stride * workload.viewport_dims.1 as usize];
+    decoder.decode_region_scaled_into_with_scratch(
+        pool,
+        &mut viewport,
+        stride,
+        fmt,
+        to_jpeg_rect(source),
+        workload.scale,
+    )?;
+    Ok(viewport)
+}
+
+#[cfg(target_os = "macos")]
+pub fn decode_viewport_region_cpu_to_surface(
+    decoder: &CpuDecoder<'_>,
+    pool: &mut ScratchPool,
+    workload: &ViewportWorkload,
+) -> Result<Surface, Error> {
+    let bytes = decode_viewport_region_cpu(decoder, pool, PixelFormat::Rgb8, workload)?;
+    crate::upload_surface(
+        bytes,
+        workload.viewport_dims,
+        PixelFormat::Rgb8,
+        slidecodec_core::BackendRequest::Metal,
+    )
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn decode_viewport_region_cpu_to_surface(
+    _decoder: &CpuDecoder<'_>,
+    _pool: &mut ScratchPool,
+    _workload: &ViewportWorkload,
+) -> Result<Surface, Error> {
+    Err(Error::MetalUnavailable)
+}
+
 #[cfg(target_os = "macos")]
 pub fn compose_viewport_cpu_to_surface(
     decoder: &CpuDecoder<'_>,
@@ -174,6 +238,30 @@ pub fn compose_viewport_hybrid(
     tiles: &[ViewportTile],
 ) -> Result<Surface, Error> {
     crate::compute::compose_rgb_viewport_from_regions(decoder, pool, scale, viewport_dims, tiles)
+}
+
+#[cfg(target_os = "macos")]
+pub fn decode_viewport_region_hybrid(
+    decoder: &CpuDecoder<'_>,
+    pool: &mut ScratchPool,
+    workload: &ViewportWorkload,
+) -> Result<Surface, Error> {
+    crate::compute::decode_region_scaled_to_surface(
+        decoder,
+        pool,
+        PixelFormat::Rgb8,
+        to_jpeg_rect(viewport_source_bounds(workload)),
+        workload.scale,
+    )
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn decode_viewport_region_hybrid(
+    _decoder: &CpuDecoder<'_>,
+    _pool: &mut ScratchPool,
+    _workload: &ViewportWorkload,
+) -> Result<Surface, Error> {
+    Err(Error::MetalUnavailable)
 }
 
 #[cfg(not(target_os = "macos"))]

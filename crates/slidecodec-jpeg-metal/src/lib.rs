@@ -650,7 +650,7 @@ fn decode_surface_from_decoder(
             BackendRequest::Cuda => Err(Error::UnsupportedBackend { request: backend }),
         },
         batch::BatchOp::Region(roi) => match backend {
-            BackendRequest::Cpu => {
+            BackendRequest::Cpu | BackendRequest::Auto => {
                 let dims = (roi.w, roi.h);
                 let stride = dims.0 as usize * fmt.bytes_per_pixel();
                 let mut out = vec![0u8; stride * dims.1 as usize];
@@ -663,7 +663,7 @@ fn decode_surface_from_decoder(
                 )?;
                 upload_surface(out, dims, fmt, backend)
             }
-            BackendRequest::Auto | BackendRequest::Metal => {
+            BackendRequest::Metal => {
                 #[cfg(target_os = "macos")]
                 {
                     compute::decode_region_to_surface(
@@ -675,43 +675,25 @@ fn decode_surface_from_decoder(
                     )
                 }
                 #[cfg(not(target_os = "macos"))]
-                {
-                    let dims = (roi.w, roi.h);
-                    let stride = dims.0 as usize * fmt.bytes_per_pixel();
-                    let mut out = vec![0u8; stride * dims.1 as usize];
-                    decoder.decode_region_into_with_scratch(
-                        pool,
-                        &mut out,
-                        stride,
-                        fmt,
-                        to_jpeg_rect(roi),
-                    )?;
-                    upload_surface(out, dims, fmt, BackendRequest::Cpu)
-                }
+                unreachable!("Metal region path is gated above");
             }
             BackendRequest::Cuda => Err(Error::UnsupportedBackend { request: backend }),
         },
         batch::BatchOp::Scaled(scale) => match backend {
-            BackendRequest::Cpu => {
+            BackendRequest::Cpu | BackendRequest::Auto => {
                 let dims = scaled_dims(decoder.info().dimensions, scale);
                 let stride = dims.0 as usize * fmt.bytes_per_pixel();
                 let mut out = vec![0u8; stride * dims.1 as usize];
                 decoder.decode_scaled_into_with_scratch(pool, &mut out, stride, fmt, scale)?;
                 upload_surface(out, dims, fmt, backend)
             }
-            BackendRequest::Auto | BackendRequest::Metal => {
+            BackendRequest::Metal => {
                 #[cfg(target_os = "macos")]
                 {
                     compute::decode_scaled_to_surface(decoder, pool, fmt, scale, fast420_packet)
                 }
                 #[cfg(not(target_os = "macos"))]
-                {
-                    let dims = scaled_dims(decoder.info().dimensions, scale);
-                    let stride = dims.0 as usize * fmt.bytes_per_pixel();
-                    let mut out = vec![0u8; stride * dims.1 as usize];
-                    decoder.decode_scaled_into_with_scratch(pool, &mut out, stride, fmt, scale)?;
-                    upload_surface(out, dims, fmt, BackendRequest::Cpu)
-                }
+                unreachable!("Metal scaled path is gated above");
             }
             BackendRequest::Cuda => Err(Error::UnsupportedBackend { request: backend }),
         },

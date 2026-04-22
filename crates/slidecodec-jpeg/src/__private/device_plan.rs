@@ -2,7 +2,7 @@
 
 use crate::decoder::Decoder;
 use crate::entropy::sequential::PreparedDecodePlan;
-use crate::error::JpegError;
+use crate::error::{JpegError, MarkerKind};
 use crate::info::ColorSpace;
 use alloc::vec::Vec;
 
@@ -35,7 +35,7 @@ pub fn build_device_plan(
     cadence_mcus: u32,
 ) -> Result<DeviceDecodePlan, JpegError> {
     let plan = &decoder.plan;
-    let scan_bytes = decoder.bytes[plan.scan_offset..].to_vec();
+    let scan_bytes = scan_payload_bytes(decoder.bytes, plan.scan_offset)?;
     let checkpoints = build_checkpoint_plan(plan, &scan_bytes, cadence_mcus);
 
     Ok(DeviceDecodePlan {
@@ -55,6 +55,39 @@ pub fn build_device_plan(
         checkpoints,
         matches_fast_420: plan.matches_fast_tile_shape(),
         matches_fast_444: plan.matches_fast_rgb444_shape(),
+    })
+}
+
+fn scan_payload_bytes(bytes: &[u8], scan_offset: usize) -> Result<Vec<u8>, JpegError> {
+    let scan = &bytes[scan_offset..];
+    let mut index = 0usize;
+    while index < scan.len() {
+        if scan[index] != 0xff {
+            index += 1;
+            continue;
+        }
+
+        let marker_start = index;
+        let mut next = index + 1;
+        while next < scan.len() && scan[next] == 0xff {
+            next += 1;
+        }
+        if next >= scan.len() {
+            return Err(JpegError::MissingMarker {
+                marker: MarkerKind::Eoi,
+            });
+        }
+
+        match scan[next] {
+            0x00 | 0xd0..=0xd7 => {
+                index = next + 1;
+            }
+            _ => return Ok(scan[..marker_start].to_vec()),
+        }
+    }
+
+    Err(JpegError::MissingMarker {
+        marker: MarkerKind::Eoi,
     })
 }
 

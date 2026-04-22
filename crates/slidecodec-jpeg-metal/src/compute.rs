@@ -91,6 +91,61 @@ kernel void jpeg_pack(
         out[out_idx + 3] = uchar(params.alpha);
     }
 }
+
+struct JpegViewportParams {
+    uint tile_width;
+    uint tile_height;
+    uint viewport_width;
+    uint viewport_height;
+    uint viewport_stride;
+    uint dest_x;
+    uint dest_y;
+    uint mode;
+};
+
+kernel void jpeg_pack_into_viewport_rgb(
+    device const uchar *plane0 [[buffer(0)]],
+    device const uchar *plane1 [[buffer(1)]],
+    device const uchar *plane2 [[buffer(2)]],
+    device uchar *out [[buffer(3)]],
+    constant JpegViewportParams &params [[buffer(4)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= params.tile_width || gid.y >= params.tile_height) {
+        return;
+    }
+
+    const uint dst_x = params.dest_x + gid.x;
+    const uint dst_y = params.dest_y + gid.y;
+    if (dst_x >= params.viewport_width || dst_y >= params.viewport_height) {
+        return;
+    }
+
+    const uint idx = gid.y * params.tile_width + gid.x;
+    const uint out_idx = dst_y * params.viewport_stride + dst_x * 3u;
+
+    if (params.mode == MODE_GRAY) {
+        const uchar gray = plane0[idx];
+        out[out_idx] = gray;
+        out[out_idx + 1] = gray;
+        out[out_idx + 2] = gray;
+        return;
+    }
+
+    if (params.mode == MODE_RGB) {
+        out[out_idx] = plane0[idx];
+        out[out_idx + 1] = plane1[idx];
+        out[out_idx + 2] = plane2[idx];
+        return;
+    }
+
+    const int y = int(plane0[idx]);
+    const int cb = int(plane1[idx]) - 128;
+    const int cr = int(plane2[idx]) - 128;
+    out[out_idx] = clamp_u8(y + ((91881 * cr + (1 << 15)) >> 16));
+    out[out_idx + 1] = clamp_u8(y - ((22554 * cb + 46802 * cr + (1 << 15)) >> 16));
+    out[out_idx + 2] = clamp_u8(y + ((116130 * cb + (1 << 15)) >> 16));
+}
 ";
 
 #[cfg(target_os = "macos")]
@@ -120,6 +175,20 @@ struct JpegPackParams {
 }
 
 #[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct JpegViewportParams {
+    tile_width: u32,
+    tile_height: u32,
+    viewport_width: u32,
+    viewport_height: u32,
+    viewport_stride: u32,
+    dest_x: u32,
+    dest_y: u32,
+    mode: u32,
+}
+
+#[cfg(target_os = "macos")]
 thread_local! {
     static METAL_RUNTIME: RefCell<Option<Result<MetalRuntime, String>>> = const { RefCell::new(None) };
 }
@@ -129,6 +198,7 @@ struct MetalRuntime {
     device: Device,
     queue: CommandQueue,
     pack_pipeline: ComputePipelineState,
+    viewport_rgb_pipeline: ComputePipelineState,
 }
 
 #[cfg(target_os = "macos")]
@@ -138,13 +208,17 @@ impl MetalRuntime {
             .ok_or_else(|| "Metal is unavailable on this host".to_string())?;
         let options = CompileOptions::new();
         let library = device.new_library_with_source(SHADER_SOURCE, &options)?;
-        let function = library.get_function("jpeg_pack", None)?;
-        let pack_pipeline = device.new_compute_pipeline_state_with_function(&function)?;
+        let pack_function = library.get_function("jpeg_pack", None)?;
+        let pack_pipeline = device.new_compute_pipeline_state_with_function(&pack_function)?;
+        let viewport_function = library.get_function("jpeg_pack_into_viewport_rgb", None)?;
+        let viewport_rgb_pipeline =
+            device.new_compute_pipeline_state_with_function(&viewport_function)?;
         let queue = device.new_command_queue();
         Ok(Self {
             device,
             queue,
             pack_pipeline,
+            viewport_rgb_pipeline,
         })
     }
 }
@@ -180,6 +254,12 @@ struct PlaneStage {
     plane0: Buffer,
     plane1: Option<Buffer>,
     plane2: Option<Buffer>,
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) struct ViewportTileStage {
+    dest: Rect,
+    stage: PlaneStage,
 }
 
 #[cfg(target_os = "macos")]
@@ -446,5 +526,114 @@ pub(crate) fn decode_scaled_to_surface(
         )?;
         decoder.decode_region_component_rows_with_scratch(pool, &mut stage, roi, scale)?;
         stage.finish_with_runtime(runtime, fmt)
+    })
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn decode_region_scaled_to_viewport_stage(
+    decoder: &CpuDecoder<'_>,
+    pool: &mut slidecodec_jpeg::ScratchPool,
+    roi: slidecodec_jpeg::Rect,
+    scale: slidecodec_core::Downscale,
+    dest: Rect,
+) -> Result<ViewportTileStage, Error> {
+    with_runtime(|runtime| {
+        let dims = (
+            roi.w.div_ceil(scale.denominator()),
+            roi.h.div_ceil(scale.denominator()),
+        );
+        if dims != (dest.w, dest.h) {
+            return Err(Error::MetalKernel {
+                message: format!(
+                    "viewport tile dims {dims:?} do not match destination rect {dest:?}"
+                ),
+            });
+        }
+        let mut stage = PlaneStage::new(&runtime.device, decoder.info().color_space, dims)?;
+        decoder.decode_region_component_rows_with_scratch(pool, &mut stage, roi, scale)?;
+        Ok(ViewportTileStage { dest, stage })
+    })
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn compose_rgb_viewport(
+    stages: &[ViewportTileStage],
+    viewport_dims: (u32, u32),
+) -> Result<Surface, Error> {
+    with_runtime(|runtime| {
+        let pitch_bytes = viewport_dims.0 as usize * PixelFormat::Rgb8.bytes_per_pixel();
+        let out_buffer = runtime.device.new_buffer(
+            (pitch_bytes * viewport_dims.1 as usize) as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+
+        let command_buffer = runtime.queue.new_command_buffer();
+        for tile in stages {
+            let params = JpegViewportParams {
+                tile_width: tile.stage.dims.0,
+                tile_height: tile.stage.dims.1,
+                viewport_width: viewport_dims.0,
+                viewport_height: viewport_dims.1,
+                viewport_stride: u32::try_from(pitch_bytes).expect("viewport stride fits in u32"),
+                dest_x: tile.dest.x,
+                dest_y: tile.dest.y,
+                mode: match tile.stage.mode {
+                    PlaneMode::Gray => MODE_GRAY,
+                    PlaneMode::YCbCr => MODE_YCBCR,
+                    PlaneMode::Rgb => MODE_RGB,
+                },
+            };
+
+            let encoder = command_buffer.new_compute_command_encoder();
+            encoder.set_compute_pipeline_state(&runtime.viewport_rgb_pipeline);
+            encoder.set_buffer(0, Some(&tile.stage.plane0), 0);
+            encoder.set_buffer(
+                1,
+                tile.stage.plane1.as_ref().map(std::convert::AsRef::as_ref),
+                0,
+            );
+            encoder.set_buffer(
+                2,
+                tile.stage.plane2.as_ref().map(std::convert::AsRef::as_ref),
+                0,
+            );
+            encoder.set_buffer(3, Some(&out_buffer), 0);
+            encoder.set_bytes(
+                4,
+                size_of::<JpegViewportParams>() as u64,
+                (&raw const params).cast(),
+            );
+
+            let width = runtime
+                .viewport_rgb_pipeline
+                .thread_execution_width()
+                .max(1);
+            let max_threads = runtime
+                .viewport_rgb_pipeline
+                .max_total_threads_per_threadgroup()
+                .max(width);
+            let height = (max_threads / width).max(1);
+            encoder.dispatch_threads(
+                MTLSize {
+                    width: u64::from(tile.stage.dims.0),
+                    height: u64::from(tile.stage.dims.1),
+                    depth: 1,
+                },
+                MTLSize {
+                    width,
+                    height,
+                    depth: 1,
+                },
+            );
+            encoder.end_encoding();
+        }
+
+        command_buffer.commit();
+        command_buffer.wait_until_completed();
+        Ok(Surface::from_metal_buffer(
+            out_buffer,
+            viewport_dims,
+            PixelFormat::Rgb8,
+        ))
     })
 }

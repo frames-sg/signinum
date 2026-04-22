@@ -8,6 +8,10 @@ use slidecodec_core::{
 use slidecodec_jpeg::{
     Decoder as CpuDecoder, DecoderContext as JpegDecoderContext, ScratchPool as CpuScratchPool,
 };
+use slidecodec_jpeg_metal::viewport::{
+    compose_viewport_cpu, compose_viewport_cpu_to_surface, compose_viewport_hybrid,
+    suggest_viewport_workload,
+};
 use slidecodec_jpeg_metal::{Codec, Decoder, MetalSession, ScratchPool};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -30,6 +34,7 @@ enum CorpusInputClass {
 struct BenchInput {
     name: String,
     bytes: Vec<u8>,
+    dimensions: (u32, u32),
     mode: DecodeMode,
     input_class: CorpusInputClass,
 }
@@ -39,12 +44,14 @@ fn load_bench_inputs() -> Vec<BenchInput> {
         BenchInput {
             name: "repo/baseline_420_16x16".to_string(),
             bytes: include_bytes!("../../../corpus/conformance/baseline_420_16x16.jpg").to_vec(),
+            dimensions: (16, 16),
             mode: DecodeMode::Rgb,
             input_class: CorpusInputClass::BoundedFullFrame,
         },
         BenchInput {
             name: "repo/grayscale_8x8".to_string(),
             bytes: include_bytes!("../../../corpus/conformance/grayscale_8x8.jpg").to_vec(),
+            dimensions: (8, 8),
             mode: DecodeMode::Gray,
             input_class: CorpusInputClass::BoundedFullFrame,
         },
@@ -111,6 +118,7 @@ fn push_jpeg(path: &Path, inputs: &mut Vec<BenchInput>, seen: &mut Vec<String>) 
     inputs.push(BenchInput {
         name,
         bytes,
+        dimensions,
         mode,
         input_class: classify_corpus_input(dimensions, mode),
     });
@@ -271,6 +279,80 @@ fn metal_decode_scaled(bytes: &[u8], factor: Downscale) {
     std::hint::black_box(submission.wait().expect("surface"));
 }
 
+fn cpu_viewport_composite(bytes: &[u8], dimensions: (u32, u32)) {
+    let Some(workload) = suggest_viewport_workload(dimensions) else {
+        return;
+    };
+    let decoder = CpuDecoder::new(bytes).expect("cpu decoder");
+    let mut pool = CpuScratchPool::new();
+    let out = compose_viewport_cpu(
+        &decoder,
+        &mut pool,
+        PixelFormat::Rgb8,
+        workload.scale,
+        workload.viewport_dims,
+        &workload.tiles,
+    )
+    .expect("cpu viewport");
+    std::hint::black_box(out);
+}
+
+fn hybrid_viewport_composite(bytes: &[u8], dimensions: (u32, u32)) {
+    let Some(workload) = suggest_viewport_workload(dimensions) else {
+        return;
+    };
+    let decoder = CpuDecoder::new(bytes).expect("cpu decoder");
+    let mut pool = CpuScratchPool::new();
+    let surface = compose_viewport_hybrid(
+        &decoder,
+        &mut pool,
+        workload.scale,
+        workload.viewport_dims,
+        &workload.tiles,
+    )
+    .expect("hybrid viewport");
+    let stride = workload.viewport_dims.0 as usize * PixelFormat::Rgb8.bytes_per_pixel();
+    let mut out = vec![0u8; stride * workload.viewport_dims.1 as usize];
+    surface
+        .download_into(&mut out, stride)
+        .expect("hybrid viewport download");
+    std::hint::black_box(out);
+}
+
+fn cpu_viewport_composite_device(bytes: &[u8], dimensions: (u32, u32)) {
+    let Some(workload) = suggest_viewport_workload(dimensions) else {
+        return;
+    };
+    let decoder = CpuDecoder::new(bytes).expect("cpu decoder");
+    let mut pool = CpuScratchPool::new();
+    let surface = compose_viewport_cpu_to_surface(
+        &decoder,
+        &mut pool,
+        workload.scale,
+        workload.viewport_dims,
+        &workload.tiles,
+    )
+    .expect("cpu viewport surface");
+    std::hint::black_box(surface);
+}
+
+fn hybrid_viewport_composite_device(bytes: &[u8], dimensions: (u32, u32)) {
+    let Some(workload) = suggest_viewport_workload(dimensions) else {
+        return;
+    };
+    let decoder = CpuDecoder::new(bytes).expect("cpu decoder");
+    let mut pool = CpuScratchPool::new();
+    let surface = compose_viewport_hybrid(
+        &decoder,
+        &mut pool,
+        workload.scale,
+        workload.viewport_dims,
+        &workload.tiles,
+    )
+    .expect("hybrid viewport surface");
+    std::hint::black_box(surface);
+}
+
 fn bench_compare(c: &mut Criterion) {
     let inputs = load_bench_inputs();
 
@@ -323,6 +405,44 @@ fn bench_compare(c: &mut Criterion) {
         });
     }
     wsi_scaled_rgb_q8.finish();
+
+    let mut viewer_region_scaled_composite_rgb =
+        c.benchmark_group("viewer_region_scaled_composite_rgb");
+    for input in inputs.iter().filter(|input| {
+        input.mode == DecodeMode::Rgb
+            && input.input_class == CorpusInputClass::BoundedFullFrame
+            && suggest_viewport_workload(input.dimensions).is_some()
+    }) {
+        viewer_region_scaled_composite_rgb.bench_function(format!("{}/cpu", input.name), |b| {
+            b.iter(|| cpu_viewport_composite(&input.bytes, input.dimensions));
+        });
+        viewer_region_scaled_composite_rgb.bench_function(format!("{}/hybrid", input.name), |b| {
+            b.iter(|| hybrid_viewport_composite(&input.bytes, input.dimensions));
+        });
+    }
+    viewer_region_scaled_composite_rgb.finish();
+
+    let mut viewer_region_scaled_composite_rgb_device =
+        c.benchmark_group("viewer_region_scaled_composite_rgb_device");
+    for input in inputs.iter().filter(|input| {
+        input.mode == DecodeMode::Rgb
+            && input.input_class == CorpusInputClass::BoundedFullFrame
+            && suggest_viewport_workload(input.dimensions).is_some()
+    }) {
+        viewer_region_scaled_composite_rgb_device.bench_function(
+            format!("{}/cpu", input.name),
+            |b| {
+                b.iter(|| cpu_viewport_composite_device(&input.bytes, input.dimensions));
+            },
+        );
+        viewer_region_scaled_composite_rgb_device.bench_function(
+            format!("{}/hybrid", input.name),
+            |b| {
+                b.iter(|| hybrid_viewport_composite_device(&input.bytes, input.dimensions));
+            },
+        );
+    }
+    viewer_region_scaled_composite_rgb_device.finish();
 }
 
 criterion_group!(benches, bench_compare);

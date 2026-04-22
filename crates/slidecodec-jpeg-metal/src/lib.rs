@@ -7,6 +7,7 @@ mod batch;
 #[cfg(target_os = "macos")]
 mod compute;
 mod session;
+pub mod viewport;
 
 use std::sync::Arc;
 
@@ -698,7 +699,7 @@ fn scaled_dims(full: (u32, u32), scale: Downscale) -> (u32, u32) {
     )
 }
 
-fn upload_surface(
+pub(crate) fn upload_surface(
     bytes: Vec<u8>,
     dimensions: (u32, u32),
     fmt: PixelFormat,

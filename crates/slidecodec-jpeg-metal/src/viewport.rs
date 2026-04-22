@@ -3,7 +3,7 @@
 use slidecodec_core::{BackendRequest, Downscale, PixelFormat, Rect};
 use slidecodec_jpeg::{
     Decoder as CpuDecoder, Rect as JpegRect, ScratchPool,
-    __private::build_metal_fast420_packet_for_decoder,
+    __private::{build_metal_fast420_packet_for_decoder, build_metal_fast444_packet_for_decoder},
 };
 
 use crate::{Error, Surface};
@@ -406,6 +406,7 @@ pub fn decode_viewport_region_hybrid(
     pool: &mut ScratchPool,
     workload: &ViewportWorkload,
 ) -> Result<Surface, Error> {
+    let fast444_packet = build_metal_fast444_packet_for_decoder(decoder).ok();
     let fast420_packet = build_metal_fast420_packet_for_decoder(decoder).ok();
     crate::compute::decode_region_scaled_to_surface(
         decoder,
@@ -413,6 +414,7 @@ pub fn decode_viewport_region_hybrid(
         PixelFormat::Rgb8,
         to_jpeg_rect(viewport_source_bounds(workload)),
         workload.scale,
+        fast444_packet.as_ref(),
         fast420_packet.as_ref(),
     )
 }

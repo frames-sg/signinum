@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use slidecodec_core::{BackendRequest, DeviceSubmission, Downscale, PixelFormat, Rect};
-use slidecodec_jpeg::__private::JpegMetalFast420PacketV1;
+use slidecodec_jpeg::__private::{JpegMetalFast420PacketV1, JpegMetalFast444PacketV1};
 
 use crate::{session::SharedSession, Error, Surface};
 
@@ -50,6 +50,7 @@ pub(crate) struct QueuedRequest {
     pub(crate) fmt: PixelFormat,
     pub(crate) backend: BackendRequest,
     pub(crate) op: BatchOp,
+    pub(crate) fast444_packet: Option<JpegMetalFast444PacketV1>,
     pub(crate) fast420_packet: Option<JpegMetalFast420PacketV1>,
     pub(crate) output_slot: usize,
 }
@@ -60,6 +61,7 @@ impl QueuedRequest {
         fmt: PixelFormat,
         backend: BackendRequest,
         op: BatchOp,
+        fast444_packet: Option<JpegMetalFast444PacketV1>,
         fast420_packet: Option<JpegMetalFast420PacketV1>,
     ) -> Self {
         Self {
@@ -67,6 +69,7 @@ impl QueuedRequest {
             fmt,
             backend,
             op,
+            fast444_packet,
             fast420_packet,
             output_slot: usize::MAX,
         }
@@ -126,6 +129,7 @@ pub(crate) fn flush_if_needed(session: &mut crate::session::SessionState) {
                 request.fmt,
                 request.backend,
                 request.op,
+                request.fast444_packet,
                 request.fast420_packet,
             );
             session.completed[request.output_slot] = Some(result);

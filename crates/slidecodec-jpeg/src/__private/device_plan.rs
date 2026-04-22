@@ -88,5 +88,7 @@ fn scan_payload_bytes(bytes: &[u8], scan_offset: usize) -> Result<Vec<u8>, JpegE
         }
     }
 
-    Ok(scan.to_vec())
+    Err(JpegError::MissingMarker {
+        marker: MarkerKind::Eoi,
+    })
 }

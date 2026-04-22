@@ -22,7 +22,7 @@ pub(crate) fn build_checkpoint_plan(
 ) -> Result<Vec<DeviceCheckpoint>, JpegError> {
     let total_mcus = total_mcus(plan);
     let cadence_mcus = cadence_mcus.max(1);
-    let restart_interval = plan.restart_interval.map(u32::from);
+    let restart_interval = plan.restart_interval.filter(|&interval| interval > 0).map(u32::from);
 
     let mut reader_bytes = Vec::with_capacity(scan_bytes.len() + 2);
     reader_bytes.extend_from_slice(scan_bytes);

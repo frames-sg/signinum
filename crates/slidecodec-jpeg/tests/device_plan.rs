@@ -114,6 +114,35 @@ fn hidden_device_plan_restart_checkpoints_capture_resume_state() {
 }
 
 #[test]
+fn hidden_device_plan_handles_restart_after_partial_entropy_byte() {
+    let bytes = grayscale_restart_jpeg();
+    let decoder = Decoder::new(&bytes).expect("restart-coded decoder");
+    let plan = slidecodec_jpeg::__private::build_device_plan(&decoder, 2).expect("device plan");
+
+    assert_eq!(plan.checkpoints.len(), 2);
+    assert_eq!(plan.checkpoints[1].mcu_index, 1);
+    assert_eq!(plan.checkpoints[1].scan_offset, 3);
+    assert_eq!(plan.checkpoints[1].expected_rst, 1);
+}
+
+#[test]
+fn hidden_device_plan_requires_terminal_eoi_marker() {
+    let mut bytes = grayscale_jpeg(24, 24);
+    bytes.truncate(bytes.len() - 2);
+
+    let decoder = Decoder::new(&bytes).expect("decoder");
+    let err = slidecodec_jpeg::__private::build_device_plan(&decoder, 2)
+        .expect_err("missing EOI should fail");
+
+    assert!(matches!(
+        err,
+        slidecodec_jpeg::JpegError::MissingMarker {
+            marker: slidecodec_jpeg::MarkerKind::Eoi,
+        }
+    ));
+}
+
+#[test]
 fn hidden_device_plan_rejects_non_eoi_marker_after_entropy() {
     let mut bytes = restart_coded_grayscale_jpeg(24, 24);
     let marker = bytes
@@ -215,5 +244,23 @@ fn grayscale_jpeg(width: u16, height: u16) -> Vec<u8> {
     }
 
     bytes.extend_from_slice(&[0xff, 0xd9]);
+    bytes
+}
+
+fn grayscale_restart_jpeg() -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&[0xff, 0xd8]);
+    bytes.extend_from_slice(&[0xff, 0xdb, 0x00, 67, 0x00]);
+    bytes.extend(std::iter::repeat_n(16u8, 64));
+    bytes.extend_from_slice(&[0xff, 0xc0, 0x00, 11, 8, 0, 8, 0, 16, 1, 1, 0x11, 0]);
+    bytes.extend_from_slice(&[0xff, 0xdd, 0x00, 0x04, 0x00, 0x01]);
+    bytes.extend_from_slice(&[
+        0xff, 0xc4, 0x00, 20, 0x00, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ]);
+    bytes.extend_from_slice(&[
+        0xff, 0xc4, 0x00, 20, 0x10, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ]);
+    bytes.extend_from_slice(&[0xff, 0xda, 0x00, 0x08, 1, 1, 0x00, 0, 63, 0]);
+    bytes.extend_from_slice(&[0x00, 0xff, 0xd0, 0x00, 0xff, 0xd9]);
     bytes
 }

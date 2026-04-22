@@ -151,7 +151,9 @@ pub(crate) fn decode_scan_baseline<W: OutputWriter>(
     let mcus_per_row = width.div_ceil(mcu_width_px);
     let mcu_rows = height.div_ceil(mcu_height_px);
 
-    pool.prepare_for(plan, mcus_per_row, block_size);
+    let region_layout = stripe_region_layout(plan, downscale, output_rect);
+
+    pool.prepare_for(plan, region_layout.stripe_mcus_per_row, block_size);
 
     let mut br = BitReader::new(scan_bytes);
     let mut coeff = CoefficientBlock::default();
@@ -194,6 +196,8 @@ pub(crate) fn decode_scan_baseline<W: OutputWriter>(
         expanded_rect,
         full_output_rect,
         0,
+        region_layout.stripe_mcu_start,
+        region_layout.stripe_mcus_per_row,
         mcus_per_row,
         mcu_rows,
         curr_stripe,
@@ -215,6 +219,8 @@ pub(crate) fn decode_scan_baseline<W: OutputWriter>(
             expanded_rect,
             full_output_rect,
             my,
+            region_layout.stripe_mcu_start,
+            region_layout.stripe_mcus_per_row,
             mcus_per_row,
             mcu_rows,
             next_stripe,
@@ -230,6 +236,7 @@ pub(crate) fn decode_scan_baseline<W: OutputWriter>(
             my - 1,
             writer,
             &mut output_scratch,
+            region_layout.source_width_usize(),
             downscale,
         )?;
         core::mem::swap(&mut prev_stripe, &mut curr_stripe);
@@ -245,6 +252,7 @@ pub(crate) fn decode_scan_baseline<W: OutputWriter>(
         mcu_rows - 1,
         writer,
         &mut output_scratch,
+        region_layout.source_width_usize(),
         downscale,
     )?;
 
@@ -281,7 +289,9 @@ pub(crate) fn decode_scan_baseline_rgb<W: OutputWriter + InterleavedRgbWriter>(
     let mcus_per_row = width.div_ceil(mcu_width_px);
     let mcu_rows = height.div_ceil(mcu_height_px);
 
-    pool.prepare_for(plan, mcus_per_row, block_size);
+    let region_layout = stripe_region_layout(plan, downscale, output_rect);
+
+    pool.prepare_for(plan, region_layout.stripe_mcus_per_row, block_size);
 
     let mut br = BitReader::new(scan_bytes);
     let mut coeff = CoefficientBlock::default();
@@ -323,6 +333,8 @@ pub(crate) fn decode_scan_baseline_rgb<W: OutputWriter + InterleavedRgbWriter>(
         expanded_rect,
         full_output_rect,
         0,
+        region_layout.stripe_mcu_start,
+        region_layout.stripe_mcus_per_row,
         mcus_per_row,
         mcu_rows,
         curr_stripe,
@@ -344,6 +356,8 @@ pub(crate) fn decode_scan_baseline_rgb<W: OutputWriter + InterleavedRgbWriter>(
             expanded_rect,
             full_output_rect,
             my,
+            region_layout.stripe_mcu_start,
+            region_layout.stripe_mcus_per_row,
             mcus_per_row,
             mcu_rows,
             next_stripe,
@@ -360,6 +374,7 @@ pub(crate) fn decode_scan_baseline_rgb<W: OutputWriter + InterleavedRgbWriter>(
             my - 1,
             writer,
             &mut output_scratch,
+            region_layout.source_width_usize(),
             downscale,
         )?;
         core::mem::swap(&mut prev_stripe, &mut curr_stripe);
@@ -376,6 +391,7 @@ pub(crate) fn decode_scan_baseline_rgb<W: OutputWriter + InterleavedRgbWriter>(
         mcu_rows - 1,
         writer,
         &mut output_scratch,
+        region_layout.source_width_usize(),
         downscale,
     )?;
 
@@ -448,6 +464,8 @@ pub(crate) fn decode_scan_fast_tile_rgb<W: OutputWriter + InterleavedRgbWriter>(
         &mut coeff,
         &mut pixels,
         mcus_per_row,
+        0,
+        mcus_per_row,
         curr_stripe,
     )?;
 
@@ -465,6 +483,8 @@ pub(crate) fn decode_scan_fast_tile_rgb<W: OutputWriter + InterleavedRgbWriter>(
             &mut coeff,
             &mut pixels,
             mcus_per_row,
+            0,
+            mcus_per_row,
             next_stripe,
         )?;
         emit_stripe_rgb(
@@ -476,6 +496,7 @@ pub(crate) fn decode_scan_fast_tile_rgb<W: OutputWriter + InterleavedRgbWriter>(
             my - 1,
             writer,
             &mut output_scratch,
+            width as usize,
             DownscaleFactor::Full,
         )?;
         core::mem::swap(&mut prev_stripe, &mut curr_stripe);
@@ -492,6 +513,7 @@ pub(crate) fn decode_scan_fast_tile_rgb<W: OutputWriter + InterleavedRgbWriter>(
         mcu_rows - 1,
         writer,
         &mut output_scratch,
+        width as usize,
         DownscaleFactor::Full,
     )?;
 
@@ -514,10 +536,6 @@ pub(crate) fn decode_scan_fast_tile_rgb<W: OutputWriter + InterleavedRgbWriter>(
 struct RgbCropWindow {
     scratch_x0: usize,
     scratch_x1: usize,
-    sample_start: usize,
-    sample_end: usize,
-    crop_start: usize,
-    crop_end: usize,
 }
 
 impl RgbCropWindow {
@@ -529,20 +547,106 @@ impl RgbCropWindow {
         let sample_end = (roi_x1.div_ceil(2) + 1).min(chroma_width);
         let scratch_x0 = sample_start * 2;
         let scratch_x1 = (sample_end * 2).min(width);
-        let crop_start = roi_x0 - scratch_x0;
-        let crop_end = crop_start + roi.w as usize;
         Self {
             scratch_x0,
             scratch_x1,
-            sample_start,
-            sample_end,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct StripeRegionLayout {
+    pub(crate) stripe_mcu_start: u32,
+    pub(crate) stripe_mcus_per_row: u32,
+    pub(crate) source_x0: u32,
+    pub(crate) source_width: u32,
+}
+
+impl StripeRegionLayout {
+    fn new(full_width: u32, mcu_width_px: u32, output_rect: Rect) -> Self {
+        let source_x0 = (output_rect.x / mcu_width_px) * mcu_width_px;
+        let source_x1 = output_rect
+            .x
+            .saturating_add(output_rect.w)
+            .div_ceil(mcu_width_px)
+            .saturating_mul(mcu_width_px)
+            .min(full_width);
+        let stripe_mcu_start = source_x0 / mcu_width_px;
+        let stripe_mcu_end = source_x1.div_ceil(mcu_width_px);
+        Self {
+            stripe_mcu_start,
+            stripe_mcus_per_row: stripe_mcu_end.saturating_sub(stripe_mcu_start),
+            source_x0,
+            source_width: source_x1.saturating_sub(source_x0),
+        }
+    }
+
+    fn source_width_usize(self) -> usize {
+        self.source_width as usize
+    }
+}
+
+pub(crate) fn stripe_region_layout(
+    plan: &PreparedDecodePlan,
+    downscale: DownscaleFactor,
+    output_rect: Rect,
+) -> StripeRegionLayout {
+    let (scaled_width, scaled_height) = scaled_dimensions(plan.dimensions, downscale);
+    let expanded_rect = expanded_output_rect(output_rect, scaled_width, scaled_height);
+    let mcu_width_px = downscale.output_block_size() * u32::from(plan.sampling.max_h);
+    StripeRegionLayout::new(scaled_width, mcu_width_px, expanded_rect)
+}
+
+#[derive(Clone, Copy)]
+struct Fast420RegionLayout {
+    stripe_mcu_start: u32,
+    stripe_mcus_per_row: u32,
+    y_decode_start: usize,
+    y_decode_end: usize,
+    chroma_decode_start: usize,
+    chroma_decode_end: usize,
+    crop_start: usize,
+    crop_end: usize,
+}
+
+impl Fast420RegionLayout {
+    fn new(width: usize, roi: Rect) -> Self {
+        let crop_window = RgbCropWindow::new(width, roi);
+        let stripe = StripeRegionLayout::new(
+            width as u32,
+            16,
+            Rect {
+                x: crop_window.scratch_x0 as u32,
+                y: 0,
+                w: (crop_window.scratch_x1 - crop_window.scratch_x0) as u32,
+                h: 1,
+            },
+        );
+        let y_decode_start = stripe.source_x0 as usize;
+        let y_decode_end = y_decode_start + stripe.source_width as usize;
+        let chroma_decode_start = (stripe.source_x0 / 2) as usize;
+        let chroma_decode_end = chroma_decode_start + stripe.source_width.div_ceil(2) as usize;
+        let crop_start = roi.x as usize - y_decode_start;
+        let crop_end = crop_start + roi.w as usize;
+
+        Self {
+            stripe_mcu_start: stripe.stripe_mcu_start,
+            stripe_mcus_per_row: stripe.stripe_mcus_per_row,
+            y_decode_start,
+            y_decode_end,
+            chroma_decode_start,
+            chroma_decode_end,
             crop_start,
             crop_end,
         }
     }
 
-    fn scratch_width(self) -> usize {
-        self.scratch_x1 - self.scratch_x0
+    fn row_width(self) -> usize {
+        self.y_decode_end - self.y_decode_start
+    }
+
+    fn chroma_width(self) -> usize {
+        self.chroma_decode_end - self.chroma_decode_start
     }
 }
 
@@ -564,14 +668,15 @@ pub(crate) fn decode_scan_fast_tile_rgb_region<W: OutputWriter + InterleavedRgbW
     let mcus_per_row = width.div_ceil(mcu_width_px);
     let mcu_rows = height.div_ceil(mcu_height_px);
 
+    let region_layout = Fast420RegionLayout::new(width as usize, roi);
+
     pool.prepare_for(
         plan,
-        mcus_per_row,
+        region_layout.stripe_mcus_per_row,
         DownscaleFactor::Full.output_block_size(),
     );
 
-    let crop_window = RgbCropWindow::new(width as usize, roi);
-    let mut crop_rows = pool.take_sink_rows(crop_window.scratch_width());
+    let mut crop_rows = pool.take_sink_rows(region_layout.row_width());
     let result = (|| {
         let mut br = BitReader::new(scan_bytes);
         let mut coeff = CoefficientBlock::default();
@@ -603,6 +708,8 @@ pub(crate) fn decode_scan_fast_tile_rgb_region<W: OutputWriter + InterleavedRgbW
             &mut coeff,
             &mut pixels,
             mcus_per_row,
+            region_layout.stripe_mcu_start,
+            region_layout.stripe_mcus_per_row,
             curr_stripe,
         )?;
 
@@ -620,6 +727,8 @@ pub(crate) fn decode_scan_fast_tile_rgb_region<W: OutputWriter + InterleavedRgbW
                 &mut coeff,
                 &mut pixels,
                 mcus_per_row,
+                region_layout.stripe_mcu_start,
+                region_layout.stripe_mcus_per_row,
                 next_stripe,
             )?;
             emit_stripe_rgb_420_region(
@@ -631,7 +740,7 @@ pub(crate) fn decode_scan_fast_tile_rgb_region<W: OutputWriter + InterleavedRgbW
                 my - 1,
                 writer,
                 roi,
-                crop_window,
+                region_layout,
                 &mut crop_rows,
             )?;
             core::mem::swap(&mut prev_stripe, &mut curr_stripe);
@@ -648,7 +757,7 @@ pub(crate) fn decode_scan_fast_tile_rgb_region<W: OutputWriter + InterleavedRgbW
             mcu_rows - 1,
             writer,
             roi,
-            crop_window,
+            region_layout,
             &mut crop_rows,
         )?;
 
@@ -689,7 +798,7 @@ fn emit_stripe_rgb_420_region<W: OutputWriter + InterleavedRgbWriter>(
     stripe_index: u32,
     writer: &mut W,
     roi: Rect,
-    crop_window: RgbCropWindow,
+    region_layout: Fast420RegionLayout,
     crop_rows: &mut SinkRows,
 ) -> Result<(), JpegError> {
     let max_v = plan.sampling.max_v as u32;
@@ -698,13 +807,12 @@ fn emit_stripe_rgb_420_region<W: OutputWriter + InterleavedRgbWriter>(
     let (_, scaled_height) = scaled_dimensions(plan.dimensions, DownscaleFactor::Full);
     let y_end = (y_start + mcu_height_px).min(scaled_height);
     let stripe_rows = (y_end - y_start) as usize;
-    let width = plan.dimensions.0 as usize;
 
     if stripe_rows == 0 {
         return Ok(());
     }
 
-    let row_len = crop_window.scratch_width() * 3;
+    let row_len = region_layout.row_width() * 3;
     let mut local_y = 0usize;
     while local_y < stripe_rows {
         let next_local_y = local_y + 1;
@@ -717,9 +825,9 @@ fn emit_stripe_rgb_420_region<W: OutputWriter + InterleavedRgbWriter>(
             continue;
         }
 
-        let y_top = &curr.row(0, local_y)[crop_window.scratch_x0..crop_window.scratch_x1];
+        let y_top = &curr.row(0, local_y)[..region_layout.row_width()];
         let y_bottom = (next_local_y < stripe_rows)
-            .then(|| &curr.row(0, next_local_y)[crop_window.scratch_x0..crop_window.scratch_x1]);
+            .then(|| &curr.row(0, next_local_y)[..region_layout.row_width()]);
         let chroma_y = (local_y / 2).min(curr.row_count(1).saturating_sub(1));
         let (prev_cb, curr_cb, next_cb) = component_row_triplet(prev, curr, next, 1, chroma_y);
         let (prev_cr, curr_cr, next_cr) = component_row_triplet(prev, curr, next, 2, chroma_y);
@@ -727,20 +835,20 @@ fn emit_stripe_rgb_420_region<W: OutputWriter + InterleavedRgbWriter>(
         backend.fill_rgb_row_pair_from_420(
             y_top,
             y_bottom,
-            &prev_cb[crop_window.sample_start..crop_window.sample_end],
-            &curr_cb[crop_window.sample_start..crop_window.sample_end],
-            &next_cb[crop_window.sample_start..crop_window.sample_end],
-            &prev_cr[crop_window.sample_start..crop_window.sample_end],
-            &curr_cr[crop_window.sample_start..crop_window.sample_end],
-            &next_cr[crop_window.sample_start..crop_window.sample_end],
+            &prev_cb[..region_layout.chroma_width()],
+            &curr_cb[..region_layout.chroma_width()],
+            &next_cb[..region_layout.chroma_width()],
+            &prev_cr[..region_layout.chroma_width()],
+            &curr_cr[..region_layout.chroma_width()],
+            &next_cr[..region_layout.chroma_width()],
             &mut crop_rows.top_row[..row_len],
             y_bottom
                 .as_ref()
                 .map(|_| &mut crop_rows.bottom_row[..row_len]),
         );
 
-        let x0 = crop_window.crop_start * 3;
-        let x1 = crop_window.crop_end * 3;
+        let x0 = region_layout.crop_start * 3;
+        let x1 = region_layout.crop_end * 3;
         match (top_in, bottom_in) {
             (true, true) => {
                 writer.with_rgb_rows(global_y - roi.y, 2, |dst_top, dst_bottom| {
@@ -769,7 +877,6 @@ fn emit_stripe_rgb_420_region<W: OutputWriter + InterleavedRgbWriter>(
         local_y += 2;
     }
 
-    debug_assert!(width >= crop_window.scratch_x1);
     Ok(())
 }
 
@@ -808,6 +915,8 @@ fn decode_mcu_row(
     output_rect: Rect,
     full_output_rect: bool,
     mcu_y: u32,
+    stripe_mcu_start: u32,
+    stripe_mcus_per_row: u32,
     mcus_per_row: u32,
     mcu_rows: u32,
     stripe: &mut StripeBuffer,
@@ -815,6 +924,7 @@ fn decode_mcu_row(
     mcus_since_restart: &mut u32,
     expected_rst: &mut u8,
 ) -> Result<(), JpegError> {
+    let stripe_mcu_end = stripe_mcu_start + stripe_mcus_per_row;
     let block_size = downscale.output_block_size();
     let mut pixels_4x4 = [0u8; 16];
     let mut pixels_2x2 = [0u8; 4];
@@ -841,7 +951,9 @@ fn decode_mcu_row(
 
         for comp in &plan.components {
             let plane_idx = comp.output_index;
-            let mcu_x0_px = mx * (comp.h as u32) * block_size;
+            let in_region = mx >= stripe_mcu_start && mx < stripe_mcu_end;
+            let local_mcu_x0_px =
+                mx.saturating_sub(stripe_mcu_start) * u32::from(comp.h) * block_size;
             for vy in 0..comp.v as u32 {
                 for vx in 0..comp.h as u32 {
                     let activity = decode_block_with_activity(
@@ -852,21 +964,22 @@ fn decode_mcu_row(
                         &comp.quant,
                         coeff,
                     )?;
-                    if !full_output_rect
-                        && !component_block_intersects_rect(
-                            plan,
-                            comp,
-                            downscale,
-                            mx,
-                            mcu_y,
-                            vx,
-                            vy,
-                            output_rect,
-                        )
+                    if !in_region
+                        || (!full_output_rect
+                            && !component_block_intersects_rect(
+                                plan,
+                                comp,
+                                downscale,
+                                mx,
+                                mcu_y,
+                                vx,
+                                vy,
+                                output_rect,
+                            ))
                     {
                         continue;
                     }
-                    let block_x = mcu_x0_px + vx * block_size;
+                    let block_x = local_mcu_x0_px + vx * block_size;
                     let block_y = vy * block_size;
                     match downscale {
                         DownscaleFactor::Full => {
@@ -1174,11 +1287,16 @@ fn decode_mcu_row_fast_tile_420(
     coeff: &mut CoefficientBlock,
     pixels: &mut [u8; 64],
     mcus_per_row: u32,
+    stripe_mcu_start: u32,
+    stripe_mcus_per_row: u32,
     stripe: &mut StripeBuffer,
 ) -> Result<(), JpegError> {
+    let stripe_mcu_end = stripe_mcu_start + stripe_mcus_per_row;
     for mx in 0..mcus_per_row {
-        let y_x = mx * 16;
-        let c_x = mx * 8;
+        let in_region = mx >= stripe_mcu_start && mx < stripe_mcu_end;
+        let local_mx = mx.saturating_sub(stripe_mcu_start);
+        let y_x = local_mx * 16;
+        let c_x = local_mx * 8;
 
         let y0_activity = decode_block_with_activity(
             br,
@@ -1188,17 +1306,19 @@ fn decode_mcu_row_fast_tile_420(
             y_comp.quant.as_ref(),
             coeff,
         )?;
-        match y0_activity {
-            BlockActivity::DcOnly => crate::idct::idct_islow_dc_only(coeff.dc_coeff(), pixels),
-            BlockActivity::General => backend.idct(coeff.coefficients(), pixels),
+        if in_region {
+            match y0_activity {
+                BlockActivity::DcOnly => crate::idct::idct_islow_dc_only(coeff.dc_coeff(), pixels),
+                BlockActivity::General => backend.idct(coeff.coefficients(), pixels),
+            }
+            deposit_block(
+                &mut stripe.planes[0],
+                stripe.plane_strides[0],
+                y_x,
+                0,
+                pixels,
+            );
         }
-        deposit_block(
-            &mut stripe.planes[0],
-            stripe.plane_strides[0],
-            y_x,
-            0,
-            pixels,
-        );
 
         let y1_activity = decode_block_with_activity(
             br,
@@ -1208,17 +1328,19 @@ fn decode_mcu_row_fast_tile_420(
             y_comp.quant.as_ref(),
             coeff,
         )?;
-        match y1_activity {
-            BlockActivity::DcOnly => crate::idct::idct_islow_dc_only(coeff.dc_coeff(), pixels),
-            BlockActivity::General => backend.idct(coeff.coefficients(), pixels),
+        if in_region {
+            match y1_activity {
+                BlockActivity::DcOnly => crate::idct::idct_islow_dc_only(coeff.dc_coeff(), pixels),
+                BlockActivity::General => backend.idct(coeff.coefficients(), pixels),
+            }
+            deposit_block(
+                &mut stripe.planes[0],
+                stripe.plane_strides[0],
+                y_x + 8,
+                0,
+                pixels,
+            );
         }
-        deposit_block(
-            &mut stripe.planes[0],
-            stripe.plane_strides[0],
-            y_x + 8,
-            0,
-            pixels,
-        );
 
         let y2_activity = decode_block_with_activity(
             br,
@@ -1228,17 +1350,19 @@ fn decode_mcu_row_fast_tile_420(
             y_comp.quant.as_ref(),
             coeff,
         )?;
-        match y2_activity {
-            BlockActivity::DcOnly => crate::idct::idct_islow_dc_only(coeff.dc_coeff(), pixels),
-            BlockActivity::General => backend.idct(coeff.coefficients(), pixels),
+        if in_region {
+            match y2_activity {
+                BlockActivity::DcOnly => crate::idct::idct_islow_dc_only(coeff.dc_coeff(), pixels),
+                BlockActivity::General => backend.idct(coeff.coefficients(), pixels),
+            }
+            deposit_block(
+                &mut stripe.planes[0],
+                stripe.plane_strides[0],
+                y_x,
+                8,
+                pixels,
+            );
         }
-        deposit_block(
-            &mut stripe.planes[0],
-            stripe.plane_strides[0],
-            y_x,
-            8,
-            pixels,
-        );
 
         let y3_activity = decode_block_with_activity(
             br,
@@ -1248,17 +1372,19 @@ fn decode_mcu_row_fast_tile_420(
             y_comp.quant.as_ref(),
             coeff,
         )?;
-        match y3_activity {
-            BlockActivity::DcOnly => crate::idct::idct_islow_dc_only(coeff.dc_coeff(), pixels),
-            BlockActivity::General => backend.idct(coeff.coefficients(), pixels),
+        if in_region {
+            match y3_activity {
+                BlockActivity::DcOnly => crate::idct::idct_islow_dc_only(coeff.dc_coeff(), pixels),
+                BlockActivity::General => backend.idct(coeff.coefficients(), pixels),
+            }
+            deposit_block(
+                &mut stripe.planes[0],
+                stripe.plane_strides[0],
+                y_x + 8,
+                8,
+                pixels,
+            );
         }
-        deposit_block(
-            &mut stripe.planes[0],
-            stripe.plane_strides[0],
-            y_x + 8,
-            8,
-            pixels,
-        );
 
         let cb_activity = decode_block_with_activity(
             br,
@@ -1268,17 +1394,19 @@ fn decode_mcu_row_fast_tile_420(
             cb_comp.quant.as_ref(),
             coeff,
         )?;
-        match cb_activity {
-            BlockActivity::DcOnly => crate::idct::idct_islow_dc_only(coeff.dc_coeff(), pixels),
-            BlockActivity::General => backend.idct(coeff.coefficients(), pixels),
+        if in_region {
+            match cb_activity {
+                BlockActivity::DcOnly => crate::idct::idct_islow_dc_only(coeff.dc_coeff(), pixels),
+                BlockActivity::General => backend.idct(coeff.coefficients(), pixels),
+            }
+            deposit_block(
+                &mut stripe.planes[1],
+                stripe.plane_strides[1],
+                c_x,
+                0,
+                pixels,
+            );
         }
-        deposit_block(
-            &mut stripe.planes[1],
-            stripe.plane_strides[1],
-            c_x,
-            0,
-            pixels,
-        );
 
         let cr_activity = decode_block_with_activity(
             br,
@@ -1288,17 +1416,19 @@ fn decode_mcu_row_fast_tile_420(
             cr_comp.quant.as_ref(),
             coeff,
         )?;
-        match cr_activity {
-            BlockActivity::DcOnly => crate::idct::idct_islow_dc_only(coeff.dc_coeff(), pixels),
-            BlockActivity::General => backend.idct(coeff.coefficients(), pixels),
+        if in_region {
+            match cr_activity {
+                BlockActivity::DcOnly => crate::idct::idct_islow_dc_only(coeff.dc_coeff(), pixels),
+                BlockActivity::General => backend.idct(coeff.coefficients(), pixels),
+            }
+            deposit_block(
+                &mut stripe.planes[2],
+                stripe.plane_strides[2],
+                c_x,
+                0,
+                pixels,
+            );
         }
-        deposit_block(
-            &mut stripe.planes[2],
-            stripe.plane_strides[2],
-            c_x,
-            0,
-            pixels,
-        );
     }
 
     Ok(())
@@ -1313,6 +1443,7 @@ fn emit_stripe<W: OutputWriter>(
     stripe_index: u32,
     writer: &mut W,
     output_scratch: &mut OutputScratch<'_>,
+    source_width: usize,
     downscale: DownscaleFactor,
 ) -> Result<(), JpegError> {
     let max_v = plan.sampling.max_v as u32;
@@ -1326,8 +1457,7 @@ fn emit_stripe<W: OutputWriter>(
         return Ok(());
     }
 
-    let (scaled_width, _) = scaled_dimensions(plan.dimensions, downscale);
-    let width = scaled_width as usize;
+    let width = source_width;
     match plan.color_space {
         ColorSpace::Grayscale => {
             for local_y in 0..stripe_rows {
@@ -1536,6 +1666,7 @@ fn emit_stripe_rgb<W: OutputWriter + InterleavedRgbWriter>(
     stripe_index: u32,
     writer: &mut W,
     output_scratch: &mut RgbOutputScratch<'_>,
+    source_width: usize,
     downscale: DownscaleFactor,
 ) -> Result<(), JpegError> {
     let max_v = plan.sampling.max_v as u32;
@@ -1549,8 +1680,7 @@ fn emit_stripe_rgb<W: OutputWriter + InterleavedRgbWriter>(
         return Ok(());
     }
 
-    let (scaled_width, _) = scaled_dimensions(plan.dimensions, downscale);
-    let width = scaled_width as usize;
+    let width = source_width;
     match plan.color_space {
         ColorSpace::Grayscale => {
             for local_y in 0..stripe_rows {
@@ -2001,6 +2131,8 @@ mod tests {
             &mut coeff,
             &mut pixels,
             1,
+            0,
+            1,
             &mut stripe,
         )
         .expect("second stripe row must still decode within stripe-local buffers");
@@ -2011,6 +2143,27 @@ mod tests {
         assert_eq!(stripe.planes[0][16 * 8 + 8], 128);
         assert_eq!(stripe.planes[1][0], 128);
         assert_eq!(stripe.planes[2][0], 128);
+    }
+
+    #[test]
+    fn fast_tile_region_layout_shrinks_horizontal_stripe_span() {
+        let roi = Rect {
+            x: 17,
+            y: 3,
+            w: 9,
+            h: 8,
+        };
+
+        let layout = Fast420RegionLayout::new(64, roi);
+
+        assert_eq!(layout.stripe_mcu_start, 0);
+        assert_eq!(layout.stripe_mcus_per_row, 2);
+        assert_eq!(layout.row_width(), 32);
+        assert_eq!(layout.chroma_width(), 16);
+        assert_eq!(layout.crop_start, 17);
+        assert_eq!(layout.crop_end, 26);
+        assert!(layout.y_decode_start <= roi.x as usize);
+        assert!(layout.y_decode_end >= (roi.x + roi.w) as usize);
     }
 
     fn trivial_dc_table() -> Arc<HuffmanTable> {

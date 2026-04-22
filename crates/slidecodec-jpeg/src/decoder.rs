@@ -7,8 +7,8 @@ use crate::context::DecoderContext;
 use crate::entropy::huffman::HuffmanTable;
 use crate::entropy::sequential::{
     decode_scan_baseline, decode_scan_baseline_rgb, decode_scan_fast_rgb_444,
-    decode_scan_fast_tile_rgb, decode_scan_fast_tile_rgb_region, PreparedComponentPlan,
-    PreparedDecodePlan,
+    decode_scan_fast_tile_rgb, decode_scan_fast_tile_rgb_region, stripe_region_layout,
+    PreparedComponentPlan, PreparedDecodePlan,
 };
 use crate::error::{JpegError, MarkerKind, Warning};
 use crate::info::{ColorSpace, DownscaleFactor, Info, OutputFormat, Rect, SofKind};
@@ -495,8 +495,9 @@ impl<'a> Decoder<'a> {
         if roi == Rect::full(self.info.dimensions) {
             self.decode_with_writer(pool, &mut adapter, downscale, roi)
         } else {
-            let (scaled_width, _) = scaled_dimensions(self.info.dimensions, downscale);
-            let mut cropped = CroppedWriter::new(adapter, scaled_roi, scaled_width);
+            let (source_x0, source_width) =
+                self.source_window_for_output_rect(downscale, scaled_roi);
+            let mut cropped = CroppedWriter::new(adapter, scaled_roi, source_x0, source_width);
             self.decode_with_writer(pool, &mut cropped, downscale, roi)
         }
     }
@@ -630,21 +631,24 @@ impl<'a> Decoder<'a> {
                     })
                 } else {
                     let base = Rgb8Writer::new(out, stride, scaled_roi.w);
-                    let (scaled_width, _) = scaled_dimensions(self.info.dimensions, downscale);
-                    let mut writer = CroppedWriter::new(base, scaled_roi, scaled_width);
+                    let (source_x0, source_width) =
+                        self.source_window_for_output_rect(downscale, scaled_roi);
+                    let mut writer = CroppedWriter::new(base, scaled_roi, source_x0, source_width);
                     self.decode_rgb_with_writer(pool, &mut writer, downscale, roi)
                 }
             }
             OutputFormat::Rgba8 { alpha } => {
                 let base = Rgba8Writer::new(out, stride, scaled_roi.w, alpha);
-                let (scaled_width, _) = scaled_dimensions(self.info.dimensions, downscale);
-                let mut writer = CroppedWriter::new(base, scaled_roi, scaled_width);
+                let (source_x0, source_width) =
+                    self.source_window_for_output_rect(downscale, scaled_roi);
+                let mut writer = CroppedWriter::new(base, scaled_roi, source_x0, source_width);
                 self.decode_with_writer(pool, &mut writer, downscale, roi)
             }
             OutputFormat::Gray8 | OutputFormat::Gray8Scaled { .. } => {
                 let base = Gray8Writer::new(out, stride, scaled_roi.w);
-                let (scaled_width, _) = scaled_dimensions(self.info.dimensions, downscale);
-                let mut writer = CroppedWriter::new(base, scaled_roi, scaled_width);
+                let (source_x0, source_width) =
+                    self.source_window_for_output_rect(downscale, scaled_roi);
+                let mut writer = CroppedWriter::new(base, scaled_roi, source_x0, source_width);
                 self.decode_with_writer(pool, &mut writer, downscale, roi)
             }
         }
@@ -889,6 +893,15 @@ impl Decoder<'_> {
             });
         }
         Ok(self.plan.scratch_bytes)
+    }
+
+    fn source_window_for_output_rect(
+        &self,
+        downscale: DownscaleFactor,
+        output_rect: Rect,
+    ) -> (u32, u32) {
+        let layout = stripe_region_layout(&self.plan, downscale, output_rect);
+        (layout.source_x0, layout.source_width)
     }
 
     fn decode_with_writer<W: OutputWriter>(
@@ -1251,6 +1264,7 @@ fn scaled_rect_covering(rect: Rect, factor: DownscaleFactor) -> Result<Rect, Jpe
 struct CroppedWriter<W> {
     inner: W,
     rect: Rect,
+    source_x0: u32,
     source_width: u32,
     top_row: Vec<u8>,
     bottom_row: Vec<u8>,
@@ -1287,11 +1301,12 @@ impl<W: ComponentRowWriter> OutputWriter for ComponentWriterAdapter<'_, W> {
 }
 
 impl<W> CroppedWriter<W> {
-    fn new(inner: W, rect: Rect, source_width: u32) -> Self {
+    fn new(inner: W, rect: Rect, source_x0: u32, source_width: u32) -> Self {
         let row_len = source_width as usize * 3;
         Self {
             inner,
             rect,
+            source_x0,
             source_width,
             top_row: vec![0; row_len],
             bottom_row: vec![0; row_len],
@@ -1310,7 +1325,11 @@ impl<W: OutputWriter> OutputWriter for CroppedWriter<W> {
         if y < self.rect.y || y >= self.rect.y + self.rect.h {
             return Ok(());
         }
-        let x0 = self.rect.x as usize;
+        let x0 = self
+            .rect
+            .x
+            .checked_sub(self.source_x0)
+            .expect("crop window must cover requested rect") as usize;
         let x1 = x0 + self.rect.w as usize;
         self.inner.write_rgb_row(
             y - self.rect.y,
@@ -1330,7 +1349,11 @@ impl<W: OutputWriter> OutputWriter for CroppedWriter<W> {
         if y < self.rect.y || y >= self.rect.y + self.rect.h {
             return Ok(());
         }
-        let x0 = self.rect.x as usize;
+        let x0 = self
+            .rect
+            .x
+            .checked_sub(self.source_x0)
+            .expect("crop window must cover requested rect") as usize;
         let x1 = x0 + self.rect.w as usize;
         self.inner.write_ycbcr_row(
             y - self.rect.y,
@@ -1344,7 +1367,11 @@ impl<W: OutputWriter> OutputWriter for CroppedWriter<W> {
         if y < self.rect.y || y >= self.rect.y + self.rect.h {
             return Ok(());
         }
-        let x0 = self.rect.x as usize;
+        let x0 = self
+            .rect
+            .x
+            .checked_sub(self.source_x0)
+            .expect("crop window must cover requested rect") as usize;
         let x1 = x0 + self.rect.w as usize;
         self.inner
             .write_gray_row(y - self.rect.y, &gray_row[x0..x1])
@@ -1372,7 +1399,12 @@ impl<W: InterleavedRgbWriter> InterleavedRgbWriter for CroppedWriter<W> {
         let bottom_y = y + 1;
         let bottom_in =
             row_count == 2 && bottom_y >= self.rect.y && bottom_y < self.rect.y + self.rect.h;
-        let x0 = self.rect.x as usize * 3;
+        let x0 = self
+            .rect
+            .x
+            .checked_sub(self.source_x0)
+            .expect("crop window must cover requested rect") as usize
+            * 3;
         let x1 = x0 + self.rect.w as usize * 3;
 
         match (top_in, bottom_in) {
@@ -1650,6 +1682,7 @@ fn checked_usize_product(factors: &[usize], cap: usize) -> Result<usize, JpegErr
 mod tests {
     use super::*;
     use crate::error::Warning;
+    use crate::output::OutputWriter;
     use alloc::vec;
     use alloc::vec::Vec;
 
@@ -1750,5 +1783,55 @@ mod tests {
             .decode_into(&mut buf, 10, PixelFormat::Rgb8)
             .unwrap_err();
         assert!(matches!(err, JpegError::InvalidStride { .. }));
+    }
+
+    #[derive(Default)]
+    struct GrayRows {
+        rows: Vec<(u32, Vec<u8>)>,
+    }
+
+    impl OutputWriter for GrayRows {
+        fn write_rgb_row(
+            &mut self,
+            _y: u32,
+            _r_row: &[u8],
+            _g_row: &[u8],
+            _b_row: &[u8],
+        ) -> Result<(), JpegError> {
+            unreachable!("gray test writer should not receive rgb rows");
+        }
+
+        fn write_ycbcr_row(
+            &mut self,
+            _y: u32,
+            _y_row: &[u8],
+            _cb_row: &[u8],
+            _cr_row: &[u8],
+        ) -> Result<(), JpegError> {
+            unreachable!("gray test writer should not receive ycbcr rows");
+        }
+
+        fn write_gray_row(&mut self, y: u32, gray_row: &[u8]) -> Result<(), JpegError> {
+            self.rows.push((y, gray_row.to_vec()));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn cropped_writer_honors_source_window_origin() {
+        let inner = GrayRows::default();
+        let rect = Rect {
+            x: 6,
+            y: 1,
+            w: 2,
+            h: 1,
+        };
+        let mut writer = CroppedWriter::new(inner, rect, 4, 4);
+
+        writer
+            .write_gray_row(1, &[10, 20, 30, 40])
+            .expect("crop write must succeed");
+
+        assert_eq!(writer.inner.rows, vec![(0, vec![30, 40])]);
     }
 }

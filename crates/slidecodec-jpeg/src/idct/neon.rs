@@ -13,8 +13,9 @@
 
 use core::arch::aarch64::{
     int16x4_t, int16x8_t, int32x4_t, vaddq_s32, vcombine_s16, vcombine_s32, vdupq_n_s32,
-    vget_high_s16, vget_high_s32, vget_low_s16, vget_low_s32, vld1q_s16, vmovl_s16, vmulq_n_s32,
-    vqmovn_s32, vqmovun_s16, vshlq_n_s32, vshrq_n_s32, vst1_u8, vsubq_s32, vtrnq_s32,
+    vget_high_s16, vget_high_s32, vget_low_s16, vget_low_s32, vgetq_lane_u64, vld1q_s16, vmovl_s16,
+    vmulq_n_s32, vorrq_u64, vqmovn_s32, vqmovun_s16, vreinterpretq_u64_s16, vshlq_n_s32,
+    vshrq_n_s32, vst1_u8, vsubq_s32, vtrnq_s32,
 };
 
 const CONST_BITS: i32 = 13;
@@ -44,35 +45,41 @@ const FIX_3_072711026: i32 = 25_172;
 pub(crate) unsafe fn idct_islow(input: &[i16; 64], output: &mut [u8; 64]) {
     const PASS1_SHIFT: i32 = CONST_BITS - PASS1_BITS;
     const PASS2_SHIFT: i32 = CONST_BITS + PASS1_BITS + 3;
-    let bottom_half_zero = input[32..].iter().all(|&coeff| coeff == 0);
-
-    // Load 8 rows as int16x8_t, widen each to two int32x4_t halves.
+    // Load 8 rows as int16x8_t so the common bottom-half-zero shortcut can
+    // reuse the tail rows instead of rescanning coefficients scalar-by-scalar.
     let src = input.as_ptr();
-    let (r0l, r0h) = unsafe { widen(vld1q_s16(src)) };
-    let (r1l, r1h) = unsafe { widen(vld1q_s16(src.add(8))) };
-    let (r2l, r2h) = unsafe { widen(vld1q_s16(src.add(16))) };
-    let (r3l, r3h) = unsafe { widen(vld1q_s16(src.add(24))) };
-    let (r4l, r4h) = unsafe { widen(vld1q_s16(src.add(32))) };
-    let (r5l, r5h) = unsafe { widen(vld1q_s16(src.add(40))) };
-    let (r6l, r6h) = unsafe { widen(vld1q_s16(src.add(48))) };
-    let (r7l, r7h) = unsafe { widen(vld1q_s16(src.add(56))) };
+    let row0 = unsafe { vld1q_s16(src) };
+    let row1 = unsafe { vld1q_s16(src.add(8)) };
+    let row2 = unsafe { vld1q_s16(src.add(16)) };
+    let row3 = unsafe { vld1q_s16(src.add(24)) };
+    let row4 = unsafe { vld1q_s16(src.add(32)) };
+    let row5 = unsafe { vld1q_s16(src.add(40)) };
+    let row6 = unsafe { vld1q_s16(src.add(48)) };
+    let row7 = unsafe { vld1q_s16(src.add(56)) };
+    let bottom_half_zero = bottom_half_rows_are_zero(row4, row5, row6, row7);
+    if bottom_half_zero {
+        unsafe {
+            idct_islow_bottom_half_zero_rows(row0, row1, row2, row3, output);
+        }
+        return;
+    }
+
+    let (r0l, r0h) = widen(row0);
+    let (r1l, r1h) = widen(row1);
+    let (r2l, r2h) = widen(row2);
+    let (r3l, r3h) = widen(row3);
+    let (r4l, r4h) = widen(row4);
+    let (r5l, r5h) = widen(row5);
+    let (r6l, r6h) = widen(row6);
+    let (r7l, r7h) = widen(row7);
 
     // Pass 1: column IDCT. `rN*` has lane `c` holding `(row N, col c)`, so
     // passing them as `p0..p7` makes each SIMD lane process one column's 8
     // samples. Output `cw_*[k]` has lane `c` holding pass-1 result at
     // (row k, col c).
     let round1 = vdupq_n_s32(1 << (PASS1_SHIFT - 1));
-
-    let cw_lo = if bottom_half_zero {
-        idct_1d_x4_bottom_half_zero::<PASS1_SHIFT>(r0l, r1l, r2l, r3l, round1)
-    } else {
-        idct_1d_x4::<PASS1_SHIFT>(r0l, r1l, r2l, r3l, r4l, r5l, r6l, r7l, round1)
-    };
-    let cw_hi = if bottom_half_zero {
-        idct_1d_x4_bottom_half_zero::<PASS1_SHIFT>(r0h, r1h, r2h, r3h, round1)
-    } else {
-        idct_1d_x4::<PASS1_SHIFT>(r0h, r1h, r2h, r3h, r4h, r5h, r6h, r7h, round1)
-    };
+    let cw_lo = idct_1d_x4::<PASS1_SHIFT>(r0l, r1l, r2l, r3l, r4l, r5l, r6l, r7l, round1);
+    let cw_hi = idct_1d_x4::<PASS1_SHIFT>(r0h, r1h, r2h, r3h, r4h, r5h, r6h, r7h, round1);
 
     // Transpose to pass-2 input. We need `q_c[l] = (row l, col c)`, meaning
     // 8 int32x4_t pairs where lane = row. Split into four independent 4×4
@@ -138,6 +145,117 @@ pub(crate) unsafe fn idct_islow(input: &[i16; 64], output: &mut [u8; 64]) {
         store_row(store.add(48), fhl2, fhh2);
         store_row(store.add(56), fhl3, fhh3);
     }
+}
+
+/// Inverse DCT for blocks whose natural-order rows 4..7 are known to be zero.
+#[target_feature(enable = "neon")]
+pub(crate) unsafe fn idct_islow_bottom_half_zero(input: &[i16; 64], output: &mut [u8; 64]) {
+    let src = input.as_ptr();
+    unsafe {
+        idct_islow_bottom_half_zero_rows(
+            vld1q_s16(src),
+            vld1q_s16(src.add(8)),
+            vld1q_s16(src.add(16)),
+            vld1q_s16(src.add(24)),
+            output,
+        );
+    }
+}
+
+#[target_feature(enable = "neon")]
+unsafe fn idct_islow_bottom_half_zero_rows(
+    row0: int16x8_t,
+    row1: int16x8_t,
+    row2: int16x8_t,
+    row3: int16x8_t,
+    output: &mut [u8; 64],
+) {
+    const PASS1_SHIFT: i32 = CONST_BITS - PASS1_BITS;
+    const PASS2_SHIFT: i32 = CONST_BITS + PASS1_BITS + 3;
+    let (r0l, r0h) = widen(row0);
+    let (r1l, r1h) = widen(row1);
+    let (r2l, r2h) = widen(row2);
+    let (r3l, r3h) = widen(row3);
+
+    let round1 = vdupq_n_s32(1 << (PASS1_SHIFT - 1));
+    let cw_lo = idct_1d_x4_bottom_half_zero::<PASS1_SHIFT>(r0l, r1l, r2l, r3l, round1);
+    let cw_hi = idct_1d_x4_bottom_half_zero::<PASS1_SHIFT>(r0h, r1h, r2h, r3h, round1);
+
+    let [q0l, q1l, q2l, q3l] = transpose_4x4_i32(cw_lo[0], cw_lo[1], cw_lo[2], cw_lo[3]);
+    let [q4l, q5l, q6l, q7l] = transpose_4x4_i32(cw_hi[0], cw_hi[1], cw_hi[2], cw_hi[3]);
+    let [q0h, q1h, q2h, q3h] = transpose_4x4_i32(cw_lo[4], cw_lo[5], cw_lo[6], cw_lo[7]);
+    let [q4h, q5h, q6h, q7h] = transpose_4x4_i32(cw_hi[4], cw_hi[5], cw_hi[6], cw_hi[7]);
+
+    let round2 = vdupq_n_s32(1 << (PASS2_SHIFT - 1));
+    let rw_lo = idct_1d_x4::<PASS2_SHIFT>(q0l, q1l, q2l, q3l, q4l, q5l, q6l, q7l, round2);
+    let rw_hi = idct_1d_x4::<PASS2_SHIFT>(q0h, q1h, q2h, q3h, q4h, q5h, q6h, q7h, round2);
+
+    let bias = vdupq_n_s32(128);
+    let [fll0, fll1, fll2, fll3] = transpose_4x4_i32(
+        vaddq_s32(rw_lo[0], bias),
+        vaddq_s32(rw_lo[1], bias),
+        vaddq_s32(rw_lo[2], bias),
+        vaddq_s32(rw_lo[3], bias),
+    );
+    let [flh0, flh1, flh2, flh3] = transpose_4x4_i32(
+        vaddq_s32(rw_lo[4], bias),
+        vaddq_s32(rw_lo[5], bias),
+        vaddq_s32(rw_lo[6], bias),
+        vaddq_s32(rw_lo[7], bias),
+    );
+    let [fhl0, fhl1, fhl2, fhl3] = transpose_4x4_i32(
+        vaddq_s32(rw_hi[0], bias),
+        vaddq_s32(rw_hi[1], bias),
+        vaddq_s32(rw_hi[2], bias),
+        vaddq_s32(rw_hi[3], bias),
+    );
+    let [fhh0, fhh1, fhh2, fhh3] = transpose_4x4_i32(
+        vaddq_s32(rw_hi[4], bias),
+        vaddq_s32(rw_hi[5], bias),
+        vaddq_s32(rw_hi[6], bias),
+        vaddq_s32(rw_hi[7], bias),
+    );
+
+    let store = output.as_mut_ptr();
+    unsafe {
+        store_row(store, fll0, flh0);
+        store_row(store.add(8), fll1, flh1);
+        store_row(store.add(16), fll2, flh2);
+        store_row(store.add(24), fll3, flh3);
+        store_row(store.add(32), fhl0, fhh0);
+        store_row(store.add(40), fhl1, fhh1);
+        store_row(store.add(48), fhl2, fhh2);
+        store_row(store.add(56), fhl3, fhh3);
+    }
+}
+
+#[inline]
+#[cfg(test)]
+fn bottom_half_is_zero(input: &[i16; 64]) -> bool {
+    let tail = unsafe { input.as_ptr().add(32) };
+    unsafe {
+        bottom_half_rows_are_zero(
+            vld1q_s16(tail),
+            vld1q_s16(tail.add(8)),
+            vld1q_s16(tail.add(16)),
+            vld1q_s16(tail.add(24)),
+        )
+    }
+}
+
+#[inline]
+#[target_feature(enable = "neon")]
+fn bottom_half_rows_are_zero(
+    row4: int16x8_t,
+    row5: int16x8_t,
+    row6: int16x8_t,
+    row7: int16x8_t,
+) -> bool {
+    let bottom = vorrq_u64(
+        vorrq_u64(vreinterpretq_u64_s16(row4), vreinterpretq_u64_s16(row5)),
+        vorrq_u64(vreinterpretq_u64_s16(row6), vreinterpretq_u64_s16(row7)),
+    );
+    vgetq_lane_u64::<0>(bottom) == 0 && vgetq_lane_u64::<1>(bottom) == 0
 }
 
 /// Saturating-narrow an (i32x4, i32x4) pair to u8x8 and store at `dst`.
@@ -341,5 +459,35 @@ mod tests {
         input[16] = 5;
         let (s, n) = run_both(&input);
         assert_eq!(s, n);
+    }
+
+    #[test]
+    fn neon_bottom_half_zero_specialization_matches_scalar() {
+        let mut input = [0i16; 64];
+        input[0] = 64;
+        input[1] = 24;
+        input[2] = -12;
+        input[8] = 18;
+        input[9] = -7;
+        input[16] = 5;
+        let mut scalar_out = [0u8; 64];
+        idct_scalar(&input, &mut scalar_out);
+        let mut neon_out = [0u8; 64];
+        unsafe { idct_islow_bottom_half_zero(&input, &mut neon_out) };
+        assert_eq!(scalar_out, neon_out);
+    }
+
+    #[test]
+    fn bottom_half_zero_detects_zero_and_nonzero_tails() {
+        let mut block = [0i16; 64];
+        block[0] = 7;
+        assert!(bottom_half_is_zero(&block));
+
+        block[32] = 1;
+        assert!(!bottom_half_is_zero(&block));
+
+        block[32] = 0;
+        block[63] = -1;
+        assert!(!bottom_half_is_zero(&block));
     }
 }

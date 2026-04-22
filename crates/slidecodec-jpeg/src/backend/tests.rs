@@ -473,6 +473,31 @@ fn neon_ycbcr_rows_match_scalar_reference_across_multiple_chunks() {
 
 #[cfg(target_arch = "aarch64")]
 #[test]
+fn neon_ycbcr_rows_match_scalar_reference_for_offset_subslice_and_odd_tail_width() {
+    let len = 255usize;
+    let y_buf: Vec<u8> = (0..len + 3)
+        .map(|i| ((i as u8).wrapping_mul(37)).wrapping_add(11))
+        .collect();
+    let cb_buf: Vec<u8> = (0..len + 3)
+        .map(|i| 255u8.wrapping_sub((i as u8).wrapping_mul(29)))
+        .collect();
+    let cr_buf: Vec<u8> = (0..len + 3)
+        .map(|i| ((i as u8).wrapping_mul(53)).wrapping_add(97))
+        .collect();
+    let y = &y_buf[1..=len];
+    let cb = &cb_buf[1..=len];
+    let cr = &cr_buf[1..=len];
+    let mut expected = vec![0u8; len * 3];
+    let mut actual = vec![0u8; len * 3];
+
+    scalar::fill_rgb_row_from_ycbcr(y, cb, cr, &mut expected);
+    super::neon::fill_rgb_row_from_ycbcr_for_test(y, cb, cr, &mut actual);
+
+    assert_eq!(actual, expected);
+}
+
+#[cfg(target_arch = "aarch64")]
+#[test]
 fn neon_420_row_pair_matches_scalar_reference_for_tail_widths() {
     let backend = super::Backend {
         kind: super::BackendKind::Neon,

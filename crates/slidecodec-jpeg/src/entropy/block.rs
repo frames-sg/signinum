@@ -22,10 +22,19 @@ use crate::entropy::ZIGZAG;
 use crate::error::{HuffmanFailure, JpegError};
 use crate::internal::bit_reader::BitReader;
 
+const DENSE_CLEAR_THRESHOLD: usize = 4;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BlockActivity {
     DcOnly,
+    BottomHalfZero,
     General,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClearMode {
+    Sparse,
+    Dense,
 }
 
 #[derive(Debug, Clone)]
@@ -33,6 +42,7 @@ pub(crate) struct CoefficientBlock {
     coeffs: [i16; 64],
     touched: [u8; 64],
     touched_len: usize,
+    clear_mode: ClearMode,
 }
 
 impl Default for CoefficientBlock {
@@ -41,6 +51,7 @@ impl Default for CoefficientBlock {
             coeffs: [0; 64],
             touched: [0; 64],
             touched_len: 0,
+            clear_mode: ClearMode::Sparse,
         }
     }
 }
@@ -48,17 +59,29 @@ impl Default for CoefficientBlock {
 impl CoefficientBlock {
     #[inline(always)]
     fn clear_touched(&mut self) {
-        for &idx in &self.touched[..self.touched_len] {
-            self.coeffs[idx as usize] = 0;
+        match self.clear_mode {
+            ClearMode::Sparse => {
+                for &idx in &self.touched[..self.touched_len] {
+                    self.coeffs[idx as usize] = 0;
+                }
+            }
+            ClearMode::Dense => self.coeffs.fill(0),
         }
         self.touched_len = 0;
+        self.clear_mode = ClearMode::Sparse;
     }
 
     #[inline(always)]
     fn store(&mut self, idx: usize, value: i16) {
         self.coeffs[idx] = value;
-        self.touched[self.touched_len] = idx as u8;
-        self.touched_len += 1;
+        if self.clear_mode == ClearMode::Sparse {
+            if self.touched_len < DENSE_CLEAR_THRESHOLD {
+                self.touched[self.touched_len] = idx as u8;
+                self.touched_len += 1;
+            } else {
+                self.clear_mode = ClearMode::Dense;
+            }
+        }
     }
 
     #[inline(always)]
@@ -69,6 +92,18 @@ impl CoefficientBlock {
     #[inline(always)]
     pub(crate) fn dc_coeff(&self) -> i16 {
         self.coeffs[0]
+    }
+}
+
+#[inline(always)]
+fn extend_activity(activity: BlockActivity, natural_idx: usize) -> BlockActivity {
+    if natural_idx < 32 {
+        match activity {
+            BlockActivity::DcOnly | BlockActivity::BottomHalfZero => BlockActivity::BottomHalfZero,
+            BlockActivity::General => BlockActivity::General,
+        }
+    } else {
+        BlockActivity::General
     }
 }
 
@@ -140,7 +175,7 @@ pub(crate) fn decode_block_with_activity(
                 // so `quant[k]` is the matching coefficient (not `quant[natural_idx]`).
                 let dequant = value.wrapping_mul(quant[k] as i32);
                 block.store(natural_idx, clamp_i16(dequant));
-                activity = BlockActivity::General;
+                activity = extend_activity(activity, natural_idx);
                 k += 1;
             }
         }
@@ -254,7 +289,57 @@ mod tests {
         let mut out = CoefficientBlock::default();
         let activity =
             decode_block_with_activity(&mut br, &dc, &ac, &mut prev_dc, &quant, &mut out).unwrap();
-        assert_eq!(activity, BlockActivity::General);
+        assert_eq!(activity, BlockActivity::BottomHalfZero);
         assert_eq!(out.coefficients()[crate::entropy::ZIGZAG[1] as usize], 1);
+    }
+
+    #[test]
+    fn extend_activity_promotes_top_half_ac_without_marking_general() {
+        assert_eq!(
+            extend_activity(BlockActivity::DcOnly, 31),
+            BlockActivity::BottomHalfZero
+        );
+        assert_eq!(
+            extend_activity(BlockActivity::BottomHalfZero, 7),
+            BlockActivity::BottomHalfZero
+        );
+    }
+
+    #[test]
+    fn extend_activity_marks_bottom_half_ac_as_general() {
+        assert_eq!(
+            extend_activity(BlockActivity::DcOnly, 32),
+            BlockActivity::General
+        );
+        assert_eq!(
+            extend_activity(BlockActivity::BottomHalfZero, 40),
+            BlockActivity::General
+        );
+    }
+
+    #[test]
+    fn switches_to_dense_clear_after_threshold_and_zeroes_full_block() {
+        let mut block = CoefficientBlock::default();
+        for (i, idx) in [0usize, 1, 8, 16, 24].into_iter().enumerate() {
+            block.store(idx, (i + 1) as i16);
+        }
+
+        assert_eq!(block.clear_mode, ClearMode::Dense);
+        block.clear_touched();
+
+        assert!(block.coefficients().iter().all(|&c| c == 0));
+        assert_eq!(block.touched_len, 0);
+        assert_eq!(block.clear_mode, ClearMode::Sparse);
+    }
+
+    #[test]
+    fn stays_sparse_below_dense_clear_threshold() {
+        let mut block = CoefficientBlock::default();
+        for (i, idx) in [0usize, 2, 4, 6].into_iter().enumerate() {
+            block.store(idx, (i + 1) as i16);
+        }
+
+        assert_eq!(block.clear_mode, ClearMode::Sparse);
+        assert_eq!(block.touched_len, DENSE_CLEAR_THRESHOLD);
     }
 }

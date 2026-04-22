@@ -36,6 +36,10 @@ pub(crate) fn idct_islow_4x4(input: &[i16; 64], output: &mut [u8; 16]) {
 }
 
 pub(crate) fn idct_islow_2x2(input: &[i16; 64], output: &mut [u8; 4]) {
+    idct_islow_2x2_scalar(input, output);
+}
+
+pub(crate) fn idct_islow_2x2_scalar(input: &[i16; 64], output: &mut [u8; 4]) {
     let mut work = [Wrapping(0i32); 16];
     for col in 0..8 {
         if col == 2 || col == 4 || col == 6 {

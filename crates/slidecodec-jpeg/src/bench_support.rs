@@ -7,6 +7,7 @@ use crate::color::upsample::upsample_h2v2_fancy_rows;
 use crate::color::ycbcr::ycbcr_to_rgb;
 use crate::entropy::huffman::HuffmanTable;
 use crate::error::JpegError;
+use crate::idct::downscale::idct_islow_2x2_scalar;
 use crate::idct::idct_islow;
 use crate::internal::bit_reader::BitReader;
 use crate::parse::tables::{HuffmanValues, RawHuffmanTable};
@@ -153,6 +154,13 @@ pub fn bench_idct_reference_block() -> [u8; 64] {
 #[doc(hidden)]
 pub fn bench_idct_reference_block_with(input: &[i16; 64], output: &mut [u8; 64]) {
     idct_islow(input, output);
+}
+
+/// Run the scalar reduced 2x2 IDCT on a caller-provided block. Used by future
+/// quarter-scale parity and microbench coverage.
+#[doc(hidden)]
+pub fn bench_idct_reduced_2x2_block_with(input: &[i16; 64], output: &mut [u8; 4]) {
+    idct_islow_2x2_scalar(input, output);
 }
 
 /// Run the NEON IDCT on a caller-provided block. Panics if the host CPU
@@ -359,6 +367,7 @@ impl BenchUpsampleH2V2Scratch {
 /// length `3 * width`.
 #[doc(hidden)]
 pub struct BenchColorRowScratch {
+    backend: Backend,
     y: Vec<u8>,
     cb: Vec<u8>,
     cr: Vec<u8>,
@@ -375,6 +384,7 @@ impl BenchColorRowScratch {
                 .collect()
         };
         Self {
+            backend: Backend::detect(),
             y: seed(0, 7),
             cb: seed(64, 5),
             cr: seed(192, 3),
@@ -396,5 +406,11 @@ impl BenchColorRowScratch {
             pixel[1] = g;
             pixel[2] = b;
         }
+    }
+
+    /// Run one iteration through the detected production backend.
+    pub fn run_backend(&mut self) {
+        self.backend
+            .fill_rgb_row_from_ycbcr(&self.y, &self.cb, &self.cr, &mut self.rgb);
     }
 }

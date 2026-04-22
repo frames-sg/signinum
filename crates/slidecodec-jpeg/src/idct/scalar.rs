@@ -48,6 +48,17 @@ pub(crate) fn idct_islow(input: &[i16; 64], output: &mut [u8; 64]) {
     }
 }
 
+/// Inverse DCT for blocks whose natural-order rows 4..7 are known to be zero.
+pub(crate) fn idct_islow_bottom_half_zero(input: &[i16; 64], output: &mut [u8; 64]) {
+    let mut work = [Wrapping(0i32); 64];
+    for col in 0..8 {
+        idct_1d_column_bottom_half_zero(input, &mut work, col);
+    }
+    for row in 0..8 {
+        idct_1d_row(&work, output, row);
+    }
+}
+
 /// Bit-exact DC-only ISLOW path. Equivalent to `idct_islow` when every AC
 /// coefficient is zero.
 pub(crate) fn idct_islow_dc_only(dc_coeff: i16, output: &mut [u8; 64]) {

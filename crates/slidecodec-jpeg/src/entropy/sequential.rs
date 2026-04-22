@@ -20,6 +20,7 @@ use crate::internal::scratch::{
 use crate::output::{InterleavedRgbWriter, OutputWriter};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::ptr;
 
 /// Per-component decode context. One entry per component declared in the
 /// SOF, in scan order.
@@ -96,6 +97,13 @@ pub(crate) struct StripeBuffer {
     pub(crate) plane_rows: Vec<usize>,
 }
 
+#[derive(Clone, Copy)]
+struct StripePlane<'a> {
+    data: &'a [u8],
+    stride: usize,
+    rows: usize,
+}
+
 impl StripeBuffer {
     /// Grow each plane's backing Vec to the size required by `plan` and
     /// `mcus_per_row`. Never shrinks the allocation — a monotonic
@@ -130,6 +138,14 @@ impl StripeBuffer {
         let stride = self.plane_strides[plane_idx];
         let start = row * stride;
         &self.planes[plane_idx][start..start + stride]
+    }
+
+    fn plane(&self, plane_idx: usize) -> StripePlane<'_> {
+        StripePlane {
+            data: &self.planes[plane_idx],
+            stride: self.plane_strides[plane_idx],
+            rows: self.plane_rows[plane_idx],
+        }
     }
 }
 
@@ -780,11 +796,17 @@ pub(crate) fn decode_scan_fast_tile_rgb_region<W: OutputWriter + InterleavedRgbW
 }
 
 fn deposit_block(plane: &mut [u8], stride: usize, x: u32, y: u32, block: &[u8; 64]) {
-    let x = x as usize;
-    let y = y as usize;
-    for by in 0..8 {
-        let dst_start = (y + by) * stride + x;
-        plane[dst_start..dst_start + 8].copy_from_slice(&block[by * 8..by * 8 + 8]);
+    let dst_row_start = (y as usize) * stride + (x as usize);
+    debug_assert!(x as usize + 8 <= stride);
+    debug_assert!(plane.len() >= dst_row_start + stride.saturating_mul(7) + 8);
+    let mut dst = unsafe { plane.as_mut_ptr().add(dst_row_start) };
+    let mut src = block.as_ptr();
+    for _ in 0..8 {
+        unsafe {
+            ptr::copy_nonoverlapping(src, dst, 8);
+            dst = dst.add(stride);
+            src = src.add(8);
+        }
     }
 }
 
@@ -829,8 +851,18 @@ fn emit_stripe_rgb_420_region<W: OutputWriter + InterleavedRgbWriter>(
         let y_bottom = (next_local_y < stripe_rows)
             .then(|| &curr.row(0, next_local_y)[..region_layout.row_width()]);
         let chroma_y = (local_y / 2).min(curr.row_count(1).saturating_sub(1));
-        let (prev_cb, curr_cb, next_cb) = component_row_triplet(prev, curr, next, 1, chroma_y);
-        let (prev_cr, curr_cr, next_cr) = component_row_triplet(prev, curr, next, 2, chroma_y);
+        let (prev_cb, curr_cb, next_cb) = component_row_triplet(
+            prev.map(|stripe| stripe.plane(1)),
+            curr.plane(1),
+            next.map(|stripe| stripe.plane(1)),
+            chroma_y,
+        );
+        let (prev_cr, curr_cr, next_cr) = component_row_triplet(
+            prev.map(|stripe| stripe.plane(2)),
+            curr.plane(2),
+            next.map(|stripe| stripe.plane(2)),
+            chroma_y,
+        );
 
         backend.fill_rgb_row_pair_from_420(
             y_top,
@@ -986,6 +1018,9 @@ fn decode_mcu_row(
                             match activity {
                                 BlockActivity::DcOnly => {
                                     crate::idct::idct_islow_dc_only(coeff.dc_coeff(), pixels);
+                                }
+                                BlockActivity::BottomHalfZero => {
+                                    backend.idct_bottom_half_zero(coeff.coefficients(), pixels);
                                 }
                                 BlockActivity::General => {
                                     backend.idct(coeff.coefficients(), pixels);
@@ -1193,6 +1228,9 @@ fn decode_mcu_row_fast_rgb_444(
         )?;
         match y_activity {
             BlockActivity::DcOnly => crate::idct::idct_islow_dc_only(coeff.dc_coeff(), pixels),
+            BlockActivity::BottomHalfZero => {
+                backend.idct_bottom_half_zero(coeff.coefficients(), pixels);
+            }
             BlockActivity::General => backend.idct(coeff.coefficients(), pixels),
         }
         deposit_block(
@@ -1213,6 +1251,9 @@ fn decode_mcu_row_fast_rgb_444(
         )?;
         match cb_activity {
             BlockActivity::DcOnly => crate::idct::idct_islow_dc_only(coeff.dc_coeff(), pixels),
+            BlockActivity::BottomHalfZero => {
+                backend.idct_bottom_half_zero(coeff.coefficients(), pixels);
+            }
             BlockActivity::General => backend.idct(coeff.coefficients(), pixels),
         }
         deposit_block(
@@ -1233,6 +1274,9 @@ fn decode_mcu_row_fast_rgb_444(
         )?;
         match cr_activity {
             BlockActivity::DcOnly => crate::idct::idct_islow_dc_only(coeff.dc_coeff(), pixels),
+            BlockActivity::BottomHalfZero => {
+                backend.idct_bottom_half_zero(coeff.coefficients(), pixels);
+            }
             BlockActivity::General => backend.idct(coeff.coefficients(), pixels),
         }
         deposit_block(
@@ -1260,13 +1304,47 @@ fn emit_stripe_rgb_444<W: OutputWriter + InterleavedRgbWriter>(
     let y_start = stripe_index * 8;
     let stripe_rows = (height.saturating_sub(y_start)).min(8) as usize;
     let width = width as usize;
+    let y_stride = stripe.plane_strides[0];
+    let cb_stride = stripe.plane_strides[1];
+    let cr_stride = stripe.plane_strides[2];
 
-    for local_y in 0..stripe_rows {
-        let y_row = &stripe.row(0, local_y)[..width];
-        let cb_row = &stripe.row(1, local_y)[..width];
-        let cr_row = &stripe.row(2, local_y)[..width];
+    let mut local_y = 0usize;
+    while local_y + 1 < stripe_rows {
+        let y_top_start = local_y * y_stride;
+        let y_bottom_start = y_top_start + y_stride;
+        let cb_top_start = local_y * cb_stride;
+        let cb_bottom_start = cb_top_start + cb_stride;
+        let cr_top_start = local_y * cr_stride;
+        let cr_bottom_start = cr_top_start + cr_stride;
+        writer.with_rgb_rows(y_start + local_y as u32, 2, |dst_top, dst_bottom| {
+            backend.fill_rgb_row_from_ycbcr(
+                &stripe.planes[0][y_top_start..y_top_start + width],
+                &stripe.planes[1][cb_top_start..cb_top_start + width],
+                &stripe.planes[2][cr_top_start..cr_top_start + width],
+                dst_top,
+            );
+            backend.fill_rgb_row_from_ycbcr(
+                &stripe.planes[0][y_bottom_start..y_bottom_start + width],
+                &stripe.planes[1][cb_bottom_start..cb_bottom_start + width],
+                &stripe.planes[2][cr_bottom_start..cr_bottom_start + width],
+                dst_bottom.expect("row_count=2 supplies bottom row"),
+            );
+            Ok(())
+        })?;
+        local_y += 2;
+    }
+
+    if local_y < stripe_rows {
+        let y_row_start = local_y * y_stride;
+        let cb_row_start = local_y * cb_stride;
+        let cr_row_start = local_y * cr_stride;
         writer.with_rgb_rows(y_start + local_y as u32, 1, |dst, _| {
-            backend.fill_rgb_row_from_ycbcr(y_row, cb_row, cr_row, dst);
+            backend.fill_rgb_row_from_ycbcr(
+                &stripe.planes[0][y_row_start..y_row_start + width],
+                &stripe.planes[1][cb_row_start..cb_row_start + width],
+                &stripe.planes[2][cr_row_start..cr_row_start + width],
+                dst,
+            );
             Ok(())
         })?;
     }
@@ -1309,6 +1387,9 @@ fn decode_mcu_row_fast_tile_420(
         if in_region {
             match y0_activity {
                 BlockActivity::DcOnly => crate::idct::idct_islow_dc_only(coeff.dc_coeff(), pixels),
+                BlockActivity::BottomHalfZero => {
+                    backend.idct_bottom_half_zero(coeff.coefficients(), pixels);
+                }
                 BlockActivity::General => backend.idct(coeff.coefficients(), pixels),
             }
             deposit_block(
@@ -1331,6 +1412,9 @@ fn decode_mcu_row_fast_tile_420(
         if in_region {
             match y1_activity {
                 BlockActivity::DcOnly => crate::idct::idct_islow_dc_only(coeff.dc_coeff(), pixels),
+                BlockActivity::BottomHalfZero => {
+                    backend.idct_bottom_half_zero(coeff.coefficients(), pixels);
+                }
                 BlockActivity::General => backend.idct(coeff.coefficients(), pixels),
             }
             deposit_block(
@@ -1353,6 +1437,9 @@ fn decode_mcu_row_fast_tile_420(
         if in_region {
             match y2_activity {
                 BlockActivity::DcOnly => crate::idct::idct_islow_dc_only(coeff.dc_coeff(), pixels),
+                BlockActivity::BottomHalfZero => {
+                    backend.idct_bottom_half_zero(coeff.coefficients(), pixels);
+                }
                 BlockActivity::General => backend.idct(coeff.coefficients(), pixels),
             }
             deposit_block(
@@ -1375,6 +1462,9 @@ fn decode_mcu_row_fast_tile_420(
         if in_region {
             match y3_activity {
                 BlockActivity::DcOnly => crate::idct::idct_islow_dc_only(coeff.dc_coeff(), pixels),
+                BlockActivity::BottomHalfZero => {
+                    backend.idct_bottom_half_zero(coeff.coefficients(), pixels);
+                }
                 BlockActivity::General => backend.idct(coeff.coefficients(), pixels),
             }
             deposit_block(
@@ -1397,6 +1487,9 @@ fn decode_mcu_row_fast_tile_420(
         if in_region {
             match cb_activity {
                 BlockActivity::DcOnly => crate::idct::idct_islow_dc_only(coeff.dc_coeff(), pixels),
+                BlockActivity::BottomHalfZero => {
+                    backend.idct_bottom_half_zero(coeff.coefficients(), pixels);
+                }
                 BlockActivity::General => backend.idct(coeff.coefficients(), pixels),
             }
             deposit_block(
@@ -1419,6 +1512,9 @@ fn decode_mcu_row_fast_tile_420(
         if in_region {
             match cr_activity {
                 BlockActivity::DcOnly => crate::idct::idct_islow_dc_only(coeff.dc_coeff(), pixels),
+                BlockActivity::BottomHalfZero => {
+                    backend.idct_bottom_half_zero(coeff.coefficients(), pixels);
+                }
                 BlockActivity::General => backend.idct(coeff.coefficients(), pixels),
             }
             deposit_block(
@@ -1704,10 +1800,18 @@ fn emit_stripe_rgb<W: OutputWriter + InterleavedRgbWriter>(
                 let row_count = if y_bottom.is_some() { 2 } else { 1 };
                 let chroma_y = (local_y / 2).min(curr.row_count(1).saturating_sub(1));
                 let chroma_cols = width.div_ceil(2);
-                let (prev_cb, curr_cb, next_cb) =
-                    component_row_triplet(prev, curr, next, 1, chroma_y);
-                let (prev_cr, curr_cr, next_cr) =
-                    component_row_triplet(prev, curr, next, 2, chroma_y);
+                let (prev_cb, curr_cb, next_cb) = component_row_triplet(
+                    prev.map(|stripe| stripe.plane(1)),
+                    curr.plane(1),
+                    next.map(|stripe| stripe.plane(1)),
+                    chroma_y,
+                );
+                let (prev_cr, curr_cr, next_cr) = component_row_triplet(
+                    prev.map(|stripe| stripe.plane(2)),
+                    curr.plane(2),
+                    next.map(|stripe| stripe.plane(2)),
+                    chroma_y,
+                );
 
                 writer.with_rgb_rows(
                     y_start + local_y as u32,
@@ -1877,29 +1981,33 @@ fn emit_stripe_rgb<W: OutputWriter + InterleavedRgbWriter>(
 }
 
 fn component_row_triplet<'a>(
-    prev: Option<&'a StripeBuffer>,
-    curr: &'a StripeBuffer,
-    next: Option<&'a StripeBuffer>,
-    plane_idx: usize,
+    prev: Option<StripePlane<'a>>,
+    curr: StripePlane<'a>,
+    next: Option<StripePlane<'a>>,
     local_row: usize,
 ) -> (&'a [u8], &'a [u8], &'a [u8]) {
-    let curr_rows = curr.row_count(plane_idx);
+    fn plane_row(plane: StripePlane<'_>, row: usize) -> &[u8] {
+        let start = row * plane.stride;
+        &plane.data[start..start + plane.stride]
+    }
+
+    let curr_rows = curr.rows;
     let prev_row = if local_row == 0 {
-        prev.map_or_else(
-            || curr.row(plane_idx, 0),
-            |stripe| stripe.row(plane_idx, stripe.row_count(plane_idx) - 1),
-        )
+        match prev {
+            Some(plane) => plane_row(plane, plane.rows - 1),
+            None => plane_row(curr, 0),
+        }
     } else {
-        curr.row(plane_idx, local_row - 1)
+        plane_row(curr, local_row - 1)
     };
-    let curr_row = curr.row(plane_idx, local_row);
+    let curr_row = plane_row(curr, local_row);
     let next_row = if local_row + 1 < curr_rows {
-        curr.row(plane_idx, local_row + 1)
+        plane_row(curr, local_row + 1)
     } else {
-        next.map_or_else(
-            || curr.row(plane_idx, curr_rows - 1),
-            |stripe| stripe.row(plane_idx, 0),
-        )
+        match next {
+            Some(plane) => plane_row(plane, 0),
+            None => plane_row(curr, curr_rows - 1),
+        }
     };
     (prev_row, curr_row, next_row)
 }
@@ -1920,10 +2028,15 @@ fn upsample_component_row_stripe(
 ) {
     let v_ratio = max_v / comp_v;
     let h_ratio = max_h / comp_h;
-    let chroma_rows = curr.row_count(plane_idx) as u32;
+    let curr_plane = curr.plane(plane_idx);
+    let chroma_rows = curr_plane.rows as u32;
     let chroma_y = (local_y_out / v_ratio).min(chroma_rows.saturating_sub(1));
-    let (prev_row, curr_row, next_row) =
-        component_row_triplet(prev, curr, next, plane_idx, chroma_y as usize);
+    let (prev_row, curr_row, next_row) = component_row_triplet(
+        prev.map(|stripe| stripe.plane(plane_idx)),
+        curr_plane,
+        next.map(|stripe| stripe.plane(plane_idx)),
+        chroma_y as usize,
+    );
 
     match (h_ratio, v_ratio) {
         (1, 1) => {
@@ -1964,10 +2077,15 @@ fn upsample_420_pair(
     top: &mut [u8],
     bot: &mut [u8],
 ) {
-    let chroma_rows = curr.row_count(plane_idx) as u32;
+    let curr_plane = curr.plane(plane_idx);
+    let chroma_rows = curr_plane.rows as u32;
     let chroma_y = (local_y_out / 2).min(chroma_rows.saturating_sub(1));
-    let (prev_row, curr_row, next_row) =
-        component_row_triplet(prev, curr, next, plane_idx, chroma_y as usize);
+    let (prev_row, curr_row, next_row) = component_row_triplet(
+        prev.map(|stripe| stripe.plane(plane_idx)),
+        curr_plane,
+        next.map(|stripe| stripe.plane(plane_idx)),
+        chroma_y as usize,
+    );
 
     upsample_h2v2_fancy_rows(prev_row, curr_row, next_row, width, top, bot);
 }
@@ -2164,6 +2282,154 @@ mod tests {
         assert_eq!(layout.crop_end, 26);
         assert!(layout.y_decode_start <= roi.x as usize);
         assert!(layout.y_decode_end >= (roi.x + roi.w) as usize);
+    }
+
+    #[test]
+    fn deposit_block_writes_expected_rows_at_offset() {
+        let mut plane = vec![0xA5u8; 16 * 16];
+        let mut block = [0u8; 64];
+        for (i, byte) in block.iter_mut().enumerate() {
+            *byte = i as u8;
+        }
+
+        deposit_block(&mut plane, 16, 3, 2, &block);
+
+        for row in 0..8usize {
+            let dst_start = (2 + row) * 16 + 3;
+            assert_eq!(
+                &plane[dst_start..dst_start + 8],
+                &block[row * 8..row * 8 + 8]
+            );
+            assert_eq!(plane[(2 + row) * 16 + 2], 0xA5);
+            assert_eq!(plane[(2 + row) * 16 + 11], 0xA5);
+        }
+        assert_eq!(plane[0], 0xA5);
+        assert_eq!(plane[plane.len() - 1], 0xA5);
+    }
+
+    #[test]
+    fn deposit_block_writes_expected_rows_at_bottom_right_edge() {
+        let mut plane = vec![0x5Au8; 16 * 16];
+        let mut block = [0u8; 64];
+        for (i, byte) in block.iter_mut().enumerate() {
+            *byte = 255u8.wrapping_sub(i as u8);
+        }
+
+        deposit_block(&mut plane, 16, 8, 8, &block);
+
+        for row in 0..8usize {
+            let dst_start = (8 + row) * 16 + 8;
+            assert_eq!(
+                &plane[dst_start..dst_start + 8],
+                &block[row * 8..row * 8 + 8]
+            );
+            assert_eq!(plane[(8 + row) * 16 + 7], 0x5A);
+        }
+        assert_eq!(plane[plane.len() - 1], block[63]);
+    }
+
+    #[test]
+    fn component_row_triplet_uses_neighbor_stripes_and_clamps_edges() {
+        let prev = StripeBuffer {
+            planes: vec![vec![], vec![10, 11, 12, 13, 14, 15], vec![]],
+            plane_strides: vec![0, 2, 0],
+            plane_rows: vec![0, 3, 0],
+        };
+        let curr = StripeBuffer {
+            planes: vec![vec![], vec![20, 21, 22, 23, 24, 25], vec![]],
+            plane_strides: vec![0, 2, 0],
+            plane_rows: vec![0, 3, 0],
+        };
+        let next = StripeBuffer {
+            planes: vec![vec![], vec![30, 31, 32, 33, 34, 35], vec![]],
+            plane_strides: vec![0, 2, 0],
+            plane_rows: vec![0, 3, 0],
+        };
+
+        let prev_plane = Some(prev.plane(1));
+        let curr_plane = curr.plane(1);
+        let next_plane = Some(next.plane(1));
+
+        let (top_prev, top_curr, top_next) =
+            component_row_triplet(prev_plane, curr_plane, next_plane, 0);
+        assert_eq!(top_prev, &[14, 15]);
+        assert_eq!(top_curr, &[20, 21]);
+        assert_eq!(top_next, &[22, 23]);
+
+        let (mid_prev, mid_curr, mid_next) =
+            component_row_triplet(prev_plane, curr_plane, next_plane, 1);
+        assert_eq!(mid_prev, &[20, 21]);
+        assert_eq!(mid_curr, &[22, 23]);
+        assert_eq!(mid_next, &[24, 25]);
+
+        let (bot_prev, bot_curr, bot_next) =
+            component_row_triplet(prev_plane, curr_plane, next_plane, 2);
+        assert_eq!(bot_prev, &[22, 23]);
+        assert_eq!(bot_curr, &[24, 25]);
+        assert_eq!(bot_next, &[30, 31]);
+
+        let (clamp_prev, clamp_curr, clamp_next) = component_row_triplet(None, curr_plane, None, 0);
+        assert_eq!(clamp_prev, &[20, 21]);
+        assert_eq!(clamp_curr, &[20, 21]);
+        assert_eq!(clamp_next, &[22, 23]);
+
+        let (tail_prev, tail_curr, tail_next) = component_row_triplet(None, curr_plane, None, 2);
+        assert_eq!(tail_prev, &[22, 23]);
+        assert_eq!(tail_curr, &[24, 25]);
+        assert_eq!(tail_next, &[24, 25]);
+    }
+
+    #[test]
+    fn emit_stripe_rgb_444_matches_direct_ycbcr_conversion_with_trailing_row() {
+        let width = 17usize;
+        let height = 7u32;
+        let mut stripe = StripeBuffer {
+            planes: vec![
+                vec![0u8; width * 8],
+                vec![0u8; width * 8],
+                vec![0u8; width * 8],
+            ],
+            plane_strides: vec![width, width, width],
+            plane_rows: vec![8, 8, 8],
+        };
+        for row in 0..8usize {
+            for col in 0..width {
+                stripe.planes[0][row * width + col] = ((row * 31 + col * 7 + 11) & 0xFF) as u8;
+                stripe.planes[1][row * width + col] = ((row * 17 + col * 13 + 97) & 0xFF) as u8;
+                stripe.planes[2][row * width + col] = ((row * 23 + col * 19 + 53) & 0xFF) as u8;
+            }
+        }
+
+        let plan = PreparedDecodePlan {
+            components: vec![],
+            sampling: SamplingFactors::from_components(&[(1, 1), (1, 1), (1, 1)]),
+            color_space: ColorSpace::YCbCr,
+            restart_interval: None,
+            dimensions: (width as u32, height),
+            scan_offset: 0,
+            scratch_bytes: 0,
+        };
+        let mut actual = vec![0u8; width * height as usize * 3];
+        let mut writer = Rgb8Writer::new(&mut actual, width * 3, width as u32);
+
+        emit_stripe_rgb_444(&plan, Backend::detect(), &stripe, 0, &mut writer)
+            .expect("emit stripe must succeed");
+
+        let mut expected = vec![0u8; actual.len()];
+        for row in 0..height as usize {
+            for col in 0..width {
+                let y = stripe.planes[0][row * width + col];
+                let cb = stripe.planes[1][row * width + col];
+                let cr = stripe.planes[2][row * width + col];
+                let (r, g, b) = crate::color::ycbcr::ycbcr_to_rgb(y, cb, cr);
+                let dst = (row * width + col) * 3;
+                expected[dst] = r;
+                expected[dst + 1] = g;
+                expected[dst + 2] = b;
+            }
+        }
+
+        assert_eq!(actual, expected);
     }
 
     fn trivial_dc_table() -> Arc<HuffmanTable> {

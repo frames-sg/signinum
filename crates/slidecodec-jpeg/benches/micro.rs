@@ -45,12 +45,42 @@ fn bench_micro(c: &mut Criterion) {
     coeffs[17] = 9;
     coeffs[24] = 11;
 
+    let mut bottom_half_zero = [0i16; 64];
+    bottom_half_zero[0] = 480;
+    bottom_half_zero[1] = -120;
+    bottom_half_zero[2] = 75;
+    bottom_half_zero[8] = 92;
+    bottom_half_zero[9] = -38;
+    bottom_half_zero[10] = 17;
+    bottom_half_zero[16] = -22;
+    bottom_half_zero[17] = 9;
+    bottom_half_zero[24] = 11;
+
     {
         use slidecodec_jpeg::bench_support::bench_idct_reference_block_with;
         c.bench_function("micro/idct_islow_scalar_block", |b| {
             let mut out = [0u8; 64];
             b.iter(|| {
                 bench_idct_reference_block_with(std::hint::black_box(&coeffs), &mut out);
+                std::hint::black_box(&out);
+            });
+        });
+
+        c.bench_function("micro/idct_islow_scalar_bottom_half_zero_block", |b| {
+            let mut out = [0u8; 64];
+            b.iter(|| {
+                bench_idct_reference_block_with(std::hint::black_box(&bottom_half_zero), &mut out);
+                std::hint::black_box(&out);
+            });
+        });
+    }
+
+    {
+        use slidecodec_jpeg::bench_support::bench_idct_reduced_2x2_block_with;
+        c.bench_function("micro/idct_islow_2x2_scalar_block", |b| {
+            let mut out = [0u8; 4];
+            b.iter(|| {
+                bench_idct_reduced_2x2_block_with(std::hint::black_box(&coeffs), &mut out);
                 std::hint::black_box(&out);
             });
         });
@@ -63,6 +93,14 @@ fn bench_micro(c: &mut Criterion) {
             let mut out = [0u8; 64];
             b.iter(|| {
                 bench_idct_neon_block(std::hint::black_box(&coeffs), &mut out);
+                std::hint::black_box(&out);
+            });
+        });
+
+        c.bench_function("micro/idct_islow_neon_bottom_half_zero_block", |b| {
+            let mut out = [0u8; 64];
+            b.iter(|| {
+                bench_idct_neon_block(std::hint::black_box(&bottom_half_zero), &mut out);
                 std::hint::black_box(&out);
             });
         });
@@ -109,6 +147,22 @@ fn bench_micro(c: &mut Criterion) {
         b.iter(|| {
             color.run_scalar();
             std::hint::black_box(&color);
+        });
+    });
+
+    let mut backend_color = BenchColorRowScratch::new(256);
+    c.bench_function("micro/ycbcr_to_rgb_row_backend_256", |b| {
+        b.iter(|| {
+            backend_color.run_backend();
+            std::hint::black_box(&backend_color);
+        });
+    });
+
+    let mut backend_color_tail = BenchColorRowScratch::new(255);
+    c.bench_function("micro/ycbcr_to_rgb_row_backend_255", |b| {
+        b.iter(|| {
+            backend_color_tail.run_backend();
+            std::hint::black_box(&backend_color_tail);
         });
     });
 }

@@ -144,4 +144,14 @@ impl Backend {
             BackendKind::Neon => unsafe { idct::neon::idct_islow(input, output) },
         }
     }
+
+    pub(crate) fn idct_bottom_half_zero(self, input: &[i16; 64], output: &mut [u8; 64]) {
+        match self.kind {
+            BackendKind::Scalar => idct::scalar::idct_islow_bottom_half_zero(input, output),
+            #[cfg(target_arch = "x86_64")]
+            BackendKind::Avx2 => unsafe { idct::avx2::idct_islow(input, output) },
+            #[cfg(target_arch = "aarch64")]
+            BackendKind::Neon => unsafe { idct::neon::idct_islow_bottom_half_zero(input, output) },
+        }
+    }
 }

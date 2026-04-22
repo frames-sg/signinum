@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::decoder::Decoder;
-use crate::entropy::sequential::PreparedDecodePlan;
 use crate::error::{JpegError, MarkerKind};
 use crate::info::ColorSpace;
+use crate::internal::checkpoint::{build_checkpoint_plan, DeviceCheckpoint};
 use alloc::vec::Vec;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -11,11 +11,6 @@ pub struct DeviceComponentPlan {
     pub h: u8,
     pub v: u8,
     pub output_index: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DeviceCheckpoint {
-    pub mcu_index: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,7 +31,7 @@ pub fn build_device_plan(
 ) -> Result<DeviceDecodePlan, JpegError> {
     let plan = &decoder.plan;
     let scan_bytes = scan_payload_bytes(decoder.bytes, plan.scan_offset)?;
-    let checkpoints = build_checkpoint_plan(plan, &scan_bytes, cadence_mcus);
+    let checkpoints = build_checkpoint_plan(plan, &scan_bytes, cadence_mcus)?;
 
     Ok(DeviceDecodePlan {
         dimensions: plan.dimensions,
@@ -93,36 +88,5 @@ fn scan_payload_bytes(bytes: &[u8], scan_offset: usize) -> Result<Vec<u8>, JpegE
         }
     }
 
-    Err(JpegError::MissingMarker {
-        marker: MarkerKind::Eoi,
-    })
-}
-
-fn build_checkpoint_plan(
-    plan: &PreparedDecodePlan,
-    _scan_bytes: &[u8],
-    cadence_mcus: u32,
-) -> Vec<DeviceCheckpoint> {
-    let cadence_mcus = cadence_mcus.max(1);
-    let mcu_width = u32::from(plan.sampling.max_h) * 8;
-    let mcu_height = u32::from(plan.sampling.max_v) * 8;
-    let mcus_per_row = plan.dimensions.0.div_ceil(mcu_width);
-    let mcu_rows = plan.dimensions.1.div_ceil(mcu_height);
-    let total_mcus = mcus_per_row.saturating_mul(mcu_rows);
-
-    let mut checkpoints = Vec::new();
-    let mut mcu_index = 0u32;
-    while mcu_index < total_mcus {
-        checkpoints.push(DeviceCheckpoint { mcu_index });
-        mcu_index = mcu_index.saturating_add(cadence_mcus);
-        if mcu_index == 0 {
-            break;
-        }
-    }
-
-    if checkpoints.is_empty() {
-        checkpoints.push(DeviceCheckpoint { mcu_index: 0 });
-    }
-
-    checkpoints
+    Ok(scan.to_vec())
 }

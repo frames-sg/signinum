@@ -5,4 +5,6 @@
 
 pub(crate) mod bit_reader;
 
+pub(crate) mod checkpoint;
+
 pub(crate) mod scratch;

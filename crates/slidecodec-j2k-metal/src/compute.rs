@@ -504,6 +504,15 @@ struct J2kHtRepeatedBatchParams {
 
 #[cfg(target_os = "macos")]
 #[repr(C)]
+#[derive(Clone, Copy)]
+struct J2kClassicRepeatedBatchParams {
+    job_count: u32,
+    output_plane_len: u32,
+    batch_count: u32,
+}
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct J2kHtStatus {
     code: u32,
@@ -525,6 +534,8 @@ struct MetalRuntime {
     pack_u16_repeated_gray: ComputePipelineState,
     classic_cleanup_plain_batched: ComputePipelineState,
     classic_cleanup_batched: ComputePipelineState,
+    classic_cleanup_plain_repeated_batched: ComputePipelineState,
+    classic_cleanup_repeated_batched: ComputePipelineState,
     idwt_interleave: ComputePipelineState,
     idwt_reversible53_horizontal: ComputePipelineState,
     idwt_reversible53_vertical: ComputePipelineState,
@@ -560,6 +571,10 @@ impl MetalRuntime {
             library.get_function("j2k_decode_classic_cleanup_plain_batched", None)?;
         let classic_cleanup_batched_fn =
             library.get_function("j2k_decode_classic_cleanup_batched", None)?;
+        let classic_cleanup_plain_repeated_batched_fn =
+            library.get_function("j2k_decode_classic_cleanup_plain_repeated_batched", None)?;
+        let classic_cleanup_repeated_batched_fn =
+            library.get_function("j2k_decode_classic_cleanup_repeated_batched", None)?;
         let idwt_interleave_fn = library.get_function("j2k_idwt_interleave", None)?;
         let idwt_interleave_batched_fn =
             library.get_function("j2k_idwt_interleave_batched", None)?;
@@ -591,6 +606,10 @@ impl MetalRuntime {
             device.new_compute_pipeline_state_with_function(&classic_cleanup_plain_batched_fn)?;
         let classic_cleanup_batched =
             device.new_compute_pipeline_state_with_function(&classic_cleanup_batched_fn)?;
+        let classic_cleanup_plain_repeated_batched = device
+            .new_compute_pipeline_state_with_function(&classic_cleanup_plain_repeated_batched_fn)?;
+        let classic_cleanup_repeated_batched = device
+            .new_compute_pipeline_state_with_function(&classic_cleanup_repeated_batched_fn)?;
         let idwt_interleave =
             device.new_compute_pipeline_state_with_function(&idwt_interleave_fn)?;
         let idwt_interleave_batched =
@@ -627,6 +646,8 @@ impl MetalRuntime {
             pack_u16_repeated_gray,
             classic_cleanup_plain_batched,
             classic_cleanup_batched,
+            classic_cleanup_plain_repeated_batched,
+            classic_cleanup_repeated_batched,
             idwt_interleave,
             idwt_reversible53_horizontal,
             idwt_reversible53_vertical,
@@ -3012,6 +3033,90 @@ fn dispatch_classic_cleanup_batched_in_command_buffer(
 }
 
 #[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+fn dispatch_classic_cleanup_repeated_batched_in_command_buffer(
+    runtime: &MetalRuntime,
+    command_buffer: &CommandBufferRef,
+    coded_data: &Buffer,
+    jobs: &Buffer,
+    job_count: usize,
+    total_job_count: usize,
+    output_plane_len: usize,
+    use_plain_fast_path: bool,
+    segments: &Buffer,
+    decoded: &Buffer,
+    coefficients_scratch: &Buffer,
+) -> DirectStatusCheck {
+    let pipeline = if use_plain_fast_path {
+        &runtime.classic_cleanup_plain_repeated_batched
+    } else {
+        &runtime.classic_cleanup_repeated_batched
+    };
+    let status_buffer = runtime.device.new_buffer(
+        (total_job_count.max(1) * size_of::<J2kClassicStatus>()) as u64,
+        MTLResourceOptions::StorageModeShared,
+    );
+    let repeated = J2kClassicRepeatedBatchParams {
+        job_count: u32::try_from(job_count).expect("classic repeated base job count fits in u32"),
+        output_plane_len: u32::try_from(output_plane_len)
+            .expect("classic repeated output plane len fits in u32"),
+        batch_count: u32::try_from(total_job_count / job_count.max(1))
+            .expect("classic repeated batch count fits in u32"),
+    };
+
+    let encoder = command_buffer.new_compute_command_encoder();
+    encoder.set_compute_pipeline_state(pipeline);
+    encoder.set_buffer(0, Some(coded_data), 0);
+    encoder.set_buffer(1, Some(decoded), 0);
+    encoder.set_buffer(2, Some(jobs), 0);
+    encoder.set_buffer(3, Some(segments), 0);
+    encoder.set_buffer(4, Some(&status_buffer), 0);
+    encoder.set_buffer(5, Some(coefficients_scratch), 0);
+    encoder.set_bytes(
+        6,
+        size_of::<J2kClassicRepeatedBatchParams>() as u64,
+        (&raw const repeated).cast(),
+    );
+    if use_plain_fast_path {
+        encoder.dispatch_thread_groups(
+            MTLSize {
+                width: job_count as u64,
+                height: u64::from(repeated.batch_count),
+                depth: 1,
+            },
+            MTLSize {
+                width: 32,
+                height: 1,
+                depth: 1,
+            },
+        );
+    } else {
+        let width = pipeline
+            .thread_execution_width()
+            .max(1)
+            .min(job_count as u64);
+        encoder.dispatch_threads(
+            MTLSize {
+                width: job_count as u64,
+                height: u64::from(repeated.batch_count),
+                depth: 1,
+            },
+            MTLSize {
+                width,
+                height: 1,
+                depth: 1,
+            },
+        );
+    }
+    encoder.end_encoding();
+
+    DirectStatusCheck::Classic {
+        buffer: status_buffer,
+        len: total_job_count,
+    }
+}
+
+#[cfg(target_os = "macos")]
 #[allow(dead_code)]
 fn encode_classic_sub_band_to_buffer(
     runtime: &MetalRuntime,
@@ -3245,11 +3350,10 @@ fn encode_repeated_classic_sub_band_to_buffer_in_command_buffer(
         .ok_or_else(|| Error::MetalKernel {
             message: "classic J2K MetalDirect repeated job count overflow".to_string(),
         })?;
-    let mut jobs = Vec::with_capacity(total_jobs);
+    let mut jobs = Vec::with_capacity(job.jobs.len());
     let mut coded_data = Vec::new();
     let mut segments = Vec::new();
 
-    let mut template_jobs = Vec::with_capacity(job.jobs.len());
     for block in &job.jobs {
         let coded_offset = u32::try_from(coded_data.len()).map_err(|_| Error::MetalKernel {
             message: "classic J2K MetalDirect coded payload exceeds u32".to_string(),
@@ -3272,7 +3376,7 @@ fn encode_repeated_classic_sub_band_to_buffer_in_command_buffer(
                 use_arithmetic: u32::from(segment.use_arithmetic),
             });
         }
-        template_jobs.push(J2kClassicCleanupBatchJob {
+        jobs.push(J2kClassicCleanupBatchJob {
             coded_offset,
             coded_len: u32::try_from(block.data.len()).map_err(|_| Error::MetalKernel {
                 message: "classic J2K MetalDirect coded payload exceeds u32".to_string(),
@@ -3306,45 +3410,23 @@ fn encode_repeated_classic_sub_band_to_buffer_in_command_buffer(
         });
     }
 
-    for instance_idx in 0..count {
-        let instance_y_offset = u32::try_from(instance_idx)
-            .ok()
-            .and_then(|idx| idx.checked_mul(job.height))
-            .ok_or_else(|| Error::MetalKernel {
-                message: "classic J2K MetalDirect repeated output offset overflow".to_string(),
-            })?;
-        for template in &template_jobs {
-            let mut repeated = *template;
-            repeated.output_offset = repeated
-                .output_offset
-                .checked_add(instance_y_offset.checked_mul(job.width).ok_or_else(|| {
-                    Error::MetalKernel {
-                        message: "classic J2K MetalDirect repeated output offset overflow"
-                            .to_string(),
-                    }
-                })?)
-                .ok_or_else(|| Error::MetalKernel {
-                    message: "classic J2K MetalDirect repeated output offset overflow".to_string(),
-                })?;
-            jobs.push(repeated);
-        }
-    }
-
     let coded_buffer = borrow_slice_buffer(&runtime.device, &coded_data);
     let jobs_buffer = borrow_slice_buffer(&runtime.device, &jobs);
     let segments_buffer = borrow_slice_buffer(&runtime.device, &segments);
-    let coefficients_scratch = classic_coefficients_scratch_buffer(&runtime.device, jobs.len())?;
+    let coefficients_scratch = classic_coefficients_scratch_buffer(&runtime.device, total_jobs)?;
     let use_plain_fast_path = classic_batch_uses_plain_fast_path(&jobs, &segments)
         && runtime
-            .classic_cleanup_plain_batched
+            .classic_cleanup_plain_repeated_batched
             .max_total_threads_per_threadgroup()
             >= 32;
-    let (status_check, _) = dispatch_classic_cleanup_batched_in_command_buffer(
+    let status_check = dispatch_classic_cleanup_repeated_batched_in_command_buffer(
         runtime,
         command_buffer,
         &coded_buffer,
         &jobs_buffer,
         jobs.len(),
+        total_jobs,
+        job.width as usize * job.height as usize,
         use_plain_fast_path,
         &segments_buffer,
         output,

@@ -329,16 +329,6 @@ impl<'a> J2kDecoder<'a> {
     }
 
     #[cfg(target_os = "macos")]
-    fn direct_plan_has_ht(plan: &J2kDirectGrayscalePlan) -> bool {
-        plan.steps.iter().any(|step| {
-            matches!(
-                step,
-                slidecodec_j2k_native::J2kDirectGrayscaleStep::HtSubBand(_)
-            )
-        })
-    }
-
-    #[cfg(target_os = "macos")]
     fn should_auto_use_direct_for_repeated(
         plan: &J2kDirectGrayscalePlan,
         fmt: PixelFormat,
@@ -349,11 +339,7 @@ impl<'a> J2kDecoder<'a> {
         }
 
         let max_dim = plan.dimensions.0.max(plan.dimensions.1);
-        if Self::direct_plan_has_ht(plan) {
-            max_dim >= 1024 && count >= 16
-        } else {
-            max_dim >= 1024 && count >= 32
-        }
+        max_dim >= 1024 && count >= 16
     }
 
     #[cfg(target_os = "macos")]

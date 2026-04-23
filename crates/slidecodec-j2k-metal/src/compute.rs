@@ -555,6 +555,7 @@ struct MetalRuntime {
     classic_cleanup_plain_batched: ComputePipelineState,
     classic_cleanup_batched: ComputePipelineState,
     classic_cleanup_plain_repeated_batched: ComputePipelineState,
+    classic_cleanup_plain_dev_repeated_batched: ComputePipelineState,
     classic_cleanup_repeated_batched: ComputePipelineState,
     classic_store_repeated_batched: ComputePipelineState,
     idwt_interleave: ComputePipelineState,
@@ -597,6 +598,10 @@ impl MetalRuntime {
             library.get_function("j2k_decode_classic_cleanup_batched", None)?;
         let classic_cleanup_plain_repeated_batched_fn =
             library.get_function("j2k_decode_classic_cleanup_plain_repeated_batched", None)?;
+        let classic_cleanup_plain_dev_repeated_batched_fn = library.get_function(
+            "j2k_decode_classic_cleanup_plain_dev_repeated_batched",
+            None,
+        )?;
         let classic_cleanup_repeated_batched_fn =
             library.get_function("j2k_decode_classic_cleanup_repeated_batched", None)?;
         let classic_store_repeated_batched_fn =
@@ -638,6 +643,10 @@ impl MetalRuntime {
             device.new_compute_pipeline_state_with_function(&classic_cleanup_batched_fn)?;
         let classic_cleanup_plain_repeated_batched = device
             .new_compute_pipeline_state_with_function(&classic_cleanup_plain_repeated_batched_fn)?;
+        let classic_cleanup_plain_dev_repeated_batched = device
+            .new_compute_pipeline_state_with_function(
+                &classic_cleanup_plain_dev_repeated_batched_fn,
+            )?;
         let classic_cleanup_repeated_batched = device
             .new_compute_pipeline_state_with_function(&classic_cleanup_repeated_batched_fn)?;
         let classic_store_repeated_batched =
@@ -683,6 +692,7 @@ impl MetalRuntime {
             classic_cleanup_plain_batched,
             classic_cleanup_batched,
             classic_cleanup_plain_repeated_batched,
+            classic_cleanup_plain_dev_repeated_batched,
             classic_cleanup_repeated_batched,
             classic_store_repeated_batched,
             idwt_interleave,
@@ -2163,6 +2173,28 @@ fn take_classic_coefficients_scratch_buffer(
 }
 
 #[cfg(target_os = "macos")]
+fn classic_states_scratch_bytes(job_count: usize) -> Result<usize, Error> {
+    job_count
+        .max(1)
+        .checked_mul(J2K_CLASSIC_MAX_COEFF_COUNT)
+        .ok_or_else(|| Error::MetalKernel {
+            message: "classic J2K MetalDirect states scratch overflow".to_string(),
+        })
+}
+
+#[cfg(target_os = "macos")]
+fn take_classic_states_scratch_buffer(
+    runtime: &MetalRuntime,
+    job_count: usize,
+) -> Result<DirectScratchBuffer, Error> {
+    let bytes = classic_states_scratch_bytes(job_count)?;
+    Ok(DirectScratchBuffer {
+        bytes,
+        buffer: runtime.take_private_buffer(bytes),
+    })
+}
+
+#[cfg(target_os = "macos")]
 #[allow(dead_code)]
 pub(crate) fn decode_inverse_mct(job: J2kInverseMctJob<'_>) -> Result<Vec<Buffer>, Error> {
     let J2kInverseMctJob {
@@ -3271,6 +3303,20 @@ fn classic_batch_uses_plain_fast_path(
 }
 
 #[cfg(target_os = "macos")]
+fn classic_batch_is_plain_arithmetic(
+    jobs: &[J2kClassicCleanupBatchJob],
+    segments: &[J2kClassicSegment],
+) -> bool {
+    jobs.iter().all(|job| {
+        job.style_flags == 0
+            && segments[job.segment_offset as usize
+                ..job.segment_offset as usize + job.segment_count as usize]
+                .iter()
+                .all(|segment| segment.use_arithmetic != 0)
+    })
+}
+
+#[cfg(target_os = "macos")]
 fn dispatch_classic_cleanup_batched(
     runtime: &MetalRuntime,
     coded_data: &[u8],
@@ -3508,6 +3554,71 @@ fn dispatch_classic_cleanup_repeated_batched_in_command_buffer(
             },
         );
     }
+    encoder.end_encoding();
+
+    DirectStatusCheck::Classic {
+        buffer: status_buffer,
+        len: total_job_count,
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+fn dispatch_classic_cleanup_plain_dev_repeated_batched_in_command_buffer(
+    runtime: &MetalRuntime,
+    command_buffer: &CommandBufferRef,
+    coded_data: &Buffer,
+    jobs: &Buffer,
+    job_count: usize,
+    total_job_count: usize,
+    output_plane_len: usize,
+    segments: &Buffer,
+    decoded: &Buffer,
+    coefficients_scratch: &Buffer,
+    states_scratch: &Buffer,
+) -> DirectStatusCheck {
+    let status_buffer = runtime.device.new_buffer(
+        (total_job_count.max(1) * size_of::<J2kClassicStatus>()) as u64,
+        MTLResourceOptions::StorageModeShared,
+    );
+    let repeated = J2kClassicRepeatedBatchParams {
+        job_count: u32::try_from(job_count).expect("classic repeated base job count fits in u32"),
+        output_plane_len: u32::try_from(output_plane_len)
+            .expect("classic repeated output plane len fits in u32"),
+        batch_count: u32::try_from(total_job_count / job_count.max(1))
+            .expect("classic repeated batch count fits in u32"),
+    };
+
+    let encoder = command_buffer.new_compute_command_encoder();
+    encoder.set_compute_pipeline_state(&runtime.classic_cleanup_plain_dev_repeated_batched);
+    encoder.set_buffer(0, Some(coded_data), 0);
+    encoder.set_buffer(1, Some(decoded), 0);
+    encoder.set_buffer(2, Some(jobs), 0);
+    encoder.set_buffer(3, Some(segments), 0);
+    encoder.set_buffer(4, Some(&status_buffer), 0);
+    encoder.set_buffer(5, Some(coefficients_scratch), 0);
+    encoder.set_buffer(6, Some(states_scratch), 0);
+    encoder.set_bytes(
+        7,
+        size_of::<J2kClassicRepeatedBatchParams>() as u64,
+        (&raw const repeated).cast(),
+    );
+    let width = runtime
+        .classic_cleanup_plain_dev_repeated_batched
+        .thread_execution_width()
+        .max(1);
+    encoder.dispatch_threads(
+        MTLSize {
+            width: job_count as u64,
+            height: u64::from(repeated.batch_count),
+            depth: 1,
+        },
+        MTLSize {
+            width,
+            height: 1,
+            depth: 1,
+        },
+    );
     encoder.end_encoding();
 
     DirectStatusCheck::Classic {
@@ -3800,25 +3911,48 @@ fn encode_repeated_classic_sub_band_to_buffer_in_command_buffer(
     let coded_buffer = borrow_slice_buffer(&runtime.device, &job.coded_data);
     let jobs_buffer = borrow_slice_buffer(&runtime.device, &job.jobs);
     let segments_buffer = borrow_slice_buffer(&runtime.device, &job.segments);
+    let use_plain_dev_path =
+        count <= 16 && classic_batch_is_plain_arithmetic(&job.jobs, &job.segments);
     let use_plain_fast_path = classic_batch_uses_plain_fast_path(&job.jobs, &job.segments)
         && runtime
             .classic_cleanup_plain_repeated_batched
             .max_total_threads_per_threadgroup()
             >= 32;
     let coefficients_scratch = take_classic_coefficients_scratch_buffer(runtime, total_jobs)?;
-    let status_check = dispatch_classic_cleanup_repeated_batched_in_command_buffer(
-        runtime,
-        command_buffer,
-        &coded_buffer,
-        &jobs_buffer,
-        job.jobs.len(),
-        total_jobs,
-        job.width as usize * job.height as usize,
-        use_plain_fast_path,
-        &segments_buffer,
-        output,
-        &coefficients_scratch.buffer,
-    );
+    let states_scratch = if use_plain_dev_path {
+        Some(take_classic_states_scratch_buffer(runtime, total_jobs)?)
+    } else {
+        None
+    };
+    let status_check = if let Some(states_scratch) = states_scratch.as_ref() {
+        dispatch_classic_cleanup_plain_dev_repeated_batched_in_command_buffer(
+            runtime,
+            command_buffer,
+            &coded_buffer,
+            &jobs_buffer,
+            job.jobs.len(),
+            total_jobs,
+            job.width as usize * job.height as usize,
+            &segments_buffer,
+            output,
+            &coefficients_scratch.buffer,
+            &states_scratch.buffer,
+        )
+    } else {
+        dispatch_classic_cleanup_repeated_batched_in_command_buffer(
+            runtime,
+            command_buffer,
+            &coded_buffer,
+            &jobs_buffer,
+            job.jobs.len(),
+            total_jobs,
+            job.width as usize * job.height as usize,
+            use_plain_fast_path,
+            &segments_buffer,
+            output,
+            &coefficients_scratch.buffer,
+        )
+    };
     if !use_plain_fast_path {
         dispatch_classic_store_repeated_batched_in_command_buffer(
             runtime,
@@ -3832,6 +3966,9 @@ fn encode_repeated_classic_sub_band_to_buffer_in_command_buffer(
         );
     }
     scratch_buffers.push(coefficients_scratch);
+    if let Some(states_scratch) = states_scratch {
+        scratch_buffers.push(states_scratch);
+    }
     let retained_buffers = vec![coded_buffer, jobs_buffer, segments_buffer];
     Ok((Vec::new(), retained_buffers, status_check))
 }

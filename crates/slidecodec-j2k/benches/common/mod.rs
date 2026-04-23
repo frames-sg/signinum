@@ -289,11 +289,7 @@ fn should_auto_use_direct_grayscale_input(input: &BenchInput, count: usize) -> b
     if input.dimensions.0.max(input.dimensions.1) < 1024 {
         return false;
     }
-    if input.is_ht {
-        count >= 16
-    } else {
-        count >= 32
-    }
+    count >= 16
 }
 
 pub(crate) fn slidecodec_adaptive_decode_tile_batch(input: &BenchInput, count: usize) {

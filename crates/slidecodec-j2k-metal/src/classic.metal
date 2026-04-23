@@ -1284,6 +1284,228 @@ inline bool decode_classic_job_plain(
     return true;
 }
 
+inline bool decode_classic_job_plain_dev(
+    J2kClassicCleanupBatchJob job,
+    device const uchar *coded_data,
+    device const J2kClassicSegment *segments,
+    device uint *coefficients_scratch,
+    uint scratch_offset,
+    device uchar *states_scratch,
+    device float *output,
+    bool store_output,
+    device J2kClassicStatus *status
+) {
+    if (job.width == 0u || job.height == 0u) {
+        return true;
+    }
+    if (job.style_flags != 0u) {
+        set_classic_status(status, J2K_CLASSIC_STATUS_UNSUPPORTED, 12u);
+        return false;
+    }
+    if (job.width > J2K_CLASSIC_MAX_WIDTH || job.height > J2K_CLASSIC_MAX_HEIGHT) {
+        set_classic_status(status, J2K_CLASSIC_STATUS_UNSUPPORTED, 0u);
+        return false;
+    }
+    if (job.total_bitplanes == 0u || job.total_bitplanes > 31u || job.missing_msbs >= job.total_bitplanes) {
+        set_classic_status(status, J2K_CLASSIC_STATUS_UNSUPPORTED, 1u);
+        return false;
+    }
+
+    const uint bitplanes = job.total_bitplanes - job.missing_msbs;
+    const uint max_coding_passes = bitplanes == 0u ? 0u : 1u + 3u * (bitplanes - 1u);
+    if (job.coded_len == 0u || max_coding_passes == 0u || job.number_of_coding_passes == 0u) {
+        return true;
+    }
+    if (job.number_of_coding_passes > max_coding_passes) {
+        set_classic_status(status, J2K_CLASSIC_STATUS_UNSUPPORTED, 2u);
+        return false;
+    }
+
+    const uint padded_width = job.width + J2K_CLASSIC_PADDING * 2u;
+    const uint coeff_count = padded_width * (job.height + J2K_CLASSIC_PADDING * 2u);
+    device uint *coefficients = coefficients_scratch + scratch_offset;
+    device uchar *states = states_scratch + scratch_offset;
+    for (uint idx = 0u; idx < coeff_count; ++idx) {
+        coefficients[idx] = 0u;
+        states[idx] = uchar(0);
+    }
+
+    thread uchar contexts[19];
+    reset_contexts(contexts);
+
+    if (job.segment_count == 0u) {
+        set_classic_status(status, J2K_CLASSIC_STATUS_UNSUPPORTED, 3u);
+        return false;
+    }
+
+    const ulong coded_begin = ulong(job.coded_offset);
+    const ulong coded_end = coded_begin + ulong(job.coded_len);
+    uint expected_start = 0u;
+    uint expected_offset = job.coded_offset;
+    for (uint segment_idx = 0u; segment_idx < job.segment_count; ++segment_idx) {
+        const J2kClassicSegment segment = segments[job.segment_offset + segment_idx];
+        if (segment.use_arithmetic == 0u) {
+            set_classic_status(status, J2K_CLASSIC_STATUS_UNSUPPORTED, 5u);
+            return false;
+        }
+        if (segment.start_coding_pass != expected_start || segment.start_coding_pass > segment.end_coding_pass) {
+            set_classic_status(status, J2K_CLASSIC_STATUS_UNSUPPORTED, 4u);
+            return false;
+        }
+        if (segment.data_offset != expected_offset) {
+            set_classic_status(status, J2K_CLASSIC_STATUS_UNSUPPORTED, 6u);
+            return false;
+        }
+        const ulong segment_end = ulong(segment.data_offset) + ulong(segment.data_length);
+        if (ulong(segment.data_offset) < coded_begin || segment_end > coded_end) {
+            set_classic_status(status, J2K_CLASSIC_STATUS_UNSUPPORTED, 7u);
+            return false;
+        }
+        expected_start = segment.end_coding_pass;
+        expected_offset = segment.data_offset + segment.data_length;
+
+        if (segment.start_coding_pass == segment.end_coding_pass) {
+            continue;
+        }
+
+        J2kArithmeticDecoder decoder;
+        decoder.data = coded_data + segment.data_offset;
+        decoder.data_len = segment.data_length;
+        decoder.c = 0u;
+        decoder.a = 0u;
+        decoder.base_pointer = 0u;
+        decoder.shift_count = 0u;
+        arithmetic_initialize(decoder);
+
+        uchar zero_coded_epoch = uchar((segment.start_coding_pass + 2u) / 3u);
+        for (uint coding_pass = segment.start_coding_pass; coding_pass < segment.end_coding_pass; ++coding_pass) {
+            const uint current_bitplane = (coding_pass + 2u) / 3u;
+            const uint current_bit_position = bitplanes - 1u - current_bitplane;
+            const uint pass_type = coding_pass % 3u;
+
+            for (uint base_row = 0u; base_row < job.height; base_row += 4u) {
+                const uint stripe_end = min(base_row + 4u, job.height);
+                for (uint x = 0u; x < job.width; ++x) {
+                    const uint index_x = x + J2K_CLASSIC_PADDING;
+                    uint index_y = base_row + J2K_CLASSIC_PADDING;
+                    while (index_y < stripe_end + J2K_CLASSIC_PADDING) {
+                        const uint idx = coeff_index(padded_width, index_x, index_y);
+                        if (pass_type == 0u) {
+                            if (coeff_is_significant_dev(states, idx) == 0u &&
+                                coeff_is_zero_coded_dev(states, idx, zero_coded_epoch) == 0u) {
+                                const bool use_rl =
+                                    ((index_y - J2K_CLASSIC_PADDING) % 4u) == 0u &&
+                                    (job.height - (index_y - J2K_CLASSIC_PADDING)) >= 4u &&
+                                    neighborhood_states_plain_dev(states, padded_width, index_x, index_y) == 0u &&
+                                    neighborhood_states_plain_dev(states, padded_width, index_x, index_y + 1u) == 0u &&
+                                    neighborhood_states_plain_dev(states, padded_width, index_x, index_y + 2u) == 0u &&
+                                    neighborhood_states_plain_dev(states, padded_width, index_x, index_y + 3u) == 0u;
+
+                                uint bit = 0u;
+                                if (use_rl) {
+                                    bit = arithmetic_decode_bit(decoder, contexts, 17u);
+                                    if (bit == 0u) {
+                                        index_y += 4u;
+                                        continue;
+                                    }
+
+                                    uint num_zeroes = arithmetic_decode_bit(decoder, contexts, 18u);
+                                    num_zeroes = (num_zeroes << 1u) | arithmetic_decode_bit(decoder, contexts, 18u);
+                                    index_y += num_zeroes;
+                                } else {
+                                    const uchar ctx_label = zero_context_label(
+                                        neighborhood_states_plain_dev(states, padded_width, index_x, index_y),
+                                        job.sub_band_type
+                                    );
+                                    bit = arithmetic_decode_bit(decoder, contexts, uint(ctx_label));
+                                }
+
+                                if (bit == 1u) {
+                                    coeff_push_bit(coefficients, coeff_index(padded_width, index_x, index_y), 1u, current_bit_position);
+                                    decode_sign_bit_plain_dev(
+                                        decoder,
+                                        contexts,
+                                        states,
+                                        coefficients,
+                                        padded_width,
+                                        index_x,
+                                        index_y
+                                    );
+                                }
+                            }
+                        } else if (pass_type == 1u) {
+                            if (coeff_is_significant_dev(states, idx) == 0u &&
+                                neighborhood_states_plain_dev(states, padded_width, index_x, index_y) != 0u) {
+                                const uchar ctx_label = zero_context_label(
+                                    neighborhood_states_plain_dev(states, padded_width, index_x, index_y),
+                                    job.sub_band_type
+                                );
+                                const uint bit = arithmetic_decode_bit(decoder, contexts, uint(ctx_label));
+                                coeff_set_zero_coded_marker_dev(states, idx, zero_coded_epoch);
+                                if (bit == 1u) {
+                                    coeff_push_bit(coefficients, idx, 1u, current_bit_position);
+                                    decode_sign_bit_plain_dev(
+                                        decoder,
+                                        contexts,
+                                        states,
+                                        coefficients,
+                                        padded_width,
+                                        index_x,
+                                        index_y
+                                    );
+                                }
+                            }
+                        } else {
+                            if (coeff_is_significant_dev(states, idx) != 0u &&
+                                coeff_is_zero_coded_dev(states, idx, zero_coded_epoch) == 0u) {
+                                const uchar ctx_label = magnitude_refinement_context_plain_dev(
+                                    states,
+                                    padded_width,
+                                    index_x,
+                                    index_y
+                                );
+                                const uint bit = arithmetic_decode_bit(decoder, contexts, uint(ctx_label));
+                                if (bit == 1u) {
+                                    coeff_push_bit(coefficients, idx, 1u, current_bit_position);
+                                }
+                                coeff_set_magnitude_refined_dev(states, idx);
+                            }
+                        }
+
+                        index_y += 1u;
+                    }
+                }
+            }
+
+            if (pass_type == 0u) {
+                zero_coded_epoch = uchar(min(uint(zero_coded_epoch) + 1u, uint(J2K_STATE_MARKER_MASK)));
+            }
+        }
+    }
+
+    if (expected_start != job.number_of_coding_passes || expected_offset != job.coded_offset + job.coded_len) {
+        set_classic_status(status, J2K_CLASSIC_STATUS_UNSUPPORTED, 8u);
+        return false;
+    }
+
+    if (store_output) {
+        for (uint y = 0u; y < job.height; ++y) {
+            const uint output_row = job.output_offset + y * job.output_stride;
+            for (uint x = 0u; x < job.width; ++x) {
+                const uint coeff =
+                    coefficients[coeff_index(padded_width, x + J2K_CLASSIC_PADDING, y + J2K_CLASSIC_PADDING)];
+                int magnitude = int(coeff & 0x7FFFFFFFu);
+                if ((coeff & 0x80000000u) != 0u) {
+                    magnitude = -magnitude;
+                }
+                output[output_row + x] = float(magnitude) * job.dequantization_step;
+            }
+        }
+    }
+
+    return true;
+}
+
 inline void store_classic_job_plain_output_tg(
     J2kClassicCleanupBatchJob job,
     device uint *coefficients_scratch,
@@ -1508,5 +1730,40 @@ kernel void j2k_decode_classic_cleanup_plain_repeated_batched(
             output,
             lane
         );
+    }
+}
+
+kernel void j2k_decode_classic_cleanup_plain_dev_repeated_batched(
+    device const uchar *coded_data [[buffer(0)]],
+    device float *output [[buffer(1)]],
+    device const J2kClassicCleanupBatchJob *jobs [[buffer(2)]],
+    device const J2kClassicSegment *segments [[buffer(3)]],
+    device J2kClassicStatus *statuses [[buffer(4)]],
+    device uint *coefficients_scratch [[buffer(5)]],
+    device uchar *states_scratch [[buffer(6)]],
+    constant J2kClassicRepeatedBatchParams &repeated [[buffer(7)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= repeated.job_count || gid.y >= repeated.batch_count) {
+        return;
+    }
+    const uint linear_idx = gid.y * repeated.job_count + gid.x;
+    device J2kClassicStatus *status = statuses + linear_idx;
+    J2kClassicCleanupBatchJob job = jobs[gid.x];
+    job.output_offset += gid.y * repeated.output_plane_len;
+    set_classic_status(status, J2K_CLASSIC_STATUS_OK, 0u);
+    if (!decode_classic_job_plain_dev(
+            job,
+            coded_data,
+            segments,
+            coefficients_scratch,
+            linear_idx * J2K_CLASSIC_MAX_COEFF_COUNT,
+            states_scratch,
+            output,
+            false,
+            status
+        ) &&
+        status->code == J2K_CLASSIC_STATUS_OK) {
+        set_classic_status(status, J2K_CLASSIC_STATUS_FAIL, 0u);
     }
 }

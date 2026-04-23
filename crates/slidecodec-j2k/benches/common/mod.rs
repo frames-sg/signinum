@@ -199,6 +199,14 @@ pub(crate) fn slidecodec_metal_decode(bytes: &[u8], mode: DecodeMode) {
     black_box(surface);
 }
 
+pub(crate) fn slidecodec_auto_decode(bytes: &[u8], mode: DecodeMode) {
+    let mut decoder = MetalJ2kDecoder::new(bytes).expect("slidecodec auto decoder");
+    let surface = decoder
+        .decode_to_device(mode_format(mode), BackendRequest::Auto)
+        .expect("slidecodec auto decode");
+    black_box(surface);
+}
+
 pub(crate) fn slidecodec_metal_supports_decode(bytes: &[u8], mode: DecodeMode) -> bool {
     let mut decoder = MetalJ2kDecoder::new(bytes).expect("slidecodec metal decoder");
     decoder
@@ -216,6 +224,16 @@ pub(crate) fn slidecodec_metal_decode_region(bytes: &[u8], mode: DecodeMode, edg
     black_box(surface);
 }
 
+pub(crate) fn slidecodec_auto_decode_region(bytes: &[u8], mode: DecodeMode, edge: u32) {
+    let cpu_decoder = J2kDecoder::new(bytes).expect("slidecodec decoder");
+    let roi = centered_roi(cpu_decoder.info().dimensions, edge);
+    let mut decoder = MetalJ2kDecoder::new(bytes).expect("slidecodec auto decoder");
+    let surface = decoder
+        .decode_region_to_device(mode_format(mode), roi, BackendRequest::Auto)
+        .expect("slidecodec auto region decode");
+    black_box(surface);
+}
+
 pub(crate) fn slidecodec_metal_supports_region(bytes: &[u8], mode: DecodeMode, edge: u32) -> bool {
     let cpu_decoder = J2kDecoder::new(bytes).expect("slidecodec decoder");
     let roi = centered_roi(cpu_decoder.info().dimensions, edge);
@@ -230,6 +248,14 @@ pub(crate) fn slidecodec_metal_decode_scaled(bytes: &[u8], mode: DecodeMode, sca
     let surface = decoder
         .decode_scaled_to_device(mode_format(mode), scale, BackendRequest::Metal)
         .expect("slidecodec metal scaled decode");
+    black_box(surface);
+}
+
+pub(crate) fn slidecodec_auto_decode_scaled(bytes: &[u8], mode: DecodeMode, scale: Downscale) {
+    let mut decoder = MetalJ2kDecoder::new(bytes).expect("slidecodec auto decoder");
+    let surface = decoder
+        .decode_scaled_to_device(mode_format(mode), scale, BackendRequest::Auto)
+        .expect("slidecodec auto scaled decode");
     black_box(surface);
 }
 
@@ -266,6 +292,32 @@ pub(crate) fn slidecodec_metal_decode_tile_batch(bytes: &[u8], mode: DecodeMode,
             BackendRequest::Metal,
         )
         .expect("slidecodec metal tile decode");
+        black_box(surface);
+    }
+}
+
+pub(crate) fn slidecodec_auto_decode_tile_batch(bytes: &[u8], mode: DecodeMode, count: usize) {
+    #[cfg(target_os = "macos")]
+    if matches!(mode, DecodeMode::Gray8) {
+        let mut decoder = MetalJ2kDecoder::new(bytes).expect("slidecodec auto decoder");
+        let surfaces = decoder
+            .decode_repeated_grayscale_auto_to_device(mode_format(mode), count)
+            .expect("slidecodec auto repeated grayscale batch decode");
+        black_box(surfaces);
+        return;
+    }
+
+    let mut ctx = DecoderContext::<J2kContext>::new();
+    let mut pool = MetalJ2kScratchPool::new();
+    for _ in 0..count {
+        let surface = MetalJ2kCodec::decode_tile_to_device(
+            &mut ctx,
+            &mut pool,
+            bytes,
+            mode_format(mode),
+            BackendRequest::Auto,
+        )
+        .expect("slidecodec auto tile decode");
         black_box(surface);
     }
 }

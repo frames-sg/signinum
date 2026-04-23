@@ -127,6 +127,26 @@ fn full_irreversible_j2k_decode_to_metal_matches_host_decode() {
 }
 
 #[test]
+fn auto_full_grayscale_prefers_cpu_for_small_classic_fixture() {
+    let bytes = fixture_gray8();
+    let mut decoder = J2kDecoder::new(&bytes).expect("decoder");
+    let surface = decoder
+        .decode_to_device(PixelFormat::Gray8, BackendRequest::Auto)
+        .expect("auto decode");
+    assert_eq!(surface.backend_kind(), BackendKind::Cpu);
+}
+
+#[test]
+fn auto_full_htj2k_prefers_cpu_for_small_fixture() {
+    let bytes = fixture_ht_gray8();
+    let mut decoder = J2kDecoder::new(&bytes).expect("decoder");
+    let surface = decoder
+        .decode_to_device(PixelFormat::Gray8, BackendRequest::Auto)
+        .expect("auto decode");
+    assert_eq!(surface.backend_kind(), BackendKind::Cpu);
+}
+
+#[test]
 fn tile_full_grayscale_device_path_uses_metal_direct() {
     let bytes = fixture_gray8();
     let mut ctx = slidecodec_core::DecoderContext::<J2kContext>::new();

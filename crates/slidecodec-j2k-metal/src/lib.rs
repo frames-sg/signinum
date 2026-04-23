@@ -283,6 +283,53 @@ impl<'a> J2kDecoder<'a> {
     }
 
     #[cfg(target_os = "macos")]
+    fn decode_repeated_grayscale_cpu_to_surfaces(
+        &mut self,
+        fmt: PixelFormat,
+        count: usize,
+    ) -> Result<Vec<Surface>, Error> {
+        let mut surfaces = Vec::with_capacity(count);
+        for _ in 0..count {
+            surfaces.push(self.decode_to_cpu_surface(fmt)?);
+        }
+        Ok(surfaces)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn direct_plan_has_ht(plan: &J2kDirectGrayscalePlan) -> bool {
+        plan.steps.iter().any(|step| {
+            matches!(
+                step,
+                slidecodec_j2k_native::J2kDirectGrayscaleStep::HtSubBand(_)
+            )
+        })
+    }
+
+    #[cfg(target_os = "macos")]
+    fn should_auto_use_direct_for_full(plan: &J2kDirectGrayscalePlan, fmt: PixelFormat) -> bool {
+        let _ = (plan, fmt);
+        false
+    }
+
+    #[cfg(target_os = "macos")]
+    fn should_auto_use_direct_for_repeated(
+        plan: &J2kDirectGrayscalePlan,
+        fmt: PixelFormat,
+        count: usize,
+    ) -> bool {
+        if !matches!(fmt, PixelFormat::Gray8 | PixelFormat::Gray16) || count == 0 {
+            return false;
+        }
+
+        let max_dim = plan.dimensions.0.max(plan.dimensions.1);
+        if Self::direct_plan_has_ht(plan) {
+            max_dim >= 1024 && count >= 16
+        } else {
+            max_dim >= 1024 && count >= 64
+        }
+    }
+
+    #[cfg(target_os = "macos")]
     #[doc(hidden)]
     pub fn decode_repeated_grayscale_direct_to_device(
         &mut self,
@@ -310,6 +357,40 @@ impl<'a> J2kDecoder<'a> {
             return Ok(Vec::new());
         };
         crate::compute::execute_repeated_direct_grayscale_plan(plan, fmt, count)
+    }
+
+    #[cfg(target_os = "macos")]
+    #[doc(hidden)]
+    pub fn decode_repeated_grayscale_auto_to_device(
+        &mut self,
+        fmt: PixelFormat,
+        count: usize,
+    ) -> Result<Vec<Surface>, Error> {
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        self.ensure_native_image()?;
+        if self.native_direct_gray_plan.is_none() {
+            let (Some(image), native_context) =
+                (self.native_image.as_ref(), &mut self.native_context)
+            else {
+                return Err(Error::Decode(J2kError::Backend(
+                    "native image cache missing".to_string(),
+                )));
+            };
+            let Ok(plan) = image.build_direct_grayscale_plan_with_context(native_context) else {
+                return self.decode_repeated_grayscale_cpu_to_surfaces(fmt, count);
+            };
+            self.native_direct_gray_plan = Some(plan);
+        }
+        let Some(plan) = self.native_direct_gray_plan.as_ref() else {
+            return self.decode_repeated_grayscale_cpu_to_surfaces(fmt, count);
+        };
+        if Self::should_auto_use_direct_for_repeated(plan, fmt, count) {
+            crate::compute::execute_repeated_direct_grayscale_plan(plan, fmt, count)
+        } else {
+            self.decode_repeated_grayscale_cpu_to_surfaces(fmt, count)
+        }
     }
 
     fn decode_to_cpu_surface(&mut self, fmt: PixelFormat) -> Result<Surface, Error> {
@@ -369,11 +450,33 @@ impl<'a> J2kDecoder<'a> {
             BackendRequest::Auto => {
                 #[cfg(target_os = "macos")]
                 {
-                    if let Some(surface) = self.decode_direct_to_surface(fmt)? {
-                        Ok(surface)
-                    } else {
-                        self.decode_to_cpu_surface(fmt)
+                    if self.native_direct_gray_plan.is_none() {
+                        self.ensure_native_image()?;
+                        let (Some(image), native_context) =
+                            (self.native_image.as_ref(), &mut self.native_context)
+                        else {
+                            return Err(Error::Decode(J2kError::Backend(
+                                "native image cache missing".to_string(),
+                            )));
+                        };
+                        match image.build_direct_grayscale_plan_with_context(native_context) {
+                            Ok(plan) => self.native_direct_gray_plan = Some(plan),
+                            Err(error)
+                                if direct::is_unsupported_direct_plan_error(&error.to_string()) => {
+                            }
+                            Err(error) => {
+                                return Err(Error::Decode(J2kError::Backend(format!(
+                                    "failed to build J2K MetalDirect grayscale plan: {error}"
+                                ))));
+                            }
+                        }
                     }
+                    if let Some(plan) = self.native_direct_gray_plan.as_ref() {
+                        if Self::should_auto_use_direct_for_full(plan, fmt) {
+                            return crate::compute::execute_direct_grayscale_plan(plan, fmt);
+                        }
+                    }
+                    self.decode_to_cpu_surface(fmt)
                 }
                 #[cfg(not(target_os = "macos"))]
                 {

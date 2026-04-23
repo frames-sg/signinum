@@ -38,6 +38,19 @@ pub(crate) struct BenchInput {
 pub(crate) fn bench_inputs() -> Vec<BenchInput> {
     let mut inputs = vec![
         BenchInput {
+            name: "j2k_gray_1024",
+            bytes: classic_bench_bytes(
+                "j2k_gray_1024",
+                &gradient_u8(1024, 1024, 1),
+                1024,
+                1024,
+                DecodeMode::Gray8,
+            ),
+            dimensions: (1024, 1024),
+            mode: DecodeMode::Gray8,
+            is_ht: false,
+        },
+        BenchInput {
             name: "j2k_gray_512",
             bytes: classic_bench_bytes(
                 "j2k_gray_512",
@@ -75,6 +88,7 @@ pub(crate) fn bench_inputs() -> Vec<BenchInput> {
 
 fn ht_bench_input() -> Result<BenchInput, String> {
     let candidates = [
+        ("htj2k_gray_1024", 1024_u32, 1024_u32),
         ("htj2k_gray_512", 512_u32, 512_u32),
         ("htj2k_gray_256", 256_u32, 256_u32),
         ("htj2k_gray_128", 128_u32, 128_u32),
@@ -84,7 +98,7 @@ fn ht_bench_input() -> Result<BenchInput, String> {
 
     let mut last_error = None;
     for (name, width, height) in candidates {
-        let pixels = gradient_u8(width, height, 1);
+        let pixels = ht_bench_pixels(width, height, 1);
         match try_encode_ht(&pixels, width, height, 1, 8) {
             Ok(codestream) => {
                 return Ok(BenchInput {
@@ -100,6 +114,22 @@ fn ht_bench_input() -> Result<BenchInput, String> {
     }
 
     Err(last_error.unwrap_or_else(|| "no HTJ2K benchmark candidate succeeded".to_string()))
+}
+
+fn ht_bench_pixels(width: u32, height: u32, channels: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(width as usize * height as usize * channels);
+    let width_denom = width.saturating_sub(1).max(1);
+    let height_denom = height.saturating_sub(1).max(1);
+    for y in 0..height {
+        let y_base = (y * 29) / height_denom;
+        for x in 0..width {
+            let x_base = (x * 31) / width_denom;
+            for c in 0..channels {
+                out.push((x_base + y_base + c as u32 * 17) as u8);
+            }
+        }
+    }
+    out
 }
 
 pub(crate) fn slidecodec_inspect(bytes: &[u8]) {

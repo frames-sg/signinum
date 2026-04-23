@@ -32,6 +32,12 @@ struct J2kHtCleanupBatchJob {
     uint stripe_causal;
 };
 
+struct J2kHtRepeatedBatchParams {
+    uint job_count;
+    uint output_plane_len;
+    uint batch_count;
+};
+
 struct J2kHtStatus {
     uint code;
     uint detail;
@@ -1027,5 +1033,49 @@ kernel void j2k_decode_ht_cleanup_batched(
         uvlc_table0,
         uvlc_table1,
         status + gid
+    );
+}
+
+kernel void j2k_decode_ht_cleanup_repeated_batched(
+    device const uchar *coded_data [[buffer(0)]],
+    device uint *decoded_data [[buffer(1)]],
+    constant J2kHtCleanupBatchJob *jobs [[buffer(2)]],
+    constant J2kHtRepeatedBatchParams &repeated [[buffer(3)]],
+    constant ushort *vlc_table0 [[buffer(4)]],
+    constant ushort *vlc_table1 [[buffer(5)]],
+    constant ushort *uvlc_table0 [[buffer(6)]],
+    constant ushort *uvlc_table1 [[buffer(7)]],
+    device J2kHtStatus *status [[buffer(8)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= repeated.job_count || gid.y >= repeated.batch_count) {
+        return;
+    }
+
+    const constant J2kHtCleanupBatchJob &job = jobs[gid.x];
+
+    J2kHtCleanupParams params;
+    params.width = job.width;
+    params.height = job.height;
+    params.coded_len = job.coded_len;
+    params.cleanup_length = job.cleanup_length;
+    params.refinement_length = job.refinement_length;
+    params.missing_msbs = job.missing_msbs;
+    params.num_bitplanes = job.num_bitplanes;
+    params.number_of_coding_passes = job.number_of_coding_passes;
+    params.output_stride = job.output_stride;
+    params.output_offset = job.output_offset + gid.y * repeated.output_plane_len;
+    params.dequantization_step = job.dequantization_step;
+    params.stripe_causal = job.stripe_causal;
+
+    decode_ht_cleanup_impl(
+        coded_data + job.coded_offset,
+        decoded_data,
+        params,
+        vlc_table0,
+        vlc_table1,
+        uvlc_table0,
+        uvlc_table1,
+        status + gid.y * repeated.job_count + gid.x
     );
 }

@@ -15,6 +15,22 @@ struct J2kIdwtSingleDecompositionParams {
     uint hh_height;
 };
 
+struct J2kRepeatedIdwtSingleDecompositionParams {
+    uint x0;
+    uint y0;
+    uint width;
+    uint height;
+    uint ll_width;
+    uint ll_height;
+    uint hl_width;
+    uint hl_height;
+    uint lh_width;
+    uint lh_height;
+    uint hh_width;
+    uint hh_height;
+    uint batch_count;
+};
+
 struct J2kIdwtStatus {
     uint code;
     uint detail;
@@ -117,6 +133,45 @@ kernel void j2k_idwt_interleave(
     }
 }
 
+kernel void j2k_idwt_interleave_batched(
+    device const float *ll [[buffer(0)]],
+    device const float *hl [[buffer(1)]],
+    device const float *lh [[buffer(2)]],
+    device const float *hh [[buffer(3)]],
+    device float *out [[buffer(4)]],
+    constant J2kRepeatedIdwtSingleDecompositionParams &params [[buffer(5)]],
+    uint3 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= params.width || gid.y >= params.height || gid.z >= params.batch_count) {
+        return;
+    }
+
+    const uint global_x = params.x0 + gid.x;
+    const uint global_y = params.y0 + gid.y;
+    const uint low_x_parity = params.x0 & 1u;
+    const uint low_y_parity = params.y0 & 1u;
+    const bool low_x = (global_x & 1u) == low_x_parity;
+    const bool low_y = (global_y & 1u) == low_y_parity;
+    const uint band_x = low_x ? low_index(global_x, params.x0) : high_index(global_x, params.x0);
+    const uint band_y = low_y ? low_index(global_y, params.y0) : high_index(global_y, params.y0);
+    const uint out_plane_len = params.width * params.height;
+    const uint ll_plane_len = params.ll_width * params.ll_height;
+    const uint hl_plane_len = params.hl_width * params.hl_height;
+    const uint lh_plane_len = params.lh_width * params.lh_height;
+    const uint hh_plane_len = params.hh_width * params.hh_height;
+    const uint out_idx = gid.z * out_plane_len + gid.y * params.width + gid.x;
+
+    if (low_y && low_x) {
+        out[out_idx] = ll[gid.z * ll_plane_len + band_y * params.ll_width + band_x];
+    } else if (low_y) {
+        out[out_idx] = hl[gid.z * hl_plane_len + band_y * params.hl_width + band_x];
+    } else if (low_x) {
+        out[out_idx] = lh[gid.z * lh_plane_len + band_y * params.lh_width + band_x];
+    } else {
+        out[out_idx] = hh[gid.z * hh_plane_len + band_y * params.hh_width + band_x];
+    }
+}
+
 kernel void j2k_idwt_reversible53_horizontal_pass(
     device float *out [[buffer(0)]],
     constant J2kIdwtSingleDecompositionParams &params [[buffer(1)]],
@@ -127,6 +182,65 @@ kernel void j2k_idwt_reversible53_horizontal_pass(
     }
 
     device float *row_ptr = out + gid * params.width;
+
+    if (params.width == 1u) {
+        if ((params.x0 & 1u) != 0u) {
+            row_ptr[0] *= 0.5f;
+        }
+        return;
+    }
+
+    const uint first_even_x = params.x0 & 1u;
+    const uint first_odd_x = 1u - first_even_x;
+
+    if (first_even_x == 0u) {
+        const uint left = periodic_symmetric_extension_left_u32(0u, 1u);
+        const uint right = periodic_symmetric_extension_right_u32(0u, 1u, params.width);
+        row_ptr[0] = reversible53_predict(row_ptr[0], row_ptr[left], row_ptr[right]);
+    }
+
+    const uint even_middle_start = first_even_x == 0u ? 2u : 1u;
+    for (uint x = even_middle_start; x + 1u < params.width; x += 2u) {
+        row_ptr[x] = reversible53_predict(row_ptr[x], row_ptr[x - 1u], row_ptr[x + 1u]);
+    }
+
+    if (((params.width - 1u) & 1u) == first_even_x) {
+        const uint x = params.width - 1u;
+        const uint left = periodic_symmetric_extension_left_u32(x, 1u);
+        const uint right = periodic_symmetric_extension_right_u32(x, 1u, params.width);
+        row_ptr[x] = reversible53_predict(row_ptr[x], row_ptr[left], row_ptr[right]);
+    }
+
+    if (first_odd_x == 0u) {
+        const uint left = periodic_symmetric_extension_left_u32(0u, 1u);
+        const uint right = periodic_symmetric_extension_right_u32(0u, 1u, params.width);
+        row_ptr[0] = reversible53_update(row_ptr[0], row_ptr[left], row_ptr[right]);
+    }
+
+    const uint odd_middle_start = first_odd_x == 0u ? 2u : 1u;
+    for (uint x = odd_middle_start; x + 1u < params.width; x += 2u) {
+        row_ptr[x] = reversible53_update(row_ptr[x], row_ptr[x - 1u], row_ptr[x + 1u]);
+    }
+
+    if (((params.width - 1u) & 1u) == first_odd_x) {
+        const uint x = params.width - 1u;
+        const uint left = periodic_symmetric_extension_left_u32(x, 1u);
+        const uint right = periodic_symmetric_extension_right_u32(x, 1u, params.width);
+        row_ptr[x] = reversible53_update(row_ptr[x], row_ptr[left], row_ptr[right]);
+    }
+}
+
+kernel void j2k_idwt_reversible53_horizontal_pass_batched(
+    device float *out [[buffer(0)]],
+    constant J2kRepeatedIdwtSingleDecompositionParams &params [[buffer(1)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= params.height || gid.y >= params.batch_count) {
+        return;
+    }
+
+    const uint plane_len = params.width * params.height;
+    device float *row_ptr = out + gid.y * plane_len + gid.x * params.width;
 
     if (params.width == 1u) {
         if ((params.x0 & 1u) != 0u) {
@@ -213,6 +327,51 @@ kernel void j2k_idwt_reversible53_vertical_pass(
             out[idx],
             out[row_above * params.width + gid],
             out[row_below * params.width + gid]
+        );
+    }
+}
+
+kernel void j2k_idwt_reversible53_vertical_pass_batched(
+    device float *out [[buffer(0)]],
+    constant J2kRepeatedIdwtSingleDecompositionParams &params [[buffer(1)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= params.width || gid.y >= params.batch_count) {
+        return;
+    }
+
+    const uint plane_len = params.width * params.height;
+    device float *plane = out + gid.y * plane_len;
+
+    if (params.height == 1u) {
+        if ((params.y0 & 1u) != 0u) {
+            plane[gid.x] *= 0.5f;
+        }
+        return;
+    }
+
+    const uint first_even_y = params.y0 & 1u;
+    const uint first_odd_y = 1u - first_even_y;
+
+    for (uint row = first_even_y; row < params.height; row += 2u) {
+        const uint row_above = periodic_symmetric_extension_left_u32(row, 1u);
+        const uint row_below = periodic_symmetric_extension_right_u32(row, 1u, params.height);
+        const uint idx = row * params.width + gid.x;
+        plane[idx] = reversible53_predict(
+            plane[idx],
+            plane[row_above * params.width + gid.x],
+            plane[row_below * params.width + gid.x]
+        );
+    }
+
+    for (uint row = first_odd_y; row < params.height; row += 2u) {
+        const uint row_above = periodic_symmetric_extension_left_u32(row, 1u);
+        const uint row_below = periodic_symmetric_extension_right_u32(row, 1u, params.height);
+        const uint idx = row * params.width + gid.x;
+        plane[idx] = reversible53_update(
+            plane[idx],
+            plane[row_above * params.width + gid.x],
+            plane[row_below * params.width + gid.x]
         );
     }
 }

@@ -86,6 +86,7 @@ pub struct Surface {
     dimensions: (u32, u32),
     fmt: PixelFormat,
     pitch_bytes: usize,
+    byte_offset: usize,
     storage: Storage,
 }
 
@@ -96,11 +97,19 @@ impl Surface {
 
     pub fn as_bytes(&self) -> &[u8] {
         match &self.storage {
-            Storage::Host(bytes) => bytes,
+            Storage::Host(bytes) => {
+                let len = self.byte_len();
+                &bytes[self.byte_offset..self.byte_offset + len]
+            }
             #[cfg(target_os = "macos")]
             Storage::Metal(buffer) => {
                 let len = self.byte_len();
-                unsafe { core::slice::from_raw_parts(buffer.contents().cast::<u8>(), len) }
+                unsafe {
+                    core::slice::from_raw_parts(
+                        buffer.contents().cast::<u8>().add(self.byte_offset),
+                        len,
+                    )
+                }
             }
         }
     }
@@ -120,6 +129,24 @@ impl Surface {
             dimensions,
             fmt,
             pitch_bytes: dimensions.0 as usize * fmt.bytes_per_pixel(),
+            byte_offset: 0,
+            storage: Storage::Metal(buffer),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn from_metal_buffer_with_offset(
+        buffer: Buffer,
+        dimensions: (u32, u32),
+        fmt: PixelFormat,
+        byte_offset: usize,
+    ) -> Self {
+        Self {
+            backend: BackendKind::Metal,
+            dimensions,
+            fmt,
+            pitch_bytes: dimensions.0 as usize * fmt.bytes_per_pixel(),
+            byte_offset,
             storage: Storage::Metal(buffer),
         }
     }
@@ -777,6 +804,7 @@ fn upload_surface(
             dimensions,
             fmt,
             pitch_bytes,
+            byte_offset: 0,
             storage: Storage::Host(bytes),
         }),
         BackendRequest::Auto | BackendRequest::Metal => {
@@ -793,6 +821,7 @@ fn upload_surface(
                     dimensions,
                     fmt,
                     pitch_bytes,
+                    byte_offset: 0,
                     storage: Storage::Metal(buffer),
                 })
             }
@@ -804,6 +833,7 @@ fn upload_surface(
                         dimensions,
                         fmt,
                         pitch_bytes,
+                        byte_offset: 0,
                         storage: Storage::Host(bytes),
                     })
                 } else {

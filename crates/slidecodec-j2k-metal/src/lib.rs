@@ -18,7 +18,7 @@ use core::convert::Infallible;
 use std::{
     collections::hash_map::DefaultHasher,
     hash::{Hash, Hasher},
-    sync::{Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 use slidecodec_core::{
@@ -87,6 +87,7 @@ pub(crate) enum Storage {
 struct DirectGrayPlanCacheEntry {
     key: u64,
     plan: J2kDirectGrayscalePlan,
+    prepared: Arc<crate::compute::PreparedDirectGrayscalePlan>,
 }
 
 #[cfg(target_os = "macos")]
@@ -205,6 +206,8 @@ pub struct J2kDecoder<'a> {
     native_context: NativeDecoderContext<'a>,
     #[cfg(target_os = "macos")]
     native_direct_gray_plan: Option<J2kDirectGrayscalePlan>,
+    #[cfg(target_os = "macos")]
+    native_prepared_direct_gray_plan: Option<Arc<crate::compute::PreparedDirectGrayscalePlan>>,
 }
 
 impl<'a> J2kDecoder<'a> {
@@ -218,6 +221,8 @@ impl<'a> J2kDecoder<'a> {
             native_context: NativeDecoderContext::default(),
             #[cfg(target_os = "macos")]
             native_direct_gray_plan: None,
+            #[cfg(target_os = "macos")]
+            native_prepared_direct_gray_plan: None,
         })
     }
 
@@ -231,6 +236,8 @@ impl<'a> J2kDecoder<'a> {
             native_context: NativeDecoderContext::default(),
             #[cfg(target_os = "macos")]
             native_direct_gray_plan: None,
+            #[cfg(target_os = "macos")]
+            native_prepared_direct_gray_plan: None,
         })
     }
 
@@ -253,12 +260,13 @@ impl<'a> J2kDecoder<'a> {
     fn decode_direct_to_surface(&mut self, fmt: PixelFormat) -> Result<Option<Surface>, Error> {
         let cache_key = direct_gray_plan_cache_key(self.inner.bytes());
         if self.native_direct_gray_plan.is_none() {
-            if let Some(plan) = cached_global_direct_gray_plan(cache_key) {
+            if let Some((plan, prepared)) = cached_global_direct_gray_plan(cache_key) {
                 self.native_direct_gray_plan = Some(plan);
+                self.native_prepared_direct_gray_plan = Some(prepared);
             }
         }
-        self.ensure_native_image()?;
         if self.native_direct_gray_plan.is_none() {
+            self.ensure_native_image()?;
             let (Some(image), native_context) =
                 (self.native_image.as_ref(), &mut self.native_context)
             else {
@@ -278,8 +286,10 @@ impl<'a> J2kDecoder<'a> {
                     ))));
                 }
             };
-            store_global_direct_gray_plan(cache_key, &plan);
+            let prepared = Arc::new(crate::compute::prepare_direct_grayscale_plan(&plan)?);
+            store_global_direct_gray_plan(cache_key, &plan, prepared.clone());
             self.native_direct_gray_plan = Some(plan);
+            self.native_prepared_direct_gray_plan = Some(prepared);
         }
 
         let Some(plan) = self.native_direct_gray_plan.as_ref() else {
@@ -291,8 +301,13 @@ impl<'a> J2kDecoder<'a> {
     }
 
     #[cfg(target_os = "macos")]
-    fn seed_direct_gray_plan(&mut self, plan: J2kDirectGrayscalePlan) {
+    fn seed_direct_gray_plan(
+        &mut self,
+        plan: J2kDirectGrayscalePlan,
+        prepared: Arc<crate::compute::PreparedDirectGrayscalePlan>,
+    ) {
         self.native_direct_gray_plan = Some(plan);
+        self.native_prepared_direct_gray_plan = Some(prepared);
     }
 
     #[cfg(target_os = "macos")]
@@ -353,12 +368,13 @@ impl<'a> J2kDecoder<'a> {
         }
         if self.native_direct_gray_plan.is_none() {
             let cache_key = direct_gray_plan_cache_key(self.inner.bytes());
-            if let Some(plan) = cached_global_direct_gray_plan(cache_key) {
+            if let Some((plan, prepared)) = cached_global_direct_gray_plan(cache_key) {
                 self.native_direct_gray_plan = Some(plan);
+                self.native_prepared_direct_gray_plan = Some(prepared);
             }
         }
-        self.ensure_native_image()?;
         if self.native_direct_gray_plan.is_none() {
+            self.ensure_native_image()?;
             let (Some(image), native_context) =
                 (self.native_image.as_ref(), &mut self.native_context)
             else {
@@ -370,13 +386,15 @@ impl<'a> J2kDecoder<'a> {
             let plan = image
                 .build_direct_grayscale_plan_with_context(native_context)
                 .map_err(|error| J2kError::Backend(error.to_string()))?;
-            store_global_direct_gray_plan(cache_key, &plan);
+            let prepared = Arc::new(crate::compute::prepare_direct_grayscale_plan(&plan)?);
+            store_global_direct_gray_plan(cache_key, &plan, prepared.clone());
             self.native_direct_gray_plan = Some(plan);
+            self.native_prepared_direct_gray_plan = Some(prepared);
         }
-        let Some(plan) = self.native_direct_gray_plan.as_ref() else {
+        let Some(plan) = self.native_prepared_direct_gray_plan.as_ref() else {
             return Ok(Vec::new());
         };
-        crate::compute::execute_repeated_direct_grayscale_plan(plan, fmt, count)
+        crate::compute::execute_repeated_prepared_direct_grayscale_plan(plan, fmt, count)
     }
 
     #[cfg(target_os = "macos")]
@@ -398,12 +416,13 @@ impl<'a> J2kDecoder<'a> {
         }
         if self.native_direct_gray_plan.is_none() {
             let cache_key = direct_gray_plan_cache_key(self.inner.bytes());
-            if let Some(plan) = cached_global_direct_gray_plan(cache_key) {
+            if let Some((plan, prepared)) = cached_global_direct_gray_plan(cache_key) {
                 self.native_direct_gray_plan = Some(plan);
+                self.native_prepared_direct_gray_plan = Some(prepared);
             }
         }
-        self.ensure_native_image()?;
         if self.native_direct_gray_plan.is_none() {
+            self.ensure_native_image()?;
             let (Some(image), native_context) =
                 (self.native_image.as_ref(), &mut self.native_context)
             else {
@@ -415,14 +434,19 @@ impl<'a> J2kDecoder<'a> {
             let Ok(plan) = image.build_direct_grayscale_plan_with_context(native_context) else {
                 return self.decode_repeated_grayscale_cpu_to_surfaces(fmt, count);
             };
-            store_global_direct_gray_plan(cache_key, &plan);
+            let prepared = Arc::new(crate::compute::prepare_direct_grayscale_plan(&plan)?);
+            store_global_direct_gray_plan(cache_key, &plan, prepared.clone());
             self.native_direct_gray_plan = Some(plan);
+            self.native_prepared_direct_gray_plan = Some(prepared);
         }
         let Some(plan) = self.native_direct_gray_plan.as_ref() else {
             return self.decode_repeated_grayscale_cpu_to_surfaces(fmt, count);
         };
         if Self::should_auto_use_direct_for_repeated(plan, fmt, count) {
-            crate::compute::execute_repeated_direct_grayscale_plan(plan, fmt, count)
+            let Some(prepared) = self.native_prepared_direct_gray_plan.as_ref() else {
+                return self.decode_repeated_grayscale_cpu_to_surfaces(fmt, count);
+            };
+            crate::compute::execute_repeated_prepared_direct_grayscale_plan(prepared, fmt, count)
         } else {
             self.decode_repeated_grayscale_cpu_to_surfaces(fmt, count)
         }
@@ -585,21 +609,31 @@ fn direct_gray_plan_cache_key(bytes: &[u8]) -> u64 {
 }
 
 #[cfg(target_os = "macos")]
-fn cached_global_direct_gray_plan(key: u64) -> Option<J2kDirectGrayscalePlan> {
+fn cached_global_direct_gray_plan(
+    key: u64,
+) -> Option<(
+    J2kDirectGrayscalePlan,
+    Arc<crate::compute::PreparedDirectGrayscalePlan>,
+)> {
     let cache = DIRECT_GRAY_PLAN_CACHE.get_or_init(|| Mutex::new(None));
     let guard = cache.lock().ok()?;
     guard
         .as_ref()
-        .and_then(|entry| (entry.key == key).then(|| entry.plan.clone()))
+        .and_then(|entry| (entry.key == key).then(|| (entry.plan.clone(), entry.prepared.clone())))
 }
 
 #[cfg(target_os = "macos")]
-fn store_global_direct_gray_plan(key: u64, plan: &J2kDirectGrayscalePlan) {
+fn store_global_direct_gray_plan(
+    key: u64,
+    plan: &J2kDirectGrayscalePlan,
+    prepared: Arc<crate::compute::PreparedDirectGrayscalePlan>,
+) {
     let cache = DIRECT_GRAY_PLAN_CACHE.get_or_init(|| Mutex::new(None));
     if let Ok(mut guard) = cache.lock() {
         *guard = Some(DirectGrayPlanCacheEntry {
             key,
             plan: plan.clone(),
+            prepared,
         });
     }
 }
@@ -798,7 +832,8 @@ impl TileBatchDecodeSubmit for Codec {
         #[cfg(target_os = "macos")]
         if let Some(key) = cache_key {
             if let Some(plan) = ctx.codec_mut().cached_direct_gray_plan(key) {
-                decoder.seed_direct_gray_plan(plan);
+                let prepared = Arc::new(crate::compute::prepare_direct_grayscale_plan(&plan)?);
+                decoder.seed_direct_gray_plan(plan, prepared);
             }
         }
         let submitted = <J2kDecoder<'_> as ImageDecodeSubmit<'_>>::submit_to_device(

@@ -2,8 +2,9 @@
 
 #[cfg(target_os = "macos")]
 use std::{
+    collections::HashMap,
     mem::{size_of, size_of_val},
-    sync::{Arc, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 #[cfg(target_os = "macos")]
@@ -18,8 +19,8 @@ use slidecodec_j2k_native::{
     ht_uvlc_table0, ht_uvlc_table1, ht_vlc_table0, ht_vlc_table1, ColorSpace as NativeColorSpace,
     DecodedComponents as NativeDecodedComponents, HtCodeBlockDecodeJob, HtSubBandDecodeJob,
     J2kCodeBlockDecodeJob, J2kDirectBandId, J2kDirectGrayscalePlan, J2kDirectGrayscaleStep,
-    J2kInverseMctJob, J2kSingleDecompositionIdwtJob, J2kStoreComponentJob, J2kSubBandDecodeJob,
-    J2kWaveletTransform,
+    J2kDirectIdwtStep, J2kDirectStoreStep, J2kInverseMctJob, J2kSingleDecompositionIdwtJob,
+    J2kStoreComponentJob, J2kSubBandDecodeJob, J2kWaveletTransform,
 };
 #[cfg(test)]
 use slidecodec_j2k_native::{
@@ -554,6 +555,7 @@ struct MetalRuntime {
     ht_vlc_table1: Buffer,
     ht_uvlc_table0: Buffer,
     ht_uvlc_table1: Buffer,
+    private_buffer_pool: Mutex<HashMap<usize, Vec<Buffer>>>,
 }
 
 #[cfg(target_os = "macos")]
@@ -681,7 +683,32 @@ impl MetalRuntime {
                 size_of_val(ht_uvlc_table1()) as u64,
                 MTLResourceOptions::StorageModeShared,
             ),
+            private_buffer_pool: Mutex::new(HashMap::new()),
         })
+    }
+
+    fn take_private_buffer(&self, bytes: usize) -> Buffer {
+        let bytes = bytes.max(1);
+        let mut pool = self
+            .private_buffer_pool
+            .lock()
+            .expect("private buffer pool lock not poisoned");
+        if let Some(buffer) = pool.get_mut(&bytes).and_then(Vec::pop) {
+            buffer
+        } else {
+            self.device
+                .new_buffer(bytes as u64, MTLResourceOptions::StorageModePrivate)
+        }
+    }
+
+    fn recycle_private_buffer(&self, bytes: usize, buffer: Buffer) {
+        let bytes = bytes.max(1);
+        self.private_buffer_pool
+            .lock()
+            .expect("private buffer pool lock not poisoned")
+            .entry(bytes)
+            .or_default()
+            .push(buffer);
     }
 }
 
@@ -703,12 +730,56 @@ enum DirectStatusCheck {
 }
 
 #[cfg(target_os = "macos")]
+struct DirectScratchBuffer {
+    bytes: usize,
+    buffer: Buffer,
+}
+
+#[cfg(target_os = "macos")]
 #[allow(dead_code)]
 enum DirectHostRetention {
     Bytes(Vec<u8>),
     ClassicJobs(Vec<J2kClassicCleanupBatchJob>),
     ClassicSegments(Vec<J2kClassicSegment>),
     HtJobs(Vec<J2kHtCleanupBatchJob>),
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone)]
+pub(crate) struct PreparedDirectGrayscalePlan {
+    dimensions: (u32, u32),
+    bit_depth: u8,
+    steps: Vec<PreparedDirectGrayscaleStep>,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone)]
+enum PreparedDirectGrayscaleStep {
+    ClassicSubBand(PreparedClassicSubBand),
+    HtSubBand(PreparedHtSubBand),
+    Idwt(J2kDirectIdwtStep),
+    Store(J2kDirectStoreStep),
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone)]
+struct PreparedClassicSubBand {
+    band_id: J2kDirectBandId,
+    width: u32,
+    height: u32,
+    coded_data: Vec<u8>,
+    jobs: Vec<J2kClassicCleanupBatchJob>,
+    segments: Vec<J2kClassicSegment>,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone)]
+struct PreparedHtSubBand {
+    band_id: J2kDirectBandId,
+    width: u32,
+    height: u32,
+    coded_data: Vec<u8>,
+    jobs: Vec<J2kHtCleanupBatchJob>,
 }
 
 #[cfg(target_os = "macos")]
@@ -911,6 +982,158 @@ pub(crate) fn pack_gray_plane_to_surface(
 }
 
 #[cfg(target_os = "macos")]
+fn prepare_classic_sub_band(
+    job: &slidecodec_j2k_native::J2kOwnedSubBandPlan,
+) -> Result<PreparedClassicSubBand, Error> {
+    let mut jobs = Vec::with_capacity(job.jobs.len());
+    let mut coded_data = Vec::new();
+    let mut segments = Vec::new();
+
+    for block in &job.jobs {
+        let coded_offset = u32::try_from(coded_data.len()).map_err(|_| Error::MetalKernel {
+            message: "classic J2K MetalDirect coded payload exceeds u32".to_string(),
+        })?;
+        coded_data.extend_from_slice(&block.data);
+        let segment_offset = u32::try_from(segments.len()).map_err(|_| Error::MetalKernel {
+            message: "classic J2K MetalDirect segment table exceeds u32".to_string(),
+        })?;
+        for segment in &block.segments {
+            let data_offset = coded_offset
+                .checked_add(segment.data_offset)
+                .ok_or_else(|| Error::MetalKernel {
+                    message: "classic J2K MetalDirect segment offset overflow".to_string(),
+                })?;
+            segments.push(J2kClassicSegment {
+                data_offset,
+                data_length: segment.data_length,
+                start_coding_pass: u32::from(segment.start_coding_pass),
+                end_coding_pass: u32::from(segment.end_coding_pass),
+                use_arithmetic: u32::from(segment.use_arithmetic),
+            });
+        }
+        jobs.push(J2kClassicCleanupBatchJob {
+            coded_offset,
+            coded_len: u32::try_from(block.data.len()).map_err(|_| Error::MetalKernel {
+                message: "classic J2K MetalDirect coded payload exceeds u32".to_string(),
+            })?,
+            segment_offset,
+            segment_count: u32::try_from(block.segments.len()).map_err(|_| Error::MetalKernel {
+                message: "classic J2K MetalDirect segment count exceeds u32".to_string(),
+            })?,
+            width: block.width,
+            height: block.height,
+            output_stride: job.width,
+            output_offset: block
+                .output_y
+                .checked_mul(job.width)
+                .and_then(|row| row.checked_add(block.output_x))
+                .ok_or_else(|| Error::MetalKernel {
+                    message: "classic J2K MetalDirect output offset overflow".to_string(),
+                })?,
+            missing_msbs: u32::from(block.missing_bit_planes),
+            total_bitplanes: u32::from(block.total_bitplanes),
+            number_of_coding_passes: u32::from(block.number_of_coding_passes),
+            sub_band_type: match block.sub_band_type {
+                slidecodec_j2k_native::J2kSubBandType::LowLow => 0,
+                slidecodec_j2k_native::J2kSubBandType::HighLow => 1,
+                slidecodec_j2k_native::J2kSubBandType::LowHigh => 2,
+                slidecodec_j2k_native::J2kSubBandType::HighHigh => 3,
+            },
+            style_flags: classic_style_flags(block.style),
+            strict: u32::from(block.strict),
+            dequantization_step: block.dequantization_step,
+        });
+    }
+
+    Ok(PreparedClassicSubBand {
+        band_id: job.band_id,
+        width: job.width,
+        height: job.height,
+        coded_data,
+        jobs,
+        segments,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn prepare_ht_sub_band(
+    job: &slidecodec_j2k_native::HtOwnedSubBandPlan,
+) -> Result<PreparedHtSubBand, Error> {
+    let mut jobs = Vec::with_capacity(job.jobs.len());
+    let mut coded_data = Vec::new();
+    for block in &job.jobs {
+        let coded_offset = u32::try_from(coded_data.len()).map_err(|_| Error::MetalKernel {
+            message: "HTJ2K MetalDirect coded payload exceeds u32".to_string(),
+        })?;
+        coded_data.extend_from_slice(&block.data);
+        jobs.push(J2kHtCleanupBatchJob {
+            coded_offset,
+            width: block.width,
+            height: block.height,
+            coded_len: u32::try_from(block.data.len()).map_err(|_| Error::MetalKernel {
+                message: "HTJ2K MetalDirect coded payload exceeds u32".to_string(),
+            })?,
+            cleanup_length: block.cleanup_length,
+            refinement_length: block.refinement_length,
+            missing_msbs: u32::from(block.missing_bit_planes),
+            num_bitplanes: u32::from(block.num_bitplanes),
+            number_of_coding_passes: u32::from(block.number_of_coding_passes),
+            output_stride: job.width,
+            output_offset: block
+                .output_y
+                .checked_mul(job.width)
+                .and_then(|row| row.checked_add(block.output_x))
+                .ok_or_else(|| Error::MetalKernel {
+                    message: "HTJ2K MetalDirect output offset overflow".to_string(),
+                })?,
+            dequantization_step: block.dequantization_step,
+            stripe_causal: u32::from(block.stripe_causal),
+        });
+    }
+
+    Ok(PreparedHtSubBand {
+        band_id: job.band_id,
+        width: job.width,
+        height: job.height,
+        coded_data,
+        jobs,
+    })
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn prepare_direct_grayscale_plan(
+    plan: &J2kDirectGrayscalePlan,
+) -> Result<PreparedDirectGrayscalePlan, Error> {
+    let mut steps = Vec::with_capacity(plan.steps.len());
+    for step in &plan.steps {
+        match step {
+            J2kDirectGrayscaleStep::ClassicSubBand(sub_band) => {
+                steps.push(PreparedDirectGrayscaleStep::ClassicSubBand(
+                    prepare_classic_sub_band(sub_band)?,
+                ));
+            }
+            J2kDirectGrayscaleStep::HtSubBand(sub_band) => {
+                steps.push(PreparedDirectGrayscaleStep::HtSubBand(prepare_ht_sub_band(
+                    sub_band,
+                )?));
+            }
+            J2kDirectGrayscaleStep::Idwt(idwt) => {
+                steps.push(PreparedDirectGrayscaleStep::Idwt(*idwt));
+            }
+            J2kDirectGrayscaleStep::Store(store) => {
+                steps.push(PreparedDirectGrayscaleStep::Store(*store));
+            }
+        }
+    }
+    Ok(PreparedDirectGrayscalePlan {
+        dimensions: plan.dimensions,
+        bit_depth: plan.bit_depth,
+        steps,
+    })
+}
+
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
 fn encode_direct_grayscale_plan_in_command_buffer(
     runtime: &MetalRuntime,
     command_buffer: &CommandBufferRef,
@@ -919,6 +1142,7 @@ fn encode_direct_grayscale_plan_in_command_buffer(
     retained_buffers: &mut Vec<Buffer>,
     retained_host_data: &mut Vec<DirectHostRetention>,
     status_checks: &mut Vec<DirectStatusCheck>,
+    scratch_buffers: &mut Vec<DirectScratchBuffer>,
 ) -> Result<Surface, Error> {
     let mut bands: Vec<(J2kDirectBandId, Buffer)> = Vec::new();
     let mut final_surface = None;
@@ -926,8 +1150,8 @@ fn encode_direct_grayscale_plan_in_command_buffer(
     for step in &plan.steps {
         match step {
             J2kDirectGrayscaleStep::ClassicSubBand(sub_band) => {
-                let output = alloc_f32_buffer(
-                    &runtime.device,
+                let output = take_f32_scratch_buffer(
+                    runtime,
                     sub_band.width as usize * sub_band.height as usize,
                 );
                 let (host_data, buffers, status_check) =
@@ -935,16 +1159,18 @@ fn encode_direct_grayscale_plan_in_command_buffer(
                         runtime,
                         command_buffer,
                         sub_band,
-                        &output,
+                        &output.buffer,
+                        scratch_buffers,
                     )?;
                 retained_host_data.extend(host_data);
                 retained_buffers.extend(buffers);
                 status_checks.push(status_check);
-                bands.push((sub_band.band_id, output));
+                bands.push((sub_band.band_id, output.buffer.clone()));
+                scratch_buffers.push(output);
             }
             J2kDirectGrayscaleStep::HtSubBand(sub_band) => {
-                let output = alloc_f32_buffer(
-                    &runtime.device,
+                let output = take_f32_scratch_buffer(
+                    runtime,
                     sub_band.width as usize * sub_band.height as usize,
                 );
                 let (host_data, buffers, status_check) =
@@ -952,12 +1178,13 @@ fn encode_direct_grayscale_plan_in_command_buffer(
                         runtime,
                         command_buffer,
                         sub_band,
-                        &output,
+                        &output.buffer,
                     )?;
                 retained_host_data.extend(host_data);
                 retained_buffers.extend(buffers);
                 status_checks.push(status_check);
-                bands.push((sub_band.band_id, output));
+                bands.push((sub_band.band_id, output.buffer.clone()));
+                scratch_buffers.push(output);
             }
             J2kDirectGrayscaleStep::Idwt(idwt) => {
                 let ll = lookup_direct_band(&bands, idwt.ll_band_id, idwt.ll)?;
@@ -978,8 +1205,8 @@ fn encode_direct_grayscale_plan_in_command_buffer(
                     hh_width: idwt.hh.width(),
                     hh_height: idwt.hh.height(),
                 };
-                let output = alloc_f32_buffer(
-                    &runtime.device,
+                let output = take_f32_scratch_buffer(
+                    runtime,
                     idwt.rect.width() as usize * idwt.rect.height() as usize,
                 );
                 match idwt.transform {
@@ -992,7 +1219,7 @@ fn encode_direct_grayscale_plan_in_command_buffer(
                             &lh,
                             &hh,
                             params,
-                            &output,
+                            &output.buffer,
                         );
                     }
                     J2kWaveletTransform::Irreversible97 => {
@@ -1005,17 +1232,18 @@ fn encode_direct_grayscale_plan_in_command_buffer(
                                 &lh,
                                 &hh,
                                 params,
-                                &output,
+                                &output.buffer,
                             );
                         status_checks.push(status_check);
                     }
                 }
-                bands.push((idwt.output_band_id, output));
+                bands.push((idwt.output_band_id, output.buffer.clone()));
+                scratch_buffers.push(output);
             }
             J2kDirectGrayscaleStep::Store(store) => {
                 let input = lookup_direct_band(&bands, store.input_band_id, store.input_rect)?;
-                let output = alloc_f32_buffer(
-                    &runtime.device,
+                let output = take_f32_scratch_buffer(
+                    runtime,
                     store.output_width as usize * store.output_height as usize,
                 );
                 let params = J2kStoreParams {
@@ -1033,19 +1261,20 @@ fn encode_direct_grayscale_plan_in_command_buffer(
                     runtime,
                     command_buffer,
                     &input,
-                    &output,
+                    &output.buffer,
                     params,
                 );
-                retained_buffers.push(output.clone());
+                retained_buffers.push(output.buffer.clone());
 
                 final_surface = Some(encode_gray_plane_to_surface_in_command_buffer(
                     runtime,
                     command_buffer,
-                    &output,
+                    &output.buffer,
                     plan.dimensions,
                     plan.bit_depth,
                     fmt,
                 )?);
+                scratch_buffers.push(output);
             }
         }
     }
@@ -1067,6 +1296,7 @@ pub(crate) fn execute_direct_grayscale_plan(
         let mut retained_buffers = Vec::new();
         let mut retained_host_data = Vec::new();
         let mut status_checks = Vec::new();
+        let mut scratch_buffers = Vec::new();
         let surface = encode_direct_grayscale_plan_in_command_buffer(
             runtime,
             command_buffer,
@@ -1075,6 +1305,7 @@ pub(crate) fn execute_direct_grayscale_plan(
             &mut retained_buffers,
             &mut retained_host_data,
             &mut status_checks,
+            &mut scratch_buffers,
         )?;
         command_buffer.commit();
         command_buffer.wait_until_completed();
@@ -1083,13 +1314,14 @@ pub(crate) fn execute_direct_grayscale_plan(
         }
         drop(retained_buffers);
         drop(retained_host_data);
+        recycle_scratch_buffers(runtime, scratch_buffers);
         Ok(surface)
     })
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) fn execute_repeated_direct_grayscale_plan(
-    plan: &J2kDirectGrayscalePlan,
+pub(crate) fn execute_repeated_prepared_direct_grayscale_plan(
+    plan: &PreparedDirectGrayscalePlan,
     fmt: PixelFormat,
     count: usize,
 ) -> Result<Vec<Surface>, Error> {
@@ -1098,6 +1330,7 @@ pub(crate) fn execute_repeated_direct_grayscale_plan(
         let mut retained_buffers = Vec::new();
         let mut retained_host_data = Vec::new();
         let mut status_checks = Vec::new();
+        let mut scratch_buffers = Vec::new();
         let surfaces = encode_repeated_direct_grayscale_plan_in_command_buffer(
             runtime,
             command_buffer,
@@ -1107,6 +1340,7 @@ pub(crate) fn execute_repeated_direct_grayscale_plan(
             &mut retained_buffers,
             &mut retained_host_data,
             &mut status_checks,
+            &mut scratch_buffers,
         )?;
         command_buffer.commit();
         command_buffer.wait_until_completed();
@@ -1115,6 +1349,7 @@ pub(crate) fn execute_repeated_direct_grayscale_plan(
         }
         drop(retained_buffers);
         drop(retained_host_data);
+        recycle_scratch_buffers(runtime, scratch_buffers);
         Ok(surfaces)
     })
 }
@@ -1150,12 +1385,13 @@ fn lookup_direct_band_slice(
 fn encode_repeated_direct_grayscale_plan_in_command_buffer(
     runtime: &MetalRuntime,
     command_buffer: &CommandBufferRef,
-    plan: &J2kDirectGrayscalePlan,
+    plan: &PreparedDirectGrayscalePlan,
     fmt: PixelFormat,
     count: usize,
     retained_buffers: &mut Vec<Buffer>,
     retained_host_data: &mut Vec<DirectHostRetention>,
     status_checks: &mut Vec<DirectStatusCheck>,
+    scratch_buffers: &mut Vec<DirectScratchBuffer>,
 ) -> Result<Vec<Surface>, Error> {
     let mut band_sets = vec![Vec::<DirectBandSlice>::new(); count];
     let mut surfaces = Vec::with_capacity(count);
@@ -1163,16 +1399,17 @@ fn encode_repeated_direct_grayscale_plan_in_command_buffer(
 
     for step in &plan.steps {
         match step {
-            J2kDirectGrayscaleStep::ClassicSubBand(sub_band) => {
+            PreparedDirectGrayscaleStep::ClassicSubBand(sub_band) => {
                 let per_instance_len = sub_band.width as usize * sub_band.height as usize;
-                let output = alloc_f32_buffer(&runtime.device, per_instance_len * count);
+                let output = take_f32_scratch_buffer(runtime, per_instance_len * count);
                 let (host_data, buffers, status_check) =
                     encode_repeated_classic_sub_band_to_buffer_in_command_buffer(
                         runtime,
                         command_buffer,
                         sub_band,
                         count,
-                        &output,
+                        &output.buffer,
+                        scratch_buffers,
                     )?;
                 retained_host_data.extend(host_data);
                 retained_buffers.extend(buffers);
@@ -1181,21 +1418,22 @@ fn encode_repeated_direct_grayscale_plan_in_command_buffer(
                 for (instance_idx, bands) in band_sets.iter_mut().enumerate() {
                     bands.push(DirectBandSlice {
                         band_id: sub_band.band_id,
-                        buffer: output.clone(),
+                        buffer: output.buffer.clone(),
                         offset_bytes: instance_idx * stride_bytes,
                     });
                 }
+                scratch_buffers.push(output);
             }
-            J2kDirectGrayscaleStep::HtSubBand(sub_band) => {
+            PreparedDirectGrayscaleStep::HtSubBand(sub_band) => {
                 let per_instance_len = sub_band.width as usize * sub_band.height as usize;
-                let output = alloc_f32_buffer(&runtime.device, per_instance_len * count);
+                let output = take_f32_scratch_buffer(runtime, per_instance_len * count);
                 let (host_data, buffers, status_check) =
                     encode_repeated_ht_sub_band_to_buffer_in_command_buffer(
                         runtime,
                         command_buffer,
                         sub_band,
                         count,
-                        &output,
+                        &output.buffer,
                     )?;
                 retained_host_data.extend(host_data);
                 retained_buffers.extend(buffers);
@@ -1204,12 +1442,13 @@ fn encode_repeated_direct_grayscale_plan_in_command_buffer(
                 for (instance_idx, bands) in band_sets.iter_mut().enumerate() {
                     bands.push(DirectBandSlice {
                         band_id: sub_band.band_id,
-                        buffer: output.clone(),
+                        buffer: output.buffer.clone(),
                         offset_bytes: instance_idx * stride_bytes,
                     });
                 }
+                scratch_buffers.push(output);
             }
-            J2kDirectGrayscaleStep::Idwt(idwt) => {
+            PreparedDirectGrayscaleStep::Idwt(idwt) => {
                 let params = J2kIdwtSingleDecompositionParams {
                     x0: idwt.rect.x0,
                     y0: idwt.rect.y0,
@@ -1236,7 +1475,7 @@ fn encode_repeated_direct_grayscale_plan_in_command_buffer(
                             lookup_direct_band_slice(&band_sets[0], idwt.hh_band_id, idwt.hh)?;
                         let per_instance_len =
                             idwt.rect.width() as usize * idwt.rect.height() as usize;
-                        let output = alloc_f32_buffer(&runtime.device, per_instance_len * count);
+                        let output = take_f32_scratch_buffer(runtime, per_instance_len * count);
                         dispatch_reversible53_repeated_buffers_in_command_buffer(
                             runtime,
                             command_buffer,
@@ -1265,16 +1504,17 @@ fn encode_repeated_direct_grayscale_plan_in_command_buffer(
                                     }
                                 })?,
                             },
-                            &output,
+                            &output.buffer,
                         );
                         let stride_bytes = per_instance_len * size_of::<f32>();
                         for (instance_idx, bands) in band_sets.iter_mut().enumerate() {
                             bands.push(DirectBandSlice {
                                 band_id: idwt.output_band_id,
-                                buffer: output.clone(),
+                                buffer: output.buffer.clone(),
                                 offset_bytes: instance_idx * stride_bytes,
                             });
                         }
+                        scratch_buffers.push(output);
                     }
                     _ => {
                         stacked_outputs = false;
@@ -1287,8 +1527,8 @@ fn encode_repeated_direct_grayscale_plan_in_command_buffer(
                                 lookup_direct_band_slice(bands, idwt.lh_band_id, idwt.lh)?;
                             let (hh, hh_offset) =
                                 lookup_direct_band_slice(bands, idwt.hh_band_id, idwt.hh)?;
-                            let output = alloc_f32_buffer(
-                                &runtime.device,
+                            let output = take_f32_scratch_buffer(
+                                runtime,
                                 idwt.rect.width() as usize * idwt.rect.height() as usize,
                             );
                             match idwt.transform {
@@ -1305,7 +1545,7 @@ fn encode_repeated_direct_grayscale_plan_in_command_buffer(
                                         &hh,
                                         hh_offset,
                                         params,
-                                        &output,
+                                        &output.buffer,
                                         0,
                                     );
                                 }
@@ -1322,21 +1562,22 @@ fn encode_repeated_direct_grayscale_plan_in_command_buffer(
                                         &hh,
                                         hh_offset,
                                         params,
-                                        &output,
+                                        &output.buffer,
                                         0,
                                     ),
                                 ),
                             }
                             bands.push(DirectBandSlice {
                                 band_id: idwt.output_band_id,
-                                buffer: output,
+                                buffer: output.buffer.clone(),
                                 offset_bytes: 0,
                             });
+                            scratch_buffers.push(output);
                         }
                     }
                 }
             }
-            J2kDirectGrayscaleStep::Store(store) => {
+            PreparedDirectGrayscaleStep::Store(store) => {
                 if stacked_outputs {
                     let (input, _) = lookup_direct_band_slice(
                         &band_sets[0],
@@ -1345,12 +1586,12 @@ fn encode_repeated_direct_grayscale_plan_in_command_buffer(
                     )?;
                     let per_instance_len =
                         store.output_width as usize * store.output_height as usize;
-                    let output = alloc_f32_buffer(&runtime.device, per_instance_len * count);
+                    let output = take_f32_scratch_buffer(runtime, per_instance_len * count);
                     dispatch_store_component_repeated_in_command_buffer(
                         runtime,
                         command_buffer,
                         &input,
-                        &output,
+                        &output.buffer,
                         J2kRepeatedStoreParams {
                             input_width: store.input_rect.width(),
                             input_height: store.input_rect.height(),
@@ -1369,22 +1610,23 @@ fn encode_repeated_direct_grayscale_plan_in_command_buffer(
                             })?,
                         },
                     );
-                    retained_buffers.push(output.clone());
+                    retained_buffers.push(output.buffer.clone());
                     surfaces.extend(encode_repeated_gray_plane_to_surfaces_in_command_buffer(
                         runtime,
                         command_buffer,
-                        &output,
+                        &output.buffer,
                         plan.dimensions,
                         plan.bit_depth,
                         fmt,
                         count,
                     )?);
+                    scratch_buffers.push(output);
                 } else {
                     for bands in &band_sets {
                         let (input, input_offset) =
                             lookup_direct_band_slice(bands, store.input_band_id, store.input_rect)?;
-                        let output = alloc_f32_buffer(
-                            &runtime.device,
+                        let output = take_f32_scratch_buffer(
+                            runtime,
                             store.output_width as usize * store.output_height as usize,
                         );
                         let params = J2kStoreParams {
@@ -1403,20 +1645,21 @@ fn encode_repeated_direct_grayscale_plan_in_command_buffer(
                             command_buffer,
                             &input,
                             input_offset,
-                            &output,
+                            &output.buffer,
                             0,
                             params,
                         );
-                        retained_buffers.push(output.clone());
+                        retained_buffers.push(output.buffer.clone());
                         surfaces.push(encode_gray_plane_to_surface_in_command_buffer_with_offset(
                             runtime,
                             command_buffer,
-                            &output,
+                            &output.buffer,
                             0,
                             plan.dimensions,
                             plan.bit_depth,
                             fmt,
                         )?);
+                        scratch_buffers.push(output);
                     }
                 }
             }
@@ -1453,9 +1696,19 @@ fn copy_plane_samples(buffer: &Buffer, samples: &[f32], image_width: usize, roi:
 }
 
 #[cfg(target_os = "macos")]
-fn alloc_f32_buffer(device: &Device, len: usize) -> Buffer {
+fn take_f32_scratch_buffer(runtime: &MetalRuntime, len: usize) -> DirectScratchBuffer {
     let bytes = len.max(1).saturating_mul(size_of::<f32>());
-    device.new_buffer(bytes as u64, MTLResourceOptions::StorageModePrivate)
+    DirectScratchBuffer {
+        bytes,
+        buffer: runtime.take_private_buffer(bytes),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn recycle_scratch_buffers(runtime: &MetalRuntime, scratch_buffers: Vec<DirectScratchBuffer>) {
+    for scratch in scratch_buffers {
+        runtime.recycle_private_buffer(scratch.bytes, scratch.buffer);
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -1823,15 +2076,26 @@ fn borrow_slice_buffer<T>(device: &Device, data: &[T]) -> Buffer {
 }
 
 #[cfg(target_os = "macos")]
-fn classic_coefficients_scratch_buffer(device: &Device, job_count: usize) -> Result<Buffer, Error> {
-    let bytes = job_count
+fn classic_coefficients_scratch_bytes(job_count: usize) -> Result<usize, Error> {
+    job_count
         .max(1)
         .checked_mul(J2K_CLASSIC_MAX_COEFF_COUNT)
         .and_then(|count| count.checked_mul(size_of::<u32>()))
         .ok_or_else(|| Error::MetalKernel {
             message: "classic J2K coefficient scratch size overflow".to_string(),
-        })?;
-    Ok(device.new_buffer(bytes as u64, MTLResourceOptions::StorageModePrivate))
+        })
+}
+
+#[cfg(target_os = "macos")]
+fn take_classic_coefficients_scratch_buffer(
+    runtime: &MetalRuntime,
+    job_count: usize,
+) -> Result<DirectScratchBuffer, Error> {
+    let bytes = classic_coefficients_scratch_bytes(job_count)?;
+    Ok(DirectScratchBuffer {
+        bytes,
+        buffer: runtime.take_private_buffer(bytes),
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -2882,7 +3146,7 @@ fn dispatch_classic_cleanup_batched(
     let input = borrow_slice_buffer(&runtime.device, coded_data);
     let jobs_buffer = borrow_slice_buffer(&runtime.device, jobs);
     let segments_buffer = borrow_slice_buffer(&runtime.device, segments);
-    let coefficients_scratch = classic_coefficients_scratch_buffer(&runtime.device, jobs.len())?;
+    let coefficients_scratch = take_classic_coefficients_scratch_buffer(runtime, jobs.len())?;
     let use_plain_fast_path = classic_batch_uses_plain_fast_path(jobs, segments)
         && runtime
             .classic_cleanup_plain_batched
@@ -2906,7 +3170,7 @@ fn dispatch_classic_cleanup_batched(
     encoder.set_buffer(2, Some(&jobs_buffer), 0);
     encoder.set_buffer(3, Some(&segments_buffer), 0);
     encoder.set_buffer(4, Some(&status_buffer), 0);
-    encoder.set_buffer(5, Some(&coefficients_scratch), 0);
+    encoder.set_buffer(5, Some(&coefficients_scratch.buffer), 0);
     if use_plain_fast_path {
         encoder.dispatch_thread_groups(
             MTLSize {
@@ -2948,11 +3212,12 @@ fn dispatch_classic_cleanup_batched(
             jobs.len(),
         )
     };
-    if let Some(status) = statuses
+    let status = statuses
         .iter()
         .copied()
-        .find(|status| status.code != J2K_CLASSIC_STATUS_OK)
-    {
+        .find(|status| status.code != J2K_CLASSIC_STATUS_OK);
+    runtime.recycle_private_buffer(coefficients_scratch.bytes, coefficients_scratch.buffer);
+    if let Some(status) = status {
         return Err(decode_classic_status_error(status));
     }
 
@@ -3196,6 +3461,7 @@ fn encode_classic_sub_band_to_buffer_in_command_buffer(
     command_buffer: &CommandBufferRef,
     job: &slidecodec_j2k_native::J2kOwnedSubBandPlan,
     output: &Buffer,
+    scratch_buffers: &mut Vec<DirectScratchBuffer>,
 ) -> Result<(Vec<DirectHostRetention>, Vec<Buffer>, DirectStatusCheck), Error> {
     if job.jobs.is_empty() {
         let empty = runtime
@@ -3274,8 +3540,12 @@ fn encode_classic_sub_band_to_buffer_in_command_buffer(
     let coded_buffer = borrow_slice_buffer(&runtime.device, &coded_data);
     let jobs_buffer = borrow_slice_buffer(&runtime.device, &jobs);
     let segments_buffer = borrow_slice_buffer(&runtime.device, &segments);
-    let coefficients_scratch = classic_coefficients_scratch_buffer(&runtime.device, jobs.len())?;
-    let use_plain_fast_path = classic_batch_uses_plain_fast_path(&jobs, &segments);
+    let use_plain_fast_path = classic_batch_uses_plain_fast_path(&jobs, &segments)
+        && runtime
+            .classic_cleanup_plain_batched
+            .max_total_threads_per_threadgroup()
+            >= 32;
+    let coefficients_scratch = take_classic_coefficients_scratch_buffer(runtime, jobs.len())?;
     let (status_check, states_scratch) = dispatch_classic_cleanup_batched_in_command_buffer(
         runtime,
         command_buffer,
@@ -3285,14 +3555,10 @@ fn encode_classic_sub_band_to_buffer_in_command_buffer(
         use_plain_fast_path,
         &segments_buffer,
         output,
-        &coefficients_scratch,
+        &coefficients_scratch.buffer,
     );
-    let mut retained_buffers = vec![
-        coded_buffer,
-        jobs_buffer,
-        segments_buffer,
-        coefficients_scratch,
-    ];
+    let mut retained_buffers = vec![coded_buffer, jobs_buffer, segments_buffer];
+    scratch_buffers.push(coefficients_scratch);
     if let Some(states_scratch) = states_scratch {
         retained_buffers.push(states_scratch);
     }
@@ -3311,9 +3577,10 @@ fn encode_classic_sub_band_to_buffer_in_command_buffer(
 fn encode_repeated_classic_sub_band_to_buffer_in_command_buffer(
     runtime: &MetalRuntime,
     command_buffer: &CommandBufferRef,
-    job: &slidecodec_j2k_native::J2kOwnedSubBandPlan,
+    job: &PreparedClassicSubBand,
     count: usize,
     output: &Buffer,
+    scratch_buffers: &mut Vec<DirectScratchBuffer>,
 ) -> Result<(Vec<DirectHostRetention>, Vec<Buffer>, DirectStatusCheck), Error> {
     if count == 0 {
         let empty = runtime
@@ -3350,102 +3617,31 @@ fn encode_repeated_classic_sub_band_to_buffer_in_command_buffer(
         .ok_or_else(|| Error::MetalKernel {
             message: "classic J2K MetalDirect repeated job count overflow".to_string(),
         })?;
-    let mut jobs = Vec::with_capacity(job.jobs.len());
-    let mut coded_data = Vec::new();
-    let mut segments = Vec::new();
-
-    for block in &job.jobs {
-        let coded_offset = u32::try_from(coded_data.len()).map_err(|_| Error::MetalKernel {
-            message: "classic J2K MetalDirect coded payload exceeds u32".to_string(),
-        })?;
-        coded_data.extend_from_slice(&block.data);
-        let segment_offset = u32::try_from(segments.len()).map_err(|_| Error::MetalKernel {
-            message: "classic J2K MetalDirect segment table exceeds u32".to_string(),
-        })?;
-        for segment in &block.segments {
-            let data_offset = coded_offset
-                .checked_add(segment.data_offset)
-                .ok_or_else(|| Error::MetalKernel {
-                    message: "classic J2K MetalDirect segment offset overflow".to_string(),
-                })?;
-            segments.push(J2kClassicSegment {
-                data_offset,
-                data_length: segment.data_length,
-                start_coding_pass: u32::from(segment.start_coding_pass),
-                end_coding_pass: u32::from(segment.end_coding_pass),
-                use_arithmetic: u32::from(segment.use_arithmetic),
-            });
-        }
-        jobs.push(J2kClassicCleanupBatchJob {
-            coded_offset,
-            coded_len: u32::try_from(block.data.len()).map_err(|_| Error::MetalKernel {
-                message: "classic J2K MetalDirect coded payload exceeds u32".to_string(),
-            })?,
-            segment_offset,
-            segment_count: u32::try_from(block.segments.len()).map_err(|_| Error::MetalKernel {
-                message: "classic J2K MetalDirect segment count exceeds u32".to_string(),
-            })?,
-            width: block.width,
-            height: block.height,
-            output_stride: job.width,
-            output_offset: block
-                .output_y
-                .checked_mul(job.width)
-                .and_then(|row| row.checked_add(block.output_x))
-                .ok_or_else(|| Error::MetalKernel {
-                    message: "classic J2K MetalDirect output offset overflow".to_string(),
-                })?,
-            missing_msbs: u32::from(block.missing_bit_planes),
-            total_bitplanes: u32::from(block.total_bitplanes),
-            number_of_coding_passes: u32::from(block.number_of_coding_passes),
-            sub_band_type: match block.sub_band_type {
-                slidecodec_j2k_native::J2kSubBandType::LowLow => 0,
-                slidecodec_j2k_native::J2kSubBandType::HighLow => 1,
-                slidecodec_j2k_native::J2kSubBandType::LowHigh => 2,
-                slidecodec_j2k_native::J2kSubBandType::HighHigh => 3,
-            },
-            style_flags: classic_style_flags(block.style),
-            strict: u32::from(block.strict),
-            dequantization_step: block.dequantization_step,
-        });
-    }
-
-    let coded_buffer = borrow_slice_buffer(&runtime.device, &coded_data);
-    let jobs_buffer = borrow_slice_buffer(&runtime.device, &jobs);
-    let segments_buffer = borrow_slice_buffer(&runtime.device, &segments);
-    let coefficients_scratch = classic_coefficients_scratch_buffer(&runtime.device, total_jobs)?;
-    let use_plain_fast_path = classic_batch_uses_plain_fast_path(&jobs, &segments)
+    let coded_buffer = borrow_slice_buffer(&runtime.device, &job.coded_data);
+    let jobs_buffer = borrow_slice_buffer(&runtime.device, &job.jobs);
+    let segments_buffer = borrow_slice_buffer(&runtime.device, &job.segments);
+    let use_plain_fast_path = classic_batch_uses_plain_fast_path(&job.jobs, &job.segments)
         && runtime
             .classic_cleanup_plain_repeated_batched
             .max_total_threads_per_threadgroup()
             >= 32;
+    let coefficients_scratch = take_classic_coefficients_scratch_buffer(runtime, total_jobs)?;
     let status_check = dispatch_classic_cleanup_repeated_batched_in_command_buffer(
         runtime,
         command_buffer,
         &coded_buffer,
         &jobs_buffer,
-        jobs.len(),
+        job.jobs.len(),
         total_jobs,
         job.width as usize * job.height as usize,
         use_plain_fast_path,
         &segments_buffer,
         output,
-        &coefficients_scratch,
+        &coefficients_scratch.buffer,
     );
-    Ok((
-        vec![
-            DirectHostRetention::Bytes(coded_data),
-            DirectHostRetention::ClassicJobs(jobs),
-            DirectHostRetention::ClassicSegments(segments),
-        ],
-        vec![
-            coded_buffer,
-            jobs_buffer,
-            segments_buffer,
-            coefficients_scratch,
-        ],
-        status_check,
-    ))
+    scratch_buffers.push(coefficients_scratch);
+    let retained_buffers = vec![coded_buffer, jobs_buffer, segments_buffer];
+    Ok((Vec::new(), retained_buffers, status_check))
 }
 
 #[cfg(target_os = "macos")]
@@ -3585,7 +3781,7 @@ fn encode_ht_sub_band_to_buffer_in_command_buffer(
 fn encode_repeated_ht_sub_band_to_buffer_in_command_buffer(
     runtime: &MetalRuntime,
     command_buffer: &CommandBufferRef,
-    job: &slidecodec_j2k_native::HtOwnedSubBandPlan,
+    job: &PreparedHtSubBand,
     count: usize,
     output: &Buffer,
 ) -> Result<(Vec<DirectHostRetention>, Vec<Buffer>, DirectStatusCheck), Error> {
@@ -3610,58 +3806,19 @@ fn encode_repeated_ht_sub_band_to_buffer_in_command_buffer(
         .ok_or_else(|| Error::MetalKernel {
             message: "HTJ2K MetalDirect repeated job count overflow".to_string(),
         })?;
-    let mut jobs = Vec::with_capacity(job.jobs.len());
-    let mut coded_data = Vec::new();
-    for block in &job.jobs {
-        let coded_offset = u32::try_from(coded_data.len()).map_err(|_| Error::MetalKernel {
-            message: "HTJ2K MetalDirect coded payload exceeds u32".to_string(),
-        })?;
-        coded_data.extend_from_slice(&block.data);
-        jobs.push(J2kHtCleanupBatchJob {
-            coded_offset,
-            width: block.width,
-            height: block.height,
-            coded_len: u32::try_from(block.data.len()).map_err(|_| Error::MetalKernel {
-                message: "HTJ2K MetalDirect coded payload exceeds u32".to_string(),
-            })?,
-            cleanup_length: block.cleanup_length,
-            refinement_length: block.refinement_length,
-            missing_msbs: u32::from(block.missing_bit_planes),
-            num_bitplanes: u32::from(block.num_bitplanes),
-            number_of_coding_passes: u32::from(block.number_of_coding_passes),
-            output_stride: job.width,
-            output_offset: block
-                .output_y
-                .checked_mul(job.width)
-                .and_then(|row| row.checked_add(block.output_x))
-                .ok_or_else(|| Error::MetalKernel {
-                    message: "HTJ2K MetalDirect output offset overflow".to_string(),
-                })?,
-            dequantization_step: block.dequantization_step,
-            stripe_causal: u32::from(block.stripe_causal),
-        });
-    }
-
-    let coded_buffer = borrow_slice_buffer(&runtime.device, &coded_data);
-    let jobs_buffer = borrow_slice_buffer(&runtime.device, &jobs);
+    let coded_buffer = borrow_slice_buffer(&runtime.device, &job.coded_data);
+    let jobs_buffer = borrow_slice_buffer(&runtime.device, &job.jobs);
     let status_check = dispatch_ht_cleanup_repeated_batched_in_command_buffer(
         runtime,
         command_buffer,
         &coded_buffer,
         &jobs_buffer,
-        jobs.len(),
+        job.jobs.len(),
         total_jobs,
         job.width as usize * job.height as usize,
         output,
     );
-    Ok((
-        vec![
-            DirectHostRetention::Bytes(coded_data),
-            DirectHostRetention::HtJobs(jobs),
-        ],
-        vec![coded_buffer, jobs_buffer],
-        status_check,
-    ))
+    Ok((Vec::new(), vec![coded_buffer, jobs_buffer], status_check))
 }
 
 #[cfg(target_os = "macos")]

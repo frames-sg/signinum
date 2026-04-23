@@ -352,7 +352,7 @@ impl<'a> J2kDecoder<'a> {
         if Self::direct_plan_has_ht(plan) {
             max_dim >= 1024 && count >= 16
         } else {
-            false
+            max_dim >= 1024 && count >= 32
         }
     }
 

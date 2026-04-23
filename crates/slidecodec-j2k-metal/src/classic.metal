@@ -250,6 +250,14 @@ inline void coeff_push_bit(device uint *coefficients, uint idx, uint bit, uint p
     coefficients[idx] |= (bit << position);
 }
 
+inline void coeff_set_sign_packed(device uint *coefficients, uint idx, uint sign) {
+    if (sign != 0u) {
+        coefficients[idx] |= 0x80000000u;
+    } else {
+        coefficients[idx] &= 0x7FFFFFFFu;
+    }
+}
+
 inline void coeff_set_sign(thread uchar *states, uint idx, uint sign) {
     set_state_bit(states, idx, J2K_SIGN_SHIFT, uchar(sign));
 }
@@ -670,6 +678,7 @@ inline void decode_sign_bit(
     thread J2kArithmeticDecoder &decoder,
     thread uchar *contexts,
     thread uchar *states,
+    device uint *coefficients,
     uint padded_width,
     uint index_x,
     uint index_y,
@@ -685,7 +694,9 @@ inline void decode_sign_bit(
         style_flags
     );
     const uint sign_bit = arithmetic_decode_bit(decoder, contexts, uint(sign_ctx.x)) ^ uint(sign_ctx.y);
-    coeff_set_sign(states, coeff_index(padded_width, index_x, index_y), sign_bit);
+    const uint idx = coeff_index(padded_width, index_x, index_y);
+    coeff_set_sign(states, idx, sign_bit);
+    coeff_set_sign_packed(coefficients, idx, sign_bit);
     set_significant(states, padded_width, index_x, index_y);
 }
 
@@ -693,13 +704,16 @@ inline void decode_sign_bit_plain_dev(
     thread J2kArithmeticDecoder &decoder,
     thread uchar *contexts,
     device uchar *states,
+    device uint *coefficients,
     uint padded_width,
     uint index_x,
     uint index_y
 ) {
     const uchar2 sign_ctx = sign_context_plain_dev(states, padded_width, index_x, index_y);
     const uint sign_bit = arithmetic_decode_bit(decoder, contexts, uint(sign_ctx.x)) ^ uint(sign_ctx.y);
-    coeff_set_sign_dev(states, coeff_index(padded_width, index_x, index_y), sign_bit);
+    const uint idx = coeff_index(padded_width, index_x, index_y);
+    coeff_set_sign_dev(states, idx, sign_bit);
+    coeff_set_sign_packed(coefficients, idx, sign_bit);
     set_significant_plain_dev(states, padded_width, index_x, index_y);
 }
 
@@ -707,13 +721,16 @@ inline void decode_sign_bit_plain_tg(
     thread J2kArithmeticDecoder &decoder,
     thread uchar *contexts,
     threadgroup uchar *states,
+    device uint *coefficients,
     uint padded_width,
     uint index_x,
     uint index_y
 ) {
     const uchar2 sign_ctx = sign_context_plain_tg(states, padded_width, index_x, index_y);
     const uint sign_bit = arithmetic_decode_bit(decoder, contexts, uint(sign_ctx.x)) ^ uint(sign_ctx.y);
-    coeff_set_sign_tg(states, coeff_index(padded_width, index_x, index_y), sign_bit);
+    const uint idx = coeff_index(padded_width, index_x, index_y);
+    coeff_set_sign_tg(states, idx, sign_bit);
+    coeff_set_sign_packed(coefficients, idx, sign_bit);
     set_significant_plain_tg(states, padded_width, index_x, index_y);
 }
 
@@ -754,6 +771,7 @@ inline uchar magnitude_refinement_context_plain_tg(
 inline bool decode_sign_bit_bypass(
     thread J2kBypassDecoder &decoder,
     thread uchar *states,
+    device uint *coefficients,
     uint padded_width,
     uint index_x,
     uint index_y
@@ -762,7 +780,9 @@ inline bool decode_sign_bit_bypass(
     if (!bypass_read_bit(decoder, sign_bit)) {
         return false;
     }
-    coeff_set_sign(states, coeff_index(padded_width, index_x, index_y), sign_bit);
+    const uint idx = coeff_index(padded_width, index_x, index_y);
+    coeff_set_sign(states, idx, sign_bit);
+    coeff_set_sign_packed(coefficients, idx, sign_bit);
     set_significant(states, padded_width, index_x, index_y);
     return true;
 }
@@ -774,6 +794,7 @@ inline bool decode_classic_job(
     device uint *coefficients_scratch,
     uint scratch_offset,
     device float *output,
+    bool store_output,
     device J2kClassicStatus *status
 ) {
     if (job.width == 0u || job.height == 0u) {
@@ -925,6 +946,7 @@ inline bool decode_classic_job(
                                         decoder,
                                         contexts,
                                         states,
+                                        coefficients,
                                         padded_width,
                                         index_x,
                                         index_y,
@@ -969,6 +991,7 @@ inline bool decode_classic_job(
                                             decoder,
                                             contexts,
                                             states,
+                                            coefficients,
                                             padded_width,
                                             index_x,
                                             index_y,
@@ -978,6 +1001,7 @@ inline bool decode_classic_job(
                                     } else if (!decode_sign_bit_bypass(
                                         bypass_decoder,
                                         states,
+                                        coefficients,
                                         padded_width,
                                         index_x,
                                         index_y
@@ -1042,15 +1066,18 @@ inline bool decode_classic_job(
         return false;
     }
 
-    for (uint y = 0u; y < job.height; ++y) {
-        const uint output_row = job.output_offset + y * job.output_stride;
-        for (uint x = 0u; x < job.width; ++x) {
-            const uint coeff = coefficients[coeff_index(padded_width, x + J2K_CLASSIC_PADDING, y + J2K_CLASSIC_PADDING)];
-            int magnitude = int(coeff & 0x7FFFFFFFu);
-            if (coeff_sign(states, coeff_index(padded_width, x + J2K_CLASSIC_PADDING, y + J2K_CLASSIC_PADDING)) != 0u) {
-                magnitude = -magnitude;
+    if (store_output) {
+        for (uint y = 0u; y < job.height; ++y) {
+            const uint output_row = job.output_offset + y * job.output_stride;
+            for (uint x = 0u; x < job.width; ++x) {
+                const uint coeff =
+                    coefficients[coeff_index(padded_width, x + J2K_CLASSIC_PADDING, y + J2K_CLASSIC_PADDING)];
+                int magnitude = int(coeff & 0x7FFFFFFFu);
+                if ((coeff & 0x80000000u) != 0u) {
+                    magnitude = -magnitude;
+                }
+                output[output_row + x] = float(magnitude) * job.dequantization_step;
             }
-            output[output_row + x] = float(magnitude) * job.dequantization_step;
         }
     }
 
@@ -1192,6 +1219,7 @@ inline bool decode_classic_job_plain(
                                         decoder,
                                         contexts,
                                         states,
+                                        coefficients,
                                         padded_width,
                                         index_x,
                                         index_y
@@ -1213,6 +1241,7 @@ inline bool decode_classic_job_plain(
                                         decoder,
                                         contexts,
                                         states,
+                                        coefficients,
                                         padded_width,
                                         index_x,
                                         index_y
@@ -1273,7 +1302,7 @@ inline void store_classic_job_plain_output_tg(
             coeff_index(padded_width, x + J2K_CLASSIC_PADDING, y + J2K_CLASSIC_PADDING);
         const uint coeff = coefficients[coeff_idx];
         int magnitude = int(coeff & 0x7FFFFFFFu);
-        if (coeff_sign_tg(states, coeff_idx) != 0u) {
+        if ((coeff & 0x80000000u) != 0u) {
             magnitude = -magnitude;
         }
         output[job.output_offset + y * job.output_stride + x] =
@@ -1292,15 +1321,16 @@ kernel void j2k_decode_classic_cleanup_batched(
 ) {
     device J2kClassicStatus *status = statuses + gid;
     set_classic_status(status, J2K_CLASSIC_STATUS_OK, 0u);
-    if (!decode_classic_job(
-            jobs[gid],
-            coded_data,
-            segments,
-            coefficients_scratch,
-            gid * J2K_CLASSIC_MAX_COEFF_COUNT,
-            output,
-            status
-        ) &&
+        if (!decode_classic_job(
+                jobs[gid],
+                coded_data,
+                segments,
+                coefficients_scratch,
+                gid * J2K_CLASSIC_MAX_COEFF_COUNT,
+                output,
+                true,
+                status
+            ) &&
         status->code == J2K_CLASSIC_STATUS_OK) {
         set_classic_status(status, J2K_CLASSIC_STATUS_FAIL, 0u);
     }
@@ -1376,17 +1406,50 @@ kernel void j2k_decode_classic_cleanup_repeated_batched(
     J2kClassicCleanupBatchJob job = jobs[gid.x];
     job.output_offset += gid.y * repeated.output_plane_len;
     set_classic_status(status, J2K_CLASSIC_STATUS_OK, 0u);
-    if (!decode_classic_job(
-            job,
-            coded_data,
-            segments,
-            coefficients_scratch,
-            linear_idx * J2K_CLASSIC_MAX_COEFF_COUNT,
-            output,
-            status
-        ) &&
+        if (!decode_classic_job(
+                job,
+                coded_data,
+                segments,
+                coefficients_scratch,
+                linear_idx * J2K_CLASSIC_MAX_COEFF_COUNT,
+                output,
+                false,
+                status
+            ) &&
         status->code == J2K_CLASSIC_STATUS_OK) {
         set_classic_status(status, J2K_CLASSIC_STATUS_FAIL, 0u);
+    }
+}
+
+kernel void j2k_store_classic_repeated_batched(
+    device float *output [[buffer(0)]],
+    device const J2kClassicCleanupBatchJob *jobs [[buffer(1)]],
+    device const uint *coefficients_scratch [[buffer(2)]],
+    constant J2kClassicRepeatedBatchParams &repeated [[buffer(3)]],
+    uint2 gid [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_threadgroup]]
+) {
+    if (gid.x >= repeated.job_count || gid.y >= repeated.batch_count) {
+        return;
+    }
+    J2kClassicCleanupBatchJob job = jobs[gid.x];
+    job.output_offset += gid.y * repeated.output_plane_len;
+    const uint padded_width = job.width + J2K_CLASSIC_PADDING * 2u;
+    const uint linear_idx = gid.y * repeated.job_count + gid.x;
+    device const uint *coefficients =
+        coefficients_scratch + linear_idx * J2K_CLASSIC_MAX_COEFF_COUNT;
+    const uint sample_count = job.width * job.height;
+    for (uint sample_idx = lane; sample_idx < sample_count; sample_idx += 32u) {
+        const uint x = sample_idx % job.width;
+        const uint y = sample_idx / job.width;
+        const uint coeff =
+            coefficients[coeff_index(padded_width, x + J2K_CLASSIC_PADDING, y + J2K_CLASSIC_PADDING)];
+        int magnitude = int(coeff & 0x7FFFFFFFu);
+        if ((coeff & 0x80000000u) != 0u) {
+            magnitude = -magnitude;
+        }
+        output[job.output_offset + y * job.output_stride + x] =
+            float(magnitude) * job.dequantization_step;
     }
 }
 

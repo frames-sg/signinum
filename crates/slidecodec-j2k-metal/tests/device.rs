@@ -164,6 +164,48 @@ fn tile_full_grayscale_device_path_uses_metal_direct() {
 }
 
 #[test]
+fn repeated_classic_grayscale_direct_decode_matches_host_decode() {
+    let bytes = fixture_gray8();
+    let mut decoder = J2kDecoder::new(&bytes).expect("decoder");
+    let surfaces = decoder
+        .decode_repeated_grayscale_direct_to_device(PixelFormat::Gray8, 3)
+        .expect("repeated direct decode");
+    assert_eq!(surfaces.len(), 3);
+
+    let mut host_decoder = J2kDecoder::new(&bytes).expect("host decoder");
+    let mut host = [0u8; 16];
+    host_decoder
+        .decode_into(&mut host, 4, PixelFormat::Gray8)
+        .expect("host decode");
+
+    for surface in surfaces {
+        assert_eq!(surface.backend_kind(), BackendKind::Metal);
+        assert_eq!(surface.as_bytes(), host.as_slice());
+    }
+}
+
+#[test]
+fn repeated_ht_grayscale_direct_decode_matches_host_decode() {
+    let bytes = fixture_ht_gray8();
+    let mut decoder = J2kDecoder::new(&bytes).expect("decoder");
+    let surfaces = decoder
+        .decode_repeated_grayscale_direct_to_device(PixelFormat::Gray8, 3)
+        .expect("repeated direct decode");
+    assert_eq!(surfaces.len(), 3);
+
+    let mut host_decoder = J2kDecoder::new(&bytes).expect("host decoder");
+    let mut host = [0u8; 16];
+    host_decoder
+        .decode_into(&mut host, 4, PixelFormat::Gray8)
+        .expect("host decode");
+
+    for surface in surfaces {
+        assert_eq!(surface.backend_kind(), BackendKind::Metal);
+        assert_eq!(surface.as_bytes(), host.as_slice());
+    }
+}
+
+#[test]
 fn metal_gray16_matches_host_decode_for_12bit_source() {
     let bytes = fixture_gray12();
     let mut decoder = J2kDecoder::new(&bytes).expect("decoder");

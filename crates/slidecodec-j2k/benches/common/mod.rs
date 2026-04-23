@@ -292,7 +292,7 @@ fn should_auto_use_direct_grayscale_input(input: &BenchInput, count: usize) -> b
     if input.is_ht {
         count >= 16
     } else {
-        false
+        count >= 32
     }
 }
 

@@ -1,9 +1,8 @@
 use std::sync::Arc;
 
 use slidecodec_core::{
-    BackendKind, BackendRequest, CodecError, DeviceSubmission, DeviceSurface, Downscale,
-    ImageDecode, ImageDecodeDevice, PixelFormat, Rect, TileBatchDecodeDevice,
-    TileBatchDecodeSubmit,
+    BackendKind, BackendRequest, DeviceSubmission, DeviceSurface, Downscale, ImageDecode,
+    ImageDecodeDevice, PixelFormat, Rect, TileBatchDecodeDevice, TileBatchDecodeSubmit,
 };
 use slidecodec_j2k::J2kContext;
 use slidecodec_j2k_metal::{
@@ -446,29 +445,53 @@ fn metal_gray16_matches_host_decode_for_12bit_source() {
 }
 
 #[test]
-fn explicit_metal_rejects_non_grayscale_formats() {
+fn explicit_metal_rgb_full_tile_matches_host_decode() {
     let rgb8 = fixture_rgb8();
-    let mut rgb8_decoder = J2kDecoder::new(&rgb8).expect("rgb8 decoder");
-    let Err(rgb8_error) = rgb8_decoder.decode_to_device(PixelFormat::Rgb8, BackendRequest::Metal)
-    else {
-        panic!("rgb8 should be unsupported on explicit MetalDirect");
-    };
-    assert!(
-        rgb8_error.is_unsupported(),
-        "rgb8 error must be unsupported"
-    );
+    {
+        let mut decoder = J2kDecoder::new(&rgb8).expect("rgb8 decoder");
+        let mut host_decoder = J2kDecoder::new(&rgb8).expect("rgb8 host decoder");
+        let mut host = [0u8; 12];
+        host_decoder
+            .decode_into(&mut host, 6, PixelFormat::Rgb8)
+            .expect("host rgb8 decode");
+        let surface = decoder
+            .decode_to_device(PixelFormat::Rgb8, BackendRequest::Metal)
+            .expect("explicit Metal rgb8 decode");
+        assert_eq!(surface.backend_kind(), BackendKind::Metal);
+        assert_eq!(surface.dimensions(), (2, 2));
+        assert_eq!(surface.as_bytes(), host.as_slice());
+    }
+
+    {
+        let mut decoder = J2kDecoder::new(&rgb8).expect("rgba8 decoder");
+        let mut host_decoder = J2kDecoder::new(&rgb8).expect("rgba8 host decoder");
+        let mut host = [0u8; 16];
+        host_decoder
+            .decode_into(&mut host, 8, PixelFormat::Rgba8)
+            .expect("host rgba8 decode");
+        let surface = decoder
+            .decode_to_device(PixelFormat::Rgba8, BackendRequest::Metal)
+            .expect("explicit Metal rgba8 decode");
+        assert_eq!(surface.backend_kind(), BackendKind::Metal);
+        assert_eq!(surface.dimensions(), (2, 2));
+        assert_eq!(surface.as_bytes(), host.as_slice());
+    }
 
     let rgb12 = fixture_rgb12();
-    let mut rgb16_decoder = J2kDecoder::new(&rgb12).expect("rgb12 decoder");
-    let Err(rgb16_error) =
-        rgb16_decoder.decode_to_device(PixelFormat::Rgb16, BackendRequest::Metal)
-    else {
-        panic!("rgb16 should be unsupported on explicit MetalDirect");
-    };
-    assert!(
-        rgb16_error.is_unsupported(),
-        "rgb16 error must be unsupported"
-    );
+    {
+        let mut decoder = J2kDecoder::new(&rgb12).expect("rgb12 decoder");
+        let mut host_decoder = J2kDecoder::new(&rgb12).expect("rgb12 host decoder");
+        let mut host = [0u8; 12];
+        host_decoder
+            .decode_into(&mut host, 12, PixelFormat::Rgb16)
+            .expect("host rgb16 decode");
+        let surface = decoder
+            .decode_to_device(PixelFormat::Rgb16, BackendRequest::Metal)
+            .expect("explicit Metal rgb16 decode");
+        assert_eq!(surface.backend_kind(), BackendKind::Metal);
+        assert_eq!(surface.dimensions(), (2, 1));
+        assert_eq!(surface.as_bytes(), host.as_slice());
+    }
 }
 
 #[test]

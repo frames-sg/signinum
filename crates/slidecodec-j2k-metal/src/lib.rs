@@ -475,6 +475,18 @@ impl<'a> J2kDecoder<'a> {
     }
 
     #[cfg(target_os = "macos")]
+    fn decode_full_to_metal_surface(&mut self, fmt: PixelFormat) -> Result<Surface, Error> {
+        self.ensure_native_image()?;
+        let (Some(image), native_context) = (self.native_image.as_ref(), &mut self.native_context)
+        else {
+            return Err(Error::Decode(J2kError::Backend(
+                "native image cache missing".to_string(),
+            )));
+        };
+        crate::compute::decode_image_to_surface(image, native_context, fmt)
+    }
+
+    #[cfg(target_os = "macos")]
     fn decode_repeated_grayscale_cpu_to_surfaces(
         &mut self,
         fmt: PixelFormat,
@@ -664,13 +676,6 @@ impl<'a> J2kDecoder<'a> {
         crate::compute::decode_scaled_to_surface(self.inner.bytes(), plan.source_dims(), fmt, scale)
     }
 
-    #[cfg(target_os = "macos")]
-    fn unsupported_metal_direct(message: impl Into<String>) -> Error {
-        Error::MetalKernel {
-            message: message.into(),
-        }
-    }
-
     pub(crate) fn decode_to_surface_impl(
         &mut self,
         fmt: PixelFormat,
@@ -695,11 +700,11 @@ impl<'a> J2kDecoder<'a> {
             BackendRequest::Metal => {
                 #[cfg(target_os = "macos")]
                 {
-                    self.decode_direct_to_surface(fmt)?.ok_or_else(|| {
-                        Self::unsupported_metal_direct(format!(
-                            "explicit J2K MetalDirect currently supports full grayscale Gray8/Gray16 only; fmt={fmt:?}"
-                        ))
-                    })
+                    if let Some(surface) = self.decode_direct_to_surface(fmt)? {
+                        Ok(surface)
+                    } else {
+                        self.decode_full_to_metal_surface(fmt)
+                    }
                 }
                 #[cfg(not(target_os = "macos"))]
                 {

@@ -1,9 +1,9 @@
 use slidecodec_core::{
-    BackendRequest, CodecError, DeviceSubmission, DeviceSurface, ImageDecodeDevice,
+    BackendRequest, CodecError, DeviceSubmission, DeviceSurface, ImageDecode, ImageDecodeDevice,
     ImageDecodeSubmit, PixelFormat,
 };
 use slidecodec_j2k_cuda::{CudaSession, J2kDecoder};
-use slidecodec_j2k_native::{encode, EncodeOptions};
+use slidecodec_j2k_native::{encode, encode_htj2k, EncodeOptions};
 
 fn fixture() -> Vec<u8> {
     let pixels = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120];
@@ -13,6 +13,16 @@ fn fixture() -> Vec<u8> {
         ..EncodeOptions::default()
     };
     encode(&pixels, 2, 2, 3, 8, false, &options).expect("encode")
+}
+
+fn fixture_ht_gray8() -> Vec<u8> {
+    let pixels: Vec<u8> = (0..16).collect();
+    let options = EncodeOptions {
+        reversible: true,
+        num_decomposition_levels: 1,
+        ..EncodeOptions::default()
+    };
+    encode_htj2k(&pixels, 4, 4, 1, 8, false, &options).expect("encode ht gray8")
 }
 
 #[test]
@@ -53,4 +63,38 @@ fn submit_to_device_auto_falls_back_to_cpu_surface() {
     assert_eq!(surface.backend_kind(), slidecodec_core::BackendKind::Cpu);
     assert!(surface.as_host_bytes().is_some());
     assert!(session.submissions() >= 1);
+}
+
+#[test]
+fn auto_classic_full_frame_surface_matches_host_decode() {
+    let bytes = fixture();
+    let mut decoder = J2kDecoder::new(&bytes).expect("decoder");
+    let surface = decoder
+        .decode_to_device(PixelFormat::Rgb8, BackendRequest::Auto)
+        .expect("surface");
+    assert_eq!(surface.backend_kind(), slidecodec_core::BackendKind::Cpu);
+
+    let mut host_decoder = J2kDecoder::new(&bytes).expect("host decoder");
+    let mut host = [0u8; 12];
+    host_decoder
+        .decode_into(&mut host, 6, PixelFormat::Rgb8)
+        .expect("host decode");
+    assert_eq!(surface.as_host_bytes(), Some(host.as_slice()));
+}
+
+#[test]
+fn auto_htj2k_full_frame_surface_matches_host_decode() {
+    let bytes = fixture_ht_gray8();
+    let mut decoder = J2kDecoder::new(&bytes).expect("decoder");
+    let surface = decoder
+        .decode_to_device(PixelFormat::Gray8, BackendRequest::Auto)
+        .expect("surface");
+    assert_eq!(surface.backend_kind(), slidecodec_core::BackendKind::Cpu);
+
+    let mut host_decoder = J2kDecoder::new(&bytes).expect("host decoder");
+    let mut host = [0u8; 16];
+    host_decoder
+        .decode_into(&mut host, 4, PixelFormat::Gray8)
+        .expect("host decode");
+    assert_eq!(surface.as_host_bytes(), Some(host.as_slice()));
 }

@@ -77,7 +77,9 @@ fn build_decompositions(tile: &Tile<'_>, storage: &mut DecompositionStorage<'_>)
         };
 
         // Resolution 0 always is the LL sub-band.
-        let ll_resolution_tile = resolution_tiles.next().unwrap();
+        let ll_resolution_tile = resolution_tiles
+            .next()
+            .ok_or(DecodingError::InvalidPrecinct)?;
         let first_ll_sub_band = build_sub_band(SubBandType::LowLow, &ll_resolution_tile, storage)?;
 
         for resolution_tile in resolution_tiles {
@@ -101,7 +103,9 @@ fn build_decompositions(tile: &Tile<'_>, storage: &mut DecompositionStorage<'_>)
         });
     }
 
-    assert_eq!(coefficient_counter, storage.coefficients.len());
+    if coefficient_counter != storage.coefficients.len() {
+        return Err(DecodingError::InvalidPrecinct.into());
+    }
 
     Ok(())
 }

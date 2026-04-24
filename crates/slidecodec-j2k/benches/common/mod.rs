@@ -3,11 +3,19 @@
 #![allow(dead_code)]
 
 use criterion::black_box;
+use slidecodec_core::{
+    BackendRequest, DeviceSubmission, ImageDecodeDevice, TileBatchDecodeDevice,
+    TileBatchDecodeSubmit,
+};
 use slidecodec_j2k::{
     DecoderContext, Downscale, J2kCodec, J2kContext, J2kDecoder, J2kScratchPool, PixelFormat, Rect,
     TileBatchDecode,
 };
 use slidecodec_j2k_compare::{grok as grok_compare, openjpeg as openjpeg_compare};
+use slidecodec_j2k_metal::{
+    Codec as MetalJ2kCodec, J2kDecoder as MetalJ2kDecoder, J2kScratchPool as MetalJ2kScratchPool,
+    MetalSession,
+};
 use slidecodec_j2k_native::{encode, encode_htj2k, EncodeOptions};
 use std::{
     fs,
@@ -33,6 +41,19 @@ pub(crate) struct BenchInput {
 
 pub(crate) fn bench_inputs() -> Vec<BenchInput> {
     let mut inputs = vec![
+        BenchInput {
+            name: "j2k_gray_1024",
+            bytes: classic_bench_bytes(
+                "j2k_gray_1024",
+                &gradient_u8(1024, 1024, 1),
+                1024,
+                1024,
+                DecodeMode::Gray8,
+            ),
+            dimensions: (1024, 1024),
+            mode: DecodeMode::Gray8,
+            is_ht: false,
+        },
         BenchInput {
             name: "j2k_gray_512",
             bytes: classic_bench_bytes(
@@ -61,18 +82,58 @@ pub(crate) fn bench_inputs() -> Vec<BenchInput> {
         },
     ];
 
-    match try_encode_ht(&gradient_u8(512, 512, 1), 512, 512, 1, 8) {
-        Ok(codestream) => inputs.push(BenchInput {
-            name: "htj2k_gray_512",
-            bytes: wrap_codestream_jp2(&codestream, 512, 512, 1, 8, 17),
-            dimensions: (512, 512),
-            mode: DecodeMode::Gray8,
-            is_ht: true,
-        }),
-        Err(error) => eprintln!("skipping htj2k_gray_512 bench input: {error}"),
+    match ht_bench_input() {
+        Ok(input) => inputs.push(input),
+        Err(error) => eprintln!("skipping HTJ2K bench input: {error}"),
     }
 
     inputs
+}
+
+fn ht_bench_input() -> Result<BenchInput, String> {
+    let candidates = [
+        ("htj2k_gray_1024", 1024_u32, 1024_u32),
+        ("htj2k_gray_512", 512_u32, 512_u32),
+        ("htj2k_gray_256", 256_u32, 256_u32),
+        ("htj2k_gray_128", 128_u32, 128_u32),
+        ("htj2k_gray_64", 64_u32, 64_u32),
+        ("htj2k_gray_8", 8_u32, 8_u32),
+    ];
+
+    let mut last_error = None;
+    for (name, width, height) in candidates {
+        let pixels = ht_bench_pixels(width, height, 1);
+        match try_encode_ht(&pixels, width, height, 1, 8) {
+            Ok(codestream) => {
+                return Ok(BenchInput {
+                    name,
+                    bytes: wrap_codestream_jp2(&codestream, width, height, 1, 8, 17),
+                    dimensions: (width, height),
+                    mode: DecodeMode::Gray8,
+                    is_ht: true,
+                })
+            }
+            Err(error) => last_error = Some(format!("{name}: {error}")),
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| "no HTJ2K benchmark candidate succeeded".to_string()))
+}
+
+fn ht_bench_pixels(width: u32, height: u32, channels: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(width as usize * height as usize * channels);
+    let width_denom = width.saturating_sub(1).max(1);
+    let height_denom = height.saturating_sub(1).max(1);
+    for y in 0..height {
+        let y_base = (y * 29) / height_denom;
+        for x in 0..width {
+            let x_base = (x * 31) / width_denom;
+            for c in 0..channels {
+                out.push((x_base + y_base + c as u32 * 17) as u8);
+            }
+        }
+    }
+    out
 }
 
 pub(crate) fn slidecodec_inspect(bytes: &[u8]) {
@@ -128,6 +189,156 @@ pub(crate) fn slidecodec_decode_tile_batch(bytes: &[u8], mode: DecodeMode, count
             .expect("tile decode");
     }
     black_box(out);
+}
+
+pub(crate) fn metal_available() -> bool {
+    cfg!(target_os = "macos")
+}
+
+pub(crate) fn slidecodec_metal_decode(bytes: &[u8], mode: DecodeMode) {
+    let mut decoder = MetalJ2kDecoder::new(bytes).expect("slidecodec metal decoder");
+    let surface = decoder
+        .decode_to_device(mode_format(mode), BackendRequest::Metal)
+        .expect("slidecodec metal decode");
+    black_box(surface);
+}
+
+pub(crate) fn slidecodec_adaptive_decode(bytes: &[u8], mode: DecodeMode) {
+    slidecodec_decode(bytes, mode);
+}
+
+pub(crate) fn slidecodec_metal_supports_decode(bytes: &[u8], mode: DecodeMode) -> bool {
+    let mut decoder = MetalJ2kDecoder::new(bytes).expect("slidecodec metal decoder");
+    decoder
+        .decode_to_device(mode_format(mode), BackendRequest::Metal)
+        .is_ok()
+}
+
+pub(crate) fn slidecodec_metal_decode_region(bytes: &[u8], mode: DecodeMode, edge: u32) {
+    let cpu_decoder = J2kDecoder::new(bytes).expect("slidecodec decoder");
+    let roi = centered_roi(cpu_decoder.info().dimensions, edge);
+    let mut decoder = MetalJ2kDecoder::new(bytes).expect("slidecodec metal decoder");
+    let surface = decoder
+        .decode_region_to_device(mode_format(mode), roi, BackendRequest::Metal)
+        .expect("slidecodec metal region decode");
+    black_box(surface);
+}
+
+pub(crate) fn slidecodec_adaptive_decode_region(bytes: &[u8], mode: DecodeMode, edge: u32) {
+    slidecodec_decode_region(bytes, mode, edge);
+}
+
+pub(crate) fn slidecodec_metal_supports_region(bytes: &[u8], mode: DecodeMode, edge: u32) -> bool {
+    let cpu_decoder = J2kDecoder::new(bytes).expect("slidecodec decoder");
+    let roi = centered_roi(cpu_decoder.info().dimensions, edge);
+    let mut decoder = MetalJ2kDecoder::new(bytes).expect("slidecodec metal decoder");
+    decoder
+        .decode_region_to_device(mode_format(mode), roi, BackendRequest::Metal)
+        .is_ok()
+}
+
+pub(crate) fn slidecodec_metal_decode_scaled(bytes: &[u8], mode: DecodeMode, scale: Downscale) {
+    let mut decoder = MetalJ2kDecoder::new(bytes).expect("slidecodec metal decoder");
+    let surface = decoder
+        .decode_scaled_to_device(mode_format(mode), scale, BackendRequest::Metal)
+        .expect("slidecodec metal scaled decode");
+    black_box(surface);
+}
+
+pub(crate) fn slidecodec_adaptive_decode_scaled(bytes: &[u8], mode: DecodeMode, scale: Downscale) {
+    slidecodec_decode_scaled(bytes, mode, scale);
+}
+
+pub(crate) fn slidecodec_metal_supports_scaled(
+    bytes: &[u8],
+    mode: DecodeMode,
+    scale: Downscale,
+) -> bool {
+    let mut decoder = MetalJ2kDecoder::new(bytes).expect("slidecodec metal decoder");
+    decoder
+        .decode_scaled_to_device(mode_format(mode), scale, BackendRequest::Metal)
+        .is_ok()
+}
+
+pub(crate) fn slidecodec_metal_decode_tile_batch(bytes: &[u8], mode: DecodeMode, count: usize) {
+    let mut ctx = DecoderContext::<J2kContext>::new();
+    let mut session = MetalSession::default();
+    let mut pool = MetalJ2kScratchPool::new();
+    let submissions = (0..count)
+        .map(|_| {
+            MetalJ2kCodec::submit_tile_to_device(
+                &mut ctx,
+                &mut session,
+                &mut pool,
+                bytes,
+                mode_format(mode),
+                BackendRequest::Metal,
+            )
+            .expect("slidecodec metal tile submit")
+        })
+        .collect::<Vec<_>>();
+    let surfaces = submissions
+        .into_iter()
+        .map(|submission| submission.wait().expect("slidecodec metal tile decode"))
+        .collect::<Vec<_>>();
+    black_box(surfaces);
+}
+
+fn slidecodec_adaptive_decode_tile_batch_to_device(input: &BenchInput, count: usize) {
+    let mut ctx = DecoderContext::<J2kContext>::new();
+    let mut session = MetalSession::default();
+    let mut pool = MetalJ2kScratchPool::new();
+    let submissions = (0..count)
+        .map(|_| {
+            MetalJ2kCodec::submit_tile_to_device(
+                &mut ctx,
+                &mut session,
+                &mut pool,
+                &input.bytes,
+                mode_format(input.mode),
+                BackendRequest::Auto,
+            )
+            .expect("slidecodec auto tile submit")
+        })
+        .collect::<Vec<_>>();
+    let surfaces = submissions
+        .into_iter()
+        .map(|submission| submission.wait().expect("slidecodec auto tile decode"))
+        .collect::<Vec<_>>();
+    black_box(surfaces);
+}
+
+pub(crate) fn slidecodec_adaptive_decode_tile_batch(input: &BenchInput, count: usize) {
+    #[cfg(target_os = "macos")]
+    if should_auto_use_direct_grayscale_input(input, count) {
+        slidecodec_adaptive_decode_tile_batch_to_device(input, count);
+        return;
+    }
+
+    slidecodec_decode_tile_batch(&input.bytes, input.mode, count);
+}
+
+fn should_auto_use_direct_grayscale_input(input: &BenchInput, count: usize) -> bool {
+    if input.mode != DecodeMode::Gray8 || count == 0 {
+        return false;
+    }
+    if input.dimensions.0.max(input.dimensions.1) < 1024 {
+        return false;
+    }
+    count >= 16
+}
+
+pub(crate) fn slidecodec_metal_supports_tile_batch(bytes: &[u8], mode: DecodeMode) -> bool {
+    let mut ctx = DecoderContext::<J2kContext>::new();
+    let mut pool = MetalJ2kScratchPool::new();
+    MetalJ2kCodec::decode_tile_to_device(
+        &mut ctx,
+        &mut pool,
+        bytes,
+        mode_format(mode),
+        BackendRequest::Metal,
+    )
+    .is_ok()
 }
 
 pub(crate) fn openjpeg_available() -> bool {

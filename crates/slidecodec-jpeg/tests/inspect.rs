@@ -47,6 +47,26 @@ fn minimal_baseline_jpeg() -> Vec<u8> {
     v
 }
 
+fn minimal_baseline_jpeg_with_restart_interval(interval: u16) -> Vec<u8> {
+    let mut bytes = minimal_baseline_jpeg();
+    let sos_pos = bytes
+        .windows(2)
+        .position(|window| window == [0xff, 0xda])
+        .expect("SOS marker");
+    bytes.splice(
+        sos_pos..sos_pos,
+        [
+            0xff,
+            0xdd,
+            0x00,
+            0x04,
+            (interval >> 8) as u8,
+            interval as u8,
+        ],
+    );
+    bytes
+}
+
 #[test]
 fn inspect_returns_info_for_valid_baseline_jpeg() {
     let info = Decoder::inspect(&minimal_baseline_jpeg()).unwrap();
@@ -94,4 +114,10 @@ fn inspect_reports_all_progressive_scans() {
     let info = Decoder::inspect(&progressive_8x8_jpeg()).unwrap();
     assert_eq!(info.sof_kind, SofKind::Progressive8);
     assert_eq!(info.scan_count, 10);
+}
+
+#[test]
+fn inspect_treats_dri_zero_as_no_restart_interval() {
+    let info = Decoder::inspect(&minimal_baseline_jpeg_with_restart_interval(0)).unwrap();
+    assert!(info.restart_interval.is_none());
 }

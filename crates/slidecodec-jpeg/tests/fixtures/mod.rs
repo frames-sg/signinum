@@ -16,6 +16,36 @@ pub(crate) fn grayscale_8x8_jpeg() -> Vec<u8> {
     include_bytes!("../../../../corpus/conformance/grayscale_8x8.jpg").to_vec()
 }
 
+/// An 8×8 baseline JPEG with 4:4:4 sampling.
+pub(crate) fn baseline_444_8x8_jpeg() -> Vec<u8> {
+    include_bytes!("../../../../corpus/conformance/baseline_444_8x8.jpg").to_vec()
+}
+
+/// Reference pixels for [`baseline_444_8x8_jpeg`].
+pub(crate) fn baseline_444_8x8_rgb() -> Vec<u8> {
+    include_bytes!("../../../../corpus/conformance/baseline_444_8x8.rgb").to_vec()
+}
+
+/// A 16×8 baseline JPEG with 4:2:2 sampling.
+pub(crate) fn baseline_422_16x8_jpeg() -> Vec<u8> {
+    include_bytes!("../../../../corpus/conformance/baseline_422_16x8.jpg").to_vec()
+}
+
+/// Reference pixels for [`baseline_422_16x8_jpeg`].
+pub(crate) fn baseline_422_16x8_rgb() -> Vec<u8> {
+    include_bytes!("../../../../corpus/conformance/baseline_422_16x8.rgb").to_vec()
+}
+
+/// A 32×16 baseline JPEG with 4:2:0 sampling and restart markers every MCU.
+pub(crate) fn baseline_420_restart_32x16_jpeg() -> Vec<u8> {
+    include_bytes!("../../../../corpus/conformance/baseline_420_restart_32x16.jpg").to_vec()
+}
+
+/// Reference pixels for [`baseline_420_restart_32x16_jpeg`].
+pub(crate) fn baseline_420_restart_32x16_rgb() -> Vec<u8> {
+    include_bytes!("../../../../corpus/conformance/baseline_420_restart_32x16.rgb").to_vec()
+}
+
 /// An 8×8 APP14 RGB JPEG with constant pixel value `(200, 20, 10)`.
 pub(crate) fn rgb_app14_8x8_jpeg() -> Vec<u8> {
     vec![

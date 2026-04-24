@@ -91,10 +91,17 @@ use crate::jp2::{DecodedImage, ImageBoxes};
 pub mod error;
 #[macro_use]
 pub(crate) mod log;
+mod direct_plan;
 pub(crate) mod math;
 pub(crate) mod writer;
 
 use crate::math::{dispatch, f32x8, Level, Simd, SIMD_WIDTH};
+#[doc(hidden)]
+pub use direct_plan::{
+    HtOwnedCodeBlockBatchJob, HtOwnedSubBandPlan, J2kDirectBandId, J2kDirectGrayscalePlan,
+    J2kDirectGrayscaleStep, J2kDirectIdwtStep, J2kDirectStoreStep, J2kOwnedCodeBlockBatchJob,
+    J2kOwnedSubBandPlan,
+};
 pub use error::{
     ColorError, DecodeError, DecodingError, FormatError, MarkerError, Result, TileError,
     ValidationError,
@@ -105,6 +112,623 @@ pub use j2c::DecoderContext;
 mod j2c;
 mod jp2;
 pub(crate) mod reader;
+
+/// Hidden HTJ2K code-block job description for backend experimentation.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy)]
+pub struct HtCodeBlockDecodeJob<'a> {
+    /// Combined cleanup/refinement bytes for the code block.
+    pub data: &'a [u8],
+    /// Cleanup segment length in bytes.
+    pub cleanup_length: u32,
+    /// Refinement segment length in bytes.
+    pub refinement_length: u32,
+    /// Code-block width in samples.
+    pub width: u32,
+    /// Code-block height in samples.
+    pub height: u32,
+    /// Output row stride, in samples, for the target sub-band storage.
+    pub output_stride: usize,
+    /// Missing most-significant bit planes for this code block.
+    pub missing_bit_planes: u8,
+    /// Number of coding passes present for this code block.
+    pub number_of_coding_passes: u8,
+    /// Total coded bitplanes for the parent sub-band.
+    pub num_bitplanes: u8,
+    /// Whether vertically causal context was enabled.
+    pub stripe_causal: bool,
+    /// Whether strict decode validation is enabled for the parent image.
+    pub strict: bool,
+    /// Dequantization step to apply to decoded coefficients.
+    pub dequantization_step: f32,
+}
+
+/// Hidden HTJ2K batched code-block decode job for one sub-band.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy)]
+pub struct HtCodeBlockBatchJob<'a> {
+    /// X offset within the target sub-band coefficient buffer.
+    pub output_x: u32,
+    /// Y offset within the target sub-band coefficient buffer.
+    pub output_y: u32,
+    /// The actual code-block decode parameters.
+    pub code_block: HtCodeBlockDecodeJob<'a>,
+}
+
+/// Hidden HTJ2K batched sub-band decode request for backend experimentation.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy)]
+pub struct HtSubBandDecodeJob<'a> {
+    /// Sub-band width in samples.
+    pub width: u32,
+    /// Sub-band height in samples.
+    pub height: u32,
+    /// Code blocks to decode into this sub-band.
+    pub jobs: &'a [HtCodeBlockBatchJob<'a>],
+}
+
+/// Hidden classic J2K sub-band kind for backend experimentation.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum J2kSubBandType {
+    /// Low-low sub-band.
+    LowLow,
+    /// High-low sub-band.
+    HighLow,
+    /// Low-high sub-band.
+    LowHigh,
+    /// High-high sub-band.
+    HighHigh,
+}
+
+/// Hidden classic J2K code-block style for backend experimentation.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy)]
+pub struct J2kCodeBlockStyle {
+    /// Selective arithmetic coding bypass was enabled.
+    pub selective_arithmetic_coding_bypass: bool,
+    /// Context probabilities reset after each pass.
+    pub reset_context_probabilities: bool,
+    /// Coding terminated after each pass.
+    pub termination_on_each_pass: bool,
+    /// Vertically causal context was enabled.
+    pub vertically_causal_context: bool,
+    /// Segmentation symbols were enabled.
+    pub segmentation_symbols: bool,
+}
+
+/// Hidden classic J2K coded segment for backend experimentation.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy)]
+pub struct J2kCodeBlockSegment {
+    /// Byte offset of this segment within the combined payload.
+    pub data_offset: u32,
+    /// Segment payload length in bytes.
+    pub data_length: u32,
+    /// First coding pass covered by this segment.
+    pub start_coding_pass: u8,
+    /// One-past-last coding pass covered by this segment.
+    pub end_coding_pass: u8,
+    /// Whether this segment is decoded through the arithmetic path.
+    pub use_arithmetic: bool,
+}
+
+/// Hidden classic J2K code-block job description for backend experimentation.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy)]
+pub struct J2kCodeBlockDecodeJob<'a> {
+    /// Combined payload bytes for all coded segments in this code block.
+    pub data: &'a [u8],
+    /// Coded segments for the code block.
+    pub segments: &'a [J2kCodeBlockSegment],
+    /// Code-block width in samples.
+    pub width: u32,
+    /// Code-block height in samples.
+    pub height: u32,
+    /// Output row stride, in samples, for the target sub-band storage.
+    pub output_stride: usize,
+    /// Missing most-significant bit planes for this code block.
+    pub missing_bit_planes: u8,
+    /// Number of coding passes present for this code block.
+    pub number_of_coding_passes: u8,
+    /// Total coded bitplanes for the parent sub-band.
+    pub total_bitplanes: u8,
+    /// The sub-band type containing this code block.
+    pub sub_band_type: J2kSubBandType,
+    /// The code-block style flags.
+    pub style: J2kCodeBlockStyle,
+    /// Whether strict decode validation is enabled for the parent image.
+    pub strict: bool,
+    /// Dequantization step to apply to decoded coefficients.
+    pub dequantization_step: f32,
+}
+
+/// Hidden encoded classic J2K code-block payload for backend experimentation.
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct EncodedJ2kCodeBlock {
+    /// Combined payload bytes for all coded segments in this code block.
+    pub data: Vec<u8>,
+    /// Coded segments for the code block.
+    pub segments: Vec<J2kCodeBlockSegment>,
+    /// Number of coding passes present for this code block.
+    pub number_of_coding_passes: u8,
+    /// Missing most-significant bit planes for this code block.
+    pub missing_bit_planes: u8,
+}
+
+/// Hidden classic J2K batched code-block decode job for one sub-band.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy)]
+pub struct J2kCodeBlockBatchJob<'a> {
+    /// X offset within the target sub-band coefficient buffer.
+    pub output_x: u32,
+    /// Y offset within the target sub-band coefficient buffer.
+    pub output_y: u32,
+    /// The actual code-block decode parameters.
+    pub code_block: J2kCodeBlockDecodeJob<'a>,
+}
+
+/// Hidden classic J2K batched sub-band decode request for backend experimentation.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy)]
+pub struct J2kSubBandDecodeJob<'a> {
+    /// Sub-band width in samples.
+    pub width: u32,
+    /// Sub-band height in samples.
+    pub height: u32,
+    /// Code blocks to decode into this sub-band.
+    pub jobs: &'a [J2kCodeBlockBatchJob<'a>],
+}
+
+/// Hidden integer rectangle for backend experimentation.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct J2kRect {
+    /// Inclusive minimum x coordinate.
+    pub x0: u32,
+    /// Inclusive minimum y coordinate.
+    pub y0: u32,
+    /// Exclusive maximum x coordinate.
+    pub x1: u32,
+    /// Exclusive maximum y coordinate.
+    pub y1: u32,
+}
+
+impl J2kRect {
+    /// Rectangle width in samples.
+    pub fn width(self) -> u32 {
+        self.x1.saturating_sub(self.x0)
+    }
+
+    /// Rectangle height in samples.
+    pub fn height(self) -> u32 {
+        self.y1.saturating_sub(self.y0)
+    }
+}
+
+/// Hidden wavelet transform selector for backend experimentation.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum J2kWaveletTransform {
+    /// Reversible 5/3 transform.
+    Reversible53,
+    /// Irreversible 9/7 transform.
+    Irreversible97,
+}
+
+/// Hidden single sub-band payload for backend experimentation.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy)]
+pub struct J2kIdwtBand<'a> {
+    /// Rect covered by this band.
+    pub rect: J2kRect,
+    /// Band coefficients in row-major order.
+    pub coefficients: &'a [f32],
+}
+
+/// Hidden single-decomposition IDWT job for backend experimentation.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy)]
+pub struct J2kSingleDecompositionIdwtJob<'a> {
+    /// Output rect of the decomposition level.
+    pub rect: J2kRect,
+    /// Transform to apply.
+    pub transform: J2kWaveletTransform,
+    /// LL band input.
+    pub ll: J2kIdwtBand<'a>,
+    /// HL band input.
+    pub hl: J2kIdwtBand<'a>,
+    /// LH band input.
+    pub lh: J2kIdwtBand<'a>,
+    /// HH band input.
+    pub hh: J2kIdwtBand<'a>,
+}
+
+/// Hidden inverse MCT job for backend experimentation.
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct J2kInverseMctJob<'a> {
+    /// Transform to apply.
+    pub transform: J2kWaveletTransform,
+    /// First component plane, updated in place.
+    pub plane0: &'a mut [f32],
+    /// Second component plane, updated in place.
+    pub plane1: &'a mut [f32],
+    /// Third component plane, updated in place.
+    pub plane2: &'a mut [f32],
+    /// Constant sign-shift addend applied to the first plane after inverse MCT.
+    pub addend0: f32,
+    /// Constant sign-shift addend applied to the second plane after inverse MCT.
+    pub addend1: f32,
+    /// Constant sign-shift addend applied to the third plane after inverse MCT.
+    pub addend2: f32,
+}
+
+/// Hidden component-store job for backend experimentation.
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct J2kStoreComponentJob<'a> {
+    /// Source IDWT coefficients in row-major order.
+    pub input: &'a [f32],
+    /// Source row width.
+    pub input_width: u32,
+    /// Source x offset to begin copying from.
+    pub source_x: u32,
+    /// Source y offset to begin copying from.
+    pub source_y: u32,
+    /// Number of samples to copy per row.
+    pub copy_width: u32,
+    /// Number of rows to copy.
+    pub copy_height: u32,
+    /// Destination component plane in row-major order.
+    pub output: &'a mut [f32],
+    /// Destination row width.
+    pub output_width: u32,
+    /// Destination x offset to begin writing at.
+    pub output_x: u32,
+    /// Destination y offset to begin writing at.
+    pub output_y: u32,
+    /// Constant value added to every copied sample.
+    pub addend: f32,
+}
+
+/// Hidden HTJ2K code-block decode hook for backend experimentation.
+#[doc(hidden)]
+pub trait HtCodeBlockDecoder {
+    /// Optionally decode a full classic J2K sub-band in one batch.
+    ///
+    /// Implementations should return `Ok(true)` if they handled the request and
+    /// wrote the decoded coefficients into `output`. Returning `Ok(false)`
+    /// falls back to per-code-block decode via `decode_j2k_code_block`.
+    fn decode_j2k_sub_band(
+        &mut self,
+        _job: J2kSubBandDecodeJob<'_>,
+        _output: &mut [f32],
+    ) -> Result<bool> {
+        Ok(false)
+    }
+
+    /// Optionally decode one classic J2K code block.
+    ///
+    /// Implementations should return `Ok(true)` if they handled the request
+    /// and wrote the decoded coefficients into `output`. Returning `Ok(false)`
+    /// falls back to the scalar bitplane decoder.
+    fn decode_j2k_code_block(
+        &mut self,
+        _job: J2kCodeBlockDecodeJob<'_>,
+        _output: &mut [f32],
+    ) -> Result<bool> {
+        Ok(false)
+    }
+
+    /// Optionally decode a full HTJ2K sub-band in one batch.
+    ///
+    /// Implementations should return `Ok(true)` if they handled the request and
+    /// wrote the decoded coefficients into `output`. Returning `Ok(false)`
+    /// falls back to per-code-block decode via `decode_code_block`.
+    fn decode_sub_band(
+        &mut self,
+        _job: HtSubBandDecodeJob<'_>,
+        _output: &mut [f32],
+    ) -> Result<bool> {
+        Ok(false)
+    }
+
+    /// Optionally decode one single-decomposition IDWT level on a backend.
+    ///
+    /// Implementations should return `Ok(true)` if they handled the request
+    /// and wrote the transformed coefficients into `output`. Returning
+    /// `Ok(false)` falls back to the scalar/SIMD CPU IDWT path.
+    fn decode_single_decomposition_idwt(
+        &mut self,
+        _job: J2kSingleDecompositionIdwtJob<'_>,
+        _output: &mut [f32],
+    ) -> Result<bool> {
+        Ok(false)
+    }
+
+    /// Optionally apply inverse MCT on a backend.
+    ///
+    /// Implementations should return `Ok(true)` if they handled the request
+    /// and updated the component planes in place. Returning `Ok(false)` falls
+    /// back to the scalar/SIMD CPU MCT path.
+    fn decode_inverse_mct(&mut self, _job: J2kInverseMctJob<'_>) -> Result<bool> {
+        Ok(false)
+    }
+
+    /// Optionally store one component plane on a backend.
+    ///
+    /// Implementations should return `Ok(true)` if they handled the request
+    /// and updated the destination plane in place. Returning `Ok(false)` falls
+    /// back to the CPU store path.
+    fn decode_store_component(&mut self, _job: J2kStoreComponentJob<'_>) -> Result<bool> {
+        Ok(false)
+    }
+
+    /// Decode one HTJ2K code block into `output`, writing `job.width` samples per row.
+    fn decode_code_block(
+        &mut self,
+        job: HtCodeBlockDecodeJob<'_>,
+        output: &mut [f32],
+    ) -> Result<()>;
+}
+
+fn internal_j2k_sub_band_type(sub_band_type: J2kSubBandType) -> j2c::build::SubBandType {
+    match sub_band_type {
+        J2kSubBandType::LowLow => j2c::build::SubBandType::LowLow,
+        J2kSubBandType::HighLow => j2c::build::SubBandType::HighLow,
+        J2kSubBandType::LowHigh => j2c::build::SubBandType::LowHigh,
+        J2kSubBandType::HighHigh => j2c::build::SubBandType::HighHigh,
+    }
+}
+
+fn internal_j2k_code_block_style(style: J2kCodeBlockStyle) -> j2c::codestream::CodeBlockStyle {
+    j2c::codestream::CodeBlockStyle {
+        selective_arithmetic_coding_bypass: style.selective_arithmetic_coding_bypass,
+        reset_context_probabilities: style.reset_context_probabilities,
+        termination_on_each_pass: style.termination_on_each_pass,
+        vertically_causal_context: style.vertically_causal_context,
+        segmentation_symbols: style.segmentation_symbols,
+        high_throughput_block_coding: false,
+    }
+}
+
+/// Hidden scalar classic J2K encoder helper for backend experimentation.
+#[doc(hidden)]
+pub fn encode_j2k_code_block_scalar_with_style(
+    coefficients: &[i32],
+    width: u32,
+    height: u32,
+    sub_band_type: J2kSubBandType,
+    total_bitplanes: u8,
+    style: J2kCodeBlockStyle,
+) -> core::result::Result<EncodedJ2kCodeBlock, &'static str> {
+    let encoded = j2c::bitplane_encode::encode_code_block_segments_with_style(
+        coefficients,
+        width,
+        height,
+        internal_j2k_sub_band_type(sub_band_type),
+        total_bitplanes,
+        &internal_j2k_code_block_style(style),
+    );
+    let segments = encoded
+        .segments
+        .into_iter()
+        .map(|segment| J2kCodeBlockSegment {
+            data_offset: segment.data_offset,
+            data_length: segment.data_length,
+            start_coding_pass: segment.start_coding_pass,
+            end_coding_pass: segment.end_coding_pass,
+            use_arithmetic: segment.use_arithmetic,
+        })
+        .collect();
+
+    Ok(EncodedJ2kCodeBlock {
+        data: encoded.data,
+        segments,
+        number_of_coding_passes: encoded.num_coding_passes,
+        missing_bit_planes: encoded.num_zero_bitplanes,
+    })
+}
+
+/// Hidden scalar classic J2K decoder helper for backend experimentation.
+#[doc(hidden)]
+pub fn decode_j2k_code_block_scalar(
+    job: J2kCodeBlockDecodeJob<'_>,
+    output: &mut [f32],
+) -> Result<()> {
+    let required_len = if job.height == 0 {
+        0
+    } else {
+        job.output_stride
+            .checked_mul(job.height as usize - 1)
+            .and_then(|prefix| prefix.checked_add(job.width as usize))
+            .ok_or(DecodingError::CodeBlockDecodeFailure)?
+    };
+    if output.len() < required_len {
+        bail!(DecodingError::CodeBlockDecodeFailure);
+    }
+
+    let style = internal_j2k_code_block_style(job.style);
+    let sub_band_type = internal_j2k_sub_band_type(job.sub_band_type);
+    let code_block_stride =
+        usize::try_from(job.width).map_err(|_| DecodingError::CodeBlockDecodeFailure)?;
+    let mut bit_plane_decode_context = j2c::bitplane::BitPlaneDecodeContext::default();
+
+    j2c::bitplane::decode_code_block_segments_validated(
+        job.data,
+        job.segments,
+        job.width,
+        job.height,
+        job.missing_bit_planes,
+        job.number_of_coding_passes,
+        job.total_bitplanes,
+        sub_band_type,
+        &style,
+        job.strict,
+        &mut bit_plane_decode_context,
+    )?;
+
+    for (row_idx, coeff_row) in bit_plane_decode_context
+        .coefficient_rows()
+        .enumerate()
+        .take(job.height as usize)
+    {
+        let row_start = row_idx * job.output_stride;
+        let output_row = &mut output[row_start..row_start + code_block_stride];
+        for (coefficient, sample) in coeff_row.iter().zip(output_row.iter_mut()) {
+            *sample = coefficient.get() as f32 * job.dequantization_step;
+        }
+    }
+
+    Ok(())
+}
+
+/// Hidden scalar classic J2K batched decoder helper for backend experimentation.
+#[doc(hidden)]
+pub fn decode_j2k_sub_band_scalar(job: J2kSubBandDecodeJob<'_>, output: &mut [f32]) -> Result<()> {
+    let required_len = if job.height == 0 {
+        0
+    } else {
+        usize::try_from(job.width)
+            .ok()
+            .and_then(|width| width.checked_mul(job.height as usize))
+            .ok_or(DecodingError::CodeBlockDecodeFailure)?
+    };
+    if output.len() < required_len {
+        bail!(DecodingError::CodeBlockDecodeFailure);
+    }
+
+    let sub_band_width =
+        usize::try_from(job.width).map_err(|_| DecodingError::CodeBlockDecodeFailure)?;
+
+    for batch_job in job.jobs {
+        let code_block = batch_job.code_block;
+        if code_block.output_stride != sub_band_width {
+            bail!(DecodingError::CodeBlockDecodeFailure);
+        }
+        if batch_job
+            .output_x
+            .checked_add(code_block.width)
+            .is_none_or(|x1| x1 > job.width)
+            || batch_job
+                .output_y
+                .checked_add(code_block.height)
+                .is_none_or(|y1| y1 > job.height)
+        {
+            bail!(DecodingError::CodeBlockDecodeFailure);
+        }
+
+        let base_idx = usize::try_from(batch_job.output_y)
+            .ok()
+            .and_then(|y| y.checked_mul(sub_band_width))
+            .and_then(|row| row.checked_add(batch_job.output_x as usize))
+            .ok_or(DecodingError::CodeBlockDecodeFailure)?;
+        let block_output_len = if code_block.height == 0 {
+            0
+        } else {
+            code_block
+                .output_stride
+                .checked_mul(code_block.height as usize - 1)
+                .and_then(|prefix| prefix.checked_add(code_block.width as usize))
+                .ok_or(DecodingError::CodeBlockDecodeFailure)?
+        };
+        let end_idx = base_idx
+            .checked_add(block_output_len)
+            .ok_or(DecodingError::CodeBlockDecodeFailure)?;
+        if end_idx > output.len() {
+            bail!(DecodingError::CodeBlockDecodeFailure);
+        }
+
+        decode_j2k_code_block_scalar(code_block, &mut output[base_idx..end_idx])?;
+    }
+
+    Ok(())
+}
+
+/// Hidden scalar HTJ2K decoder helper for backend experimentation.
+#[doc(hidden)]
+pub fn decode_ht_code_block_scalar(
+    job: HtCodeBlockDecodeJob<'_>,
+    output: &mut [f32],
+) -> Result<()> {
+    let required_len = if job.height == 0 {
+        0
+    } else {
+        job.output_stride
+            .checked_mul(job.height as usize - 1)
+            .and_then(|prefix| prefix.checked_add(job.width as usize))
+            .ok_or(DecodingError::CodeBlockDecodeFailure)?
+    };
+    if output.len() < required_len {
+        bail!(DecodingError::CodeBlockDecodeFailure);
+    }
+    let code_block_stride =
+        usize::try_from(job.width).map_err(|_| DecodingError::CodeBlockDecodeFailure)?;
+    let code_block_len = code_block_stride
+        .checked_mul(job.height as usize)
+        .ok_or(DecodingError::CodeBlockDecodeFailure)?;
+
+    let combined = j2c::ht_block_decode::CombinedCodeBlockData {
+        data: job.data.to_vec(),
+        cleanup_length: job.cleanup_length,
+        refinement_length: job.refinement_length,
+    };
+    let mut coefficients = vec![0u32; code_block_len];
+    j2c::ht_block_decode::decode_combined_validated(
+        &combined,
+        job.missing_bit_planes,
+        job.num_bitplanes,
+        job.number_of_coding_passes,
+        job.stripe_causal,
+        job.strict,
+        &mut coefficients,
+        job.width,
+        job.height,
+        job.width,
+    )?;
+
+    for (row_idx, coeff_row) in coefficients
+        .chunks_exact(code_block_stride)
+        .enumerate()
+        .take(job.height as usize)
+    {
+        let row_start = row_idx * job.output_stride;
+        let output_row = &mut output[row_start..row_start + code_block_stride];
+        for (coefficient, sample) in coeff_row.iter().copied().zip(output_row.iter_mut()) {
+            *sample = j2c::ht_block_decode::coefficient_to_i32(coefficient, job.num_bitplanes)
+                as f32
+                * job.dequantization_step;
+        }
+    }
+
+    Ok(())
+}
+
+/// Hidden HTJ2K VLC table 0 for backend experimentation.
+#[doc(hidden)]
+pub fn ht_vlc_table0() -> &'static [u16; 1024] {
+    &j2c::ht_tables::VLC_TABLE0
+}
+
+/// Hidden HTJ2K VLC table 1 for backend experimentation.
+#[doc(hidden)]
+pub fn ht_vlc_table1() -> &'static [u16; 1024] {
+    &j2c::ht_tables::VLC_TABLE1
+}
+
+/// Hidden HTJ2K UVLC table 0 for backend experimentation.
+#[doc(hidden)]
+pub fn ht_uvlc_table0() -> &'static [u16; 320] {
+    &j2c::ht_tables::UVLC_TABLE0
+}
+
+/// Hidden HTJ2K UVLC table 1 for backend experimentation.
+#[doc(hidden)]
+pub fn ht_uvlc_table1() -> &'static [u16; 256] {
+    &j2c::ht_tables::UVLC_TABLE1
+}
 
 /// JP2 signature box: 00 00 00 0C 6A 50 20 20
 pub(crate) const JP2_MAGIC: &[u8] = b"\x00\x00\x00\x0C\x6A\x50\x20\x20";
@@ -201,6 +825,26 @@ impl<'a> Image<'a> {
         self.header.component_infos[0].size_info.precision
     }
 
+    /// Whether decode finishes with additional host-side component mutation or reordering.
+    #[doc(hidden)]
+    pub fn supports_direct_device_plane_reuse(&self) -> bool {
+        if self.settings.resolve_palette_indices && self.boxes.palette.is_some() {
+            return false;
+        }
+        if self.boxes.channel_definition.is_some() {
+            return false;
+        }
+        !matches!(
+            self.boxes
+                .color_specification
+                .as_ref()
+                .map(|spec| &spec.color_space),
+            Some(jp2::colr::ColorSpace::Enumerated(
+                EnumeratedColorspace::Sycc | EnumeratedColorspace::CieLab(_)
+            ))
+        )
+    }
+
     /// Decode the image and return its decoded result as a `Vec<u8>`, with each
     /// channel interleaved.
     pub fn decode(&self) -> Result<Vec<u8>> {
@@ -251,6 +895,80 @@ impl<'a> Image<'a> {
         })
     }
 
+    /// Build a hidden grayscale direct device plan without materializing host component planes.
+    #[doc(hidden)]
+    pub fn build_direct_grayscale_plan_with_context(
+        &self,
+        decoder_context: &mut DecoderContext<'a>,
+    ) -> Result<J2kDirectGrayscalePlan> {
+        if !matches!(self.color_space, ColorSpace::Gray) || self.has_alpha {
+            bail!(DecodingError::UnsupportedFeature(
+                "direct grayscale plan only supports grayscale images without alpha"
+            ));
+        }
+
+        j2c::build_direct_grayscale_plan(self.codestream, &self.header, decoder_context)
+    }
+
+    /// Decode borrowed component planes while delegating HTJ2K code-block decode.
+    #[doc(hidden)]
+    pub fn decode_components_with_ht_decoder<'ctx>(
+        &self,
+        decoder_context: &'ctx mut DecoderContext<'a>,
+        ht_decoder: &mut dyn HtCodeBlockDecoder,
+    ) -> Result<DecodedComponents<'ctx>> {
+        let decoded_image =
+            self.prepare_decoded_image_with_ht_decoder(decoder_context, ht_decoder)?;
+        let planes = decoded_image
+            .decoded_components
+            .iter()
+            .map(|component| ComponentPlane {
+                samples: component.container.truncated(),
+                bit_depth: component.bit_depth,
+            })
+            .collect();
+
+        Ok(DecodedComponents {
+            dimensions: (self.width(), self.height()),
+            color_space: self.color_space.clone(),
+            has_alpha: self.has_alpha,
+            planes,
+        })
+    }
+
+    /// Decode borrowed component planes for a requested region while
+    /// delegating code-block/transform stages through the hidden backend hook.
+    #[doc(hidden)]
+    pub fn decode_region_components_with_ht_decoder<'ctx>(
+        &self,
+        decoder_context: &'ctx mut DecoderContext<'a>,
+        roi: (u32, u32, u32, u32),
+        ht_decoder: &mut dyn HtCodeBlockDecoder,
+    ) -> Result<DecodedComponents<'ctx>> {
+        validate_roi((self.width(), self.height()), roi)?;
+        let (_x, _y, width, height) = roi;
+        let decoded_image = self.prepare_decoded_image_with_region_and_ht_decoder(
+            decoder_context,
+            Some(roi),
+            Some(ht_decoder),
+        )?;
+        let planes = decoded_image
+            .decoded_components
+            .iter()
+            .map(|component| ComponentPlane {
+                samples: component.container.truncated(),
+                bit_depth: component.bit_depth,
+            })
+            .collect();
+
+        Ok(DecodedComponents {
+            dimensions: (width, height),
+            color_space: self.color_space.clone(),
+            has_alpha: self.has_alpha,
+            planes,
+        })
+    }
+
     /// Decode a region of the image and return it as an 8-bit interleaved bitmap.
     pub fn decode_region(&self, roi: (u32, u32, u32, u32)) -> Result<Bitmap> {
         self.decode_region_with_context(roi, &mut DecoderContext::default())
@@ -264,12 +982,18 @@ impl<'a> Image<'a> {
         decoder_context: &mut DecoderContext<'a>,
     ) -> Result<Bitmap> {
         validate_roi((self.width(), self.height()), roi)?;
-        let mut decoded_image = self.prepare_decoded_image(decoder_context)?;
+        let mut decoded_image =
+            self.prepare_decoded_image_with_region(decoder_context, Some(roi))?;
         let (_x, _y, width, height) = roi;
         let channels =
             self.color_space.num_channels() as usize + if self.has_alpha { 1 } else { 0 };
         let mut data = vec![0; width as usize * height as usize * channels];
-        interleave_and_convert_region(&mut decoded_image, self.width() as usize, roi, &mut data);
+        interleave_and_convert_region(
+            &mut decoded_image,
+            width as usize,
+            (0, 0, width, height),
+            &mut data,
+        );
         Ok(Bitmap {
             color_space: self.color_space.clone(),
             data,
@@ -304,7 +1028,7 @@ impl<'a> Image<'a> {
         &self,
         decoder_context: &mut DecoderContext<'a>,
     ) -> Result<RawBitmap> {
-        j2c::decode(self.codestream, &self.header, decoder_context)?;
+        self.decode_with_output_region(decoder_context, None)?;
 
         let components = &decoder_context.tile_decode_context.channel_data;
         let bit_depth = self.original_bit_depth();
@@ -373,22 +1097,21 @@ impl<'a> Image<'a> {
         decoder_context: &mut DecoderContext<'a>,
     ) -> Result<RawBitmap> {
         validate_roi((self.width(), self.height()), roi)?;
-        j2c::decode(self.codestream, &self.header, decoder_context)?;
+        self.decode_with_output_region(decoder_context, Some(roi))?;
 
         let components = &decoder_context.tile_decode_context.channel_data;
         let bit_depth = self.original_bit_depth();
         let num_components = components.len() as u8;
         let bytes_per_sample = if bit_depth <= 8 { 1 } else { 2 };
-        let (x, y, width, height) = roi;
-        let image_width = self.width() as usize;
+        let (_x, _y, width, height) = roi;
         let mut data = Vec::with_capacity(
             width as usize * height as usize * num_components as usize * bytes_per_sample,
         );
         let max_val = ((1u32 << bit_depth) - 1) as f32;
 
-        for row in y as usize..(y + height) as usize {
-            for col in x as usize..(x + width) as usize {
-                let idx = row * image_width + col;
+        for row in 0..height as usize {
+            for col in 0..width as usize {
+                let idx = row * width as usize + col;
                 for component in components {
                     let v = math::round_f32(component.container.truncated()[idx]);
                     let clamped = if v < 0.0 {
@@ -441,8 +1164,37 @@ impl<'a> Image<'a> {
         &self,
         decoder_context: &'ctx mut DecoderContext<'a>,
     ) -> Result<DecodedImage<'ctx>> {
+        self.prepare_decoded_image_with_region(decoder_context, None)
+    }
+
+    fn prepare_decoded_image_with_ht_decoder<'ctx>(
+        &self,
+        decoder_context: &'ctx mut DecoderContext<'a>,
+        ht_decoder: &mut dyn HtCodeBlockDecoder,
+    ) -> Result<DecodedImage<'ctx>> {
+        self.prepare_decoded_image_with_region_and_ht_decoder(
+            decoder_context,
+            None,
+            Some(ht_decoder),
+        )
+    }
+
+    fn prepare_decoded_image_with_region<'ctx>(
+        &self,
+        decoder_context: &'ctx mut DecoderContext<'a>,
+        output_region: Option<(u32, u32, u32, u32)>,
+    ) -> Result<DecodedImage<'ctx>> {
+        self.prepare_decoded_image_with_region_and_ht_decoder(decoder_context, output_region, None)
+    }
+
+    fn prepare_decoded_image_with_region_and_ht_decoder<'ctx>(
+        &self,
+        decoder_context: &'ctx mut DecoderContext<'a>,
+        output_region: Option<(u32, u32, u32, u32)>,
+        ht_decoder: Option<&mut dyn HtCodeBlockDecoder>,
+    ) -> Result<DecodedImage<'ctx>> {
         let settings = &self.settings;
-        j2c::decode(self.codestream, &self.header, decoder_context)?;
+        self.decode_with_output_region_and_ht_decoder(decoder_context, output_region, ht_decoder)?;
         let mut decoded_image = DecodedImage {
             decoded_components: &mut decoder_context.tile_decode_context.channel_data,
             boxes: self.boxes.clone(),
@@ -475,6 +1227,31 @@ impl<'a> Image<'a> {
         let bit_depth = decoded_image.decoded_components[0].bit_depth;
         convert_color_space(&mut decoded_image, bit_depth)?;
         Ok(decoded_image)
+    }
+
+    fn decode_with_output_region(
+        &self,
+        decoder_context: &mut DecoderContext<'a>,
+        output_region: Option<(u32, u32, u32, u32)>,
+    ) -> Result<()> {
+        self.decode_with_output_region_and_ht_decoder(decoder_context, output_region, None)
+    }
+
+    fn decode_with_output_region_and_ht_decoder(
+        &self,
+        decoder_context: &mut DecoderContext<'a>,
+        output_region: Option<(u32, u32, u32, u32)>,
+        mut ht_decoder: Option<&mut dyn HtCodeBlockDecoder>,
+    ) -> Result<()> {
+        decoder_context.set_output_region(output_region);
+        let decode_result = j2c::decode(
+            self.codestream,
+            &self.header,
+            decoder_context,
+            &mut ht_decoder,
+        );
+        decoder_context.set_output_region(None);
+        decode_result
     }
 }
 
@@ -1093,4 +1870,265 @@ fn sycc_to_rgb<S: Simd>(simd: S, components: &mut [ComponentData], bit_depth: u8
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    struct FailingHtDecoder {
+        called: bool,
+    }
+
+    impl HtCodeBlockDecoder for FailingHtDecoder {
+        fn decode_code_block(
+            &mut self,
+            _job: HtCodeBlockDecodeJob<'_>,
+            _output: &mut [f32],
+        ) -> Result<()> {
+            self.called = true;
+            Err(DecodingError::CodeBlockDecodeFailure.into())
+        }
+    }
+
+    struct FailingClassicDecoder {
+        called: bool,
+    }
+
+    impl HtCodeBlockDecoder for FailingClassicDecoder {
+        fn decode_code_block(
+            &mut self,
+            _job: HtCodeBlockDecodeJob<'_>,
+            _output: &mut [f32],
+        ) -> Result<()> {
+            panic!("HT hook must not be used for classic J2K test")
+        }
+
+        fn decode_j2k_code_block(
+            &mut self,
+            _job: J2kCodeBlockDecodeJob<'_>,
+            _output: &mut [f32],
+        ) -> Result<bool> {
+            self.called = true;
+            Err(DecodingError::CodeBlockDecodeFailure.into())
+        }
+    }
+
+    struct FailingClassicBatchDecoder {
+        called: bool,
+    }
+
+    impl HtCodeBlockDecoder for FailingClassicBatchDecoder {
+        fn decode_code_block(
+            &mut self,
+            _job: HtCodeBlockDecodeJob<'_>,
+            _output: &mut [f32],
+        ) -> Result<()> {
+            panic!("HT hook must not be used for classic J2K batch test")
+        }
+
+        fn decode_j2k_code_block(
+            &mut self,
+            _job: J2kCodeBlockDecodeJob<'_>,
+            _output: &mut [f32],
+        ) -> Result<bool> {
+            panic!(
+                "per-block classic hook must not be used when the batch hook handles the sub-band"
+            )
+        }
+
+        fn decode_j2k_sub_band(
+            &mut self,
+            _job: J2kSubBandDecodeJob<'_>,
+            _output: &mut [f32],
+        ) -> Result<bool> {
+            self.called = true;
+            Err(DecodingError::CodeBlockDecodeFailure.into())
+        }
+    }
+
+    fn fixture() -> Vec<u8> {
+        let pixels = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120];
+        let options = EncodeOptions {
+            reversible: true,
+            num_decomposition_levels: 1,
+            ..EncodeOptions::default()
+        };
+        encode(&pixels, 2, 2, 3, 8, false, &options).expect("encode")
+    }
+
+    fn fixture_multi_block() -> Vec<u8> {
+        let pixels: Vec<u8> = (0..64).collect();
+        let options = EncodeOptions {
+            reversible: true,
+            num_decomposition_levels: 0,
+            code_block_width_exp: 0,
+            code_block_height_exp: 0,
+            ..EncodeOptions::default()
+        };
+        encode(&pixels, 8, 8, 1, 8, false, &options).expect("encode multi-block classic")
+    }
+
+    fn fixture_gray() -> Vec<u8> {
+        let pixels: Vec<u8> = (0..16).collect();
+        let options = EncodeOptions {
+            reversible: true,
+            num_decomposition_levels: 1,
+            ..EncodeOptions::default()
+        };
+        encode(&pixels, 4, 4, 1, 8, false, &options).expect("encode classic gray8")
+    }
+
+    fn fixture_ht_gray() -> Vec<u8> {
+        let pixels: Vec<u8> = (0..16).collect();
+        let options = EncodeOptions {
+            reversible: true,
+            num_decomposition_levels: 1,
+            ..EncodeOptions::default()
+        };
+        encode_htj2k(&pixels, 4, 4, 1, 8, false, &options).expect("encode ht gray8")
+    }
+
+    #[test]
+    fn region_decode_reuses_region_sized_component_storage() {
+        let bytes = fixture();
+        let image = Image::new(&bytes, &DecodeSettings::default()).expect("image");
+        let mut context = DecoderContext::default();
+
+        let bitmap = image
+            .decode_region_with_context((1, 0, 1, 2), &mut context)
+            .expect("region decode");
+
+        assert_eq!((bitmap.width, bitmap.height), (1, 2));
+        assert!(context
+            .tile_decode_context
+            .channel_data
+            .iter()
+            .all(|component| component.container.truncated().len() == 2));
+    }
+
+    #[test]
+    fn native_region_decode_reuses_region_sized_component_storage() {
+        let bytes = fixture();
+        let image = Image::new(&bytes, &DecodeSettings::default()).expect("image");
+        let mut context = DecoderContext::default();
+
+        let bitmap = image
+            .decode_native_region_with_context((1, 0, 1, 2), &mut context)
+            .expect("native region decode");
+
+        assert_eq!((bitmap.width, bitmap.height), (1, 2));
+        assert!(context
+            .tile_decode_context
+            .channel_data
+            .iter()
+            .all(|component| component.container.truncated().len() == 2));
+    }
+
+    #[test]
+    fn grayscale_direct_plan_is_built_without_materializing_channel_data() {
+        let bytes = fixture_gray();
+        let image = Image::new(&bytes, &DecodeSettings::default()).expect("image");
+        let mut context = DecoderContext::default();
+
+        let plan = image
+            .build_direct_grayscale_plan_with_context(&mut context)
+            .expect("build direct plan");
+
+        assert_eq!(plan.dimensions, (4, 4));
+        assert_eq!(plan.bit_depth, 8);
+        assert!(
+            !plan.steps.is_empty(),
+            "direct plan must contain executable steps"
+        );
+        assert!(
+            plan.steps.iter().any(|step| matches!(
+                step,
+                J2kDirectGrayscaleStep::ClassicSubBand(plan) if !plan.jobs.is_empty()
+            )),
+            "classic J2K direct plan must contain at least one non-empty classic sub-band job"
+        );
+        assert!(
+            context.tile_decode_context.channel_data.is_empty(),
+            "building a direct plan must not materialize host component planes"
+        );
+    }
+
+    #[test]
+    fn htj2k_grayscale_direct_plan_contains_ht_sub_band_steps() {
+        let bytes = fixture_ht_gray();
+        let image = Image::new(&bytes, &DecodeSettings::default()).expect("image");
+        let mut context = DecoderContext::default();
+
+        let plan = image
+            .build_direct_grayscale_plan_with_context(&mut context)
+            .expect("build direct plan");
+
+        assert!(
+            plan.steps.iter().any(|step| matches!(
+                step,
+                J2kDirectGrayscaleStep::HtSubBand(plan) if !plan.jobs.is_empty()
+            )),
+            "HTJ2K direct plan must contain at least one non-empty HT sub-band decode step"
+        );
+    }
+
+    #[test]
+    fn ht_decoder_hook_is_used_for_htj2k_codeblocks() {
+        let pixels: Vec<u8> = (0..16).collect();
+        let options = EncodeOptions {
+            reversible: true,
+            num_decomposition_levels: 1,
+            ..EncodeOptions::default()
+        };
+        let bytes = encode_htj2k(&pixels, 4, 4, 1, 8, false, &options).expect("encode ht");
+        let image = Image::new(&bytes, &DecodeSettings::default()).expect("image");
+        let mut hooked_context = DecoderContext::default();
+        let mut hook = FailingHtDecoder { called: false };
+        let error = match image.decode_components_with_ht_decoder(&mut hooked_context, &mut hook) {
+            Ok(_) => panic!("hooked decode must use external HT decoder"),
+            Err(error) => error,
+        };
+
+        assert!(hook.called, "HT decoder hook must be invoked");
+        assert_eq!(
+            error,
+            DecodeError::Decoding(DecodingError::CodeBlockDecodeFailure)
+        );
+    }
+
+    #[test]
+    fn classic_decoder_hook_is_used_for_j2k_codeblocks() {
+        let bytes = fixture();
+        let image = Image::new(&bytes, &DecodeSettings::default()).expect("image");
+        let mut hooked_context = DecoderContext::default();
+        let mut hook = FailingClassicDecoder { called: false };
+        let error = match image.decode_components_with_ht_decoder(&mut hooked_context, &mut hook) {
+            Ok(_) => panic!("hooked decode must use external classic decoder"),
+            Err(error) => error,
+        };
+
+        assert!(hook.called, "classic decoder hook must be invoked");
+        assert_eq!(
+            error,
+            DecodeError::Decoding(DecodingError::CodeBlockDecodeFailure)
+        );
+    }
+
+    #[test]
+    fn classic_sub_band_decoder_hook_is_used_for_j2k_codeblocks() {
+        let bytes = fixture_multi_block();
+        let image = Image::new(&bytes, &DecodeSettings::default()).expect("image");
+        let mut hooked_context = DecoderContext::default();
+        let mut hook = FailingClassicBatchDecoder { called: false };
+        let error = match image.decode_components_with_ht_decoder(&mut hooked_context, &mut hook) {
+            Ok(_) => panic!("hooked decode must use external classic batch decoder"),
+            Err(error) => error,
+        };
+
+        assert!(hook.called, "classic sub-band decoder hook must be invoked");
+        assert_eq!(
+            error,
+            DecodeError::Decoding(DecodingError::CodeBlockDecodeFailure)
+        );
+    }
 }

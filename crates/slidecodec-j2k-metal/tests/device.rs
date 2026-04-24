@@ -1,9 +1,14 @@
+use std::sync::Arc;
+
 use slidecodec_core::{
-    BackendKind, BackendRequest, CodecError, DeviceSurface, Downscale, ImageDecode,
-    ImageDecodeDevice, PixelFormat, Rect, TileBatchDecodeDevice,
+    BackendKind, BackendRequest, CodecError, DeviceSubmission, DeviceSurface, Downscale,
+    ImageDecode, ImageDecodeDevice, PixelFormat, Rect, TileBatchDecodeDevice,
+    TileBatchDecodeSubmit,
 };
 use slidecodec_j2k::J2kContext;
-use slidecodec_j2k_metal::{Codec, Error, J2kDecoder, J2kScratchPool};
+use slidecodec_j2k_metal::{
+    Codec, Error, J2kDecoder, J2kScratchPool, MetalSession, MetalTileBatch,
+};
 use slidecodec_j2k_native::{encode, encode_htj2k, EncodeOptions};
 
 fn fixture_rgb8() -> Vec<u8> {
@@ -24,6 +29,16 @@ fn fixture_gray8() -> Vec<u8> {
         ..EncodeOptions::default()
     };
     encode(&pixels, 4, 4, 1, 8, false, &options).expect("encode gray8")
+}
+
+fn fixture_gray8_reversed() -> Vec<u8> {
+    let pixels: Vec<u8> = (0..16).rev().collect();
+    let options = EncodeOptions {
+        reversible: true,
+        num_decomposition_levels: 1,
+        ..EncodeOptions::default()
+    };
+    encode(&pixels, 4, 4, 1, 8, false, &options).expect("encode reversed gray8")
 }
 
 fn fixture_gray12() -> Vec<u8> {
@@ -164,6 +179,214 @@ fn tile_full_grayscale_device_path_uses_metal_direct() {
 }
 
 #[test]
+fn metal_surface_exposes_buffer_for_on_device_consumers() {
+    let bytes = fixture_gray8();
+    let mut metal_decoder = J2kDecoder::new(&bytes).expect("metal decoder");
+    let metal_surface = metal_decoder
+        .decode_to_device(PixelFormat::Gray8, BackendRequest::Metal)
+        .expect("metal surface");
+    let (buffer, byte_offset) = metal_surface.metal_buffer().expect("metal buffer");
+    assert_eq!(byte_offset, 0);
+    let buffer_len = usize::try_from(buffer.length()).expect("metal buffer length fits usize");
+    assert!(buffer_len >= metal_surface.byte_len());
+
+    let mut cpu_decoder = J2kDecoder::new(&bytes).expect("cpu decoder");
+    let cpu_surface = cpu_decoder
+        .decode_to_device(PixelFormat::Gray8, BackendRequest::Cpu)
+        .expect("cpu surface");
+    assert!(cpu_surface.metal_buffer().is_none());
+}
+
+#[test]
+fn submitted_full_grayscale_tiles_flush_as_one_device_batch() {
+    let bytes = fixture_gray8();
+    let mut ctx = slidecodec_core::DecoderContext::<J2kContext>::new();
+    let mut session = MetalSession::default();
+    let mut pool = J2kScratchPool::new();
+
+    let submissions = (0..3)
+        .map(|_| {
+            Codec::submit_tile_to_device(
+                &mut ctx,
+                &mut session,
+                &mut pool,
+                &bytes,
+                PixelFormat::Gray8,
+                BackendRequest::Metal,
+            )
+            .expect("submit tile")
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        session.submissions(),
+        0,
+        "submitted tile surfaces should stay queued until a wait flushes the session"
+    );
+
+    let mut host_decoder = J2kDecoder::new(&bytes).expect("host decoder");
+    let mut host = [0u8; 16];
+    host_decoder
+        .decode_into(&mut host, 4, PixelFormat::Gray8)
+        .expect("host decode");
+
+    for submission in submissions {
+        let surface = submission.wait().expect("surface");
+        assert_eq!(surface.backend_kind(), BackendKind::Metal);
+        assert_eq!(surface.as_bytes(), host.as_slice());
+    }
+    assert_eq!(
+        session.submissions(),
+        1,
+        "compatible queued grayscale tiles should flush through one repeated Metal batch"
+    );
+}
+
+#[test]
+fn submitted_distinct_full_grayscale_tiles_flush_as_one_device_batch() {
+    let classic_bytes = fixture_gray8();
+    let reversed_bytes = fixture_gray8_reversed();
+    let mut ctx = slidecodec_core::DecoderContext::<J2kContext>::new();
+    let mut session = MetalSession::default();
+    let mut pool = J2kScratchPool::new();
+
+    let classic_submission = Codec::submit_tile_to_device(
+        &mut ctx,
+        &mut session,
+        &mut pool,
+        &classic_bytes,
+        PixelFormat::Gray8,
+        BackendRequest::Metal,
+    )
+    .expect("submit classic tile");
+    let reversed_submission = Codec::submit_tile_to_device(
+        &mut ctx,
+        &mut session,
+        &mut pool,
+        &reversed_bytes,
+        PixelFormat::Gray8,
+        BackendRequest::Metal,
+    )
+    .expect("submit reversed tile");
+
+    assert_eq!(
+        session.submissions(),
+        0,
+        "distinct submitted tile surfaces should stay queued until wait"
+    );
+
+    let mut classic_host_decoder = J2kDecoder::new(&classic_bytes).expect("classic host decoder");
+    let mut classic_host = [0u8; 16];
+    classic_host_decoder
+        .decode_into(&mut classic_host, 4, PixelFormat::Gray8)
+        .expect("classic host decode");
+
+    let mut reversed_host_decoder =
+        J2kDecoder::new(&reversed_bytes).expect("reversed host decoder");
+    let mut reversed_host = [0u8; 16];
+    reversed_host_decoder
+        .decode_into(&mut reversed_host, 4, PixelFormat::Gray8)
+        .expect("reversed host decode");
+
+    let classic_surface = classic_submission.wait().expect("classic surface");
+    let reversed_surface = reversed_submission.wait().expect("reversed surface");
+    assert_eq!(classic_surface.backend_kind(), BackendKind::Metal);
+    assert_eq!(reversed_surface.backend_kind(), BackendKind::Metal);
+    assert_eq!(classic_surface.as_bytes(), classic_host.as_slice());
+    assert_eq!(reversed_surface.as_bytes(), reversed_host.as_slice());
+    assert_eq!(
+        session.submissions(),
+        1,
+        "distinct queued grayscale tiles should flush through one Metal command buffer"
+    );
+}
+
+#[test]
+fn metal_tile_batch_decodes_submitted_tiles_in_order() {
+    let classic_bytes = fixture_gray8();
+    let reversed_bytes = fixture_gray8_reversed();
+    let mut batch = MetalTileBatch::new();
+
+    assert!(batch.is_empty());
+    assert_eq!(
+        batch
+            .push_tile(&classic_bytes, PixelFormat::Gray8, BackendRequest::Metal)
+            .expect("push classic tile"),
+        0
+    );
+    assert_eq!(
+        batch
+            .push_shared_tile(
+                Arc::<[u8]>::from(reversed_bytes.as_slice()),
+                PixelFormat::Gray8,
+                BackendRequest::Metal,
+            )
+            .expect("push reversed tile"),
+        1
+    );
+    assert_eq!(batch.len(), 2);
+    assert_eq!(batch.submissions(), 0);
+
+    let surfaces = batch.decode_all().expect("batch decode");
+    assert_eq!(surfaces.len(), 2);
+    assert_eq!(surfaces[0].backend_kind(), BackendKind::Metal);
+    assert_eq!(surfaces[1].backend_kind(), BackendKind::Metal);
+
+    let mut classic_host_decoder = J2kDecoder::new(&classic_bytes).expect("classic host decoder");
+    let mut classic_host = [0u8; 16];
+    classic_host_decoder
+        .decode_into(&mut classic_host, 4, PixelFormat::Gray8)
+        .expect("classic host decode");
+
+    let mut reversed_host_decoder =
+        J2kDecoder::new(&reversed_bytes).expect("reversed host decoder");
+    let mut reversed_host = [0u8; 16];
+    reversed_host_decoder
+        .decode_into(&mut reversed_host, 4, PixelFormat::Gray8)
+        .expect("reversed host decode");
+
+    assert_eq!(surfaces[0].as_bytes(), classic_host.as_slice());
+    assert_eq!(surfaces[1].as_bytes(), reversed_host.as_slice());
+}
+
+#[test]
+fn metal_tile_batch_supports_region_and_scaled_requests() {
+    let bytes = fixture_gray8();
+    let roi = Rect {
+        x: 0,
+        y: 0,
+        w: 2,
+        h: 2,
+    };
+    let mut batch = MetalTileBatch::with_capacity(2);
+
+    assert_eq!(
+        batch
+            .push_tile_region(&bytes, PixelFormat::Gray8, roi, BackendRequest::Metal)
+            .expect("push region tile"),
+        0
+    );
+    assert_eq!(
+        batch
+            .push_tile_scaled(
+                &bytes,
+                PixelFormat::Gray8,
+                Downscale::Half,
+                BackendRequest::Metal
+            )
+            .expect("push scaled tile"),
+        1
+    );
+
+    let surfaces = batch.decode_all().expect("batch decode");
+    assert_eq!(surfaces.len(), 2);
+    assert_eq!(surfaces[0].dimensions(), (2, 2));
+    assert_eq!(surfaces[1].dimensions(), (2, 2));
+    assert_eq!(surfaces[0].backend_kind(), BackendKind::Metal);
+    assert_eq!(surfaces[1].backend_kind(), BackendKind::Metal);
+}
+
+#[test]
 fn repeated_classic_grayscale_direct_decode_matches_host_decode() {
     let bytes = fixture_gray8();
     let mut decoder = J2kDecoder::new(&bytes).expect("decoder");
@@ -249,7 +472,7 @@ fn explicit_metal_rejects_non_grayscale_formats() {
 }
 
 #[test]
-fn explicit_metal_rejects_region_and_scaled_requests() {
+fn explicit_metal_region_and_scaled_grayscale_match_host_decode() {
     let bytes = fixture_gray8();
     let roi = Rect {
         x: 0,
@@ -258,23 +481,96 @@ fn explicit_metal_rejects_region_and_scaled_requests() {
         h: 2,
     };
 
+    let mut host_region_decoder = J2kDecoder::new(&bytes).expect("host region decoder");
+    let mut host_region = [0u8; 4];
+    host_region_decoder
+        .decode_region_into(
+            &mut J2kScratchPool::new(),
+            &mut host_region,
+            2,
+            PixelFormat::Gray8,
+            roi,
+        )
+        .expect("host region decode");
+
     let mut region_decoder = J2kDecoder::new(&bytes).expect("decoder");
-    let Err(region_error) =
-        region_decoder.decode_region_to_device(PixelFormat::Gray8, roi, BackendRequest::Metal)
-    else {
-        panic!("explicit Metal region decode must be unsupported in the first cut");
-    };
-    assert!(region_error.is_unsupported());
+    let region_surface = region_decoder
+        .decode_region_to_device(PixelFormat::Gray8, roi, BackendRequest::Metal)
+        .expect("explicit Metal region decode");
+    assert_eq!(region_surface.backend_kind(), BackendKind::Metal);
+    assert_eq!(region_surface.dimensions(), (2, 2));
+    assert_eq!(region_surface.as_bytes(), host_region.as_slice());
+
+    let mut host_scaled_decoder = J2kDecoder::new(&bytes).expect("host scaled decoder");
+    let mut host_scaled = [0u8; 4];
+    host_scaled_decoder
+        .decode_scaled_into(
+            &mut J2kScratchPool::new(),
+            &mut host_scaled,
+            2,
+            PixelFormat::Gray8,
+            Downscale::Half,
+        )
+        .expect("host scaled decode");
 
     let mut scaled_decoder = J2kDecoder::new(&bytes).expect("decoder");
-    let Err(scaled_error) = scaled_decoder.decode_scaled_to_device(
-        PixelFormat::Gray8,
-        Downscale::Half,
-        BackendRequest::Metal,
-    ) else {
-        panic!("explicit Metal scaled decode must be unsupported in the first cut");
+    let scaled_surface = scaled_decoder
+        .decode_scaled_to_device(PixelFormat::Gray8, Downscale::Half, BackendRequest::Metal)
+        .expect("explicit Metal scaled decode");
+    assert_eq!(scaled_surface.backend_kind(), BackendKind::Metal);
+    assert_eq!(scaled_surface.dimensions(), (2, 2));
+    assert_eq!(scaled_surface.as_bytes(), host_scaled.as_slice());
+}
+
+#[test]
+fn explicit_metal_region_and_scaled_htj2k_grayscale_match_host_decode() {
+    let bytes = fixture_ht_gray8();
+    let roi = Rect {
+        x: 0,
+        y: 0,
+        w: 2,
+        h: 2,
     };
-    assert!(scaled_error.is_unsupported());
+
+    let mut host_region_decoder = J2kDecoder::new(&bytes).expect("host region decoder");
+    let mut host_region = [0u8; 4];
+    host_region_decoder
+        .decode_region_into(
+            &mut J2kScratchPool::new(),
+            &mut host_region,
+            2,
+            PixelFormat::Gray8,
+            roi,
+        )
+        .expect("host region decode");
+
+    let mut region_decoder = J2kDecoder::new(&bytes).expect("decoder");
+    let region_surface = region_decoder
+        .decode_region_to_device(PixelFormat::Gray8, roi, BackendRequest::Metal)
+        .expect("explicit Metal region decode");
+    assert_eq!(region_surface.backend_kind(), BackendKind::Metal);
+    assert_eq!(region_surface.dimensions(), (2, 2));
+    assert_eq!(region_surface.as_bytes(), host_region.as_slice());
+
+    let mut host_scaled_decoder = J2kDecoder::new(&bytes).expect("host scaled decoder");
+    let mut host_scaled = [0u8; 4];
+    host_scaled_decoder
+        .decode_scaled_into(
+            &mut J2kScratchPool::new(),
+            &mut host_scaled,
+            2,
+            PixelFormat::Gray8,
+            Downscale::Half,
+        )
+        .expect("host scaled decode");
+
+    let mut scaled_decoder = J2kDecoder::new(&bytes).expect("decoder");
+    let scaled_surface = scaled_decoder
+        .decode_scaled_to_device(PixelFormat::Gray8, Downscale::Half, BackendRequest::Metal)
+        .expect("explicit Metal scaled decode");
+    assert_eq!(scaled_surface.backend_kind(), BackendKind::Metal);
+    assert_eq!(scaled_surface.dimensions(), (2, 2));
+    assert_eq!(scaled_surface.as_bytes(), host_scaled.as_slice());
 }
 
 #[test]

@@ -28,6 +28,10 @@ struct J2kRepeatedIdwtSingleDecompositionParams {
     uint lh_height;
     uint hh_width;
     uint hh_height;
+    uint ll_instance_stride;
+    uint hl_instance_stride;
+    uint lh_instance_stride;
+    uint hh_instance_stride;
     uint batch_count;
 };
 
@@ -155,20 +159,16 @@ kernel void j2k_idwt_interleave_batched(
     const uint band_x = low_x ? low_index(global_x, params.x0) : high_index(global_x, params.x0);
     const uint band_y = low_y ? low_index(global_y, params.y0) : high_index(global_y, params.y0);
     const uint out_plane_len = params.width * params.height;
-    const uint ll_plane_len = params.ll_width * params.ll_height;
-    const uint hl_plane_len = params.hl_width * params.hl_height;
-    const uint lh_plane_len = params.lh_width * params.lh_height;
-    const uint hh_plane_len = params.hh_width * params.hh_height;
     const uint out_idx = gid.z * out_plane_len + gid.y * params.width + gid.x;
 
     if (low_y && low_x) {
-        out[out_idx] = ll[gid.z * ll_plane_len + band_y * params.ll_width + band_x];
+        out[out_idx] = ll[gid.z * params.ll_instance_stride + band_y * params.ll_width + band_x];
     } else if (low_y) {
-        out[out_idx] = hl[gid.z * hl_plane_len + band_y * params.hl_width + band_x];
+        out[out_idx] = hl[gid.z * params.hl_instance_stride + band_y * params.hl_width + band_x];
     } else if (low_x) {
-        out[out_idx] = lh[gid.z * lh_plane_len + band_y * params.lh_width + band_x];
+        out[out_idx] = lh[gid.z * params.lh_instance_stride + band_y * params.lh_width + band_x];
     } else {
-        out[out_idx] = hh[gid.z * hh_plane_len + band_y * params.hh_width + band_x];
+        out[out_idx] = hh[gid.z * params.hh_instance_stride + band_y * params.hh_width + band_x];
     }
 }
 

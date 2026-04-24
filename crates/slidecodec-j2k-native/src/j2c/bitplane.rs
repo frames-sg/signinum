@@ -18,6 +18,7 @@ use super::codestream::CodeBlockStyle;
 use super::decode::{DecompositionStorage, TileDecodeContext};
 use crate::error::{bail, DecodingError, Result};
 use crate::reader::BitReader;
+use crate::J2kCodeBlockSegment;
 
 /// Decode the layers of the given code block into coefficients.
 ///
@@ -48,6 +49,40 @@ pub(crate) fn decode(
         &mut tile_ctx.bit_plane_decode_buffers,
     )
     .ok_or(DecodingError::CodeBlockDecodeFailure)?;
+
+    Ok(())
+}
+
+pub(crate) fn decode_code_block_segments_validated(
+    data: &[u8],
+    segments: &[J2kCodeBlockSegment],
+    width: u32,
+    height: u32,
+    missing_bit_planes: u8,
+    number_of_coding_passes: u8,
+    total_bitplanes: u8,
+    sub_band_type: SubBandType,
+    code_block_style: &CodeBlockStyle,
+    strict: bool,
+    ctx: &mut BitPlaneDecodeContext,
+) -> Result<()> {
+    ctx.reset_for_job(
+        width,
+        height,
+        missing_bit_planes,
+        number_of_coding_passes,
+        sub_band_type,
+        code_block_style,
+        total_bitplanes,
+        strict,
+    )?;
+
+    if number_of_coding_passes == 0 || ctx.bitplanes == 0 {
+        return Ok(());
+    }
+
+    decode_code_block_segments_inner(data, segments, number_of_coding_passes, ctx)
+        .ok_or(DecodingError::CodeBlockDecodeFailure)?;
 
     Ok(())
 }
@@ -413,16 +448,17 @@ impl Default for BitPlaneDecodeContext {
 }
 
 impl BitPlaneDecodeContext {
-    /// Completely reset context so that it can be reused for a new code-block.
-    pub(crate) fn reset(
+    fn reset_for_job(
         &mut self,
-        code_block: &CodeBlock,
+        width: u32,
+        height: u32,
+        missing_bit_planes: u8,
+        number_of_coding_passes: u8,
         sub_band_type: SubBandType,
         code_block_style: &CodeBlockStyle,
         total_bitplanes: u8,
         strict: bool,
     ) -> Result<()> {
-        let (width, height) = (code_block.rect.width(), code_block.rect.height());
         let padded_width = width + COEFFICIENTS_PADDING * 2;
         let padded_height = height + COEFFICIENTS_PADDING * 2;
         let num_coefficients = padded_width as usize * padded_height as usize;
@@ -446,20 +482,12 @@ impl BitPlaneDecodeContext {
         self.style = *code_block_style;
         self.reset_contexts();
 
-        // "The maximum number of bit-planes available for the representation of
-        // coefficients in any sub-band, b, is given by Mb as defined in Equation
-        // (E-2). In general however, the number of actual bit-planes for which
-        // coding passes are generated is Mb – P, where the number of missing most
-        // significant bit-planes, P, may vary from code-block to code-block."
-
-        // See issue 399. If this subtraction fails the file is in theory invalid,
-        // but we still try to be lenient.
         self.bitplanes = if strict {
             total_bitplanes
-                .checked_sub(code_block.missing_bit_planes)
+                .checked_sub(missing_bit_planes)
                 .ok_or(DecodingError::InvalidBitplaneCount)?
         } else {
-            total_bitplanes.saturating_sub(code_block.missing_bit_planes)
+            total_bitplanes.saturating_sub(missing_bit_planes)
         };
 
         self.max_coding_passes = if self.bitplanes == 0 {
@@ -468,11 +496,34 @@ impl BitPlaneDecodeContext {
             1 + 3 * (self.bitplanes - 1)
         };
 
-        if self.max_coding_passes < code_block.number_of_coding_passes && strict {
+        if self.max_coding_passes < number_of_coding_passes && strict {
             bail!(DecodingError::TooManyCodingPasses);
         }
 
+        self.strict = strict;
+
         Ok(())
+    }
+
+    /// Completely reset context so that it can be reused for a new code-block.
+    pub(crate) fn reset(
+        &mut self,
+        code_block: &CodeBlock,
+        sub_band_type: SubBandType,
+        code_block_style: &CodeBlockStyle,
+        total_bitplanes: u8,
+        strict: bool,
+    ) -> Result<()> {
+        self.reset_for_job(
+            code_block.rect.width(),
+            code_block.rect.height(),
+            code_block.missing_bit_planes,
+            code_block.number_of_coding_passes,
+            sub_band_type,
+            code_block_style,
+            total_bitplanes,
+            strict,
+        )
     }
 
     pub(crate) fn coefficient_rows(&self) -> impl Iterator<Item = &[Coefficient]> {
@@ -587,6 +638,45 @@ impl BitPlaneDecodeContext {
             neighbors.all()
         }
     }
+}
+
+fn decode_code_block_segments_inner(
+    data: &[u8],
+    segments: &[J2kCodeBlockSegment],
+    number_of_coding_passes: u8,
+    ctx: &mut BitPlaneDecodeContext,
+) -> Option<()> {
+    let mut expected_start = 0u8;
+
+    for segment in segments {
+        if segment.start_coding_pass != expected_start
+            || segment.start_coding_pass > segment.end_coding_pass
+        {
+            return None;
+        }
+        expected_start = segment.end_coding_pass;
+
+        let start_coding_pass = segment.start_coding_pass;
+        let end_coding_pass = segment.end_coding_pass.min(ctx.max_coding_passes);
+        let data_start = usize::try_from(segment.data_offset).ok()?;
+        let data_length = usize::try_from(segment.data_length).ok()?;
+        let data_end = data_start.checked_add(data_length)?;
+        let segment_data = data.get(data_start..data_end)?;
+
+        if segment.use_arithmetic {
+            let mut decoder = ArithmeticDecoder::new(segment_data);
+            handle_coding_passes(start_coding_pass, end_coding_pass, ctx, &mut decoder)?;
+        } else {
+            let mut decoder = BypassDecoder::new(segment_data, ctx.strict);
+            handle_coding_passes(start_coding_pass, end_coding_pass, ctx, &mut decoder)?;
+        }
+    }
+
+    if expected_start != number_of_coding_passes {
+        return None;
+    }
+
+    Some(())
 }
 
 /// Perform the cleanup pass, specified in D.3.4.

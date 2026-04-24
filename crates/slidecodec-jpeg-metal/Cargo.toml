@@ -29,6 +29,10 @@ criterion = { workspace = true }
 name = "device_upload"
 harness = false
 
+[[bench]]
+name = "compare"
+harness = false
+
 [lints.rust]
 unsafe_code = "allow"
 unreachable_pub = "warn"

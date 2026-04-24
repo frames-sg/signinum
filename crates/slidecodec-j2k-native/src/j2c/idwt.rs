@@ -7,8 +7,13 @@ use super::build::{Decomposition, SubBand};
 use super::codestream::WaveletTransform;
 use super::decode::{DecompositionStorage, TileDecodeContext};
 use super::rect::IntRect;
+use crate::error::DecodingError;
 use crate::j2c::Header;
 use crate::math::{self, dispatch, f32x8, Level, Simd, SIMD_WIDTH};
+use crate::{
+    HtCodeBlockDecoder, J2kIdwtBand, J2kRect, J2kSingleDecompositionIdwtJob, J2kWaveletTransform,
+    Result,
+};
 
 /// The output from performing the IDWT operation.
 pub(crate) struct IDWTOutput {
@@ -35,6 +40,13 @@ struct IDWTTempOutput {
     rect: IntRect,
 }
 
+#[derive(Clone, Copy)]
+enum InputSource {
+    SubBand,
+    Scratch,
+    Output,
+}
+
 /// Apply the inverse discrete wavelet transform (see Annex F). The output
 /// will be transformed samples covering the rectangle of the smallest
 /// decomposition level.
@@ -44,7 +56,8 @@ pub(crate) fn apply(
     component_idx: usize,
     header: &Header<'_>,
     transform: WaveletTransform,
-) {
+    backend: &mut Option<&mut dyn HtCodeBlockDecoder>,
+) -> Result<()> {
     let tile_decompositions = &storage.tile_decompositions[component_idx];
 
     let mut decompositions = &storage.decompositions[tile_decompositions.decompositions.clone()];
@@ -87,7 +100,7 @@ pub(crate) fn apply(
 
         output.rect = ll_sub_band.rect;
 
-        return;
+        return Ok(());
     }
 
     // The coefficient array will always be the one that holds the coefficients
@@ -112,57 +125,155 @@ pub(crate) fn apply(
     // Determine which buffer we should use first, such that the `coefficients`
     // array will always hold the final values.
     let mut use_scratch = decompositions.len() % 2 == 0;
+    let mut current_source = InputSource::SubBand;
+    let mut current_rect = ll_sub_band.rect;
+    let mut temp_output = IDWTTempOutput {
+        rect: ll_sub_band.rect,
+    };
 
-    let mut temp_output = filter_2d(
-        IDWTInput::from_sub_band(ll_sub_band, storage),
-        if use_scratch {
-            scratch_buf
-        } else {
-            &mut output.coefficients
-        },
-        &decompositions[0],
-        transform,
-        storage,
-    );
-
-    for decomposition in decompositions.iter().skip(1) {
-        use_scratch = !use_scratch;
-
-        temp_output = if use_scratch {
-            filter_2d(
-                IDWTInput::from_output(&output.coefficients),
+    for decomposition in decompositions {
+        temp_output = match (current_source, use_scratch) {
+            (InputSource::SubBand, true) => apply_level(
+                IDWTInput::from_sub_band(ll_sub_band, storage),
                 scratch_buf,
                 decomposition,
                 transform,
                 storage,
-            )
-        } else {
-            filter_2d(
-                IDWTInput::from_output(scratch_buf),
+                backend,
+            )?,
+            (InputSource::SubBand, false) => apply_level(
+                IDWTInput::from_sub_band(ll_sub_band, storage),
                 &mut output.coefficients,
                 decomposition,
                 transform,
                 storage,
-            )
+                backend,
+            )?,
+            (InputSource::Scratch, false) => apply_level(
+                IDWTInput::from_output(scratch_buf, current_rect),
+                &mut output.coefficients,
+                decomposition,
+                transform,
+                storage,
+                backend,
+            )?,
+            (InputSource::Output, true) => apply_level(
+                IDWTInput::from_output(&output.coefficients, current_rect),
+                scratch_buf,
+                decomposition,
+                transform,
+                storage,
+                backend,
+            )?,
+            (InputSource::Scratch, true) | (InputSource::Output, false) => unreachable!(),
         };
+        current_source = if use_scratch {
+            InputSource::Scratch
+        } else {
+            InputSource::Output
+        };
+        current_rect = temp_output.rect;
+        use_scratch = !use_scratch;
     }
 
     output.rect = temp_output.rect;
+    Ok(())
 }
 
+fn apply_level(
+    input: IDWTInput<'_>,
+    target: &mut Vec<f32>,
+    decomposition: &Decomposition,
+    transform: WaveletTransform,
+    storage: &DecompositionStorage<'_>,
+    backend: &mut Option<&mut dyn HtCodeBlockDecoder>,
+) -> Result<IDWTTempOutput> {
+    let handled = if let Some(backend) = backend.as_deref_mut() {
+        let required_len =
+            decomposition.rect.width() as usize * decomposition.rect.height() as usize;
+        target.resize(required_len, 0.0);
+        let job = single_decomposition_job(input, decomposition, storage, transform);
+        backend
+            .decode_single_decomposition_idwt(job, target)
+            .map_err(|_| DecodingError::CodeBlockDecodeFailure)?
+    } else {
+        false
+    };
+
+    if handled {
+        Ok(IDWTTempOutput {
+            rect: decomposition.rect,
+        })
+    } else {
+        Ok(filter_2d(input, target, decomposition, transform, storage))
+    }
+}
+
+#[inline(always)]
+fn external_rect(rect: IntRect) -> J2kRect {
+    J2kRect {
+        x0: rect.x0,
+        y0: rect.y0,
+        x1: rect.x1,
+        y1: rect.y1,
+    }
+}
+
+#[inline(always)]
+fn external_transform(transform: WaveletTransform) -> J2kWaveletTransform {
+    match transform {
+        WaveletTransform::Reversible53 => J2kWaveletTransform::Reversible53,
+        WaveletTransform::Irreversible97 => J2kWaveletTransform::Irreversible97,
+    }
+}
+
+#[derive(Clone, Copy)]
 struct IDWTInput<'a> {
+    rect: IntRect,
     coefficients: &'a [f32],
 }
 
 impl<'a> IDWTInput<'a> {
     fn from_sub_band(sub_band: &'a SubBand, storage: &'a DecompositionStorage<'_>) -> Self {
         IDWTInput {
+            rect: sub_band.rect,
             coefficients: &storage.coefficients[sub_band.coefficients.clone()],
         }
     }
 
-    fn from_output(coefficients: &'a [f32]) -> Self {
-        IDWTInput { coefficients }
+    fn from_output(coefficients: &'a [f32], rect: IntRect) -> Self {
+        IDWTInput { rect, coefficients }
+    }
+}
+
+fn single_decomposition_job<'a>(
+    input: IDWTInput<'a>,
+    decomposition: &'a Decomposition,
+    storage: &'a DecompositionStorage<'a>,
+    transform: WaveletTransform,
+) -> J2kSingleDecompositionIdwtJob<'a> {
+    let hl = &storage.sub_bands[decomposition.sub_bands[0]];
+    let lh = &storage.sub_bands[decomposition.sub_bands[1]];
+    let hh = &storage.sub_bands[decomposition.sub_bands[2]];
+    J2kSingleDecompositionIdwtJob {
+        rect: external_rect(decomposition.rect),
+        transform: external_transform(transform),
+        ll: J2kIdwtBand {
+            rect: external_rect(input.rect),
+            coefficients: input.coefficients,
+        },
+        hl: J2kIdwtBand {
+            rect: external_rect(hl.rect),
+            coefficients: &storage.coefficients[hl.coefficients.clone()],
+        },
+        lh: J2kIdwtBand {
+            rect: external_rect(lh.rect),
+            coefficients: &storage.coefficients[lh.coefficients.clone()],
+        },
+        hh: J2kIdwtBand {
+            rect: external_rect(hh.rect),
+            coefficients: &storage.coefficients[hh.coefficients.clone()],
+        },
     }
 }
 

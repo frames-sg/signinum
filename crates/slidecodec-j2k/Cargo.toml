@@ -23,6 +23,7 @@ thiserror = { workspace = true }
 proptest = { workspace = true }
 criterion = { workspace = true }
 slidecodec-j2k-compare = { path = "../slidecodec-j2k-compare", version = "0.0.0" }
+slidecodec-j2k-metal = { path = "../slidecodec-j2k-metal", version = "0.0.0" }
 slidecodec-j2k-native = { path = "../slidecodec-j2k-native", version = "0.0.0" }
 
 [[bench]]

@@ -28,6 +28,13 @@ const ACC_BITS: u8 = 64;
 #[cfg(test)]
 const REFILL_THRESHOLD: u8 = 56;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BitReaderSnapshot {
+    pub(crate) pos: usize,
+    pub(crate) acc: u64,
+    pub(crate) bits: u8,
+}
+
 pub(crate) struct BitReader<'a> {
     bytes: &'a [u8],
     /// Cursor into `bytes`. Always either (a) past the last consumed byte, or
@@ -222,11 +229,30 @@ impl<'a> BitReader<'a> {
         self.pos
     }
 
+    pub(crate) fn snapshot(&self) -> BitReaderSnapshot {
+        BitReaderSnapshot {
+            pos: self.pos,
+            acc: self.acc,
+            bits: self.bits,
+        }
+    }
+
     /// Reset the bit accumulator at a restart interval boundary. Called by
     /// the MCU loop after observing an RST marker.
     pub(crate) fn reset_at_restart(&mut self) {
         self.acc = 0;
         self.bits = 0;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_snapshot(bytes: &'a [u8], snapshot: BitReaderSnapshot) -> Self {
+        Self {
+            bytes,
+            pos: snapshot.pos,
+            acc: snapshot.acc,
+            bits: snapshot.bits,
+            marker: None,
+        }
     }
 }
 
@@ -326,5 +352,17 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn snapshot_roundtrips_reader_state() {
+        let data = [0xABu8, 0xCD, 0xEF];
+        let mut br = BitReader::new(&data);
+        assert_eq!(br.read_bits(5).unwrap(), 0b10101);
+        let snapshot = br.snapshot();
+        let expected = br.read_bits(7).unwrap();
+
+        let mut restored = BitReader::from_snapshot(&data, snapshot);
+        assert_eq!(restored.read_bits(7).unwrap(), expected);
     }
 }

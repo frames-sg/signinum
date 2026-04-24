@@ -1,18 +1,18 @@
 mod arithmetic_decoder;
 pub(crate) mod arithmetic_encoder;
-mod bitplane;
+pub(crate) mod bitplane;
 pub(crate) mod bitplane_encode;
-mod build;
-mod codestream;
+pub(crate) mod build;
+pub(crate) mod codestream;
 pub(crate) mod codestream_write;
 mod decode;
 pub(crate) mod encode;
 pub(crate) mod fdwt;
 pub(crate) mod forward_mct;
-mod ht_block_decode;
+pub(crate) mod ht_block_decode;
 mod ht_block_encode;
 mod ht_encode_tables;
-mod ht_tables;
+pub(crate) mod ht_tables;
 mod idwt;
 mod mct;
 pub(crate) mod packet_encode;
@@ -33,8 +33,8 @@ use crate::{resolve_alpha_and_color_space, DecodeSettings, Image};
 
 use crate::math::{SimdBuffer, SIMD_WIDTH};
 pub(crate) use codestream::Header;
-pub(crate) use decode::decode;
 pub use decode::DecoderContext;
+pub(crate) use decode::{build_direct_grayscale_plan, decode};
 
 pub(crate) struct ParsedCodestream<'a> {
     pub(crate) header: Header<'a>,

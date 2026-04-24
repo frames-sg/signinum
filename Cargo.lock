@@ -828,6 +828,7 @@ dependencies = [
  "proptest",
  "slidecodec-core",
  "slidecodec-j2k-compare",
+ "slidecodec-j2k-metal",
  "slidecodec-j2k-native",
  "thiserror",
 ]

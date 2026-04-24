@@ -80,29 +80,27 @@ pub(crate) fn decode(
     }
 
     let combined = collect_code_block_data(code_block, storage)?;
-
-    decode_impl(
-        &combined.data,
+    decode_combined_validated(
+        &combined,
+        code_block.missing_bit_planes,
+        total_bitplanes,
+        code_block.number_of_coding_passes,
+        stripe_causal,
+        strict,
         &mut ctx.coefficients,
-        code_block.missing_bit_planes as u32,
-        code_block.number_of_coding_passes as u32,
-        combined.cleanup_length,
-        combined.refinement_length,
         code_block.rect.width(),
         code_block.rect.height(),
         code_block.rect.width(),
-        stripe_causal,
     )
-    .ok_or(DecodingError::CodeBlockDecodeFailure.into())
 }
 
-struct CombinedCodeBlockData {
-    data: Vec<u8>,
-    cleanup_length: u32,
-    refinement_length: u32,
+pub(crate) struct CombinedCodeBlockData {
+    pub(crate) data: Vec<u8>,
+    pub(crate) cleanup_length: u32,
+    pub(crate) refinement_length: u32,
 }
 
-fn collect_code_block_data(
+pub(crate) fn collect_code_block_data(
     code_block: &CodeBlock,
     storage: &DecompositionStorage<'_>,
 ) -> Result<CombinedCodeBlockData> {
@@ -145,6 +143,86 @@ fn collect_code_block_data(
         cleanup_length,
         refinement_length,
     })
+}
+
+pub(crate) fn decode_combined(
+    combined: &CombinedCodeBlockData,
+    missing_bit_planes: u8,
+    number_of_coding_passes: u8,
+    width: u32,
+    height: u32,
+    stride: u32,
+    stripe_causal: bool,
+    decoded_data: &mut [u32],
+) -> Result<()> {
+    decode_impl(
+        &combined.data,
+        decoded_data,
+        missing_bit_planes as u32,
+        number_of_coding_passes as u32,
+        combined.cleanup_length,
+        combined.refinement_length,
+        width,
+        height,
+        stride,
+        stripe_causal,
+    )
+    .ok_or(DecodingError::CodeBlockDecodeFailure.into())
+}
+
+#[allow(dead_code)]
+pub(crate) fn decode_combined_validated(
+    combined: &CombinedCodeBlockData,
+    missing_bit_planes: u8,
+    total_bitplanes: u8,
+    number_of_coding_passes: u8,
+    stripe_causal: bool,
+    strict: bool,
+    decoded_data: &mut [u32],
+    width: u32,
+    height: u32,
+    stride: u32,
+) -> Result<()> {
+    if total_bitplanes == 0 {
+        return Ok(());
+    }
+
+    if total_bitplanes > 31 {
+        bail!(DecodingError::TooManyBitplanes);
+    }
+
+    let actual_bitplanes = if strict {
+        total_bitplanes
+            .checked_sub(missing_bit_planes)
+            .ok_or(DecodingError::InvalidBitplaneCount)?
+    } else {
+        total_bitplanes.saturating_sub(missing_bit_planes)
+    };
+
+    let max_coding_passes = if actual_bitplanes == 0 {
+        0
+    } else {
+        1 + 3 * (actual_bitplanes - 1)
+    };
+
+    if number_of_coding_passes > max_coding_passes && strict {
+        bail!(DecodingError::TooManyCodingPasses);
+    }
+
+    if number_of_coding_passes == 0 || actual_bitplanes == 0 {
+        return Ok(());
+    }
+
+    decode_combined(
+        combined,
+        missing_bit_planes,
+        number_of_coding_passes,
+        width,
+        height,
+        stride,
+        stripe_causal,
+        decoded_data,
+    )
 }
 
 struct MelDecoder<'a> {

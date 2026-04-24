@@ -24,4 +24,7 @@ pub use slidecodec_core::{
     ImageDecode, ImageDecodeRows, PixelFormat, Rect, RowSink, TileBatchDecode,
 };
 
+#[doc(hidden)]
+pub mod __private;
+
 pub(crate) mod parse;

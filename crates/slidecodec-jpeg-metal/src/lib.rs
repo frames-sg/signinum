@@ -3,18 +3,28 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(unreachable_pub)]
 
+mod batch;
 #[cfg(target_os = "macos")]
 mod compute;
+mod session;
+pub mod viewport;
+
+use std::sync::Arc;
 
 use slidecodec_core::{
     BackendKind, BackendRequest, BufferError, CodecError, DecodeOutcome, DeviceSubmission,
     DeviceSurface, Downscale, ImageCodec, ImageDecode, ImageDecodeDevice, ImageDecodeSubmit,
-    PixelFormat, ReadySubmission, Rect, TileBatchDecodeDevice, TileBatchDecodeSubmit,
+    PixelFormat, Rect, TileBatchDecodeDevice, TileBatchDecodeSubmit,
 };
 use slidecodec_jpeg::{
     ColorSpace as JpegColorSpace, DecodeOutcome as JpegDecodeOutcome, Decoder as CpuDecoder,
     DecoderContext as CpuDecoderContext, JpegError, JpegView, Rect as JpegRect,
     ScratchPool as CpuScratchPool, Warning as CpuWarning,
+    __private::{
+        build_metal_fast420_packet, build_metal_fast420_packet_for_decoder,
+        build_metal_fast444_packet, build_metal_fast444_packet_for_decoder, decoder_bytes,
+        JpegMetalFast420PacketV1, JpegMetalFast444PacketV1,
+    },
 };
 
 #[cfg(target_os = "macos")]
@@ -124,38 +134,59 @@ impl DeviceSurface for Surface {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Default)]
 pub struct MetalSession {
-    submissions: u64,
+    shared: session::SharedSession,
 }
 
 impl MetalSession {
     pub fn submissions(&self) -> u64 {
-        self.submissions
+        self.shared.0.lock().expect("metal session").submissions
     }
+}
 
-    fn record_submit(&mut self) {
-        self.submissions = self.submissions.saturating_add(1);
+impl core::fmt::Debug for MetalSession {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("MetalSession")
+            .field("submissions", &self.submissions())
+            .finish()
     }
 }
 
 pub struct Decoder<'a> {
     inner: CpuDecoder<'a>,
-    pool: CpuScratchPool,
+    source: Arc<[u8]>,
+    fast444_packet: Option<JpegMetalFast444PacketV1>,
+    fast420_packet: Option<JpegMetalFast420PacketV1>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AutoDevicePath {
+    CpuUpload,
+    MetalKernel,
 }
 
 impl<'a> Decoder<'a> {
     pub fn new(input: &'a [u8]) -> Result<Self, Error> {
+        let inner = CpuDecoder::new(input)?;
         Ok(Self {
-            inner: CpuDecoder::new(input)?,
-            pool: CpuScratchPool::new(),
+            fast444_packet: build_metal_fast444_packet(input).ok(),
+            fast420_packet: build_metal_fast420_packet(input).ok(),
+            inner,
+            source: Arc::<[u8]>::from(input),
         })
     }
 
     pub fn from_view(view: JpegView<'a>) -> Result<Self, Error> {
+        let inner = CpuDecoder::from_view(view)?;
+        let source = Arc::<[u8]>::from(decoder_bytes(&inner));
+        let fast444_packet = build_metal_fast444_packet_for_decoder(&inner).ok();
+        let fast420_packet = build_metal_fast420_packet_for_decoder(&inner).ok();
         Ok(Self {
-            inner: CpuDecoder::from_view(view)?,
-            pool: CpuScratchPool::new(),
+            inner,
+            source,
+            fast444_packet,
+            fast420_packet,
         })
     }
 
@@ -165,115 +196,6 @@ impl<'a> Decoder<'a> {
 
     pub fn into_inner(self) -> CpuDecoder<'a> {
         self.inner
-    }
-
-    fn decode_to_surface_impl(
-        &mut self,
-        fmt: PixelFormat,
-        backend: BackendRequest,
-    ) -> Result<Surface, Error> {
-        #[cfg(not(target_os = "macos"))]
-        if matches!(backend, BackendRequest::Metal) {
-            return Err(Error::MetalUnavailable);
-        }
-        match backend {
-            BackendRequest::Cpu => {
-                let (bytes, _outcome) = self.inner.decode(fmt)?;
-                upload_surface(bytes, self.inner.info().dimensions, fmt, backend)
-            }
-            BackendRequest::Auto | BackendRequest::Metal => {
-                #[cfg(target_os = "macos")]
-                {
-                    compute::decode_to_surface(&self.inner, &mut self.pool, fmt)
-                }
-                #[cfg(not(target_os = "macos"))]
-                {
-                    let (bytes, _outcome) = self.inner.decode(fmt)?;
-                    upload_surface(
-                        bytes,
-                        self.inner.info().dimensions,
-                        fmt,
-                        BackendRequest::Cpu,
-                    )
-                }
-            }
-            BackendRequest::Cuda => Err(Error::UnsupportedBackend { request: backend }),
-        }
-    }
-
-    fn decode_region_to_surface_impl(
-        &mut self,
-        fmt: PixelFormat,
-        roi: Rect,
-        backend: BackendRequest,
-    ) -> Result<Surface, Error> {
-        #[cfg(not(target_os = "macos"))]
-        if matches!(backend, BackendRequest::Metal) {
-            return Err(Error::MetalUnavailable);
-        }
-        match backend {
-            BackendRequest::Cpu => {
-                let (bytes, outcome) = self.inner.decode_region(fmt, to_jpeg_rect(roi))?;
-                upload_surface(bytes, (outcome.decoded.w, outcome.decoded.h), fmt, backend)
-            }
-            BackendRequest::Auto | BackendRequest::Metal => {
-                #[cfg(target_os = "macos")]
-                {
-                    compute::decode_region_to_surface(
-                        &self.inner,
-                        &mut self.pool,
-                        fmt,
-                        to_jpeg_rect(roi),
-                    )
-                }
-                #[cfg(not(target_os = "macos"))]
-                {
-                    let (bytes, outcome) = self.inner.decode_region(fmt, to_jpeg_rect(roi))?;
-                    upload_surface(
-                        bytes,
-                        (outcome.decoded.w, outcome.decoded.h),
-                        fmt,
-                        BackendRequest::Cpu,
-                    )
-                }
-            }
-            BackendRequest::Cuda => Err(Error::UnsupportedBackend { request: backend }),
-        }
-    }
-
-    fn decode_scaled_to_surface_impl(
-        &mut self,
-        fmt: PixelFormat,
-        scale: Downscale,
-        backend: BackendRequest,
-    ) -> Result<Surface, Error> {
-        #[cfg(not(target_os = "macos"))]
-        if matches!(backend, BackendRequest::Metal) {
-            return Err(Error::MetalUnavailable);
-        }
-        match backend {
-            BackendRequest::Cpu => {
-                let (bytes, outcome) = self.inner.decode_scaled(fmt, scale)?;
-                upload_surface(bytes, (outcome.decoded.w, outcome.decoded.h), fmt, backend)
-            }
-            BackendRequest::Auto | BackendRequest::Metal => {
-                #[cfg(target_os = "macos")]
-                {
-                    compute::decode_scaled_to_surface(&self.inner, &mut self.pool, fmt, scale)
-                }
-                #[cfg(not(target_os = "macos"))]
-                {
-                    let (bytes, outcome) = self.inner.decode_scaled(fmt, scale)?;
-                    upload_surface(
-                        bytes,
-                        (outcome.decoded.w, outcome.decoded.h),
-                        fmt,
-                        BackendRequest::Cpu,
-                    )
-                }
-            }
-            BackendRequest::Cuda => Err(Error::UnsupportedBackend { request: backend }),
-        }
     }
 }
 
@@ -410,140 +332,10 @@ impl ImageCodec for Codec {
     type Pool = CpuScratchPool;
 }
 
-impl Codec {
-    fn decode_tile_to_surface_impl(
-        ctx: &mut slidecodec_core::DecoderContext<CpuDecoderContext>,
-        pool: &mut CpuScratchPool,
-        input: &[u8],
-        fmt: PixelFormat,
-        backend: BackendRequest,
-    ) -> Result<Surface, Error> {
-        let decoder = CpuDecoder::from_view_in_context(JpegView::parse(input)?, ctx.codec_mut())?;
-        #[cfg(not(target_os = "macos"))]
-        if matches!(backend, BackendRequest::Metal) {
-            return Err(Error::MetalUnavailable);
-        }
-        match backend {
-            BackendRequest::Cpu => {
-                let dims = decoder.info().dimensions;
-                let stride = dims.0 as usize * fmt.bytes_per_pixel();
-                let mut out = vec![0u8; stride * dims.1 as usize];
-                decoder.decode_into_with_scratch(pool, &mut out, stride, fmt)?;
-                upload_surface(out, dims, fmt, backend)
-            }
-            BackendRequest::Auto | BackendRequest::Metal => {
-                #[cfg(target_os = "macos")]
-                {
-                    compute::decode_to_surface(&decoder, pool, fmt)
-                }
-                #[cfg(not(target_os = "macos"))]
-                {
-                    let dims = decoder.info().dimensions;
-                    let stride = dims.0 as usize * fmt.bytes_per_pixel();
-                    let mut out = vec![0u8; stride * dims.1 as usize];
-                    decoder.decode_into_with_scratch(pool, &mut out, stride, fmt)?;
-                    upload_surface(out, dims, fmt, BackendRequest::Cpu)
-                }
-            }
-            BackendRequest::Cuda => Err(Error::UnsupportedBackend { request: backend }),
-        }
-    }
-
-    fn decode_tile_region_to_surface_impl(
-        ctx: &mut slidecodec_core::DecoderContext<CpuDecoderContext>,
-        pool: &mut CpuScratchPool,
-        input: &[u8],
-        fmt: PixelFormat,
-        roi: Rect,
-        backend: BackendRequest,
-    ) -> Result<Surface, Error> {
-        let decoder = CpuDecoder::from_view_in_context(JpegView::parse(input)?, ctx.codec_mut())?;
-        #[cfg(not(target_os = "macos"))]
-        if matches!(backend, BackendRequest::Metal) {
-            return Err(Error::MetalUnavailable);
-        }
-        match backend {
-            BackendRequest::Cpu => {
-                let dims = (roi.w, roi.h);
-                let stride = dims.0 as usize * fmt.bytes_per_pixel();
-                let mut out = vec![0u8; stride * dims.1 as usize];
-                decoder.decode_region_into_with_scratch(
-                    pool,
-                    &mut out,
-                    stride,
-                    fmt,
-                    to_jpeg_rect(roi),
-                )?;
-                upload_surface(out, dims, fmt, backend)
-            }
-            BackendRequest::Auto | BackendRequest::Metal => {
-                #[cfg(target_os = "macos")]
-                {
-                    compute::decode_region_to_surface(&decoder, pool, fmt, to_jpeg_rect(roi))
-                }
-                #[cfg(not(target_os = "macos"))]
-                {
-                    let dims = (roi.w, roi.h);
-                    let stride = dims.0 as usize * fmt.bytes_per_pixel();
-                    let mut out = vec![0u8; stride * dims.1 as usize];
-                    decoder.decode_region_into_with_scratch(
-                        pool,
-                        &mut out,
-                        stride,
-                        fmt,
-                        to_jpeg_rect(roi),
-                    )?;
-                    upload_surface(out, dims, fmt, BackendRequest::Cpu)
-                }
-            }
-            BackendRequest::Cuda => Err(Error::UnsupportedBackend { request: backend }),
-        }
-    }
-
-    fn decode_tile_scaled_to_surface_impl(
-        ctx: &mut slidecodec_core::DecoderContext<CpuDecoderContext>,
-        pool: &mut CpuScratchPool,
-        input: &[u8],
-        fmt: PixelFormat,
-        scale: Downscale,
-        backend: BackendRequest,
-    ) -> Result<Surface, Error> {
-        let decoder = CpuDecoder::from_view_in_context(JpegView::parse(input)?, ctx.codec_mut())?;
-        #[cfg(not(target_os = "macos"))]
-        if matches!(backend, BackendRequest::Metal) {
-            return Err(Error::MetalUnavailable);
-        }
-        match backend {
-            BackendRequest::Cpu => {
-                let dims = scaled_dims(decoder.info().dimensions, scale);
-                let stride = dims.0 as usize * fmt.bytes_per_pixel();
-                let mut out = vec![0u8; stride * dims.1 as usize];
-                decoder.decode_scaled_into_with_scratch(pool, &mut out, stride, fmt, scale)?;
-                upload_surface(out, dims, fmt, backend)
-            }
-            BackendRequest::Auto | BackendRequest::Metal => {
-                #[cfg(target_os = "macos")]
-                {
-                    compute::decode_scaled_to_surface(&decoder, pool, fmt, scale)
-                }
-                #[cfg(not(target_os = "macos"))]
-                {
-                    let dims = scaled_dims(decoder.info().dimensions, scale);
-                    let stride = dims.0 as usize * fmt.bytes_per_pixel();
-                    let mut out = vec![0u8; stride * dims.1 as usize];
-                    decoder.decode_scaled_into_with_scratch(pool, &mut out, stride, fmt, scale)?;
-                    upload_surface(out, dims, fmt, BackendRequest::Cpu)
-                }
-            }
-            BackendRequest::Cuda => Err(Error::UnsupportedBackend { request: backend }),
-        }
-    }
-}
-
 impl<'a> ImageDecodeSubmit<'a> for Decoder<'a> {
     type Session = MetalSession;
     type DeviceSurface = Surface;
-    type SubmittedSurface = ReadySubmission<Surface, Error>;
+    type SubmittedSurface = batch::MetalSubmission;
 
     fn submit_to_device(
         &mut self,
@@ -551,10 +343,33 @@ impl<'a> ImageDecodeSubmit<'a> for Decoder<'a> {
         fmt: PixelFormat,
         backend: BackendRequest,
     ) -> Result<Self::SubmittedSurface, Self::Error> {
-        session.record_submit();
-        Ok(ReadySubmission::from_result(
-            self.decode_to_surface_impl(fmt, backend),
-        ))
+        let fast444_packet = if matches!(backend, BackendRequest::Auto | BackendRequest::Metal) {
+            self.fast444_packet.clone()
+        } else {
+            None
+        };
+        let fast420_packet = if matches!(backend, BackendRequest::Auto | BackendRequest::Metal) {
+            self.fast420_packet.clone()
+        } else {
+            None
+        };
+        let slot = session
+            .shared
+            .0
+            .lock()
+            .expect("metal session")
+            .queue_request(batch::QueuedRequest::new(
+                Arc::clone(&self.source),
+                fmt,
+                backend,
+                batch::BatchOp::Full,
+                fast444_packet,
+                fast420_packet,
+            ));
+        Ok(batch::MetalSubmission {
+            session: session.shared.clone(),
+            slot,
+        })
     }
 
     fn submit_region_to_device(
@@ -564,10 +379,33 @@ impl<'a> ImageDecodeSubmit<'a> for Decoder<'a> {
         roi: Rect,
         backend: BackendRequest,
     ) -> Result<Self::SubmittedSurface, Self::Error> {
-        session.record_submit();
-        Ok(ReadySubmission::from_result(
-            self.decode_region_to_surface_impl(fmt, roi, backend),
-        ))
+        let fast444_packet = if matches!(backend, BackendRequest::Auto | BackendRequest::Metal) {
+            self.fast444_packet.clone()
+        } else {
+            None
+        };
+        let fast420_packet = if matches!(backend, BackendRequest::Auto | BackendRequest::Metal) {
+            self.fast420_packet.clone()
+        } else {
+            None
+        };
+        let slot = session
+            .shared
+            .0
+            .lock()
+            .expect("metal session")
+            .queue_request(batch::QueuedRequest::new(
+                Arc::clone(&self.source),
+                fmt,
+                backend,
+                batch::BatchOp::Region(roi),
+                fast444_packet,
+                fast420_packet,
+            ));
+        Ok(batch::MetalSubmission {
+            session: session.shared.clone(),
+            slot,
+        })
     }
 
     fn submit_scaled_to_device(
@@ -577,10 +415,33 @@ impl<'a> ImageDecodeSubmit<'a> for Decoder<'a> {
         scale: Downscale,
         backend: BackendRequest,
     ) -> Result<Self::SubmittedSurface, Self::Error> {
-        session.record_submit();
-        Ok(ReadySubmission::from_result(
-            self.decode_scaled_to_surface_impl(fmt, scale, backend),
-        ))
+        let fast444_packet = if matches!(backend, BackendRequest::Auto | BackendRequest::Metal) {
+            self.fast444_packet.clone()
+        } else {
+            None
+        };
+        let fast420_packet = if matches!(backend, BackendRequest::Auto | BackendRequest::Metal) {
+            self.fast420_packet.clone()
+        } else {
+            None
+        };
+        let slot = session
+            .shared
+            .0
+            .lock()
+            .expect("metal session")
+            .queue_request(batch::QueuedRequest::new(
+                Arc::clone(&self.source),
+                fmt,
+                backend,
+                batch::BatchOp::Scaled(scale),
+                fast444_packet,
+                fast420_packet,
+            ));
+        Ok(batch::MetalSubmission {
+            session: session.shared.clone(),
+            slot,
+        })
     }
 }
 
@@ -588,7 +449,7 @@ impl TileBatchDecodeSubmit for Codec {
     type Context = CpuDecoderContext;
     type Session = MetalSession;
     type DeviceSurface = Surface;
-    type SubmittedSurface = ReadySubmission<Surface, Error>;
+    type SubmittedSurface = batch::MetalSubmission;
 
     fn submit_tile_to_device(
         ctx: &mut slidecodec_core::DecoderContext<Self::Context>,
@@ -598,10 +459,34 @@ impl TileBatchDecodeSubmit for Codec {
         fmt: PixelFormat,
         backend: BackendRequest,
     ) -> Result<Self::SubmittedSurface, Self::Error> {
-        session.record_submit();
-        Ok(ReadySubmission::from_result(
-            Self::decode_tile_to_surface_impl(ctx, pool, input, fmt, backend),
-        ))
+        let _ = (ctx, pool);
+        let fast444_packet = if matches!(backend, BackendRequest::Auto | BackendRequest::Metal) {
+            build_metal_fast444_packet(input).ok()
+        } else {
+            None
+        };
+        let fast420_packet = if matches!(backend, BackendRequest::Auto | BackendRequest::Metal) {
+            build_metal_fast420_packet(input).ok()
+        } else {
+            None
+        };
+        let slot = session
+            .shared
+            .0
+            .lock()
+            .expect("metal session")
+            .queue_request(batch::QueuedRequest::new(
+                Arc::<[u8]>::from(input),
+                fmt,
+                backend,
+                batch::BatchOp::Full,
+                fast444_packet,
+                fast420_packet,
+            ));
+        Ok(batch::MetalSubmission {
+            session: session.shared.clone(),
+            slot,
+        })
     }
 
     fn submit_tile_region_to_device(
@@ -613,10 +498,34 @@ impl TileBatchDecodeSubmit for Codec {
         roi: Rect,
         backend: BackendRequest,
     ) -> Result<Self::SubmittedSurface, Self::Error> {
-        session.record_submit();
-        Ok(ReadySubmission::from_result(
-            Self::decode_tile_region_to_surface_impl(ctx, pool, input, fmt, roi, backend),
-        ))
+        let _ = (ctx, pool);
+        let fast444_packet = if matches!(backend, BackendRequest::Auto | BackendRequest::Metal) {
+            build_metal_fast444_packet(input).ok()
+        } else {
+            None
+        };
+        let fast420_packet = if matches!(backend, BackendRequest::Auto | BackendRequest::Metal) {
+            build_metal_fast420_packet(input).ok()
+        } else {
+            None
+        };
+        let slot = session
+            .shared
+            .0
+            .lock()
+            .expect("metal session")
+            .queue_request(batch::QueuedRequest::new(
+                Arc::<[u8]>::from(input),
+                fmt,
+                backend,
+                batch::BatchOp::Region(roi),
+                fast444_packet,
+                fast420_packet,
+            ));
+        Ok(batch::MetalSubmission {
+            session: session.shared.clone(),
+            slot,
+        })
     }
 
     fn submit_tile_scaled_to_device(
@@ -628,10 +537,34 @@ impl TileBatchDecodeSubmit for Codec {
         scale: Downscale,
         backend: BackendRequest,
     ) -> Result<Self::SubmittedSurface, Self::Error> {
-        session.record_submit();
-        Ok(ReadySubmission::from_result(
-            Self::decode_tile_scaled_to_surface_impl(ctx, pool, input, fmt, scale, backend),
-        ))
+        let _ = (ctx, pool);
+        let fast444_packet = if matches!(backend, BackendRequest::Auto | BackendRequest::Metal) {
+            build_metal_fast444_packet(input).ok()
+        } else {
+            None
+        };
+        let fast420_packet = if matches!(backend, BackendRequest::Auto | BackendRequest::Metal) {
+            build_metal_fast420_packet(input).ok()
+        } else {
+            None
+        };
+        let slot = session
+            .shared
+            .0
+            .lock()
+            .expect("metal session")
+            .queue_request(batch::QueuedRequest::new(
+                Arc::<[u8]>::from(input),
+                fmt,
+                backend,
+                batch::BatchOp::Scaled(scale),
+                fast444_packet,
+                fast420_packet,
+            ));
+        Ok(batch::MetalSubmission {
+            session: session.shared.clone(),
+            slot,
+        })
     }
 }
 
@@ -701,6 +634,255 @@ impl TileBatchDecodeDevice for Codec {
     }
 }
 
+pub(crate) fn decode_surface_from_bytes(
+    input: &[u8],
+    fmt: PixelFormat,
+    backend: BackendRequest,
+    op: batch::BatchOp,
+    fast444_packet: Option<JpegMetalFast444PacketV1>,
+    fast420_packet: Option<JpegMetalFast420PacketV1>,
+) -> Result<Surface, Error> {
+    let decoder = CpuDecoder::new(input)?;
+    let mut pool = CpuScratchPool::new();
+    let build_auto_packets =
+        matches!(backend, BackendRequest::Auto) && decoder.info().restart_interval.is_some();
+    let build_metal_packets = matches!(backend, BackendRequest::Metal);
+    let fast444_packet = if build_auto_packets || build_metal_packets {
+        fast444_packet.or_else(|| build_metal_fast444_packet_for_decoder(&decoder).ok())
+    } else {
+        None
+    };
+    let fast420_packet = if build_auto_packets || build_metal_packets {
+        fast420_packet.or_else(|| build_metal_fast420_packet_for_decoder(&decoder).ok())
+    } else {
+        None
+    };
+    decode_surface_from_decoder(
+        &decoder,
+        &mut pool,
+        fmt,
+        backend,
+        op,
+        fast444_packet.as_ref(),
+        fast420_packet.as_ref(),
+    )
+}
+
+fn decode_surface_from_decoder(
+    decoder: &CpuDecoder<'_>,
+    pool: &mut CpuScratchPool,
+    fmt: PixelFormat,
+    backend: BackendRequest,
+    op: batch::BatchOp,
+    fast444_packet: Option<&JpegMetalFast444PacketV1>,
+    fast420_packet: Option<&JpegMetalFast420PacketV1>,
+) -> Result<Surface, Error> {
+    #[cfg(not(target_os = "macos"))]
+    if matches!(backend, BackendRequest::Metal) {
+        return Err(Error::MetalUnavailable);
+    }
+
+    match op {
+        batch::BatchOp::Full => match backend {
+            BackendRequest::Cpu => {
+                let dims = decoder.info().dimensions;
+                let stride = dims.0 as usize * fmt.bytes_per_pixel();
+                let mut out = vec![0u8; stride * dims.1 as usize];
+                decoder.decode_into_with_scratch(pool, &mut out, stride, fmt)?;
+                upload_surface(out, dims, fmt, backend)
+            }
+            BackendRequest::Auto => {
+                #[cfg(target_os = "macos")]
+                {
+                    match choose_auto_device_path(decoder, op, fast444_packet, fast420_packet) {
+                        AutoDevicePath::CpuUpload => {
+                            let dims = decoder.info().dimensions;
+                            let stride = dims.0 as usize * fmt.bytes_per_pixel();
+                            let mut out = vec![0u8; stride * dims.1 as usize];
+                            decoder.decode_into_with_scratch(pool, &mut out, stride, fmt)?;
+                            upload_surface(out, dims, fmt, backend)
+                        }
+                        AutoDevicePath::MetalKernel => compute::decode_to_surface(
+                            decoder,
+                            pool,
+                            fmt,
+                            fast444_packet,
+                            fast420_packet,
+                        ),
+                    }
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    let dims = decoder.info().dimensions;
+                    let stride = dims.0 as usize * fmt.bytes_per_pixel();
+                    let mut out = vec![0u8; stride * dims.1 as usize];
+                    decoder.decode_into_with_scratch(pool, &mut out, stride, fmt)?;
+                    upload_surface(out, dims, fmt, BackendRequest::Cpu)
+                }
+            }
+            BackendRequest::Metal => {
+                #[cfg(target_os = "macos")]
+                {
+                    compute::decode_to_surface(decoder, pool, fmt, fast444_packet, fast420_packet)
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    let dims = decoder.info().dimensions;
+                    let stride = dims.0 as usize * fmt.bytes_per_pixel();
+                    let mut out = vec![0u8; stride * dims.1 as usize];
+                    decoder.decode_into_with_scratch(pool, &mut out, stride, fmt)?;
+                    upload_surface(out, dims, fmt, BackendRequest::Cpu)
+                }
+            }
+            BackendRequest::Cuda => Err(Error::UnsupportedBackend { request: backend }),
+        },
+        batch::BatchOp::Region(roi) => match backend {
+            BackendRequest::Cpu => {
+                let dims = (roi.w, roi.h);
+                let stride = dims.0 as usize * fmt.bytes_per_pixel();
+                let mut out = vec![0u8; stride * dims.1 as usize];
+                decoder.decode_region_into_with_scratch(
+                    pool,
+                    &mut out,
+                    stride,
+                    fmt,
+                    to_jpeg_rect(roi),
+                )?;
+                upload_surface(out, dims, fmt, backend)
+            }
+            BackendRequest::Auto => {
+                #[cfg(target_os = "macos")]
+                {
+                    match choose_auto_device_path(decoder, op, fast444_packet, fast420_packet) {
+                        AutoDevicePath::CpuUpload => {
+                            let dims = (roi.w, roi.h);
+                            let stride = dims.0 as usize * fmt.bytes_per_pixel();
+                            let mut out = vec![0u8; stride * dims.1 as usize];
+                            decoder.decode_region_into_with_scratch(
+                                pool,
+                                &mut out,
+                                stride,
+                                fmt,
+                                to_jpeg_rect(roi),
+                            )?;
+                            upload_surface(out, dims, fmt, backend)
+                        }
+                        AutoDevicePath::MetalKernel => compute::decode_region_to_surface(
+                            decoder,
+                            pool,
+                            fmt,
+                            to_jpeg_rect(roi),
+                            fast444_packet,
+                            fast420_packet,
+                        ),
+                    }
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    let dims = (roi.w, roi.h);
+                    let stride = dims.0 as usize * fmt.bytes_per_pixel();
+                    let mut out = vec![0u8; stride * dims.1 as usize];
+                    decoder.decode_region_into_with_scratch(
+                        pool,
+                        &mut out,
+                        stride,
+                        fmt,
+                        to_jpeg_rect(roi),
+                    )?;
+                    upload_surface(out, dims, fmt, BackendRequest::Cpu)
+                }
+            }
+            BackendRequest::Metal => {
+                #[cfg(target_os = "macos")]
+                {
+                    compute::decode_region_to_surface(
+                        decoder,
+                        pool,
+                        fmt,
+                        to_jpeg_rect(roi),
+                        fast444_packet,
+                        fast420_packet,
+                    )
+                }
+                #[cfg(not(target_os = "macos"))]
+                unreachable!("Metal region path is gated above");
+            }
+            BackendRequest::Cuda => Err(Error::UnsupportedBackend { request: backend }),
+        },
+        batch::BatchOp::Scaled(scale) => match backend {
+            BackendRequest::Cpu => {
+                let dims = scaled_dims(decoder.info().dimensions, scale);
+                let stride = dims.0 as usize * fmt.bytes_per_pixel();
+                let mut out = vec![0u8; stride * dims.1 as usize];
+                decoder.decode_scaled_into_with_scratch(pool, &mut out, stride, fmt, scale)?;
+                upload_surface(out, dims, fmt, backend)
+            }
+            BackendRequest::Auto => {
+                #[cfg(target_os = "macos")]
+                {
+                    match choose_auto_device_path(decoder, op, fast444_packet, fast420_packet) {
+                        AutoDevicePath::CpuUpload => {
+                            let dims = scaled_dims(decoder.info().dimensions, scale);
+                            let stride = dims.0 as usize * fmt.bytes_per_pixel();
+                            let mut out = vec![0u8; stride * dims.1 as usize];
+                            decoder.decode_scaled_into_with_scratch(
+                                pool, &mut out, stride, fmt, scale,
+                            )?;
+                            upload_surface(out, dims, fmt, backend)
+                        }
+                        AutoDevicePath::MetalKernel => compute::decode_scaled_to_surface(
+                            decoder,
+                            pool,
+                            fmt,
+                            scale,
+                            fast444_packet,
+                            fast420_packet,
+                        ),
+                    }
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    let dims = scaled_dims(decoder.info().dimensions, scale);
+                    let stride = dims.0 as usize * fmt.bytes_per_pixel();
+                    let mut out = vec![0u8; stride * dims.1 as usize];
+                    decoder.decode_scaled_into_with_scratch(pool, &mut out, stride, fmt, scale)?;
+                    upload_surface(out, dims, fmt, BackendRequest::Cpu)
+                }
+            }
+            BackendRequest::Metal => {
+                #[cfg(target_os = "macos")]
+                {
+                    compute::decode_scaled_to_surface(
+                        decoder,
+                        pool,
+                        fmt,
+                        scale,
+                        fast444_packet,
+                        fast420_packet,
+                    )
+                }
+                #[cfg(not(target_os = "macos"))]
+                unreachable!("Metal scaled path is gated above");
+            }
+            BackendRequest::Cuda => Err(Error::UnsupportedBackend { request: backend }),
+        },
+    }
+}
+
+fn choose_auto_device_path(
+    decoder: &CpuDecoder<'_>,
+    _op: batch::BatchOp,
+    fast444_packet: Option<&JpegMetalFast444PacketV1>,
+    fast420_packet: Option<&JpegMetalFast420PacketV1>,
+) -> AutoDevicePath {
+    let direct_packet = fast444_packet.is_some() || fast420_packet.is_some();
+    if decoder.info().restart_interval.is_some() && direct_packet {
+        AutoDevicePath::MetalKernel
+    } else {
+        AutoDevicePath::CpuUpload
+    }
+}
+
 fn convert_info(info: &slidecodec_jpeg::Info) -> slidecodec_core::Info {
     slidecodec_core::Info {
         dimensions: info.dimensions,
@@ -750,7 +932,7 @@ fn scaled_dims(full: (u32, u32), scale: Downscale) -> (u32, u32) {
     )
 }
 
-fn upload_surface(
+pub(crate) fn upload_surface(
     bytes: Vec<u8>,
     dimensions: (u32, u32),
     fmt: PixelFormat,
@@ -838,3 +1020,62 @@ pub use slidecodec_jpeg::{
     DecoderContext, Downscale as JpegDownscale, PixelFormat as JpegPixelFormat, ScratchPool,
 };
 pub use slidecodec_jpeg::{Info, Rect as JpegRectPublic};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use slidecodec_jpeg::__private::{build_metal_fast420_packet, build_metal_fast444_packet};
+
+    const BASELINE_420: &[u8] =
+        include_bytes!("../../../corpus/conformance/baseline_420_16x16.jpg");
+    const BASELINE_420_RESTART: &[u8] =
+        include_bytes!("../../../corpus/conformance/baseline_420_restart_32x16.jpg");
+    const BASELINE_444: &[u8] = include_bytes!("../../../corpus/conformance/baseline_444_8x8.jpg");
+
+    #[test]
+    fn auto_device_path_prefers_cpu_upload_for_nonrestart_packets() {
+        let decoder_420 = CpuDecoder::new(BASELINE_420).expect("420 decoder");
+        let packet_420 = build_metal_fast420_packet(BASELINE_420).expect("420 packet");
+        assert_eq!(
+            choose_auto_device_path(&decoder_420, batch::BatchOp::Full, None, Some(&packet_420),),
+            AutoDevicePath::CpuUpload
+        );
+
+        let decoder_444 = CpuDecoder::new(BASELINE_444).expect("444 decoder");
+        let packet_444 = build_metal_fast444_packet(BASELINE_444).expect("444 packet");
+        assert_eq!(
+            choose_auto_device_path(
+                &decoder_444,
+                batch::BatchOp::Scaled(Downscale::Quarter),
+                Some(&packet_444),
+                None,
+            ),
+            AutoDevicePath::CpuUpload
+        );
+    }
+
+    #[test]
+    fn auto_device_path_prefers_metal_for_restart_packets() {
+        let decoder = CpuDecoder::new(BASELINE_420_RESTART).expect("restart decoder");
+        let packet = build_metal_fast420_packet(BASELINE_420_RESTART).expect("restart packet");
+
+        assert_eq!(
+            choose_auto_device_path(&decoder, batch::BatchOp::Full, None, Some(&packet)),
+            AutoDevicePath::MetalKernel
+        );
+        assert_eq!(
+            choose_auto_device_path(
+                &decoder,
+                batch::BatchOp::Region(Rect {
+                    x: 0,
+                    y: 0,
+                    w: 16,
+                    h: 16,
+                }),
+                None,
+                Some(&packet),
+            ),
+            AutoDevicePath::MetalKernel
+        );
+    }
+}

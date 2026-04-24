@@ -110,6 +110,30 @@ decoder.decode_scaled_into(
 )?;
 ```
 
+JPEG 2000 / HTJ2K Metal tile batch:
+
+```rust
+use slidecodec_core::{BackendRequest, PixelFormat};
+use slidecodec_j2k_metal::MetalTileBatch;
+
+let tile_bytes: Vec<Vec<u8>> = load_visible_j2k_tiles()?;
+let mut batch = MetalTileBatch::with_capacity(tile_bytes.len());
+
+for tile in &tile_bytes {
+    batch.push_tile(tile, PixelFormat::Gray8, BackendRequest::Metal)?;
+}
+
+let surfaces = batch.decode_all()?;
+```
+
+WSI readers should own vendor parsing, pyramid levels, tile coordinates,
+caching, prefetch, and viewport policy. `MetalTileBatch` only batches codec
+requests and returns decoded surfaces in submission order. If a caller already
+stores compressed tile payloads in `Arc<[u8]>`, the `push_shared_*` methods can
+queue them without another tile-byte copy. Use explicit `BackendRequest::Metal`
+when a batched caller wants Metal execution; `BackendRequest::Auto` remains
+conservative for small or host-returned decodes.
+
 Tile decompression:
 
 ```rust

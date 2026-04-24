@@ -5,12 +5,14 @@ use super::codestream::{Header, WaveletTransform};
 use super::decode::TileDecodeContext;
 use crate::error::{bail, err, ColorError, Result};
 use crate::math::{dispatch, f32x8, Level, Simd};
+use crate::{HtCodeBlockDecoder, J2kInverseMctJob, J2kWaveletTransform};
 
 /// Apply the inverse multi-component transform, as specified in G.2 and G.3.
 pub(crate) fn apply_inverse(
     tile_ctx: &mut TileDecodeContext,
     component_infos: &[super::codestream::ComponentInfo],
     header: &Header<'_>,
+    backend: &mut Option<&mut dyn HtCodeBlockDecoder>,
 ) -> Result<()> {
     if tile_ctx.channel_data.len() < 3 {
         return if header.strict {
@@ -35,14 +37,38 @@ pub(crate) fn apply_inverse(
         bail!(ColorError::Mct);
     }
 
-    apply_inner(
-        transform,
-        &mut s0.container,
-        &mut s1.container,
-        &mut s2.container,
-    );
+    let handled = if let Some(backend) = backend.as_deref_mut() {
+        backend.decode_inverse_mct(J2kInverseMctJob {
+            transform: external_transform(transform),
+            plane0: &mut s0.container,
+            plane1: &mut s1.container,
+            plane2: &mut s2.container,
+            addend0: (1_u32 << (component_infos[0].size_info.precision - 1)) as f32,
+            addend1: (1_u32 << (component_infos[1].size_info.precision - 1)) as f32,
+            addend2: (1_u32 << (component_infos[2].size_info.precision - 1)) as f32,
+        })?
+    } else {
+        false
+    };
+
+    if !handled {
+        apply_inner(
+            transform,
+            &mut s0.container,
+            &mut s1.container,
+            &mut s2.container,
+        );
+    }
 
     Ok(())
+}
+
+#[inline(always)]
+fn external_transform(transform: WaveletTransform) -> J2kWaveletTransform {
+    match transform {
+        WaveletTransform::Reversible53 => J2kWaveletTransform::Reversible53,
+        WaveletTransform::Irreversible97 => J2kWaveletTransform::Irreversible97,
+    }
 }
 
 fn apply_inner(transform: WaveletTransform, s0: &mut [f32], s1: &mut [f32], s2: &mut [f32]) {

@@ -3,7 +3,10 @@
 #![allow(dead_code)]
 
 use criterion::black_box;
-use slidecodec_core::{BackendRequest, ImageDecodeDevice, TileBatchDecodeDevice};
+use slidecodec_core::{
+    BackendRequest, DeviceSubmission, ImageDecodeDevice, TileBatchDecodeDevice,
+    TileBatchDecodeSubmit,
+};
 use slidecodec_j2k::{
     DecoderContext, Downscale, J2kCodec, J2kContext, J2kDecoder, J2kScratchPool, PixelFormat, Rect,
     TileBatchDecode,
@@ -11,6 +14,7 @@ use slidecodec_j2k::{
 use slidecodec_j2k_compare::{grok as grok_compare, openjpeg as openjpeg_compare};
 use slidecodec_j2k_metal::{
     Codec as MetalJ2kCodec, J2kDecoder as MetalJ2kDecoder, J2kScratchPool as MetalJ2kScratchPool,
+    MetalSession,
 };
 use slidecodec_j2k_native::{encode, encode_htj2k, EncodeOptions};
 use std::{
@@ -257,29 +261,61 @@ pub(crate) fn slidecodec_metal_supports_scaled(
 }
 
 pub(crate) fn slidecodec_metal_decode_tile_batch(bytes: &[u8], mode: DecodeMode, count: usize) {
+    let mut ctx = DecoderContext::<J2kContext>::new();
+    let mut session = MetalSession::default();
+    let mut pool = MetalJ2kScratchPool::new();
+    let submissions = (0..count)
+        .map(|_| {
+            MetalJ2kCodec::submit_tile_to_device(
+                &mut ctx,
+                &mut session,
+                &mut pool,
+                bytes,
+                mode_format(mode),
+                BackendRequest::Metal,
+            )
+            .expect("slidecodec metal tile submit")
+        })
+        .collect::<Vec<_>>();
+    let surfaces = submissions
+        .into_iter()
+        .map(|submission| submission.wait().expect("slidecodec metal tile decode"))
+        .collect::<Vec<_>>();
+    black_box(surfaces);
+}
+
+fn slidecodec_adaptive_decode_tile_batch_to_device(input: &BenchInput, count: usize) {
+    let mut ctx = DecoderContext::<J2kContext>::new();
+    let mut session = MetalSession::default();
+    let mut pool = MetalJ2kScratchPool::new();
+    let submissions = (0..count)
+        .map(|_| {
+            MetalJ2kCodec::submit_tile_to_device(
+                &mut ctx,
+                &mut session,
+                &mut pool,
+                &input.bytes,
+                mode_format(input.mode),
+                BackendRequest::Auto,
+            )
+            .expect("slidecodec auto tile submit")
+        })
+        .collect::<Vec<_>>();
+    let surfaces = submissions
+        .into_iter()
+        .map(|submission| submission.wait().expect("slidecodec auto tile decode"))
+        .collect::<Vec<_>>();
+    black_box(surfaces);
+}
+
+pub(crate) fn slidecodec_adaptive_decode_tile_batch(input: &BenchInput, count: usize) {
     #[cfg(target_os = "macos")]
-    if matches!(mode, DecodeMode::Gray8) {
-        let mut decoder = MetalJ2kDecoder::new(bytes).expect("slidecodec metal decoder");
-        let surfaces = decoder
-            .decode_repeated_grayscale_direct_to_device(mode_format(mode), count)
-            .expect("slidecodec metal repeated grayscale batch decode");
-        black_box(surfaces);
+    if should_auto_use_direct_grayscale_input(input, count) {
+        slidecodec_adaptive_decode_tile_batch_to_device(input, count);
         return;
     }
 
-    let mut ctx = DecoderContext::<J2kContext>::new();
-    let mut pool = MetalJ2kScratchPool::new();
-    for _ in 0..count {
-        let surface = MetalJ2kCodec::decode_tile_to_device(
-            &mut ctx,
-            &mut pool,
-            bytes,
-            mode_format(mode),
-            BackendRequest::Metal,
-        )
-        .expect("slidecodec metal tile decode");
-        black_box(surface);
-    }
+    slidecodec_decode_tile_batch(&input.bytes, input.mode, count);
 }
 
 fn should_auto_use_direct_grayscale_input(input: &BenchInput, count: usize) -> bool {
@@ -290,20 +326,6 @@ fn should_auto_use_direct_grayscale_input(input: &BenchInput, count: usize) -> b
         return false;
     }
     count >= 16
-}
-
-pub(crate) fn slidecodec_adaptive_decode_tile_batch(input: &BenchInput, count: usize) {
-    #[cfg(target_os = "macos")]
-    if should_auto_use_direct_grayscale_input(input, count) {
-        let mut decoder = MetalJ2kDecoder::new(&input.bytes).expect("slidecodec auto decoder");
-        let surfaces = decoder
-            .decode_repeated_grayscale_auto_to_device(mode_format(input.mode), count)
-            .expect("slidecodec auto repeated grayscale batch decode");
-        black_box(surfaces);
-        return;
-    }
-
-    slidecodec_decode_tile_batch(&input.bytes, input.mode, count);
 }
 
 pub(crate) fn slidecodec_metal_supports_tile_batch(bytes: &[u8], mode: DecodeMode) -> bool {

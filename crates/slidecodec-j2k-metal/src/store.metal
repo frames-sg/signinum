@@ -42,8 +42,10 @@ struct J2kRepeatedGrayStoreParams {
     uint output_x;
     uint output_y;
     float addend;
-    uint bit_depth;
     uint batch_count;
+    float max_value;
+    float u8_scale;
+    float u16_scale;
 };
 
 struct J2kGrayStoreParams {
@@ -56,7 +58,9 @@ struct J2kGrayStoreParams {
     uint output_x;
     uint output_y;
     float addend;
-    uint bit_depth;
+    float max_value;
+    float u8_scale;
+    float u16_scale;
 };
 
 kernel void j2k_store_component(
@@ -120,7 +124,7 @@ kernel void j2k_store_component_repeated_gray_u8(
 
     const uint src_idx = gid.z * input_plane_len + src_y * params.input_width + src_x;
     const uint dst_idx = gid.z * output_plane_len + dst_y * params.output_width + dst_x;
-    output[dst_idx] = scale_to_u8(input[src_idx] + params.addend, params.bit_depth);
+    output[dst_idx] = scale_to_u8(input[src_idx] + params.addend, params.max_value, params.u8_scale);
 }
 
 kernel void j2k_store_component_repeated_gray_u16(
@@ -142,7 +146,37 @@ kernel void j2k_store_component_repeated_gray_u16(
 
     const uint src_idx = gid.z * input_plane_len + src_y * params.input_width + src_x;
     const uint dst_idx = gid.z * output_plane_len + dst_y * params.output_width + dst_x;
-    output[dst_idx] = pack_to_u16(input[src_idx] + params.addend, params.bit_depth);
+    output[dst_idx] = pack_to_u16(input[src_idx] + params.addend, params.max_value, params.u16_scale);
+}
+
+kernel void j2k_store_component_repeated_gray_u8_contiguous(
+    device const float *input [[buffer(0)]],
+    device uchar *output [[buffer(1)]],
+    constant J2kRepeatedGrayStoreParams &params [[buffer(2)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    const uint plane_len = params.input_width * params.input_height;
+    const uint total_len = plane_len * params.batch_count;
+    if (gid >= total_len) {
+        return;
+    }
+
+    output[gid] = scale_to_u8(input[gid] + params.addend, params.max_value, params.u8_scale);
+}
+
+kernel void j2k_store_component_repeated_gray_u16_contiguous(
+    device const float *input [[buffer(0)]],
+    device ushort *output [[buffer(1)]],
+    constant J2kRepeatedGrayStoreParams &params [[buffer(2)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    const uint plane_len = params.input_width * params.input_height;
+    const uint total_len = plane_len * params.batch_count;
+    if (gid >= total_len) {
+        return;
+    }
+
+    output[gid] = pack_to_u16(input[gid] + params.addend, params.max_value, params.u16_scale);
 }
 
 kernel void j2k_store_component_gray_u8(
@@ -162,7 +196,7 @@ kernel void j2k_store_component_gray_u8(
 
     const uint src_idx = src_y * params.input_width + src_x;
     const uint dst_idx = dst_y * params.output_width + dst_x;
-    output[dst_idx] = scale_to_u8(input[src_idx] + params.addend, params.bit_depth);
+    output[dst_idx] = scale_to_u8(input[src_idx] + params.addend, params.max_value, params.u8_scale);
 }
 
 kernel void j2k_store_component_gray_u16(
@@ -182,5 +216,5 @@ kernel void j2k_store_component_gray_u16(
 
     const uint src_idx = src_y * params.input_width + src_x;
     const uint dst_idx = dst_y * params.output_width + dst_x;
-    output[dst_idx] = pack_to_u16(input[src_idx] + params.addend, params.bit_depth);
+    output[dst_idx] = pack_to_u16(input[src_idx] + params.addend, params.max_value, params.u16_scale);
 }

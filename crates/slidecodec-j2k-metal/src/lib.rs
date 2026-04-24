@@ -3,6 +3,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(unreachable_pub)]
 
+mod batch;
 mod classic;
 #[cfg(target_os = "macos")]
 mod compute;
@@ -14,11 +15,12 @@ mod mct;
 mod store;
 
 use core::convert::Infallible;
+use std::sync::Arc;
 #[cfg(target_os = "macos")]
 use std::{
     collections::hash_map::DefaultHasher,
     hash::{Hash, Hasher},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Mutex, OnceLock},
 };
 
 use slidecodec_core::{
@@ -131,6 +133,14 @@ impl Surface {
     }
 
     #[cfg(target_os = "macos")]
+    pub fn metal_buffer(&self) -> Option<(&Buffer, usize)> {
+        match &self.storage {
+            Storage::Metal(buffer) => Some((buffer, self.byte_offset)),
+            Storage::Host(_) => None,
+        }
+    }
+
+    #[cfg(target_os = "macos")]
     pub(crate) fn from_metal_buffer(
         buffer: Buffer,
         dimensions: (u32, u32),
@@ -182,18 +192,175 @@ impl DeviceSurface for Surface {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Clone, Default)]
 pub struct MetalSession {
-    submissions: u64,
+    shared: batch::SharedSession,
 }
 
 impl MetalSession {
     pub fn submissions(&self) -> u64 {
-        self.submissions
+        self.shared.0.lock().expect("J2K Metal session").submissions
     }
 
     fn record_submit(&mut self) {
-        self.submissions = self.submissions.saturating_add(1);
+        let mut session = self.shared.0.lock().expect("J2K Metal session");
+        session.submissions = session.submissions.saturating_add(1);
+    }
+}
+
+impl core::fmt::Debug for MetalSession {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("MetalSession")
+            .field("submissions", &self.submissions())
+            .finish()
+    }
+}
+
+/// Convenience wrapper for submitting a group of J2K/HTJ2K tiles to one
+/// decoder session.
+///
+/// This is intentionally codec-scoped: callers own slide metadata, tile
+/// coordinates, cache policy, and viewport decisions. The batch only preserves
+/// submission order and lets compatible tile requests share the Metal session.
+#[derive(Default)]
+pub struct MetalTileBatch {
+    session: MetalSession,
+    submissions: Vec<batch::MetalSubmission>,
+}
+
+impl MetalTileBatch {
+    /// Create an empty tile batch.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Create an empty tile batch with capacity for `capacity` submissions.
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            submissions: Vec::with_capacity(capacity),
+            ..Self::default()
+        }
+    }
+
+    /// Number of queued tile requests.
+    pub fn len(&self) -> usize {
+        self.submissions.len()
+    }
+
+    /// Whether the batch has no queued tile requests.
+    pub fn is_empty(&self) -> bool {
+        self.submissions.is_empty()
+    }
+
+    /// Number of Metal session submissions already flushed.
+    ///
+    /// Queued requests normally do not increment this until `decode_all` waits
+    /// on the first result.
+    pub fn submissions(&self) -> u64 {
+        self.session.submissions()
+    }
+
+    /// Queue a full-tile decode request, copying the compressed tile bytes into
+    /// the batch.
+    pub fn push_tile(
+        &mut self,
+        input: &[u8],
+        fmt: PixelFormat,
+        backend: BackendRequest,
+    ) -> Result<usize, Error> {
+        self.push_shared_tile(Arc::<[u8]>::from(input), fmt, backend)
+    }
+
+    /// Queue a full-tile decode request backed by shared compressed tile bytes.
+    pub fn push_shared_tile(
+        &mut self,
+        input: Arc<[u8]>,
+        fmt: PixelFormat,
+        backend: BackendRequest,
+    ) -> Result<usize, Error> {
+        let slot = self.submissions.len();
+        let submission = batch::queue_tile_request_shared(
+            &mut self.session,
+            input,
+            fmt,
+            backend,
+            batch::BatchOp::Full,
+        );
+        self.submissions.push(submission);
+        Ok(slot)
+    }
+
+    /// Queue a region decode request, copying the compressed tile bytes into
+    /// the batch.
+    pub fn push_tile_region(
+        &mut self,
+        input: &[u8],
+        fmt: PixelFormat,
+        roi: Rect,
+        backend: BackendRequest,
+    ) -> Result<usize, Error> {
+        self.push_shared_tile_region(Arc::<[u8]>::from(input), fmt, roi, backend)
+    }
+
+    /// Queue a region decode request backed by shared compressed tile bytes.
+    pub fn push_shared_tile_region(
+        &mut self,
+        input: Arc<[u8]>,
+        fmt: PixelFormat,
+        roi: Rect,
+        backend: BackendRequest,
+    ) -> Result<usize, Error> {
+        let slot = self.submissions.len();
+        let submission = batch::queue_tile_request_shared(
+            &mut self.session,
+            input,
+            fmt,
+            backend,
+            batch::BatchOp::Region(roi),
+        );
+        self.submissions.push(submission);
+        Ok(slot)
+    }
+
+    /// Queue a scaled decode request, copying the compressed tile bytes into
+    /// the batch.
+    pub fn push_tile_scaled(
+        &mut self,
+        input: &[u8],
+        fmt: PixelFormat,
+        scale: Downscale,
+        backend: BackendRequest,
+    ) -> Result<usize, Error> {
+        self.push_shared_tile_scaled(Arc::<[u8]>::from(input), fmt, scale, backend)
+    }
+
+    /// Queue a scaled decode request backed by shared compressed tile bytes.
+    pub fn push_shared_tile_scaled(
+        &mut self,
+        input: Arc<[u8]>,
+        fmt: PixelFormat,
+        scale: Downscale,
+        backend: BackendRequest,
+    ) -> Result<usize, Error> {
+        let slot = self.submissions.len();
+        let submission = batch::queue_tile_request_shared(
+            &mut self.session,
+            input,
+            fmt,
+            backend,
+            batch::BatchOp::Scaled(scale),
+        );
+        self.submissions.push(submission);
+        Ok(slot)
+    }
+
+    /// Decode all queued tile requests and return surfaces in submission order.
+    pub fn decode_all(self) -> Result<Vec<Surface>, Error> {
+        let mut surfaces = Vec::with_capacity(self.submissions.len());
+        for submission in self.submissions {
+            surfaces.push(submission.wait()?);
+        }
+        Ok(surfaces)
     }
 }
 
@@ -257,7 +424,9 @@ impl<'a> J2kDecoder<'a> {
     }
 
     #[cfg(target_os = "macos")]
-    fn decode_direct_to_surface(&mut self, fmt: PixelFormat) -> Result<Option<Surface>, Error> {
+    fn ensure_prepared_direct_gray_plan(
+        &mut self,
+    ) -> Result<Option<Arc<crate::compute::PreparedDirectGrayscalePlan>>, Error> {
         let cache_key = direct_gray_plan_cache_key(self.inner.bytes());
         if self.native_prepared_direct_gray_plan.is_none() {
             if let Some((plan, prepared)) = cached_global_direct_gray_plan(cache_key) {
@@ -292,27 +461,17 @@ impl<'a> J2kDecoder<'a> {
             self.native_prepared_direct_gray_plan = Some(prepared);
         }
 
-        let Some(plan) = self.native_prepared_direct_gray_plan.as_ref() else {
+        Ok(self.native_prepared_direct_gray_plan.clone())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn decode_direct_to_surface(&mut self, fmt: PixelFormat) -> Result<Option<Surface>, Error> {
+        let Some(plan) = self.ensure_prepared_direct_gray_plan()? else {
             return Ok(None);
         };
         Ok(Some(
-            crate::compute::execute_prepared_direct_grayscale_plan(plan, fmt)?,
+            crate::compute::execute_prepared_direct_grayscale_plan(&plan, fmt)?,
         ))
-    }
-
-    #[cfg(target_os = "macos")]
-    fn seed_direct_gray_plan(
-        &mut self,
-        plan: J2kDirectGrayscalePlan,
-        prepared: Arc<crate::compute::PreparedDirectGrayscalePlan>,
-    ) {
-        self.native_direct_gray_plan = Some(plan);
-        self.native_prepared_direct_gray_plan = Some(prepared);
-    }
-
-    #[cfg(target_os = "macos")]
-    fn direct_gray_plan(&self) -> Option<&J2kDirectGrayscalePlan> {
-        self.native_direct_gray_plan.as_ref()
     }
 
     #[cfg(target_os = "macos")]
@@ -475,13 +634,44 @@ impl<'a> J2kDecoder<'a> {
     }
 
     #[cfg(target_os = "macos")]
+    fn decode_region_to_metal_surface(
+        &mut self,
+        fmt: PixelFormat,
+        plan: DeviceDecodePlan,
+    ) -> Result<Surface, Error> {
+        self.ensure_native_image()?;
+        let (Some(image), native_context) = (self.native_image.as_ref(), &mut self.native_context)
+        else {
+            return Err(Error::Decode(J2kError::Backend(
+                "native image cache missing".to_string(),
+            )));
+        };
+        crate::compute::decode_image_region_to_surface(
+            image,
+            native_context,
+            fmt,
+            plan.source_rect(),
+        )
+    }
+
+    #[cfg(target_os = "macos")]
+    fn decode_scaled_to_metal_surface(
+        &mut self,
+        fmt: PixelFormat,
+        scale: Downscale,
+        plan: DeviceDecodePlan,
+    ) -> Result<Surface, Error> {
+        crate::compute::decode_scaled_to_surface(self.inner.bytes(), plan.source_dims(), fmt, scale)
+    }
+
+    #[cfg(target_os = "macos")]
     fn unsupported_metal_direct(message: impl Into<String>) -> Error {
         Error::MetalKernel {
             message: message.into(),
         }
     }
 
-    fn decode_to_surface_impl(
+    pub(crate) fn decode_to_surface_impl(
         &mut self,
         fmt: PixelFormat,
         backend: BackendRequest,
@@ -520,7 +710,7 @@ impl<'a> J2kDecoder<'a> {
         }
     }
 
-    fn decode_region_to_surface_impl(
+    pub(crate) fn decode_region_to_surface_impl(
         &mut self,
         fmt: PixelFormat,
         roi: Rect,
@@ -546,14 +736,19 @@ impl<'a> J2kDecoder<'a> {
                     self.decode_region_to_cpu_surface(fmt, plan)
                 }
             }
-            BackendRequest::Metal => Err(Self::unsupported_metal_direct(
-                "explicit J2K MetalDirect region decode is not implemented in the first grayscale-only cut",
-            )),
+            BackendRequest::Metal => {
+                #[cfg(target_os = "macos")]
+                {
+                    self.decode_region_to_metal_surface(fmt, plan)
+                }
+                #[cfg(not(target_os = "macos"))]
+                unreachable!("Metal region path is gated above");
+            }
             BackendRequest::Cuda => Err(Error::UnsupportedBackend { request: backend }),
         }
     }
 
-    fn decode_scaled_to_surface_impl(
+    pub(crate) fn decode_scaled_to_surface_impl(
         &mut self,
         fmt: PixelFormat,
         scale: Downscale,
@@ -579,9 +774,14 @@ impl<'a> J2kDecoder<'a> {
                     self.decode_scaled_to_cpu_surface(fmt, scale, plan)
                 }
             }
-            BackendRequest::Metal => Err(Self::unsupported_metal_direct(
-                "explicit J2K MetalDirect scaled decode is not implemented in the first grayscale-only cut",
-            )),
+            BackendRequest::Metal => {
+                #[cfg(target_os = "macos")]
+                {
+                    self.decode_scaled_to_metal_surface(fmt, scale, plan)
+                }
+                #[cfg(not(target_os = "macos"))]
+                unreachable!("Metal scaled path is gated above");
+            }
             BackendRequest::Cuda => Err(Error::UnsupportedBackend { request: backend }),
         }
     }
@@ -622,6 +822,35 @@ fn store_global_direct_gray_plan(
             prepared,
         });
     }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn decode_full_grayscale_batch_direct_to_device(
+    inputs: &[Arc<[u8]>],
+    fmt: PixelFormat,
+) -> Result<Vec<Surface>, Error> {
+    if inputs.is_empty() {
+        return Ok(Vec::new());
+    }
+    if !matches!(fmt, PixelFormat::Gray8 | PixelFormat::Gray16) {
+        return Err(Error::MetalKernel {
+            message: format!("J2K MetalDirect full grayscale batch does not support {fmt:?}"),
+        });
+    }
+
+    let mut plans = Vec::with_capacity(inputs.len());
+    for input in inputs {
+        let mut decoder = J2kDecoder::new(input.as_ref())?;
+        let Some(plan) = decoder.ensure_prepared_direct_gray_plan()? else {
+            return Err(Error::MetalKernel {
+                message: format!(
+                    "explicit J2K MetalDirect batch currently supports full grayscale Gray8/Gray16 only; fmt={fmt:?}"
+                ),
+            });
+        };
+        plans.push(plan);
+    }
+    crate::compute::execute_prepared_direct_grayscale_plan_batch(&plans, fmt)
 }
 
 impl ImageCodec for J2kDecoder<'_> {
@@ -795,7 +1024,7 @@ impl TileBatchDecodeSubmit for Codec {
     type Context = CpuJ2kContext;
     type Session = MetalSession;
     type DeviceSurface = Surface;
-    type SubmittedSurface = ReadySubmission<Surface, Error>;
+    type SubmittedSurface = batch::MetalSubmission;
 
     fn submit_tile_to_device(
         ctx: &mut slidecodec_core::DecoderContext<Self::Context>,
@@ -805,36 +1034,14 @@ impl TileBatchDecodeSubmit for Codec {
         fmt: PixelFormat,
         backend: BackendRequest,
     ) -> Result<Self::SubmittedSurface, Self::Error> {
-        let _ = pool;
-        let mut decoder = J2kDecoder::new(input)?;
-        #[cfg(target_os = "macos")]
-        let cache_key = if matches!(fmt, PixelFormat::Gray8 | PixelFormat::Gray16)
-            && matches!(backend, BackendRequest::Metal | BackendRequest::Auto)
-        {
-            Some(direct_gray_plan_cache_key(input))
-        } else {
-            None
-        };
-        #[cfg(target_os = "macos")]
-        if let Some(key) = cache_key {
-            if let Some(plan) = ctx.codec_mut().cached_direct_gray_plan(key) {
-                let prepared = Arc::new(crate::compute::prepare_direct_grayscale_plan(&plan)?);
-                decoder.seed_direct_gray_plan(plan, prepared);
-            }
-        }
-        let submitted = <J2kDecoder<'_> as ImageDecodeSubmit<'_>>::submit_to_device(
-            &mut decoder,
+        let _ = (ctx, pool);
+        Ok(batch::queue_tile_request(
             session,
+            input,
             fmt,
             backend,
-        )?;
-        #[cfg(target_os = "macos")]
-        if let Some(key) = cache_key {
-            if let Some(plan) = decoder.direct_gray_plan().cloned() {
-                ctx.codec_mut().store_direct_gray_plan(key, plan);
-            }
-        }
-        Ok(submitted)
+            batch::BatchOp::Full,
+        ))
     }
 
     fn submit_tile_region_to_device(
@@ -847,14 +1054,13 @@ impl TileBatchDecodeSubmit for Codec {
         backend: BackendRequest,
     ) -> Result<Self::SubmittedSurface, Self::Error> {
         let _ = (ctx, pool);
-        let mut decoder = J2kDecoder::new(input)?;
-        <J2kDecoder<'_> as ImageDecodeSubmit<'_>>::submit_region_to_device(
-            &mut decoder,
+        Ok(batch::queue_tile_request(
             session,
+            input,
             fmt,
-            roi,
             backend,
-        )
+            batch::BatchOp::Region(roi),
+        ))
     }
 
     fn submit_tile_scaled_to_device(
@@ -867,14 +1073,13 @@ impl TileBatchDecodeSubmit for Codec {
         backend: BackendRequest,
     ) -> Result<Self::SubmittedSurface, Self::Error> {
         let _ = (ctx, pool);
-        let mut decoder = J2kDecoder::new(input)?;
-        <J2kDecoder<'_> as ImageDecodeSubmit<'_>>::submit_scaled_to_device(
-            &mut decoder,
+        Ok(batch::queue_tile_request(
             session,
+            input,
             fmt,
-            scale,
             backend,
-        )
+            batch::BatchOp::Scaled(scale),
+        ))
     }
 }
 

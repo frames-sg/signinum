@@ -8,7 +8,10 @@ use crate::backend::Backend;
 use crate::color::upsample::{
     upsample_1x1, upsample_h2v1_fancy_row, upsample_h2v2_fancy_row, upsample_h2v2_fancy_rows,
 };
-use crate::entropy::block::{decode_block_with_activity, BlockActivity, CoefficientBlock};
+use crate::entropy::block::{
+    decode_block_for_1x1_idct, decode_block_for_reduced_idct, decode_block_with_activity,
+    skip_block, BlockActivity, CoefficientBlock, ReducedIdctCoefficients,
+};
 use crate::entropy::huffman::HuffmanTable;
 use crate::error::{HuffmanFailure, JpegError, Warning};
 use crate::idct::downscale;
@@ -200,6 +203,30 @@ pub(crate) fn decode_scan_baseline<W: OutputWriter>(
     let mut expected_rst = 0u8;
     let expanded_rect = expanded_output_rect(output_rect, width, height);
     let full_output_rect = expanded_rect == Rect::full((width, height));
+    let first_decode_mcu_row =
+        first_decode_mcu_row_for_rect(full_output_rect, expanded_rect, mcu_height_px);
+    let decode_mcu_row_end =
+        decode_mcu_row_end_for_rect(full_output_rect, expanded_rect, mcu_height_px, mcu_rows);
+    let last_output_mcu_row = last_mcu_row_for_rect(expanded_rect, mcu_height_px, mcu_rows);
+    let total_mcus = mcu_rows * mcus_per_row;
+    let first_decode_mcu = first_decode_mcu_row * mcus_per_row;
+    let mut current_mcu = 0u32;
+    if let Some(seek) = restart_seek_for_mcu(scan_bytes, restart, first_decode_mcu) {
+        br = BitReader::new(&scan_bytes[seek.scan_offset..]);
+        current_mcu = seek.mcu_index;
+        expected_rst = seek.expected_rst;
+    }
+    skip_to_mcu(
+        plan,
+        &mut br,
+        prev_dc,
+        &mut current_mcu,
+        first_decode_mcu,
+        total_mcus,
+        restart,
+        &mut mcus_since_restart,
+        &mut expected_rst,
+    )?;
 
     decode_mcu_row(
         plan,
@@ -211,7 +238,7 @@ pub(crate) fn decode_scan_baseline<W: OutputWriter>(
         downscale,
         expanded_rect,
         full_output_rect,
-        0,
+        first_decode_mcu_row,
         region_layout.stripe_mcu_start,
         region_layout.stripe_mcus_per_row,
         mcus_per_row,
@@ -223,7 +250,7 @@ pub(crate) fn decode_scan_baseline<W: OutputWriter>(
     )?;
 
     let mut has_prev = false;
-    for my in 1..mcu_rows {
+    for my in first_decode_mcu_row + 1..decode_mcu_row_end {
         decode_mcu_row(
             plan,
             backend,
@@ -244,47 +271,41 @@ pub(crate) fn decode_scan_baseline<W: OutputWriter>(
             &mut mcus_since_restart,
             &mut expected_rst,
         )?;
-        emit_stripe(
-            plan,
-            has_prev.then_some(&*prev_stripe),
-            curr_stripe,
-            Some(&*next_stripe),
-            my - 1,
-            writer,
-            &mut output_scratch,
-            region_layout.source_width_usize(),
-            downscale,
-        )?;
+        if full_output_rect || mcu_row_intersects_rect(my - 1, mcu_height_px, expanded_rect) {
+            emit_stripe(
+                plan,
+                has_prev.then_some(&*prev_stripe),
+                curr_stripe,
+                Some(&*next_stripe),
+                my - 1,
+                writer,
+                &mut output_scratch,
+                region_layout.source_width_usize(),
+                downscale,
+            )?;
+        }
         core::mem::swap(&mut prev_stripe, &mut curr_stripe);
         core::mem::swap(&mut curr_stripe, &mut next_stripe);
         has_prev = true;
     }
 
-    emit_stripe(
-        plan,
-        has_prev.then_some(&*prev_stripe),
-        curr_stripe,
-        None,
-        mcu_rows - 1,
-        writer,
-        &mut output_scratch,
-        region_layout.source_width_usize(),
-        downscale,
-    )?;
-
-    let mut warnings = Vec::new();
-    match br.take_marker() {
-        Some(0xD9) => Ok(warnings),
-        Some(found) => Err(JpegError::UnexpectedMarker {
-            offset: br.position().saturating_sub(2),
-            expected: crate::error::MarkerKind::Eoi,
-            found,
-        }),
-        None => {
-            warnings.push(Warning::MissingEoi);
-            Ok(warnings)
-        }
+    let curr_mcu_row = decode_mcu_row_end - 1;
+    if curr_mcu_row <= last_output_mcu_row
+        && (full_output_rect || mcu_row_intersects_rect(curr_mcu_row, mcu_height_px, expanded_rect))
+    {
+        emit_stripe(
+            plan,
+            has_prev.then_some(&*prev_stripe),
+            curr_stripe,
+            None,
+            curr_mcu_row,
+            writer,
+            &mut output_scratch,
+            region_layout.source_width_usize(),
+            downscale,
+        )?;
     }
+    finish_scan(&mut br, decode_mcu_row_end == mcu_rows)
 }
 
 pub(crate) fn decode_scan_baseline_rgb<W: OutputWriter + InterleavedRgbWriter>(
@@ -337,6 +358,42 @@ pub(crate) fn decode_scan_baseline_rgb<W: OutputWriter + InterleavedRgbWriter>(
     let mut expected_rst = 0u8;
     let expanded_rect = expanded_output_rect(output_rect, width, height);
     let full_output_rect = expanded_rect == Rect::full((width, height));
+    let use_420_context_window = !full_output_rect && is_ycbcr_420(plan);
+    let emit_rect = if use_420_context_window {
+        output_rect
+    } else {
+        expanded_rect
+    };
+    let first_decode_mcu_row = if use_420_context_window {
+        fast420_first_decode_mcu_row(output_rect, mcu_height_px)
+    } else {
+        first_decode_mcu_row_for_rect(full_output_rect, expanded_rect, mcu_height_px)
+    };
+    let decode_mcu_row_end = if use_420_context_window {
+        fast420_decode_mcu_row_end(output_rect, mcu_height_px, mcu_rows)
+    } else {
+        decode_mcu_row_end_for_rect(full_output_rect, expanded_rect, mcu_height_px, mcu_rows)
+    };
+    let last_output_mcu_row = last_mcu_row_for_rect(emit_rect, mcu_height_px, mcu_rows);
+    let total_mcus = mcu_rows * mcus_per_row;
+    let first_decode_mcu = first_decode_mcu_row * mcus_per_row;
+    let mut current_mcu = 0u32;
+    if let Some(seek) = restart_seek_for_mcu(scan_bytes, restart, first_decode_mcu) {
+        br = BitReader::new(&scan_bytes[seek.scan_offset..]);
+        current_mcu = seek.mcu_index;
+        expected_rst = seek.expected_rst;
+    }
+    skip_to_mcu(
+        plan,
+        &mut br,
+        prev_dc,
+        &mut current_mcu,
+        first_decode_mcu,
+        total_mcus,
+        restart,
+        &mut mcus_since_restart,
+        &mut expected_rst,
+    )?;
 
     decode_mcu_row(
         plan,
@@ -348,7 +405,7 @@ pub(crate) fn decode_scan_baseline_rgb<W: OutputWriter + InterleavedRgbWriter>(
         downscale,
         expanded_rect,
         full_output_rect,
-        0,
+        first_decode_mcu_row,
         region_layout.stripe_mcu_start,
         region_layout.stripe_mcus_per_row,
         mcus_per_row,
@@ -360,7 +417,7 @@ pub(crate) fn decode_scan_baseline_rgb<W: OutputWriter + InterleavedRgbWriter>(
     )?;
 
     let mut has_prev = false;
-    for my in 1..mcu_rows {
+    for my in first_decode_mcu_row + 1..decode_mcu_row_end {
         decode_mcu_row(
             plan,
             backend,
@@ -381,49 +438,43 @@ pub(crate) fn decode_scan_baseline_rgb<W: OutputWriter + InterleavedRgbWriter>(
             &mut mcus_since_restart,
             &mut expected_rst,
         )?;
-        emit_stripe_rgb(
-            plan,
-            backend,
-            has_prev.then_some(&*prev_stripe),
-            curr_stripe,
-            Some(&*next_stripe),
-            my - 1,
-            writer,
-            &mut output_scratch,
-            region_layout.source_width_usize(),
-            downscale,
-        )?;
+        if full_output_rect || mcu_row_intersects_rect(my - 1, mcu_height_px, emit_rect) {
+            emit_stripe_rgb(
+                plan,
+                backend,
+                has_prev.then_some(&*prev_stripe),
+                curr_stripe,
+                Some(&*next_stripe),
+                my - 1,
+                writer,
+                &mut output_scratch,
+                region_layout.source_width_usize(),
+                downscale,
+            )?;
+        }
         core::mem::swap(&mut prev_stripe, &mut curr_stripe);
         core::mem::swap(&mut curr_stripe, &mut next_stripe);
         has_prev = true;
     }
 
-    emit_stripe_rgb(
-        plan,
-        backend,
-        has_prev.then_some(&*prev_stripe),
-        curr_stripe,
-        None,
-        mcu_rows - 1,
-        writer,
-        &mut output_scratch,
-        region_layout.source_width_usize(),
-        downscale,
-    )?;
-
-    let mut warnings = Vec::new();
-    match br.take_marker() {
-        Some(0xD9) => Ok(warnings),
-        Some(found) => Err(JpegError::UnexpectedMarker {
-            offset: br.position().saturating_sub(2),
-            expected: crate::error::MarkerKind::Eoi,
-            found,
-        }),
-        None => {
-            warnings.push(Warning::MissingEoi);
-            Ok(warnings)
-        }
+    let curr_mcu_row = decode_mcu_row_end - 1;
+    if curr_mcu_row <= last_output_mcu_row
+        && (full_output_rect || mcu_row_intersects_rect(curr_mcu_row, mcu_height_px, emit_rect))
+    {
+        emit_stripe_rgb(
+            plan,
+            backend,
+            has_prev.then_some(&*prev_stripe),
+            curr_stripe,
+            None,
+            curr_mcu_row,
+            writer,
+            &mut output_scratch,
+            region_layout.source_width_usize(),
+            downscale,
+        )?;
     }
+    finish_scan(&mut br, decode_mcu_row_end == mcu_rows)
 }
 
 pub(crate) fn decode_scan_fast_tile_rgb<W: OutputWriter + InterleavedRgbWriter>(
@@ -613,24 +664,222 @@ pub(crate) fn stripe_region_layout(
     StripeRegionLayout::new(scaled_width, mcu_width_px, expanded_rect)
 }
 
+#[inline]
+fn last_mcu_row_for_rect(rect: Rect, mcu_height_px: u32, mcu_rows: u32) -> u32 {
+    let last_y = rect.y.saturating_add(rect.h).saturating_sub(1);
+    (last_y / mcu_height_px).min(mcu_rows.saturating_sub(1))
+}
+
+#[inline]
+fn first_mcu_row_for_rect(rect: Rect, mcu_height_px: u32) -> u32 {
+    rect.y / mcu_height_px
+}
+
+#[inline]
+fn first_decode_mcu_row_for_rect(full_output_rect: bool, rect: Rect, mcu_height_px: u32) -> u32 {
+    if full_output_rect {
+        0
+    } else {
+        first_mcu_row_for_rect(rect, mcu_height_px).saturating_sub(1)
+    }
+}
+
+#[inline]
+fn decode_mcu_row_end_for_rect(
+    full_output_rect: bool,
+    rect: Rect,
+    mcu_height_px: u32,
+    mcu_rows: u32,
+) -> u32 {
+    if full_output_rect {
+        return mcu_rows;
+    }
+    let last_output_mcu_row = last_mcu_row_for_rect(rect, mcu_height_px, mcu_rows);
+    if last_output_mcu_row + 1 < mcu_rows {
+        last_output_mcu_row + 2
+    } else {
+        mcu_rows
+    }
+}
+
+#[inline]
+fn fast420_first_decode_mcu_row(roi: Rect, mcu_height_px: u32) -> u32 {
+    let first_row = first_mcu_row_for_rect(roi, mcu_height_px);
+    if roi.y.is_multiple_of(mcu_height_px) {
+        first_row.saturating_sub(1)
+    } else {
+        first_row
+    }
+}
+
+#[inline]
+fn fast420_decode_mcu_row_end(roi: Rect, mcu_height_px: u32, mcu_rows: u32) -> u32 {
+    let last_row = last_mcu_row_for_rect(roi, mcu_height_px, mcu_rows);
+    let last_local_y = (roi.y + roi.h - 1) % mcu_height_px;
+    let needs_next_row = last_local_y == mcu_height_px.saturating_sub(1);
+    if needs_next_row && last_row + 1 < mcu_rows {
+        last_row + 2
+    } else {
+        last_row + 1
+    }
+}
+
+#[inline]
+fn mcu_row_intersects_rect(stripe_index: u32, mcu_height_px: u32, rect: Rect) -> bool {
+    let y0 = stripe_index * mcu_height_px;
+    let y1 = y0 + mcu_height_px;
+    let rect_y1 = rect.y + rect.h;
+    y0 < rect_y1 && y1 > rect.y
+}
+
+fn finish_scan(br: &mut BitReader<'_>, validate_eoi: bool) -> Result<Vec<Warning>, JpegError> {
+    if !validate_eoi {
+        return Ok(Vec::new());
+    }
+
+    let mut warnings = Vec::new();
+    match br.take_marker() {
+        Some(0xD9) => Ok(warnings),
+        Some(found) => Err(JpegError::UnexpectedMarker {
+            offset: br.position().saturating_sub(2),
+            expected: crate::error::MarkerKind::Eoi,
+            found,
+        }),
+        None => {
+            warnings.push(Warning::MissingEoi);
+            Ok(warnings)
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RestartSeek {
+    scan_offset: usize,
+    mcu_index: u32,
+    expected_rst: u8,
+}
+
+fn restart_seek_for_mcu(scan_bytes: &[u8], restart: u16, target_mcu: u32) -> Option<RestartSeek> {
+    if restart == 0 {
+        return None;
+    }
+    let restart = u32::from(restart);
+    let restart_index = target_mcu / restart;
+    if restart_index == 0 {
+        return None;
+    }
+    let marker_ordinal = restart_index - 1;
+    let mut seen = 0u32;
+    let mut pos = 0usize;
+    while pos + 1 < scan_bytes.len() {
+        if scan_bytes[pos] != 0xff {
+            pos += 1;
+            continue;
+        }
+
+        let mut marker_pos = pos + 1;
+        while marker_pos < scan_bytes.len() && scan_bytes[marker_pos] == 0xff {
+            marker_pos += 1;
+        }
+        if marker_pos >= scan_bytes.len() {
+            return None;
+        }
+
+        let marker = scan_bytes[marker_pos];
+        match marker {
+            0x00 => pos = marker_pos + 1,
+            0xd0..=0xd7 => {
+                if seen == marker_ordinal {
+                    return Some(RestartSeek {
+                        scan_offset: marker_pos + 1,
+                        mcu_index: restart_index * restart,
+                        expected_rst: (restart_index & 0x07) as u8,
+                    });
+                }
+                seen += 1;
+                pos = marker_pos + 1;
+            }
+            0xd9 => return None,
+            _ => return None,
+        }
+    }
+    None
+}
+
+fn skip_mcu(
+    plan: &PreparedDecodePlan,
+    br: &mut BitReader<'_>,
+    prev_dc: &mut [i32],
+) -> Result<(), JpegError> {
+    for comp in &plan.components {
+        let plane_idx = comp.output_index;
+        for _ in 0..u32::from(comp.h) * u32::from(comp.v) {
+            skip_block(br, &comp.dc_table, &comp.ac_table, &mut prev_dc[plane_idx])?;
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn skip_to_mcu(
+    plan: &PreparedDecodePlan,
+    br: &mut BitReader<'_>,
+    prev_dc: &mut [i32],
+    current_mcu: &mut u32,
+    target_mcu: u32,
+    total_mcus: u32,
+    restart: u16,
+    mcus_since_restart: &mut u32,
+    expected_rst: &mut u8,
+) -> Result<(), JpegError> {
+    while *current_mcu < target_mcu {
+        if restart > 0 && *mcus_since_restart == u32::from(restart) {
+            let _ = br.ensure_bits(1);
+            let marker = br.take_marker().ok_or(JpegError::UnexpectedEoi {
+                mcu_at: *current_mcu,
+                mcu_total: total_mcus,
+            })?;
+            let expected = 0xD0 | *expected_rst;
+            if marker != expected {
+                return Err(JpegError::RestartMismatch {
+                    offset: br.position(),
+                    expected: *expected_rst,
+                    found: marker,
+                });
+            }
+            *expected_rst = (*expected_rst + 1) & 0x07;
+            br.reset_at_restart();
+            prev_dc.fill(0);
+            *mcus_since_restart = 0;
+        }
+
+        skip_mcu(plan, br, prev_dc)?;
+        *mcus_since_restart += 1;
+        *current_mcu += 1;
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy)]
 struct Fast420RegionLayout {
     stripe_mcu_start: u32,
     stripe_mcus_per_row: u32,
     y_decode_start: usize,
     y_decode_end: usize,
-    chroma_decode_start: usize,
-    chroma_decode_end: usize,
     crop_start: usize,
     crop_end: usize,
 }
 
 impl Fast420RegionLayout {
     fn new(width: usize, roi: Rect) -> Self {
+        Self::new_for_mcu_width(width, roi, 16)
+    }
+
+    fn new_for_mcu_width(width: usize, roi: Rect, mcu_width_px: u32) -> Self {
         let crop_window = RgbCropWindow::new(width, roi);
         let stripe = StripeRegionLayout::new(
             width as u32,
-            16,
+            mcu_width_px,
             Rect {
                 x: crop_window.scratch_x0 as u32,
                 y: 0,
@@ -640,8 +889,6 @@ impl Fast420RegionLayout {
         );
         let y_decode_start = stripe.source_x0 as usize;
         let y_decode_end = y_decode_start + stripe.source_width as usize;
-        let chroma_decode_start = (stripe.source_x0 / 2) as usize;
-        let chroma_decode_end = chroma_decode_start + stripe.source_width.div_ceil(2) as usize;
         let crop_start = roi.x as usize - y_decode_start;
         let crop_end = crop_start + roi.w as usize;
 
@@ -650,8 +897,6 @@ impl Fast420RegionLayout {
             stripe_mcus_per_row: stripe.stripe_mcus_per_row,
             y_decode_start,
             y_decode_end,
-            chroma_decode_start,
-            chroma_decode_end,
             crop_start,
             crop_end,
         }
@@ -661,8 +906,9 @@ impl Fast420RegionLayout {
         self.y_decode_end - self.y_decode_start
     }
 
+    #[cfg(test)]
     fn chroma_width(self) -> usize {
-        self.chroma_decode_end - self.chroma_decode_start
+        self.row_width().div_ceil(2)
     }
 }
 
@@ -683,6 +929,9 @@ pub(crate) fn decode_scan_fast_tile_rgb_region<W: OutputWriter + InterleavedRgbW
     let mcu_height_px = 8 * max_v;
     let mcus_per_row = width.div_ceil(mcu_width_px);
     let mcu_rows = height.div_ceil(mcu_height_px);
+    let first_decode_mcu_row = fast420_first_decode_mcu_row(roi, mcu_height_px);
+    let decode_mcu_row_end = fast420_decode_mcu_row_end(roi, mcu_height_px, mcu_rows);
+    let last_output_mcu_row = last_mcu_row_for_rect(roi, mcu_height_px, mcu_rows);
 
     let region_layout = Fast420RegionLayout::new(width as usize, roi);
 
@@ -701,6 +950,11 @@ pub(crate) fn decode_scan_fast_tile_rgb_region<W: OutputWriter + InterleavedRgbW
         let mut y_dc = 0i32;
         let mut cb_dc = 0i32;
         let mut cr_dc = 0i32;
+        for _ in 0..first_decode_mcu_row * mcus_per_row {
+            skip_mcu_fast_tile_420(
+                y_comp, cb_comp, cr_comp, &mut br, &mut y_dc, &mut cb_dc, &mut cr_dc,
+            )?;
+        }
 
         let ScratchPool {
             stripe_a,
@@ -730,7 +984,7 @@ pub(crate) fn decode_scan_fast_tile_rgb_region<W: OutputWriter + InterleavedRgbW
         )?;
 
         let mut has_prev = false;
-        for my in 1..mcu_rows {
+        for my in first_decode_mcu_row + 1..decode_mcu_row_end {
             decode_mcu_row_fast_tile_420(
                 y_comp,
                 cb_comp,
@@ -747,49 +1001,188 @@ pub(crate) fn decode_scan_fast_tile_rgb_region<W: OutputWriter + InterleavedRgbW
                 region_layout.stripe_mcus_per_row,
                 next_stripe,
             )?;
-            emit_stripe_rgb_420_region(
-                plan,
-                backend,
-                has_prev.then_some(&*prev_stripe),
-                curr_stripe,
-                Some(&*next_stripe),
-                my - 1,
-                writer,
-                roi,
-                region_layout,
-                &mut crop_rows,
-            )?;
+            if mcu_row_intersects_rect(my - 1, mcu_height_px, roi) {
+                emit_stripe_rgb_420_region(
+                    plan,
+                    backend,
+                    has_prev.then_some(&*prev_stripe),
+                    curr_stripe,
+                    Some(&*next_stripe),
+                    my - 1,
+                    writer,
+                    roi,
+                    region_layout,
+                    &mut crop_rows,
+                    DownscaleFactor::Full,
+                )?;
+            }
             core::mem::swap(&mut prev_stripe, &mut curr_stripe);
             core::mem::swap(&mut curr_stripe, &mut next_stripe);
             has_prev = true;
         }
 
-        emit_stripe_rgb_420_region(
-            plan,
-            backend,
-            has_prev.then_some(&*prev_stripe),
+        let curr_mcu_row = decode_mcu_row_end - 1;
+        if curr_mcu_row <= last_output_mcu_row
+            && mcu_row_intersects_rect(curr_mcu_row, mcu_height_px, roi)
+        {
+            emit_stripe_rgb_420_region(
+                plan,
+                backend,
+                has_prev.then_some(&*prev_stripe),
+                curr_stripe,
+                None,
+                curr_mcu_row,
+                writer,
+                roi,
+                region_layout,
+                &mut crop_rows,
+                DownscaleFactor::Full,
+            )?;
+        }
+        finish_scan(&mut br, decode_mcu_row_end == mcu_rows)
+    })();
+    pool.restore_sink_rows(crop_rows);
+    result
+}
+
+pub(crate) fn decode_scan_fast_tile_rgb_region_scaled<W: OutputWriter + InterleavedRgbWriter>(
+    plan: &PreparedDecodePlan,
+    backend: Backend,
+    scan_bytes: &[u8],
+    pool: &mut ScratchPool,
+    writer: &mut W,
+    roi: Rect,
+    downscale: DownscaleFactor,
+) -> Result<Vec<Warning>, JpegError> {
+    debug_assert!(plan.matches_fast_tile_shape());
+    debug_assert!(downscale != DownscaleFactor::Full);
+
+    let (width, height) = scaled_dimensions(plan.dimensions, downscale);
+    let max_h = plan.sampling.max_h as u32;
+    let max_v = plan.sampling.max_v as u32;
+    let block_size = downscale.output_block_size();
+    let mcu_width_px = block_size * max_h;
+    let mcu_height_px = block_size * max_v;
+    let mcus_per_row = width.div_ceil(mcu_width_px);
+    let mcu_rows = height.div_ceil(mcu_height_px);
+    let first_decode_mcu_row = fast420_first_decode_mcu_row(roi, mcu_height_px);
+    let decode_mcu_row_end = fast420_decode_mcu_row_end(roi, mcu_height_px, mcu_rows);
+    let last_output_mcu_row = last_mcu_row_for_rect(roi, mcu_height_px, mcu_rows);
+
+    let region_layout = Fast420RegionLayout::new_for_mcu_width(width as usize, roi, mcu_width_px);
+
+    pool.prepare_for(plan, region_layout.stripe_mcus_per_row, block_size);
+
+    let mut crop_rows = pool.take_sink_rows(region_layout.row_width());
+    let result = (|| {
+        let mut br = BitReader::new(scan_bytes);
+        let mut coeff = CoefficientBlock::default();
+        let ScratchPool {
+            prev_dc,
+            stripe_a,
+            stripe_b,
+            stripe_c,
+            ..
+        } = pool;
+        let mut pixels_4x4 = [0u8; 16];
+        let mut pixels_2x2 = [0u8; 4];
+        let (y_dc_slice, rest_dc) = prev_dc.split_at_mut(1);
+        let (cb_dc_slice, cr_dc_slice) = rest_dc.split_at_mut(1);
+        let y_dc = &mut y_dc_slice[0];
+        let cb_dc = &mut cb_dc_slice[0];
+        let cr_dc = &mut cr_dc_slice[0];
+        for _ in 0..first_decode_mcu_row * mcus_per_row {
+            skip_mcu_fast_tile_420(
+                &plan.components[0],
+                &plan.components[1],
+                &plan.components[2],
+                &mut br,
+                y_dc,
+                cb_dc,
+                cr_dc,
+            )?;
+        }
+
+        let mut prev_stripe: &mut StripeBuffer = stripe_a;
+        let mut curr_stripe: &mut StripeBuffer = stripe_b;
+        let mut next_stripe: &mut StripeBuffer = stripe_c;
+
+        decode_mcu_row_fast_tile_420_scaled(
+            &plan.components[0],
+            &plan.components[1],
+            &plan.components[2],
+            &mut br,
+            y_dc,
+            cb_dc,
+            cr_dc,
+            &mut coeff,
+            downscale,
+            &mut pixels_4x4,
+            &mut pixels_2x2,
+            mcus_per_row,
+            region_layout.stripe_mcu_start,
+            region_layout.stripe_mcus_per_row,
             curr_stripe,
-            None,
-            mcu_rows - 1,
-            writer,
-            roi,
-            region_layout,
-            &mut crop_rows,
         )?;
 
-        let mut warnings = Vec::new();
-        match br.take_marker() {
-            Some(0xD9) => Ok(warnings),
-            Some(found) => Err(JpegError::UnexpectedMarker {
-                offset: br.position().saturating_sub(2),
-                expected: crate::error::MarkerKind::Eoi,
-                found,
-            }),
-            None => {
-                warnings.push(Warning::MissingEoi);
-                Ok(warnings)
+        let mut has_prev = false;
+        for my in first_decode_mcu_row + 1..decode_mcu_row_end {
+            decode_mcu_row_fast_tile_420_scaled(
+                &plan.components[0],
+                &plan.components[1],
+                &plan.components[2],
+                &mut br,
+                y_dc,
+                cb_dc,
+                cr_dc,
+                &mut coeff,
+                downscale,
+                &mut pixels_4x4,
+                &mut pixels_2x2,
+                mcus_per_row,
+                region_layout.stripe_mcu_start,
+                region_layout.stripe_mcus_per_row,
+                next_stripe,
+            )?;
+            if mcu_row_intersects_rect(my - 1, mcu_height_px, roi) {
+                emit_stripe_rgb_420_region(
+                    plan,
+                    backend,
+                    has_prev.then_some(&*prev_stripe),
+                    curr_stripe,
+                    Some(&*next_stripe),
+                    my - 1,
+                    writer,
+                    roi,
+                    region_layout,
+                    &mut crop_rows,
+                    downscale,
+                )?;
             }
+            core::mem::swap(&mut prev_stripe, &mut curr_stripe);
+            core::mem::swap(&mut curr_stripe, &mut next_stripe);
+            has_prev = true;
         }
+
+        let curr_mcu_row = decode_mcu_row_end - 1;
+        if curr_mcu_row <= last_output_mcu_row
+            && mcu_row_intersects_rect(curr_mcu_row, mcu_height_px, roi)
+        {
+            emit_stripe_rgb_420_region(
+                plan,
+                backend,
+                has_prev.then_some(&*prev_stripe),
+                curr_stripe,
+                None,
+                curr_mcu_row,
+                writer,
+                roi,
+                region_layout,
+                &mut crop_rows,
+                downscale,
+            )?;
+        }
+        finish_scan(&mut br, decode_mcu_row_end == mcu_rows)
     })();
     pool.restore_sink_rows(crop_rows);
     result
@@ -822,11 +1215,12 @@ fn emit_stripe_rgb_420_region<W: OutputWriter + InterleavedRgbWriter>(
     roi: Rect,
     region_layout: Fast420RegionLayout,
     crop_rows: &mut SinkRows,
+    downscale: DownscaleFactor,
 ) -> Result<(), JpegError> {
     let max_v = plan.sampling.max_v as u32;
-    let mcu_height_px = DownscaleFactor::Full.output_block_size() * max_v;
+    let mcu_height_px = downscale.output_block_size() * max_v;
     let y_start = stripe_index * mcu_height_px;
-    let (_, scaled_height) = scaled_dimensions(plan.dimensions, DownscaleFactor::Full);
+    let (_, scaled_height) = scaled_dimensions(plan.dimensions, downscale);
     let y_end = (y_start + mcu_height_px).min(scaled_height);
     let stripe_rows = (y_end - y_start) as usize;
 
@@ -834,7 +1228,13 @@ fn emit_stripe_rgb_420_region<W: OutputWriter + InterleavedRgbWriter>(
         return Ok(());
     }
 
-    let row_len = region_layout.row_width() * 3;
+    let row_width = region_layout.row_width();
+    let chroma_width = row_width.div_ceil(2);
+    let row_len = row_width * 3;
+    let crop_width = region_layout.crop_end - region_layout.crop_start;
+    let crop_len = crop_width * 3;
+    let use_direct_crop = downscale == DownscaleFactor::Full
+        && backend.prefers_cropped_420_region(row_width, crop_width);
     let mut local_y = 0usize;
     while local_y < stripe_rows {
         let next_local_y = local_y + 1;
@@ -847,9 +1247,9 @@ fn emit_stripe_rgb_420_region<W: OutputWriter + InterleavedRgbWriter>(
             continue;
         }
 
-        let y_top = &curr.row(0, local_y)[..region_layout.row_width()];
-        let y_bottom = (next_local_y < stripe_rows)
-            .then(|| &curr.row(0, next_local_y)[..region_layout.row_width()]);
+        let y_top = &curr.row(0, local_y)[..row_width];
+        let y_bottom =
+            (next_local_y < stripe_rows).then(|| &curr.row(0, next_local_y)[..row_width]);
         let chroma_y = (local_y / 2).min(curr.row_count(1).saturating_sub(1));
         let (prev_cb, curr_cb, next_cb) = component_row_triplet(
             prev.map(|stripe| stripe.plane(1)),
@@ -864,15 +1264,81 @@ fn emit_stripe_rgb_420_region<W: OutputWriter + InterleavedRgbWriter>(
             chroma_y,
         );
 
+        if use_direct_crop {
+            match (top_in, bottom_in) {
+                (true, true) => {
+                    writer.with_rgb_rows(global_y - roi.y, 2, |dst_top, dst_bottom| {
+                        backend.fill_rgb_row_pair_from_420_cropped(
+                            y_top,
+                            y_bottom,
+                            &prev_cb[..chroma_width],
+                            &curr_cb[..chroma_width],
+                            &next_cb[..chroma_width],
+                            &prev_cr[..chroma_width],
+                            &curr_cr[..chroma_width],
+                            &next_cr[..chroma_width],
+                            region_layout.crop_start,
+                            crop_width,
+                            dst_top,
+                            dst_bottom,
+                        );
+                        Ok(())
+                    })?;
+                }
+                (true, false) => {
+                    writer.with_rgb_rows(global_y - roi.y, 1, |dst, _| {
+                        backend.fill_rgb_row_pair_from_420_cropped(
+                            y_top,
+                            None,
+                            &prev_cb[..chroma_width],
+                            &curr_cb[..chroma_width],
+                            &next_cb[..chroma_width],
+                            &prev_cr[..chroma_width],
+                            &curr_cr[..chroma_width],
+                            &next_cr[..chroma_width],
+                            region_layout.crop_start,
+                            crop_width,
+                            dst,
+                            None,
+                        );
+                        Ok(())
+                    })?;
+                }
+                (false, true) => {
+                    let y_bottom = y_bottom.expect("bottom ROI row requires a decoded bottom row");
+                    writer.with_rgb_rows(global_y + 1 - roi.y, 1, |dst, _| {
+                        backend.fill_rgb_row_pair_from_420_cropped(
+                            y_top,
+                            Some(y_bottom),
+                            &prev_cb[..chroma_width],
+                            &curr_cb[..chroma_width],
+                            &next_cb[..chroma_width],
+                            &prev_cr[..chroma_width],
+                            &curr_cr[..chroma_width],
+                            &next_cr[..chroma_width],
+                            region_layout.crop_start,
+                            crop_width,
+                            &mut crop_rows.top_row[..crop_len],
+                            Some(dst),
+                        );
+                        Ok(())
+                    })?;
+                }
+                (false, false) => unreachable!("ROI row pair must intersect at least one row"),
+            }
+            local_y += 2;
+            continue;
+        }
+
         backend.fill_rgb_row_pair_from_420(
             y_top,
             y_bottom,
-            &prev_cb[..region_layout.chroma_width()],
-            &curr_cb[..region_layout.chroma_width()],
-            &next_cb[..region_layout.chroma_width()],
-            &prev_cr[..region_layout.chroma_width()],
-            &curr_cr[..region_layout.chroma_width()],
-            &next_cr[..region_layout.chroma_width()],
+            &prev_cb[..chroma_width],
+            &curr_cb[..chroma_width],
+            &next_cb[..chroma_width],
+            &prev_cr[..chroma_width],
+            &curr_cr[..chroma_width],
+            &next_cr[..chroma_width],
             &mut crop_rows.top_row[..row_len],
             y_bottom
                 .as_ref()
@@ -924,10 +1390,12 @@ fn deposit_block_4x4(plane: &mut [u8], stride: usize, x: u32, y: u32, block: &[u
 fn deposit_block_2x2(plane: &mut [u8], stride: usize, x: u32, y: u32, block: [u8; 4]) {
     let x = x as usize;
     let y = y as usize;
-    for by in 0..2 {
-        let dst_start = (y + by) * stride + x;
-        plane[dst_start..dst_start + 2].copy_from_slice(&block[by * 2..by * 2 + 2]);
-    }
+    let top = y * stride + x;
+    let bottom = top + stride;
+    plane[top] = block[0];
+    plane[top + 1] = block[1];
+    plane[bottom] = block[2];
+    plane[bottom + 1] = block[3];
 }
 
 fn deposit_block_1x1(plane: &mut [u8], stride: usize, x: u32, y: u32, pixel: u8) {
@@ -988,17 +1456,9 @@ fn decode_mcu_row(
                 mx.saturating_sub(stripe_mcu_start) * u32::from(comp.h) * block_size;
             for vy in 0..comp.v as u32 {
                 for vx in 0..comp.h as u32 {
-                    let activity = decode_block_with_activity(
-                        br,
-                        &comp.dc_table,
-                        &comp.ac_table,
-                        &mut prev_dc[plane_idx],
-                        &comp.quant,
-                        coeff,
-                    )?;
-                    if !in_region
-                        || (!full_output_rect
-                            && !component_block_intersects_rect(
+                    let should_output = in_region
+                        && (full_output_rect
+                            || component_block_intersects_rect(
                                 plan,
                                 comp,
                                 downscale,
@@ -1007,10 +1467,20 @@ fn decode_mcu_row(
                                 vx,
                                 vy,
                                 output_rect,
-                            ))
-                    {
+                            ));
+                    if !should_output {
+                        skip_block(br, &comp.dc_table, &comp.ac_table, &mut prev_dc[plane_idx])?;
                         continue;
                     }
+
+                    let activity = decode_block_with_activity(
+                        br,
+                        &comp.dc_table,
+                        &comp.ac_table,
+                        &mut prev_dc[plane_idx],
+                        &comp.quant,
+                        coeff,
+                    )?;
                     let block_x = local_mcu_x0_px + vx * block_size;
                     let block_y = vy * block_size;
                     match downscale {
@@ -1035,7 +1505,14 @@ fn decode_mcu_row(
                             );
                         }
                         DownscaleFactor::Half => {
-                            downscale::idct_islow_4x4(coeff.coefficients(), &mut pixels_4x4);
+                            if activity == BlockActivity::DcOnly {
+                                downscale::idct_islow_4x4_dc_only(
+                                    coeff.dc_coeff(),
+                                    &mut pixels_4x4,
+                                );
+                            } else {
+                                downscale::idct_islow_4x4(coeff.coefficients(), &mut pixels_4x4);
+                            }
                             deposit_block_4x4(
                                 &mut stripe.planes[plane_idx],
                                 stripe.plane_strides[plane_idx],
@@ -1045,7 +1522,14 @@ fn decode_mcu_row(
                             );
                         }
                         DownscaleFactor::Quarter => {
-                            downscale::idct_islow_2x2(coeff.coefficients(), &mut pixels_2x2);
+                            if activity == BlockActivity::DcOnly {
+                                downscale::idct_islow_2x2_dc_only(
+                                    coeff.dc_coeff(),
+                                    &mut pixels_2x2,
+                                );
+                            } else {
+                                downscale::idct_islow_2x2(coeff.coefficients(), &mut pixels_2x2);
+                            }
                             deposit_block_2x2(
                                 &mut stripe.planes[plane_idx],
                                 stripe.plane_strides[plane_idx],
@@ -1352,6 +1836,296 @@ fn emit_stripe_rgb_444<W: OutputWriter + InterleavedRgbWriter>(
     Ok(())
 }
 
+#[allow(clippy::inline_always)]
+#[inline(always)]
+fn skip_mcu_fast_tile_420(
+    y_comp: &PreparedComponentPlan,
+    cb_comp: &PreparedComponentPlan,
+    cr_comp: &PreparedComponentPlan,
+    br: &mut BitReader<'_>,
+    y_dc: &mut i32,
+    cb_dc: &mut i32,
+    cr_dc: &mut i32,
+) -> Result<(), JpegError> {
+    for _ in 0..4 {
+        skip_block(br, &y_comp.dc_table, &y_comp.ac_table, y_dc)?;
+    }
+    skip_block(br, &cb_comp.dc_table, &cb_comp.ac_table, cb_dc)?;
+    skip_block(br, &cr_comp.dc_table, &cr_comp.ac_table, cr_dc)?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn decode_scaled_block_to_plane(
+    comp: &PreparedComponentPlan,
+    br: &mut BitReader<'_>,
+    prev_dc: &mut i32,
+    coeff: &mut CoefficientBlock,
+    downscale: DownscaleFactor,
+    pixels_4x4: &mut [u8; 16],
+    pixels_2x2: &mut [u8; 4],
+    plane: &mut [u8],
+    stride: usize,
+    x: u32,
+    y: u32,
+) -> Result<(), JpegError> {
+    let keep = match downscale {
+        DownscaleFactor::Full => unreachable!("scaled block path excludes full-size decode"),
+        DownscaleFactor::Half => ReducedIdctCoefficients::Half,
+        DownscaleFactor::Quarter => ReducedIdctCoefficients::Quarter,
+        DownscaleFactor::Eighth => {
+            decode_block_for_1x1_idct(
+                br,
+                &comp.dc_table,
+                &comp.ac_table,
+                prev_dc,
+                comp.quant.as_ref(),
+                coeff,
+            )?;
+            let pixel = downscale::idct_islow_1x1(coeff.coefficients());
+            deposit_block_1x1(plane, stride, x, y, pixel);
+            return Ok(());
+        }
+    };
+    let dc_only = decode_block_for_reduced_idct(
+        br,
+        &comp.dc_table,
+        &comp.ac_table,
+        prev_dc,
+        comp.quant.as_ref(),
+        coeff,
+        keep,
+    )?;
+    match downscale {
+        DownscaleFactor::Full => unreachable!("scaled block path excludes full-size decode"),
+        DownscaleFactor::Half => {
+            if dc_only {
+                downscale::idct_islow_4x4_dc_only(coeff.dc_coeff(), pixels_4x4);
+            } else {
+                downscale::idct_islow_4x4(coeff.coefficients(), pixels_4x4);
+            }
+            deposit_block_4x4(plane, stride, x, y, pixels_4x4);
+        }
+        DownscaleFactor::Quarter => {
+            if dc_only {
+                downscale::idct_islow_2x2_dc_only(coeff.dc_coeff(), pixels_2x2);
+            } else {
+                downscale::idct_islow_2x2(coeff.coefficients(), pixels_2x2);
+            }
+            deposit_block_2x2(plane, stride, x, y, *pixels_2x2);
+        }
+        DownscaleFactor::Eighth => {
+            let pixel = downscale::idct_islow_1x1(coeff.coefficients());
+            deposit_block_1x1(plane, stride, x, y, pixel);
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn decode_quarter_block_to_plane(
+    comp: &PreparedComponentPlan,
+    br: &mut BitReader<'_>,
+    prev_dc: &mut i32,
+    coeff: &mut CoefficientBlock,
+    pixels_2x2: &mut [u8; 4],
+    plane: &mut [u8],
+    stride: usize,
+    x: u32,
+    y: u32,
+) -> Result<(), JpegError> {
+    let dc_only = decode_block_for_reduced_idct(
+        br,
+        &comp.dc_table,
+        &comp.ac_table,
+        prev_dc,
+        comp.quant.as_ref(),
+        coeff,
+        ReducedIdctCoefficients::Quarter,
+    )?;
+    if dc_only {
+        downscale::idct_islow_2x2_dc_only(coeff.dc_coeff(), pixels_2x2);
+    } else {
+        downscale::idct_islow_2x2(coeff.coefficients(), pixels_2x2);
+    }
+    deposit_block_2x2(plane, stride, x, y, *pixels_2x2);
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn decode_eighth_block_to_plane(
+    comp: &PreparedComponentPlan,
+    br: &mut BitReader<'_>,
+    prev_dc: &mut i32,
+    coeff: &mut CoefficientBlock,
+    plane: &mut [u8],
+    stride: usize,
+    x: u32,
+    y: u32,
+) -> Result<(), JpegError> {
+    decode_block_for_1x1_idct(
+        br,
+        &comp.dc_table,
+        &comp.ac_table,
+        prev_dc,
+        comp.quant.as_ref(),
+        coeff,
+    )?;
+    let pixel = downscale::idct_islow_1x1(coeff.coefficients());
+    deposit_block_1x1(plane, stride, x, y, pixel);
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn decode_mcu_row_fast_tile_420_scaled(
+    y_comp: &PreparedComponentPlan,
+    cb_comp: &PreparedComponentPlan,
+    cr_comp: &PreparedComponentPlan,
+    br: &mut BitReader<'_>,
+    y_dc: &mut i32,
+    cb_dc: &mut i32,
+    cr_dc: &mut i32,
+    coeff: &mut CoefficientBlock,
+    downscale: DownscaleFactor,
+    pixels_4x4: &mut [u8; 16],
+    pixels_2x2: &mut [u8; 4],
+    mcus_per_row: u32,
+    stripe_mcu_start: u32,
+    stripe_mcus_per_row: u32,
+    stripe: &mut StripeBuffer,
+) -> Result<(), JpegError> {
+    if downscale == DownscaleFactor::Quarter {
+        return decode_mcu_row_fast_tile_420_quarter(
+            y_comp,
+            cb_comp,
+            cr_comp,
+            br,
+            y_dc,
+            cb_dc,
+            cr_dc,
+            coeff,
+            pixels_2x2,
+            mcus_per_row,
+            stripe_mcu_start,
+            stripe_mcus_per_row,
+            stripe,
+        );
+    }
+    if downscale == DownscaleFactor::Eighth {
+        return decode_mcu_row_fast_tile_420_eighth(
+            y_comp,
+            cb_comp,
+            cr_comp,
+            br,
+            y_dc,
+            cb_dc,
+            cr_dc,
+            coeff,
+            mcus_per_row,
+            stripe_mcu_start,
+            stripe_mcus_per_row,
+            stripe,
+        );
+    }
+
+    let block_size = downscale.output_block_size();
+    let stripe_mcu_end = stripe_mcu_start + stripe_mcus_per_row;
+    let y_stride = stripe.plane_strides[0];
+    let cb_stride = stripe.plane_strides[1];
+    let cr_stride = stripe.plane_strides[2];
+
+    for mx in 0..mcus_per_row {
+        let in_region = mx >= stripe_mcu_start && mx < stripe_mcu_end;
+        if !in_region {
+            skip_mcu_fast_tile_420(y_comp, cb_comp, cr_comp, br, y_dc, cb_dc, cr_dc)?;
+            continue;
+        }
+
+        let local_mx = mx - stripe_mcu_start;
+        let y_x = local_mx * 2 * block_size;
+        let c_x = local_mx * block_size;
+        decode_scaled_block_to_plane(
+            y_comp,
+            br,
+            y_dc,
+            coeff,
+            downscale,
+            pixels_4x4,
+            pixels_2x2,
+            &mut stripe.planes[0],
+            y_stride,
+            y_x,
+            0,
+        )?;
+        decode_scaled_block_to_plane(
+            y_comp,
+            br,
+            y_dc,
+            coeff,
+            downscale,
+            pixels_4x4,
+            pixels_2x2,
+            &mut stripe.planes[0],
+            y_stride,
+            y_x + block_size,
+            0,
+        )?;
+        decode_scaled_block_to_plane(
+            y_comp,
+            br,
+            y_dc,
+            coeff,
+            downscale,
+            pixels_4x4,
+            pixels_2x2,
+            &mut stripe.planes[0],
+            y_stride,
+            y_x,
+            block_size,
+        )?;
+        decode_scaled_block_to_plane(
+            y_comp,
+            br,
+            y_dc,
+            coeff,
+            downscale,
+            pixels_4x4,
+            pixels_2x2,
+            &mut stripe.planes[0],
+            y_stride,
+            y_x + block_size,
+            block_size,
+        )?;
+        decode_scaled_block_to_plane(
+            cb_comp,
+            br,
+            cb_dc,
+            coeff,
+            downscale,
+            pixels_4x4,
+            pixels_2x2,
+            &mut stripe.planes[1],
+            cb_stride,
+            c_x,
+            0,
+        )?;
+        decode_scaled_block_to_plane(
+            cr_comp,
+            br,
+            cr_dc,
+            coeff,
+            downscale,
+            pixels_4x4,
+            pixels_2x2,
+            &mut stripe.planes[2],
+            cr_stride,
+            c_x,
+            0,
+        )?;
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn decode_mcu_row_fast_tile_420(
     y_comp: &PreparedComponentPlan,
@@ -1372,7 +2146,16 @@ fn decode_mcu_row_fast_tile_420(
     let stripe_mcu_end = stripe_mcu_start + stripe_mcus_per_row;
     for mx in 0..mcus_per_row {
         let in_region = mx >= stripe_mcu_start && mx < stripe_mcu_end;
-        let local_mx = mx.saturating_sub(stripe_mcu_start);
+        if !in_region {
+            for _ in 0..4 {
+                skip_block(br, &y_comp.dc_table, &y_comp.ac_table, y_dc)?;
+            }
+            skip_block(br, &cb_comp.dc_table, &cb_comp.ac_table, cb_dc)?;
+            skip_block(br, &cr_comp.dc_table, &cr_comp.ac_table, cr_dc)?;
+            continue;
+        }
+
+        let local_mx = mx - stripe_mcu_start;
         let y_x = local_mx * 16;
         let c_x = local_mx * 8;
 
@@ -1384,22 +2167,20 @@ fn decode_mcu_row_fast_tile_420(
             y_comp.quant.as_ref(),
             coeff,
         )?;
-        if in_region {
-            match y0_activity {
-                BlockActivity::DcOnly => crate::idct::idct_islow_dc_only(coeff.dc_coeff(), pixels),
-                BlockActivity::BottomHalfZero => {
-                    backend.idct_bottom_half_zero(coeff.coefficients(), pixels);
-                }
-                BlockActivity::General => backend.idct(coeff.coefficients(), pixels),
+        match y0_activity {
+            BlockActivity::DcOnly => crate::idct::idct_islow_dc_only(coeff.dc_coeff(), pixels),
+            BlockActivity::BottomHalfZero => {
+                backend.idct_bottom_half_zero(coeff.coefficients(), pixels);
             }
-            deposit_block(
-                &mut stripe.planes[0],
-                stripe.plane_strides[0],
-                y_x,
-                0,
-                pixels,
-            );
+            BlockActivity::General => backend.idct(coeff.coefficients(), pixels),
         }
+        deposit_block(
+            &mut stripe.planes[0],
+            stripe.plane_strides[0],
+            y_x,
+            0,
+            pixels,
+        );
 
         let y1_activity = decode_block_with_activity(
             br,
@@ -1409,22 +2190,20 @@ fn decode_mcu_row_fast_tile_420(
             y_comp.quant.as_ref(),
             coeff,
         )?;
-        if in_region {
-            match y1_activity {
-                BlockActivity::DcOnly => crate::idct::idct_islow_dc_only(coeff.dc_coeff(), pixels),
-                BlockActivity::BottomHalfZero => {
-                    backend.idct_bottom_half_zero(coeff.coefficients(), pixels);
-                }
-                BlockActivity::General => backend.idct(coeff.coefficients(), pixels),
+        match y1_activity {
+            BlockActivity::DcOnly => crate::idct::idct_islow_dc_only(coeff.dc_coeff(), pixels),
+            BlockActivity::BottomHalfZero => {
+                backend.idct_bottom_half_zero(coeff.coefficients(), pixels);
             }
-            deposit_block(
-                &mut stripe.planes[0],
-                stripe.plane_strides[0],
-                y_x + 8,
-                0,
-                pixels,
-            );
+            BlockActivity::General => backend.idct(coeff.coefficients(), pixels),
         }
+        deposit_block(
+            &mut stripe.planes[0],
+            stripe.plane_strides[0],
+            y_x + 8,
+            0,
+            pixels,
+        );
 
         let y2_activity = decode_block_with_activity(
             br,
@@ -1434,22 +2213,20 @@ fn decode_mcu_row_fast_tile_420(
             y_comp.quant.as_ref(),
             coeff,
         )?;
-        if in_region {
-            match y2_activity {
-                BlockActivity::DcOnly => crate::idct::idct_islow_dc_only(coeff.dc_coeff(), pixels),
-                BlockActivity::BottomHalfZero => {
-                    backend.idct_bottom_half_zero(coeff.coefficients(), pixels);
-                }
-                BlockActivity::General => backend.idct(coeff.coefficients(), pixels),
+        match y2_activity {
+            BlockActivity::DcOnly => crate::idct::idct_islow_dc_only(coeff.dc_coeff(), pixels),
+            BlockActivity::BottomHalfZero => {
+                backend.idct_bottom_half_zero(coeff.coefficients(), pixels);
             }
-            deposit_block(
-                &mut stripe.planes[0],
-                stripe.plane_strides[0],
-                y_x,
-                8,
-                pixels,
-            );
+            BlockActivity::General => backend.idct(coeff.coefficients(), pixels),
         }
+        deposit_block(
+            &mut stripe.planes[0],
+            stripe.plane_strides[0],
+            y_x,
+            8,
+            pixels,
+        );
 
         let y3_activity = decode_block_with_activity(
             br,
@@ -1459,22 +2236,20 @@ fn decode_mcu_row_fast_tile_420(
             y_comp.quant.as_ref(),
             coeff,
         )?;
-        if in_region {
-            match y3_activity {
-                BlockActivity::DcOnly => crate::idct::idct_islow_dc_only(coeff.dc_coeff(), pixels),
-                BlockActivity::BottomHalfZero => {
-                    backend.idct_bottom_half_zero(coeff.coefficients(), pixels);
-                }
-                BlockActivity::General => backend.idct(coeff.coefficients(), pixels),
+        match y3_activity {
+            BlockActivity::DcOnly => crate::idct::idct_islow_dc_only(coeff.dc_coeff(), pixels),
+            BlockActivity::BottomHalfZero => {
+                backend.idct_bottom_half_zero(coeff.coefficients(), pixels);
             }
-            deposit_block(
-                &mut stripe.planes[0],
-                stripe.plane_strides[0],
-                y_x + 8,
-                8,
-                pixels,
-            );
+            BlockActivity::General => backend.idct(coeff.coefficients(), pixels),
         }
+        deposit_block(
+            &mut stripe.planes[0],
+            stripe.plane_strides[0],
+            y_x + 8,
+            8,
+            pixels,
+        );
 
         let cb_activity = decode_block_with_activity(
             br,
@@ -1484,22 +2259,20 @@ fn decode_mcu_row_fast_tile_420(
             cb_comp.quant.as_ref(),
             coeff,
         )?;
-        if in_region {
-            match cb_activity {
-                BlockActivity::DcOnly => crate::idct::idct_islow_dc_only(coeff.dc_coeff(), pixels),
-                BlockActivity::BottomHalfZero => {
-                    backend.idct_bottom_half_zero(coeff.coefficients(), pixels);
-                }
-                BlockActivity::General => backend.idct(coeff.coefficients(), pixels),
+        match cb_activity {
+            BlockActivity::DcOnly => crate::idct::idct_islow_dc_only(coeff.dc_coeff(), pixels),
+            BlockActivity::BottomHalfZero => {
+                backend.idct_bottom_half_zero(coeff.coefficients(), pixels);
             }
-            deposit_block(
-                &mut stripe.planes[1],
-                stripe.plane_strides[1],
-                c_x,
-                0,
-                pixels,
-            );
+            BlockActivity::General => backend.idct(coeff.coefficients(), pixels),
         }
+        deposit_block(
+            &mut stripe.planes[1],
+            stripe.plane_strides[1],
+            c_x,
+            0,
+            pixels,
+        );
 
         let cr_activity = decode_block_with_activity(
             br,
@@ -1509,22 +2282,219 @@ fn decode_mcu_row_fast_tile_420(
             cr_comp.quant.as_ref(),
             coeff,
         )?;
-        if in_region {
-            match cr_activity {
-                BlockActivity::DcOnly => crate::idct::idct_islow_dc_only(coeff.dc_coeff(), pixels),
-                BlockActivity::BottomHalfZero => {
-                    backend.idct_bottom_half_zero(coeff.coefficients(), pixels);
-                }
-                BlockActivity::General => backend.idct(coeff.coefficients(), pixels),
+        match cr_activity {
+            BlockActivity::DcOnly => crate::idct::idct_islow_dc_only(coeff.dc_coeff(), pixels),
+            BlockActivity::BottomHalfZero => {
+                backend.idct_bottom_half_zero(coeff.coefficients(), pixels);
             }
-            deposit_block(
-                &mut stripe.planes[2],
-                stripe.plane_strides[2],
-                c_x,
-                0,
-                pixels,
-            );
+            BlockActivity::General => backend.idct(coeff.coefficients(), pixels),
         }
+        deposit_block(
+            &mut stripe.planes[2],
+            stripe.plane_strides[2],
+            c_x,
+            0,
+            pixels,
+        );
+    }
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn decode_mcu_row_fast_tile_420_eighth(
+    y_comp: &PreparedComponentPlan,
+    cb_comp: &PreparedComponentPlan,
+    cr_comp: &PreparedComponentPlan,
+    br: &mut BitReader<'_>,
+    y_dc: &mut i32,
+    cb_dc: &mut i32,
+    cr_dc: &mut i32,
+    coeff: &mut CoefficientBlock,
+    mcus_per_row: u32,
+    stripe_mcu_start: u32,
+    stripe_mcus_per_row: u32,
+    stripe: &mut StripeBuffer,
+) -> Result<(), JpegError> {
+    const BLOCK_SIZE: u32 = 1;
+    let stripe_mcu_end = stripe_mcu_start + stripe_mcus_per_row;
+    let y_stride = stripe.plane_strides[0];
+    let cb_stride = stripe.plane_strides[1];
+    let cr_stride = stripe.plane_strides[2];
+
+    for mx in 0..mcus_per_row {
+        let in_region = mx >= stripe_mcu_start && mx < stripe_mcu_end;
+        if !in_region {
+            skip_mcu_fast_tile_420(y_comp, cb_comp, cr_comp, br, y_dc, cb_dc, cr_dc)?;
+            continue;
+        }
+
+        let local_mx = mx - stripe_mcu_start;
+        let y_x = local_mx * 2 * BLOCK_SIZE;
+        let c_x = local_mx * BLOCK_SIZE;
+        decode_eighth_block_to_plane(
+            y_comp,
+            br,
+            y_dc,
+            coeff,
+            &mut stripe.planes[0],
+            y_stride,
+            y_x,
+            0,
+        )?;
+        decode_eighth_block_to_plane(
+            y_comp,
+            br,
+            y_dc,
+            coeff,
+            &mut stripe.planes[0],
+            y_stride,
+            y_x + BLOCK_SIZE,
+            0,
+        )?;
+        decode_eighth_block_to_plane(
+            y_comp,
+            br,
+            y_dc,
+            coeff,
+            &mut stripe.planes[0],
+            y_stride,
+            y_x,
+            BLOCK_SIZE,
+        )?;
+        decode_eighth_block_to_plane(
+            y_comp,
+            br,
+            y_dc,
+            coeff,
+            &mut stripe.planes[0],
+            y_stride,
+            y_x + BLOCK_SIZE,
+            BLOCK_SIZE,
+        )?;
+        decode_eighth_block_to_plane(
+            cb_comp,
+            br,
+            cb_dc,
+            coeff,
+            &mut stripe.planes[1],
+            cb_stride,
+            c_x,
+            0,
+        )?;
+        decode_eighth_block_to_plane(
+            cr_comp,
+            br,
+            cr_dc,
+            coeff,
+            &mut stripe.planes[2],
+            cr_stride,
+            c_x,
+            0,
+        )?;
+    }
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn decode_mcu_row_fast_tile_420_quarter(
+    y_comp: &PreparedComponentPlan,
+    cb_comp: &PreparedComponentPlan,
+    cr_comp: &PreparedComponentPlan,
+    br: &mut BitReader<'_>,
+    y_dc: &mut i32,
+    cb_dc: &mut i32,
+    cr_dc: &mut i32,
+    coeff: &mut CoefficientBlock,
+    pixels_2x2: &mut [u8; 4],
+    mcus_per_row: u32,
+    stripe_mcu_start: u32,
+    stripe_mcus_per_row: u32,
+    stripe: &mut StripeBuffer,
+) -> Result<(), JpegError> {
+    const BLOCK_SIZE: u32 = 2;
+    let stripe_mcu_end = stripe_mcu_start + stripe_mcus_per_row;
+    let y_stride = stripe.plane_strides[0];
+    let cb_stride = stripe.plane_strides[1];
+    let cr_stride = stripe.plane_strides[2];
+
+    for mx in 0..mcus_per_row {
+        let in_region = mx >= stripe_mcu_start && mx < stripe_mcu_end;
+        if !in_region {
+            skip_mcu_fast_tile_420(y_comp, cb_comp, cr_comp, br, y_dc, cb_dc, cr_dc)?;
+            continue;
+        }
+
+        let local_mx = mx - stripe_mcu_start;
+        let y_x = local_mx * 2 * BLOCK_SIZE;
+        let c_x = local_mx * BLOCK_SIZE;
+        decode_quarter_block_to_plane(
+            y_comp,
+            br,
+            y_dc,
+            coeff,
+            pixels_2x2,
+            &mut stripe.planes[0],
+            y_stride,
+            y_x,
+            0,
+        )?;
+        decode_quarter_block_to_plane(
+            y_comp,
+            br,
+            y_dc,
+            coeff,
+            pixels_2x2,
+            &mut stripe.planes[0],
+            y_stride,
+            y_x + BLOCK_SIZE,
+            0,
+        )?;
+        decode_quarter_block_to_plane(
+            y_comp,
+            br,
+            y_dc,
+            coeff,
+            pixels_2x2,
+            &mut stripe.planes[0],
+            y_stride,
+            y_x,
+            BLOCK_SIZE,
+        )?;
+        decode_quarter_block_to_plane(
+            y_comp,
+            br,
+            y_dc,
+            coeff,
+            pixels_2x2,
+            &mut stripe.planes[0],
+            y_stride,
+            y_x + BLOCK_SIZE,
+            BLOCK_SIZE,
+        )?;
+        decode_quarter_block_to_plane(
+            cb_comp,
+            br,
+            cb_dc,
+            coeff,
+            pixels_2x2,
+            &mut stripe.planes[1],
+            cb_stride,
+            c_x,
+            0,
+        )?;
+        decode_quarter_block_to_plane(
+            cr_comp,
+            br,
+            cr_dc,
+            coeff,
+            pixels_2x2,
+            &mut stripe.planes[2],
+            cr_stride,
+            c_x,
+            0,
+        )?;
     }
 
     Ok(())
@@ -2282,6 +3252,34 @@ mod tests {
         assert_eq!(layout.crop_end, 26);
         assert!(layout.y_decode_start <= roi.x as usize);
         assert!(layout.y_decode_end >= (roi.x + roi.w) as usize);
+    }
+
+    #[test]
+    fn fast420_vertical_context_only_keeps_neighbor_stripes_when_needed() {
+        let middle_roi = Rect {
+            x: 0,
+            y: 76,
+            w: 256,
+            h: 256,
+        };
+        assert_eq!(fast420_first_decode_mcu_row(middle_roi, 16), 4);
+        assert_eq!(fast420_decode_mcu_row_end(middle_roi, 16, 26), 21);
+
+        let top_edge_roi = Rect {
+            x: 0,
+            y: 64,
+            w: 32,
+            h: 16,
+        };
+        assert_eq!(fast420_first_decode_mcu_row(top_edge_roi, 16), 3);
+
+        let bottom_edge_roi = Rect {
+            x: 0,
+            y: 78,
+            w: 32,
+            h: 18,
+        };
+        assert_eq!(fast420_decode_mcu_row_end(bottom_edge_roi, 16, 26), 7);
     }
 
     #[test]

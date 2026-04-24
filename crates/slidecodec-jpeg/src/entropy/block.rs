@@ -17,7 +17,7 @@
 //! Produces a 64-entry array in row-major (natural) order, suitable for
 //! direct consumption by the IDCT.
 
-use crate::entropy::huffman::{AcDecoded, HuffmanTable};
+use crate::entropy::huffman::{AcDecoded, AcSkipDecoded, HuffmanTable};
 use crate::entropy::ZIGZAG;
 use crate::error::{HuffmanFailure, JpegError};
 use crate::internal::bit_reader::BitReader;
@@ -29,6 +29,24 @@ pub(crate) enum BlockActivity {
     DcOnly,
     BottomHalfZero,
     General,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReducedIdctCoefficients {
+    Half,
+    Quarter,
+}
+
+impl ReducedIdctCoefficients {
+    #[inline(always)]
+    fn keeps(self, natural_idx: usize) -> bool {
+        let row = natural_idx >> 3;
+        let col = natural_idx & 7;
+        match self {
+            Self::Half => row != 4 && col != 4,
+            Self::Quarter => !matches!(row, 2 | 4 | 6) && !matches!(col, 2 | 4 | 6),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -183,6 +201,194 @@ pub(crate) fn decode_block_with_activity(
     Ok(activity)
 }
 
+#[inline(always)]
+#[cfg(test)]
+pub(crate) fn decode_block_with_dc_status(
+    br: &mut BitReader<'_>,
+    dc_table: &HuffmanTable,
+    ac_table: &HuffmanTable,
+    prev_dc: &mut i32,
+    quant: &[u16; 64],
+    block: &mut CoefficientBlock,
+) -> Result<bool, JpegError> {
+    block.clear_touched();
+
+    let ssss = dc_table.decode(br)?;
+    if ssss > 15 {
+        return Err(JpegError::HuffmanDecode {
+            mcu: 0,
+            reason: HuffmanFailure::InvalidSymbol,
+        });
+    }
+    let diff = br.receive_extend(ssss)?;
+    *prev_dc = prev_dc.wrapping_add(diff);
+    let dc_dequant = (*prev_dc).wrapping_mul(quant[0] as i32);
+    block.store(0, clamp_i16(dc_dequant));
+
+    let mut k: usize = 1;
+    let mut dc_only = true;
+    while k < 64 {
+        match ac_table.decode_fast_ac(br)? {
+            AcDecoded::Eob => break,
+            AcDecoded::Zrl => {
+                k += 16;
+            }
+            AcDecoded::Value { run, value } => {
+                k += run;
+                if k >= 64 {
+                    return Err(JpegError::HuffmanDecode {
+                        mcu: 0,
+                        reason: HuffmanFailure::InvalidSymbol,
+                    });
+                }
+                let natural_idx = ZIGZAG[k] as usize;
+                let dequant = value.wrapping_mul(quant[k] as i32);
+                block.store(natural_idx, clamp_i16(dequant));
+                dc_only = false;
+                k += 1;
+            }
+        }
+    }
+    Ok(dc_only)
+}
+
+#[inline(always)]
+pub(crate) fn decode_block_for_reduced_idct(
+    br: &mut BitReader<'_>,
+    dc_table: &HuffmanTable,
+    ac_table: &HuffmanTable,
+    prev_dc: &mut i32,
+    quant: &[u16; 64],
+    block: &mut CoefficientBlock,
+    keep: ReducedIdctCoefficients,
+) -> Result<bool, JpegError> {
+    block.clear_touched();
+
+    let ssss = dc_table.decode(br)?;
+    if ssss > 15 {
+        return Err(JpegError::HuffmanDecode {
+            mcu: 0,
+            reason: HuffmanFailure::InvalidSymbol,
+        });
+    }
+    let diff = br.receive_extend(ssss)?;
+    *prev_dc = prev_dc.wrapping_add(diff);
+    let dc_dequant = (*prev_dc).wrapping_mul(quant[0] as i32);
+    block.store(0, clamp_i16(dc_dequant));
+
+    let mut k: usize = 1;
+    let mut dc_only_for_reduced_idct = true;
+    while k < 64 {
+        match ac_table.decode_fast_ac(br)? {
+            AcDecoded::Eob => break,
+            AcDecoded::Zrl => {
+                k += 16;
+            }
+            AcDecoded::Value { run, value } => {
+                k += run;
+                if k >= 64 {
+                    return Err(JpegError::HuffmanDecode {
+                        mcu: 0,
+                        reason: HuffmanFailure::InvalidSymbol,
+                    });
+                }
+                let natural_idx = ZIGZAG[k] as usize;
+                if keep.keeps(natural_idx) {
+                    let dequant = value.wrapping_mul(quant[k] as i32);
+                    block.store(natural_idx, clamp_i16(dequant));
+                    dc_only_for_reduced_idct = false;
+                }
+                k += 1;
+            }
+        }
+    }
+    Ok(dc_only_for_reduced_idct)
+}
+
+#[inline(always)]
+pub(crate) fn decode_block_for_1x1_idct(
+    br: &mut BitReader<'_>,
+    dc_table: &HuffmanTable,
+    ac_table: &HuffmanTable,
+    prev_dc: &mut i32,
+    quant: &[u16; 64],
+    block: &mut CoefficientBlock,
+) -> Result<(), JpegError> {
+    block.clear_touched();
+
+    let ssss = dc_table.decode(br)?;
+    if ssss > 15 {
+        return Err(JpegError::HuffmanDecode {
+            mcu: 0,
+            reason: HuffmanFailure::InvalidSymbol,
+        });
+    }
+    let diff = br.receive_extend(ssss)?;
+    *prev_dc = prev_dc.wrapping_add(diff);
+    let dc_dequant = (*prev_dc).wrapping_mul(quant[0] as i32);
+    block.store(0, clamp_i16(dc_dequant));
+
+    let mut k: usize = 1;
+    while k < 64 {
+        match ac_table.skip_fast_ac(br)? {
+            AcSkipDecoded::Eob => break,
+            AcSkipDecoded::Zrl => {
+                k += 16;
+            }
+            AcSkipDecoded::Value { run } => {
+                k += run;
+                if k >= 64 {
+                    return Err(JpegError::HuffmanDecode {
+                        mcu: 0,
+                        reason: HuffmanFailure::InvalidSymbol,
+                    });
+                }
+                k += 1;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[inline(always)]
+pub(crate) fn skip_block(
+    br: &mut BitReader<'_>,
+    dc_table: &HuffmanTable,
+    ac_table: &HuffmanTable,
+    prev_dc: &mut i32,
+) -> Result<(), JpegError> {
+    let ssss = dc_table.decode(br)?;
+    if ssss > 15 {
+        return Err(JpegError::HuffmanDecode {
+            mcu: 0,
+            reason: HuffmanFailure::InvalidSymbol,
+        });
+    }
+    let diff = br.receive_extend(ssss)?;
+    *prev_dc = prev_dc.wrapping_add(diff);
+
+    let mut k: usize = 1;
+    while k < 64 {
+        match ac_table.skip_fast_ac(br)? {
+            AcSkipDecoded::Eob => break,
+            AcSkipDecoded::Zrl => {
+                k += 16;
+            }
+            AcSkipDecoded::Value { run } => {
+                k += run;
+                if k >= 64 {
+                    return Err(JpegError::HuffmanDecode {
+                        mcu: 0,
+                        reason: HuffmanFailure::InvalidSymbol,
+                    });
+                }
+                k += 1;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn clamp_i16(v: i32) -> i16 {
     v.clamp(i16::MIN as i32, i16::MAX as i32) as i16
 }
@@ -291,6 +497,194 @@ mod tests {
             decode_block_with_activity(&mut br, &dc, &ac, &mut prev_dc, &quant, &mut out).unwrap();
         assert_eq!(activity, BlockActivity::BottomHalfZero);
         assert_eq!(out.coefficients()[crate::entropy::ZIGZAG[1] as usize], 1);
+    }
+
+    #[test]
+    fn dc_status_decoder_matches_block_coefficients_without_activity_classification() {
+        let dc = trivial_dc_table();
+        let raw = RawHuffmanTable {
+            bits: [0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            values: HuffmanValues::from_slice(&[0x01, 0x00]),
+        };
+        let ac = HuffmanTable::from_raw(&raw).unwrap();
+        let bytes = [0b0001_0100u8, 0, 0, 0];
+        let quant = [1u16; 64];
+        let mut activity_reader = BitReader::new(&bytes);
+        let mut dc_status_reader = BitReader::new(&bytes);
+        let mut activity_prev_dc = 0i32;
+        let mut dc_status_prev_dc = 0i32;
+        let mut activity_block = CoefficientBlock::default();
+        let mut dc_status_block = CoefficientBlock::default();
+
+        let activity = decode_block_with_activity(
+            &mut activity_reader,
+            &dc,
+            &ac,
+            &mut activity_prev_dc,
+            &quant,
+            &mut activity_block,
+        )
+        .unwrap();
+        let dc_only = decode_block_with_dc_status(
+            &mut dc_status_reader,
+            &dc,
+            &ac,
+            &mut dc_status_prev_dc,
+            &quant,
+            &mut dc_status_block,
+        )
+        .unwrap();
+
+        assert_eq!(activity, BlockActivity::BottomHalfZero);
+        assert!(!dc_only);
+        assert_eq!(dc_status_prev_dc, activity_prev_dc);
+        assert_eq!(
+            dc_status_block.coefficients(),
+            activity_block.coefficients()
+        );
+        assert_eq!(dc_status_reader.snapshot(), activity_reader.snapshot());
+    }
+
+    #[test]
+    fn reduced_idct_decoder_keeps_only_coefficients_read_by_scale() {
+        let dc = trivial_dc_table();
+        let raw = RawHuffmanTable {
+            bits: [0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            values: HuffmanValues::from_slice(&[0x41, 0x00]),
+        };
+        let ac = HuffmanTable::from_raw(&raw).unwrap();
+        let bytes = [0b0001_0100u8, 0, 0, 0];
+        let quant = [1u16; 64];
+        let ignored_by_quarter = ZIGZAG[5] as usize;
+        assert_eq!(ignored_by_quarter, 2);
+
+        let mut full_reader = BitReader::new(&bytes);
+        let mut quarter_reader = BitReader::new(&bytes);
+        let mut half_reader = BitReader::new(&bytes);
+        let mut full_prev_dc = 0i32;
+        let mut quarter_prev_dc = 0i32;
+        let mut half_prev_dc = 0i32;
+        let mut full_block = CoefficientBlock::default();
+        let mut quarter_block = CoefficientBlock::default();
+        let mut half_block = CoefficientBlock::default();
+
+        decode_block_with_activity(
+            &mut full_reader,
+            &dc,
+            &ac,
+            &mut full_prev_dc,
+            &quant,
+            &mut full_block,
+        )
+        .unwrap();
+        let quarter_dc_only = decode_block_for_reduced_idct(
+            &mut quarter_reader,
+            &dc,
+            &ac,
+            &mut quarter_prev_dc,
+            &quant,
+            &mut quarter_block,
+            ReducedIdctCoefficients::Quarter,
+        )
+        .unwrap();
+        let half_dc_only = decode_block_for_reduced_idct(
+            &mut half_reader,
+            &dc,
+            &ac,
+            &mut half_prev_dc,
+            &quant,
+            &mut half_block,
+            ReducedIdctCoefficients::Half,
+        )
+        .unwrap();
+
+        assert_eq!(quarter_prev_dc, full_prev_dc);
+        assert_eq!(half_prev_dc, full_prev_dc);
+        assert_eq!(quarter_reader.snapshot(), full_reader.snapshot());
+        assert_eq!(half_reader.snapshot(), full_reader.snapshot());
+        assert_eq!(full_block.coefficients()[ignored_by_quarter], 1);
+        assert_eq!(quarter_block.coefficients()[ignored_by_quarter], 0);
+        assert_eq!(half_block.coefficients()[ignored_by_quarter], 1);
+        assert!(quarter_dc_only);
+        assert!(!half_dc_only);
+    }
+
+    #[test]
+    fn one_by_one_idct_decoder_keeps_dc_and_skips_ac_values() {
+        let dc = trivial_dc_table();
+        let raw = RawHuffmanTable {
+            bits: [0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            values: HuffmanValues::from_slice(&[0x01, 0x00]),
+        };
+        let ac = HuffmanTable::from_raw(&raw).unwrap();
+        let bytes = [0b0001_0100u8, 0, 0, 0];
+        let quant = [1u16; 64];
+        let mut full_reader = BitReader::new(&bytes);
+        let mut one_by_one_reader = BitReader::new(&bytes);
+        let mut full_prev_dc = 0i32;
+        let mut one_by_one_prev_dc = 0i32;
+        let mut full_block = CoefficientBlock::default();
+        let mut one_by_one_block = CoefficientBlock::default();
+
+        decode_block_with_activity(
+            &mut full_reader,
+            &dc,
+            &ac,
+            &mut full_prev_dc,
+            &quant,
+            &mut full_block,
+        )
+        .unwrap();
+        decode_block_for_1x1_idct(
+            &mut one_by_one_reader,
+            &dc,
+            &ac,
+            &mut one_by_one_prev_dc,
+            &quant,
+            &mut one_by_one_block,
+        )
+        .unwrap();
+
+        assert_eq!(one_by_one_prev_dc, full_prev_dc);
+        assert_eq!(one_by_one_reader.snapshot(), full_reader.snapshot());
+        assert_eq!(one_by_one_block.dc_coeff(), full_block.dc_coeff());
+        assert!(one_by_one_block.coefficients()[1..].iter().all(|&c| c == 0));
+    }
+
+    #[test]
+    fn skip_block_consumes_stream_and_updates_dc_like_decode() {
+        let dc_raw = RawHuffmanTable {
+            bits: [0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            values: HuffmanValues::from_slice(&[2]),
+        };
+        let dc = HuffmanTable::from_raw(&dc_raw).unwrap();
+        let ac_raw = RawHuffmanTable {
+            bits: [0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            values: HuffmanValues::from_slice(&[0x01, 0x00]),
+        };
+        let ac = HuffmanTable::from_raw(&ac_raw).unwrap();
+        let bytes = [0b0011_0010u8, 0b1000_0000, 0, 0];
+        let quant = [1u16; 64];
+
+        let mut decoded_reader = BitReader::new(&bytes);
+        let mut skipped_reader = BitReader::new(&bytes);
+        let mut decoded_prev_dc = 5i32;
+        let mut skipped_prev_dc = 5i32;
+        let mut out = CoefficientBlock::default();
+
+        decode_block_with_activity(
+            &mut decoded_reader,
+            &dc,
+            &ac,
+            &mut decoded_prev_dc,
+            &quant,
+            &mut out,
+        )
+        .unwrap();
+        skip_block(&mut skipped_reader, &dc, &ac, &mut skipped_prev_dc).unwrap();
+
+        assert_eq!(skipped_prev_dc, decoded_prev_dc);
+        assert_eq!(skipped_reader.snapshot(), decoded_reader.snapshot());
     }
 
     #[test]

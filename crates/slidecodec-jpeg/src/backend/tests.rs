@@ -198,6 +198,153 @@ fn backend_scalar_420_row_pair_handles_missing_bottom_row() {
     assert_eq!(actual_top, expected_top);
 }
 
+#[test]
+fn backend_scalar_420_cropped_row_pair_matches_full_width_crop() {
+    let backend = super::Backend {
+        kind: super::BackendKind::Scalar,
+    };
+    let width = 73usize;
+    let crop_start = 3usize;
+    let crop_width = 53usize;
+    let chroma_width = width.div_ceil(2);
+    let y_top: Vec<u8> = (0..width)
+        .map(|i| ((i as u8).wrapping_mul(37)).wrapping_add(11))
+        .collect();
+    let y_bot: Vec<u8> = (0..width)
+        .map(|i| 255u8.wrapping_sub((i as u8).wrapping_mul(19)))
+        .collect();
+    let prev_cb: Vec<u8> = (0..chroma_width)
+        .map(|i| ((i as u8).wrapping_mul(17)).wrapping_add(41))
+        .collect();
+    let curr_cb: Vec<u8> = (0..chroma_width)
+        .map(|i| ((i as u8).wrapping_mul(29)).wrapping_add(13))
+        .collect();
+    let next_cb: Vec<u8> = (0..chroma_width)
+        .map(|i| ((i as u8).wrapping_mul(43)).wrapping_add(7))
+        .collect();
+    let prev_cr: Vec<u8> = (0..chroma_width)
+        .map(|i| 255u8.wrapping_sub((i as u8).wrapping_mul(11)))
+        .collect();
+    let curr_cr: Vec<u8> = (0..chroma_width)
+        .map(|i| 255u8.wrapping_sub((i as u8).wrapping_mul(23)))
+        .collect();
+    let next_cr: Vec<u8> = (0..chroma_width)
+        .map(|i| 255u8.wrapping_sub((i as u8).wrapping_mul(31)))
+        .collect();
+
+    let mut expected_top = vec![0u8; width * 3];
+    let mut expected_bot = vec![0u8; width * 3];
+    scalar::fill_rgb_row_pair_from_420(
+        &y_top,
+        Some(&y_bot),
+        &prev_cb,
+        &curr_cb,
+        &next_cb,
+        &prev_cr,
+        &curr_cr,
+        &next_cr,
+        &mut expected_top,
+        Some(&mut expected_bot),
+    );
+
+    let mut actual_top = vec![0u8; crop_width * 3];
+    let mut actual_bot = vec![0u8; crop_width * 3];
+    backend.fill_rgb_row_pair_from_420_cropped(
+        &y_top,
+        Some(&y_bot),
+        &prev_cb,
+        &curr_cb,
+        &next_cb,
+        &prev_cr,
+        &curr_cr,
+        &next_cr,
+        crop_start,
+        crop_width,
+        &mut actual_top,
+        Some(&mut actual_bot),
+    );
+
+    let crop_bytes = crop_width * 3;
+    let crop_byte_start = crop_start * 3;
+    assert_eq!(
+        actual_top,
+        expected_top[crop_byte_start..crop_byte_start + crop_bytes]
+    );
+    assert_eq!(
+        actual_bot,
+        expected_bot[crop_byte_start..crop_byte_start + crop_bytes]
+    );
+}
+
+#[test]
+fn backend_scalar_420_cropped_top_only_matches_full_width_crop() {
+    let backend = super::Backend {
+        kind: super::BackendKind::Scalar,
+    };
+    let width = 31usize;
+    let crop_start = 1usize;
+    let crop_width = 17usize;
+    let chroma_width = width.div_ceil(2);
+    let y_top: Vec<u8> = (0..width)
+        .map(|i| ((i as u8).wrapping_mul(53)).wrapping_add(97))
+        .collect();
+    let prev_cb: Vec<u8> = (0..chroma_width)
+        .map(|i| ((i as u8).wrapping_mul(23)).wrapping_add(19))
+        .collect();
+    let curr_cb: Vec<u8> = (0..chroma_width)
+        .map(|i| 255u8.wrapping_sub((i as u8).wrapping_mul(31)))
+        .collect();
+    let next_cb: Vec<u8> = (0..chroma_width)
+        .map(|i| ((i as u8).wrapping_mul(7)).wrapping_add(113))
+        .collect();
+    let prev_cr: Vec<u8> = (0..chroma_width)
+        .map(|i| 255u8.wrapping_sub((i as u8).wrapping_mul(13)))
+        .collect();
+    let curr_cr: Vec<u8> = (0..chroma_width)
+        .map(|i| ((i as u8).wrapping_mul(29)).wrapping_add(3))
+        .collect();
+    let next_cr: Vec<u8> = (0..chroma_width)
+        .map(|i| 255u8.wrapping_sub((i as u8).wrapping_mul(17)))
+        .collect();
+
+    let mut expected_top = vec![0u8; width * 3];
+    scalar::fill_rgb_row_pair_from_420(
+        &y_top,
+        None,
+        &prev_cb,
+        &curr_cb,
+        &next_cb,
+        &prev_cr,
+        &curr_cr,
+        &next_cr,
+        &mut expected_top,
+        None,
+    );
+
+    let mut actual_top = vec![0u8; crop_width * 3];
+    backend.fill_rgb_row_pair_from_420_cropped(
+        &y_top,
+        None,
+        &prev_cb,
+        &curr_cb,
+        &next_cb,
+        &prev_cr,
+        &curr_cr,
+        &next_cr,
+        crop_start,
+        crop_width,
+        &mut actual_top,
+        None,
+    );
+
+    let crop_bytes = crop_width * 3;
+    let crop_byte_start = crop_start * 3;
+    assert_eq!(
+        actual_top,
+        expected_top[crop_byte_start..crop_byte_start + crop_bytes]
+    );
+}
+
 #[cfg(target_arch = "x86_64")]
 #[test]
 fn avx2_ycbcr_rows_match_scalar_reference_for_tail_widths() {
@@ -434,6 +581,82 @@ fn avx2_420_row_pair_handles_missing_bottom_row() {
     assert_eq!(actual_top, expected_top);
 }
 
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn avx2_420_cropped_row_pair_matches_scalar_reference() {
+    if !std::is_x86_feature_detected!("avx2") {
+        return;
+    }
+
+    let backend = super::Backend {
+        kind: super::BackendKind::Avx2,
+    };
+    let width = 73usize;
+    let crop_start = 3usize;
+    let crop_width = 53usize;
+    let chroma_width = width.div_ceil(2);
+    let y_top: Vec<u8> = (0..width)
+        .map(|i| ((i as u8).wrapping_mul(37)).wrapping_add(11))
+        .collect();
+    let y_bot: Vec<u8> = (0..width)
+        .map(|i| 255u8.wrapping_sub((i as u8).wrapping_mul(19)))
+        .collect();
+    let prev_cb: Vec<u8> = (0..chroma_width)
+        .map(|i| ((i as u8).wrapping_mul(17)).wrapping_add(41))
+        .collect();
+    let curr_cb: Vec<u8> = (0..chroma_width)
+        .map(|i| ((i as u8).wrapping_mul(29)).wrapping_add(13))
+        .collect();
+    let next_cb: Vec<u8> = (0..chroma_width)
+        .map(|i| ((i as u8).wrapping_mul(43)).wrapping_add(7))
+        .collect();
+    let prev_cr: Vec<u8> = (0..chroma_width)
+        .map(|i| 255u8.wrapping_sub((i as u8).wrapping_mul(11)))
+        .collect();
+    let curr_cr: Vec<u8> = (0..chroma_width)
+        .map(|i| 255u8.wrapping_sub((i as u8).wrapping_mul(23)))
+        .collect();
+    let next_cr: Vec<u8> = (0..chroma_width)
+        .map(|i| 255u8.wrapping_sub((i as u8).wrapping_mul(31)))
+        .collect();
+    let mut expected_top = vec![0u8; crop_width * 3];
+    let mut expected_bot = vec![0u8; crop_width * 3];
+    scalar::fill_rgb_row_pair_from_420_cropped(
+        &y_top,
+        Some(&y_bot),
+        &prev_cb,
+        &curr_cb,
+        &next_cb,
+        &prev_cr,
+        &curr_cr,
+        &next_cr,
+        crop_start,
+        crop_width,
+        &mut expected_top,
+        Some(&mut expected_bot),
+    );
+
+    let mut actual_top = vec![0u8; crop_width * 3];
+    let mut actual_bot = vec![0u8; crop_width * 3];
+    backend.fill_rgb_row_pair_from_420_cropped(
+        &y_top,
+        Some(&y_bot),
+        &prev_cb,
+        &curr_cb,
+        &next_cb,
+        &prev_cr,
+        &curr_cr,
+        &next_cr,
+        crop_start,
+        crop_width,
+        &mut actual_top,
+        Some(&mut actual_bot),
+    );
+
+    assert_eq!(actual_top, expected_top);
+    assert_eq!(actual_bot, expected_bot);
+}
+
 #[cfg(target_arch = "aarch64")]
 #[test]
 fn neon_ycbcr_rows_match_scalar_reference_for_tail_widths() {
@@ -655,4 +878,76 @@ fn neon_420_row_pair_handles_missing_bottom_row() {
     );
 
     assert_eq!(actual_top, expected_top);
+}
+
+#[cfg(target_arch = "aarch64")]
+#[test]
+fn neon_420_cropped_row_pair_matches_scalar_reference_across_chunks() {
+    let backend = super::Backend {
+        kind: super::BackendKind::Neon,
+    };
+    let width = 73usize;
+    let crop_start = 3usize;
+    let crop_width = 53usize;
+    let chroma_width = width.div_ceil(2);
+    let y_top: Vec<u8> = (0..width)
+        .map(|i| ((i as u8).wrapping_mul(37)).wrapping_add(11))
+        .collect();
+    let y_bot: Vec<u8> = (0..width)
+        .map(|i| 255u8.wrapping_sub((i as u8).wrapping_mul(19)))
+        .collect();
+    let prev_cb: Vec<u8> = (0..chroma_width)
+        .map(|i| ((i as u8).wrapping_mul(17)).wrapping_add(41))
+        .collect();
+    let curr_cb: Vec<u8> = (0..chroma_width)
+        .map(|i| ((i as u8).wrapping_mul(29)).wrapping_add(13))
+        .collect();
+    let next_cb: Vec<u8> = (0..chroma_width)
+        .map(|i| ((i as u8).wrapping_mul(43)).wrapping_add(7))
+        .collect();
+    let prev_cr: Vec<u8> = (0..chroma_width)
+        .map(|i| 255u8.wrapping_sub((i as u8).wrapping_mul(11)))
+        .collect();
+    let curr_cr: Vec<u8> = (0..chroma_width)
+        .map(|i| 255u8.wrapping_sub((i as u8).wrapping_mul(23)))
+        .collect();
+    let next_cr: Vec<u8> = (0..chroma_width)
+        .map(|i| 255u8.wrapping_sub((i as u8).wrapping_mul(31)))
+        .collect();
+    let mut expected_top = vec![0u8; crop_width * 3];
+    let mut expected_bot = vec![0u8; crop_width * 3];
+    scalar::fill_rgb_row_pair_from_420_cropped(
+        &y_top,
+        Some(&y_bot),
+        &prev_cb,
+        &curr_cb,
+        &next_cb,
+        &prev_cr,
+        &curr_cr,
+        &next_cr,
+        crop_start,
+        crop_width,
+        &mut expected_top,
+        Some(&mut expected_bot),
+    );
+
+    let mut actual_top = vec![0u8; crop_width * 3];
+    let mut actual_bot = vec![0u8; crop_width * 3];
+    backend.fill_rgb_row_pair_from_420_cropped(
+        &y_top,
+        Some(&y_bot),
+        &prev_cb,
+        &curr_cb,
+        &next_cb,
+        &prev_cr,
+        &curr_cr,
+        &next_cr,
+        crop_start,
+        crop_width,
+        &mut actual_top,
+        Some(&mut actual_bot),
+    );
+
+    assert_eq!(actual_top, expected_top);
+    assert_eq!(actual_bot, expected_bot);
 }

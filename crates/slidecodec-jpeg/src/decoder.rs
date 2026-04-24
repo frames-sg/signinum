@@ -7,8 +7,9 @@ use crate::context::DecoderContext;
 use crate::entropy::huffman::HuffmanTable;
 use crate::entropy::sequential::{
     decode_scan_baseline, decode_scan_baseline_rgb, decode_scan_fast_rgb_444,
-    decode_scan_fast_tile_rgb, decode_scan_fast_tile_rgb_region, stripe_region_layout,
-    PreparedComponentPlan, PreparedDecodePlan,
+    decode_scan_fast_tile_rgb, decode_scan_fast_tile_rgb_region,
+    decode_scan_fast_tile_rgb_region_scaled, stripe_region_layout, PreparedComponentPlan,
+    PreparedDecodePlan,
 };
 use crate::error::{JpegError, MarkerKind, Warning};
 use crate::info::{ColorSpace, DownscaleFactor, Info, OutputFormat, Rect, SofKind};
@@ -627,6 +628,24 @@ impl<'a> Decoder<'a> {
                     )?;
                     Ok(DecodeOutcome {
                         decoded: roi,
+                        warnings: merged_warnings(&self.warnings, scan_warnings),
+                    })
+                } else if matches!(fmt, OutputFormat::Rgb8Scaled { .. })
+                    && self.plan.matches_fast_tile_shape()
+                {
+                    let mut writer = Rgb8Writer::new(out, stride, scaled_roi.w);
+                    let scan_bytes = &self.bytes[self.plan.scan_offset..];
+                    let scan_warnings = decode_scan_fast_tile_rgb_region_scaled(
+                        &self.plan,
+                        self.backend,
+                        scan_bytes,
+                        pool,
+                        &mut writer,
+                        scaled_roi,
+                        downscale,
+                    )?;
+                    Ok(DecodeOutcome {
+                        decoded: scaled_roi,
                         warnings: merged_warnings(&self.warnings, scan_warnings),
                     })
                 } else {

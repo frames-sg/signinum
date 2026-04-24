@@ -76,6 +76,56 @@ pub(crate) fn fill_rgb_row_pair_from_420(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn fill_rgb_row_pair_from_420_cropped(
+    y_top: &[u8],
+    y_bottom: Option<&[u8]>,
+    prev_cb: &[u8],
+    curr_cb: &[u8],
+    next_cb: &[u8],
+    prev_cr: &[u8],
+    curr_cr: &[u8],
+    next_cr: &[u8],
+    crop_start: usize,
+    crop_width: usize,
+    dst_top: &mut [u8],
+    dst_bottom: Option<&mut [u8]>,
+) {
+    let crop_end = crop_start + crop_width;
+    debug_assert!(crop_end <= y_top.len());
+    debug_assert_eq!(crop_width * 3, dst_top.len());
+    debug_assert!(y_bottom.is_none_or(|row| row.len() == y_top.len()));
+    debug_assert!(dst_bottom
+        .as_ref()
+        .is_none_or(|row| row.len() == crop_width * 3));
+    debug_assert_eq!(prev_cb.len(), curr_cb.len());
+    debug_assert_eq!(prev_cb.len(), next_cb.len());
+    debug_assert_eq!(prev_cr.len(), curr_cr.len());
+    debug_assert_eq!(prev_cr.len(), next_cr.len());
+
+    for (local_x, pixel) in dst_top.chunks_exact_mut(3).enumerate() {
+        let x = crop_start + local_x;
+        let cb = h2v2_sample(prev_cb, curr_cb, x);
+        let cr = h2v2_sample(prev_cr, curr_cr, x);
+        let (r, g, b) = ycbcr_to_rgb(y_top[x], cb, cr);
+        pixel[0] = r;
+        pixel[1] = g;
+        pixel[2] = b;
+    }
+
+    if let (Some(y_bottom), Some(dst_bottom)) = (y_bottom, dst_bottom) {
+        for (local_x, pixel) in dst_bottom.chunks_exact_mut(3).enumerate() {
+            let x = crop_start + local_x;
+            let cb = h2v2_sample(next_cb, curr_cb, x);
+            let cr = h2v2_sample(next_cr, curr_cr, x);
+            let (r, g, b) = ycbcr_to_rgb(y_bottom[x], cb, cr);
+            pixel[0] = r;
+            pixel[1] = g;
+            pixel[2] = b;
+        }
+    }
+}
+
 fn h2v2_sample(near: &[u8], curr: &[u8], x: usize) -> u8 {
     debug_assert_eq!(near.len(), curr.len());
     let n = curr.len();

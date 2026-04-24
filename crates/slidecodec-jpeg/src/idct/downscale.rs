@@ -35,8 +35,16 @@ pub(crate) fn idct_islow_4x4(input: &[i16; 64], output: &mut [u8; 16]) {
     }
 }
 
+pub(crate) fn idct_islow_4x4_dc_only(dc_coeff: i16, output: &mut [u8; 16]) {
+    output.fill(dc_only_pixel(dc_coeff));
+}
+
 pub(crate) fn idct_islow_2x2(input: &[i16; 64], output: &mut [u8; 4]) {
     idct_islow_2x2_scalar(input, output);
+}
+
+pub(crate) fn idct_islow_2x2_dc_only(dc_coeff: i16, output: &mut [u8; 4]) {
+    output.fill(dc_only_pixel(dc_coeff));
 }
 
 pub(crate) fn idct_islow_2x2_scalar(input: &[i16; 64], output: &mut [u8; 4]) {
@@ -54,6 +62,11 @@ pub(crate) fn idct_islow_2x2_scalar(input: &[i16; 64], output: &mut [u8; 4]) {
 
 pub(crate) fn idct_islow_1x1(input: &[i16; 64]) -> u8 {
     descale_and_clamp(Wrapping(input[0] as i32), 3)
+}
+
+#[inline]
+fn dc_only_pixel(dc_coeff: i16) -> u8 {
+    descale_and_clamp(Wrapping(i32::from(dc_coeff)), 3)
 }
 
 fn idct_4x4_column(input: &[i16; 64], work: &mut [Wrapping<i32>; 32], col: usize) {
@@ -217,5 +230,25 @@ mod tests {
         assert!(out4.iter().all(|&px| px == 128));
         assert!(out2.iter().all(|&px| px == 128));
         assert_eq!(idct_islow_1x1(&input), 128);
+    }
+
+    #[test]
+    fn reduced_dc_only_helpers_match_full_reduced_idcts() {
+        for dc in [-300, -37, 0, 37, 300] {
+            let mut input = [0i16; 64];
+            input[0] = dc;
+            let mut expected4 = [0u8; 16];
+            let mut actual4 = [0u8; 16];
+            let mut expected2 = [0u8; 4];
+            let mut actual2 = [0u8; 4];
+
+            idct_islow_4x4(&input, &mut expected4);
+            idct_islow_4x4_dc_only(input[0], &mut actual4);
+            idct_islow_2x2(&input, &mut expected2);
+            idct_islow_2x2_dc_only(input[0], &mut actual2);
+
+            assert_eq!(actual4, expected4);
+            assert_eq!(actual2, expected2);
+        }
     }
 }

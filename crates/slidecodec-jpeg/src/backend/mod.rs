@@ -132,6 +132,53 @@ impl Backend {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn fill_rgb_row_pair_from_420_cropped(
+        self,
+        y_top: &[u8],
+        y_bottom: Option<&[u8]>,
+        prev_cb: &[u8],
+        curr_cb: &[u8],
+        next_cb: &[u8],
+        prev_cr: &[u8],
+        curr_cr: &[u8],
+        next_cr: &[u8],
+        crop_start: usize,
+        crop_width: usize,
+        dst_top: &mut [u8],
+        dst_bottom: Option<&mut [u8]>,
+    ) {
+        match self.kind {
+            BackendKind::Scalar => scalar::fill_rgb_row_pair_from_420_cropped(
+                y_top, y_bottom, prev_cb, curr_cb, next_cb, prev_cr, curr_cr, next_cr, crop_start,
+                crop_width, dst_top, dst_bottom,
+            ),
+            #[cfg(target_arch = "x86_64")]
+            BackendKind::Avx2 => x86::fill_rgb_row_pair_from_420_cropped(
+                y_top, y_bottom, prev_cb, curr_cb, next_cb, prev_cr, curr_cr, next_cr, crop_start,
+                crop_width, dst_top, dst_bottom,
+            ),
+            #[cfg(target_arch = "aarch64")]
+            BackendKind::Neon => neon::fill_rgb_row_pair_from_420_cropped(
+                y_top, y_bottom, prev_cb, curr_cb, next_cb, prev_cr, curr_cr, next_cr, crop_start,
+                crop_width, dst_top, dst_bottom,
+            ),
+        }
+    }
+
+    pub(crate) fn prefers_cropped_420_region(self, row_width: usize, crop_width: usize) -> bool {
+        if crop_width == 0 || crop_width >= row_width {
+            return false;
+        }
+        match self.kind {
+            BackendKind::Scalar => true,
+            #[cfg(target_arch = "x86_64")]
+            BackendKind::Avx2 => false,
+            #[cfg(target_arch = "aarch64")]
+            BackendKind::Neon => true,
+        }
+    }
+
     /// 8×8 inverse DCT of a dequantized coefficient block. Output is
     /// level-shifted by +128 and clamped to `[0, 255]` — bit-exact with
     /// [`idct::scalar::idct_islow`] on every legal JPEG input.

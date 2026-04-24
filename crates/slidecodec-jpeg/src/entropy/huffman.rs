@@ -29,6 +29,13 @@ pub(crate) enum AcDecoded {
     Value { run: usize, value: i32 },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AcSkipDecoded {
+    Eob,
+    Zrl,
+    Value { run: usize },
+}
+
 const AC_FAST_KIND_SHIFT: u32 = 28;
 const AC_FAST_KIND_MASK: u32 = 0xF << AC_FAST_KIND_SHIFT;
 const AC_FAST_VALUE: u32 = 1 << AC_FAST_KIND_SHIFT;
@@ -253,6 +260,46 @@ impl HuffmanTable {
 
         let value = br.receive_extend(ssss)?;
         Ok(AcDecoded::Value { run, value })
+    }
+
+    #[inline(always)]
+    pub(crate) fn skip_fast_ac(&self, br: &mut BitReader<'_>) -> Result<AcSkipDecoded, JpegError> {
+        br.ensure_bits_padded(FAST_BITS)?;
+        let peek = br.peek_bits(FAST_BITS) as usize;
+        let packed = self.fast_ac[peek];
+        if packed != 0 {
+            br.consume_bits((packed & AC_FAST_LEN_MASK) as u8);
+            return Ok(match packed & AC_FAST_KIND_MASK {
+                AC_FAST_VALUE => AcSkipDecoded::Value {
+                    run: ((packed & AC_FAST_RUN_MASK) >> 4) as usize,
+                },
+                AC_FAST_EOB => AcSkipDecoded::Eob,
+                AC_FAST_ZRL => AcSkipDecoded::Zrl,
+                _ => unreachable!("invalid AC fast-table tag"),
+            });
+        }
+
+        let (sym, len) = self.fast[peek];
+        let sym = if len != 0 {
+            br.consume_bits(len);
+            sym
+        } else {
+            self.decode(br)?
+        };
+
+        let run = (sym >> 4) as usize;
+        let ssss = sym & 0x0F;
+        if ssss == 0 {
+            return Ok(if run == 15 {
+                AcSkipDecoded::Zrl
+            } else {
+                AcSkipDecoded::Eob
+            });
+        }
+
+        br.ensure_bits(ssss)?;
+        br.consume_bits(ssss);
+        Ok(AcSkipDecoded::Value { run })
     }
 }
 

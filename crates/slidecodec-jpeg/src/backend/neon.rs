@@ -122,6 +122,40 @@ pub(crate) fn fill_rgb_row_pair_from_420(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn fill_rgb_row_pair_from_420_cropped(
+    y_top: &[u8],
+    y_bottom: Option<&[u8]>,
+    prev_cb: &[u8],
+    curr_cb: &[u8],
+    next_cb: &[u8],
+    prev_cr: &[u8],
+    curr_cr: &[u8],
+    next_cr: &[u8],
+    crop_start: usize,
+    crop_width: usize,
+    dst_top: &mut [u8],
+    dst_bottom: Option<&mut [u8]>,
+) {
+    let crop_end = crop_start + crop_width;
+    debug_assert!(crop_end <= y_top.len());
+    debug_assert_eq!(dst_top.len(), crop_width * 3);
+    debug_assert!(y_bottom.is_none_or(|row| row.len() == y_top.len()));
+    debug_assert!(dst_bottom
+        .as_ref()
+        .is_none_or(|row| row.len() == crop_width * 3));
+    debug_assert_eq!(prev_cb.len(), curr_cb.len());
+    debug_assert_eq!(prev_cb.len(), next_cb.len());
+    debug_assert_eq!(prev_cr.len(), curr_cr.len());
+    debug_assert_eq!(prev_cr.len(), next_cr.len());
+    unsafe {
+        fill_rgb_row_pair_from_420_cropped_neon(
+            y_top, y_bottom, prev_cb, curr_cb, next_cb, prev_cr, curr_cr, next_cr, crop_start,
+            crop_width, dst_top, dst_bottom,
+        );
+    }
+}
+
 #[target_feature(enable = "neon")]
 #[allow(clippy::too_many_arguments)]
 unsafe fn fill_rgb_row_pair_from_420_neon(
@@ -159,6 +193,398 @@ unsafe fn fill_rgb_row_pair_from_420_neon(
             );
         }
     }
+}
+
+#[target_feature(enable = "neon")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn fill_rgb_row_pair_from_420_cropped_neon(
+    y_top: &[u8],
+    y_bottom: Option<&[u8]>,
+    prev_cb: &[u8],
+    curr_cb: &[u8],
+    next_cb: &[u8],
+    prev_cr: &[u8],
+    curr_cr: &[u8],
+    next_cr: &[u8],
+    crop_start: usize,
+    crop_width: usize,
+    dst_top: &mut [u8],
+    dst_bottom: Option<&mut [u8]>,
+) {
+    if let (Some(y_bottom), Some(dst_bottom)) = (y_bottom, dst_bottom) {
+        unsafe {
+            fill_rgb_row_pair_from_420_cropped_neon_dual(
+                y_top, y_bottom, prev_cb, curr_cb, next_cb, prev_cr, curr_cr, next_cr, crop_start,
+                crop_width, dst_top, dst_bottom,
+            );
+        }
+    } else {
+        unsafe {
+            fill_rgb_row_pair_from_420_cropped_neon_top_only(
+                y_top, prev_cb, curr_cb, prev_cr, curr_cr, crop_start, crop_width, dst_top,
+            );
+        }
+    }
+}
+
+#[target_feature(enable = "neon")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn fill_rgb_row_pair_from_420_cropped_neon_dual(
+    y_top: &[u8],
+    y_bottom: &[u8],
+    prev_cb: &[u8],
+    curr_cb: &[u8],
+    next_cb: &[u8],
+    prev_cr: &[u8],
+    curr_cr: &[u8],
+    next_cr: &[u8],
+    crop_start: usize,
+    crop_width: usize,
+    dst_top: &mut [u8],
+    dst_bottom: &mut [u8],
+) {
+    let mut out_x = 0usize;
+    if crop_width == 0 {
+        return;
+    }
+
+    if crop_start == 0 {
+        let prefix = crop_width.min(2);
+        scalar::fill_rgb_row_pair_from_420_cropped(
+            y_top,
+            Some(y_bottom),
+            prev_cb,
+            curr_cb,
+            next_cb,
+            prev_cr,
+            curr_cr,
+            next_cr,
+            crop_start,
+            prefix,
+            &mut dst_top[..prefix * 3],
+            Some(&mut dst_bottom[..prefix * 3]),
+        );
+        out_x = prefix;
+    } else if !crop_start.is_multiple_of(2) {
+        let aligned_x = crop_start - 1;
+        let copy_width = crop_width.min(UPSAMPLED_LANES - 1);
+        if copy_width >= LANES
+            && can_vectorize_cropped_420_chunk(y_top.len(), curr_cb.len(), aligned_x)
+        {
+            unsafe {
+                fill_rgb_row_pair_from_420_cropped_partial_chunk16_dual(
+                    y_top,
+                    y_bottom,
+                    prev_cb,
+                    curr_cb,
+                    next_cb,
+                    prev_cr,
+                    curr_cr,
+                    next_cr,
+                    aligned_x,
+                    1,
+                    copy_width,
+                    &mut dst_top[..copy_width * 3],
+                    &mut dst_bottom[..copy_width * 3],
+                );
+            }
+            out_x = copy_width;
+        } else {
+            scalar::fill_rgb_row_pair_from_420_cropped(
+                y_top,
+                Some(y_bottom),
+                prev_cb,
+                curr_cb,
+                next_cb,
+                prev_cr,
+                curr_cr,
+                next_cr,
+                crop_start,
+                1,
+                &mut dst_top[..3],
+                Some(&mut dst_bottom[..3]),
+            );
+            out_x = 1;
+        }
+    }
+
+    while out_x + UPSAMPLED_LANES <= crop_width {
+        let x = crop_start + out_x;
+        if !can_vectorize_cropped_420_chunk(y_top.len(), curr_cb.len(), x) {
+            break;
+        }
+
+        unsafe {
+            fill_rgb_row_pair_from_420_chunk16_interior_neon(
+                &y_top[x..x + UPSAMPLED_LANES],
+                &y_bottom[x..x + UPSAMPLED_LANES],
+                prev_cb,
+                curr_cb,
+                next_cb,
+                prev_cr,
+                curr_cr,
+                next_cr,
+                x / 2,
+                &mut dst_top[out_x * 3..(out_x + UPSAMPLED_LANES) * 3],
+                &mut dst_bottom[out_x * 3..(out_x + UPSAMPLED_LANES) * 3],
+            );
+        }
+        out_x += UPSAMPLED_LANES;
+    }
+
+    let remaining = crop_width - out_x;
+    if remaining >= LANES {
+        let x = crop_start + out_x;
+        if can_vectorize_cropped_420_chunk(y_top.len(), curr_cb.len(), x) {
+            unsafe {
+                fill_rgb_row_pair_from_420_cropped_partial_chunk16_dual(
+                    y_top,
+                    y_bottom,
+                    prev_cb,
+                    curr_cb,
+                    next_cb,
+                    prev_cr,
+                    curr_cr,
+                    next_cr,
+                    x,
+                    0,
+                    remaining,
+                    &mut dst_top[out_x * 3..],
+                    &mut dst_bottom[out_x * 3..],
+                );
+            }
+            out_x = crop_width;
+        }
+    }
+
+    if out_x < crop_width {
+        scalar::fill_rgb_row_pair_from_420_cropped(
+            y_top,
+            Some(y_bottom),
+            prev_cb,
+            curr_cb,
+            next_cb,
+            prev_cr,
+            curr_cr,
+            next_cr,
+            crop_start + out_x,
+            crop_width - out_x,
+            &mut dst_top[out_x * 3..],
+            Some(&mut dst_bottom[out_x * 3..]),
+        );
+    }
+}
+
+#[target_feature(enable = "neon")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn fill_rgb_row_pair_from_420_cropped_neon_top_only(
+    y_top: &[u8],
+    prev_cb: &[u8],
+    curr_cb: &[u8],
+    prev_cr: &[u8],
+    curr_cr: &[u8],
+    crop_start: usize,
+    crop_width: usize,
+    dst_top: &mut [u8],
+) {
+    let mut out_x = 0usize;
+    if crop_width == 0 {
+        return;
+    }
+
+    if crop_start == 0 {
+        let prefix = crop_width.min(2);
+        scalar::fill_rgb_row_pair_from_420_cropped(
+            y_top,
+            None,
+            prev_cb,
+            curr_cb,
+            curr_cb,
+            prev_cr,
+            curr_cr,
+            curr_cr,
+            crop_start,
+            prefix,
+            &mut dst_top[..prefix * 3],
+            None,
+        );
+        out_x = prefix;
+    } else if !crop_start.is_multiple_of(2) {
+        let aligned_x = crop_start - 1;
+        let copy_width = crop_width.min(UPSAMPLED_LANES - 1);
+        if copy_width >= LANES
+            && can_vectorize_cropped_420_chunk(y_top.len(), curr_cb.len(), aligned_x)
+        {
+            unsafe {
+                fill_rgb_row_pair_from_420_cropped_partial_chunk16_top_only(
+                    y_top,
+                    prev_cb,
+                    curr_cb,
+                    prev_cr,
+                    curr_cr,
+                    aligned_x,
+                    1,
+                    copy_width,
+                    &mut dst_top[..copy_width * 3],
+                );
+            }
+            out_x = copy_width;
+        } else {
+            scalar::fill_rgb_row_pair_from_420_cropped(
+                y_top,
+                None,
+                prev_cb,
+                curr_cb,
+                curr_cb,
+                prev_cr,
+                curr_cr,
+                curr_cr,
+                crop_start,
+                1,
+                &mut dst_top[..3],
+                None,
+            );
+            out_x = 1;
+        }
+    }
+
+    while out_x + UPSAMPLED_LANES <= crop_width {
+        let x = crop_start + out_x;
+        if !can_vectorize_cropped_420_chunk(y_top.len(), curr_cb.len(), x) {
+            break;
+        }
+
+        unsafe {
+            fill_rgb_row_from_420_chunk16_interior_neon(
+                &y_top[x..x + UPSAMPLED_LANES],
+                prev_cb,
+                curr_cb,
+                prev_cr,
+                curr_cr,
+                x / 2,
+                &mut dst_top[out_x * 3..(out_x + UPSAMPLED_LANES) * 3],
+            );
+        }
+        out_x += UPSAMPLED_LANES;
+    }
+
+    let remaining = crop_width - out_x;
+    if remaining >= LANES {
+        let x = crop_start + out_x;
+        if can_vectorize_cropped_420_chunk(y_top.len(), curr_cb.len(), x) {
+            unsafe {
+                fill_rgb_row_pair_from_420_cropped_partial_chunk16_top_only(
+                    y_top,
+                    prev_cb,
+                    curr_cb,
+                    prev_cr,
+                    curr_cr,
+                    x,
+                    0,
+                    remaining,
+                    &mut dst_top[out_x * 3..],
+                );
+            }
+            out_x = crop_width;
+        }
+    }
+
+    if out_x < crop_width {
+        scalar::fill_rgb_row_pair_from_420_cropped(
+            y_top,
+            None,
+            prev_cb,
+            curr_cb,
+            curr_cb,
+            prev_cr,
+            curr_cr,
+            curr_cr,
+            crop_start + out_x,
+            crop_width - out_x,
+            &mut dst_top[out_x * 3..],
+            None,
+        );
+    }
+}
+
+fn can_vectorize_cropped_420_chunk(row_width: usize, chroma_width: usize, x: usize) -> bool {
+    x.is_multiple_of(2)
+        && x + UPSAMPLED_LANES <= row_width
+        && can_vectorize_420_chunk(chroma_width, x / 2, UPSAMPLED_LANES)
+}
+
+#[target_feature(enable = "neon")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn fill_rgb_row_pair_from_420_cropped_partial_chunk16_dual(
+    y_top: &[u8],
+    y_bottom: &[u8],
+    prev_cb: &[u8],
+    curr_cb: &[u8],
+    next_cb: &[u8],
+    prev_cr: &[u8],
+    curr_cr: &[u8],
+    next_cr: &[u8],
+    aligned_x: usize,
+    src_skip: usize,
+    copy_width: usize,
+    dst_top: &mut [u8],
+    dst_bottom: &mut [u8],
+) {
+    debug_assert!(src_skip + copy_width <= UPSAMPLED_LANES);
+    debug_assert!(copy_width <= UPSAMPLED_LANES);
+    let mut tmp_top = [0u8; UPSAMPLED_LANES * 3];
+    let mut tmp_bottom = [0u8; UPSAMPLED_LANES * 3];
+    unsafe {
+        fill_rgb_row_pair_from_420_chunk16_interior_neon(
+            &y_top[aligned_x..aligned_x + UPSAMPLED_LANES],
+            &y_bottom[aligned_x..aligned_x + UPSAMPLED_LANES],
+            prev_cb,
+            curr_cb,
+            next_cb,
+            prev_cr,
+            curr_cr,
+            next_cr,
+            aligned_x / 2,
+            &mut tmp_top,
+            &mut tmp_bottom,
+        );
+    }
+    let src_start = src_skip * 3;
+    let copy_len = copy_width * 3;
+    dst_top[..copy_len].copy_from_slice(&tmp_top[src_start..src_start + copy_len]);
+    dst_bottom[..copy_len].copy_from_slice(&tmp_bottom[src_start..src_start + copy_len]);
+}
+
+#[target_feature(enable = "neon")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn fill_rgb_row_pair_from_420_cropped_partial_chunk16_top_only(
+    y_top: &[u8],
+    prev_cb: &[u8],
+    curr_cb: &[u8],
+    prev_cr: &[u8],
+    curr_cr: &[u8],
+    aligned_x: usize,
+    src_skip: usize,
+    copy_width: usize,
+    dst_top: &mut [u8],
+) {
+    debug_assert!(src_skip + copy_width <= UPSAMPLED_LANES);
+    debug_assert!(copy_width <= UPSAMPLED_LANES);
+    let mut tmp_top = [0u8; UPSAMPLED_LANES * 3];
+    unsafe {
+        fill_rgb_row_from_420_chunk16_interior_neon(
+            &y_top[aligned_x..aligned_x + UPSAMPLED_LANES],
+            prev_cb,
+            curr_cb,
+            prev_cr,
+            curr_cr,
+            aligned_x / 2,
+            &mut tmp_top,
+        );
+    }
+    let src_start = src_skip * 3;
+    let copy_len = copy_width * 3;
+    dst_top[..copy_len].copy_from_slice(&tmp_top[src_start..src_start + copy_len]);
 }
 
 #[target_feature(enable = "neon")]

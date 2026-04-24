@@ -144,6 +144,27 @@ pub(crate) fn fill_rgb_row_pair_from_420(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn fill_rgb_row_pair_from_420_cropped(
+    y_top: &[u8],
+    y_bottom: Option<&[u8]>,
+    prev_cb: &[u8],
+    curr_cb: &[u8],
+    next_cb: &[u8],
+    prev_cr: &[u8],
+    curr_cr: &[u8],
+    next_cr: &[u8],
+    crop_start: usize,
+    crop_width: usize,
+    dst_top: &mut [u8],
+    dst_bottom: Option<&mut [u8]>,
+) {
+    scalar::fill_rgb_row_pair_from_420_cropped(
+        y_top, y_bottom, prev_cb, curr_cb, next_cb, prev_cr, curr_cr, next_cr, crop_start,
+        crop_width, dst_top, dst_bottom,
+    );
+}
+
 #[target_feature(enable = "avx2")]
 #[allow(clippy::too_many_arguments)]
 unsafe fn fill_rgb_row_pair_from_420_avx2(

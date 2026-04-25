@@ -94,6 +94,10 @@ struct DirectGrayPlanCacheEntry {
 
 #[cfg(target_os = "macos")]
 static DIRECT_GRAY_PLAN_CACHE: OnceLock<Mutex<Option<DirectGrayPlanCacheEntry>>> = OnceLock::new();
+#[cfg(target_os = "macos")]
+const AUTO_REPEATED_GRAYSCALE_MIN_DIM: u32 = 512;
+#[cfg(target_os = "macos")]
+const AUTO_REPEATED_GRAYSCALE_MIN_COUNT: usize = 16;
 
 pub struct Surface {
     backend: BackendKind,
@@ -510,7 +514,7 @@ impl<'a> J2kDecoder<'a> {
         }
 
         let max_dim = plan.dimensions.0.max(plan.dimensions.1);
-        max_dim >= 1024 && count >= 16
+        max_dim >= AUTO_REPEATED_GRAYSCALE_MIN_DIM && count >= AUTO_REPEATED_GRAYSCALE_MIN_COUNT
     }
 
     #[cfg(target_os = "macos")]
@@ -568,7 +572,9 @@ impl<'a> J2kDecoder<'a> {
             return self.decode_repeated_grayscale_cpu_to_surfaces(fmt, count);
         }
         let dims = self.inner.info().dimensions;
-        if dims.0.max(dims.1) < 1024 || count < 16 {
+        if dims.0.max(dims.1) < AUTO_REPEATED_GRAYSCALE_MIN_DIM
+            || count < AUTO_REPEATED_GRAYSCALE_MIN_COUNT
+        {
             return self.decode_repeated_grayscale_cpu_to_surfaces(fmt, count);
         }
         if self.native_direct_gray_plan.is_none() {

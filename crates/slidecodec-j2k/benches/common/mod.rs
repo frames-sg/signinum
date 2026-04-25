@@ -39,6 +39,9 @@ pub(crate) struct BenchInput {
     pub is_ht: bool,
 }
 
+const AUTO_REPEATED_GRAYSCALE_MIN_DIM: u32 = 512;
+const AUTO_REPEATED_GRAYSCALE_MIN_COUNT: usize = 16;
+
 pub(crate) fn bench_inputs() -> Vec<BenchInput> {
     let mut inputs = vec![
         BenchInput {
@@ -322,10 +325,10 @@ fn should_auto_use_direct_grayscale_input(input: &BenchInput, count: usize) -> b
     if input.mode != DecodeMode::Gray8 || count == 0 {
         return false;
     }
-    if input.dimensions.0.max(input.dimensions.1) < 1024 {
+    if input.dimensions.0.max(input.dimensions.1) < AUTO_REPEATED_GRAYSCALE_MIN_DIM {
         return false;
     }
-    count >= 16
+    count >= AUTO_REPEATED_GRAYSCALE_MIN_COUNT
 }
 
 pub(crate) fn slidecodec_metal_supports_tile_batch(bytes: &[u8], mode: DecodeMode) -> bool {

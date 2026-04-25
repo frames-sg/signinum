@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use slidecodec_core::Rect;
+#[cfg(have_grok)]
 use std::{ffi::c_void, ptr};
 
 pub fn is_available() -> bool {

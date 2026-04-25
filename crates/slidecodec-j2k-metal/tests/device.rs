@@ -30,6 +30,22 @@ fn fixture_gray8() -> Vec<u8> {
     encode(&pixels, 4, 4, 1, 8, false, &options).expect("encode gray8")
 }
 
+fn fixture_gray8_sized(width: u32, height: u32) -> Vec<u8> {
+    let mut pixels = Vec::with_capacity(width as usize * height as usize);
+    for y in 0..height {
+        for x in 0..width {
+            pixels.push(((x + y) & 0xFF) as u8);
+        }
+    }
+    let options = EncodeOptions {
+        reversible: true,
+        num_decomposition_levels: 3,
+        guard_bits: 2,
+        ..EncodeOptions::default()
+    };
+    encode(&pixels, width, height, 1, 8, false, &options).expect("encode sized gray8")
+}
+
 fn fixture_gray8_reversed() -> Vec<u8> {
     let pixels: Vec<u8> = (0..16).rev().collect();
     let options = EncodeOptions {
@@ -161,6 +177,32 @@ fn auto_full_htj2k_prefers_cpu_for_small_fixture() {
 }
 
 #[test]
+fn auto_repeated_grayscale_keeps_short_512_batch_on_cpu() {
+    let bytes = fixture_gray8_sized(512, 512);
+    let mut decoder = J2kDecoder::new(&bytes).expect("decoder");
+    let surfaces = decoder
+        .decode_repeated_grayscale_auto_to_device(PixelFormat::Gray8, 8)
+        .expect("auto repeated decode");
+    assert_eq!(surfaces.len(), 8);
+    assert!(surfaces
+        .iter()
+        .all(|surface| surface.backend_kind() == BackendKind::Cpu));
+}
+
+#[test]
+fn auto_repeated_grayscale_uses_metal_for_512_batch() {
+    let bytes = fixture_gray8_sized(512, 512);
+    let mut decoder = J2kDecoder::new(&bytes).expect("decoder");
+    let surfaces = decoder
+        .decode_repeated_grayscale_auto_to_device(PixelFormat::Gray8, 16)
+        .expect("auto repeated decode");
+    assert_eq!(surfaces.len(), 16);
+    assert!(surfaces
+        .iter()
+        .all(|surface| surface.backend_kind() == BackendKind::Metal));
+}
+
+#[test]
 fn tile_full_grayscale_device_path_uses_metal_direct() {
     let bytes = fixture_gray8();
     let mut ctx = slidecodec_core::DecoderContext::<J2kContext>::new();
@@ -238,6 +280,45 @@ fn submitted_full_grayscale_tiles_flush_as_one_device_batch() {
         session.submissions(),
         1,
         "compatible queued grayscale tiles should flush through one repeated Metal batch"
+    );
+}
+
+#[test]
+fn submitted_auto_512_grayscale_tiles_flush_as_one_metal_batch() {
+    let bytes = fixture_gray8_sized(512, 512);
+    let mut ctx = slidecodec_core::DecoderContext::<J2kContext>::new();
+    let mut session = MetalSession::default();
+    let mut pool = J2kScratchPool::new();
+
+    let submissions = (0..16)
+        .map(|_| {
+            Codec::submit_tile_to_device(
+                &mut ctx,
+                &mut session,
+                &mut pool,
+                &bytes,
+                PixelFormat::Gray8,
+                BackendRequest::Auto,
+            )
+            .expect("submit auto tile")
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        session.submissions(),
+        0,
+        "auto submitted tile surfaces should stay queued until a wait flushes the session"
+    );
+
+    for submission in submissions {
+        let surface = submission.wait().expect("surface");
+        assert_eq!(surface.backend_kind(), BackendKind::Metal);
+        assert_eq!(surface.dimensions(), (512, 512));
+    }
+    assert_eq!(
+        session.submissions(),
+        1,
+        "compatible auto grayscale tiles should flush through one repeated Metal batch"
     );
 }
 

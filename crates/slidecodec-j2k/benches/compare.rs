@@ -3,14 +3,16 @@
 mod common;
 
 use common::{
-    bench_inputs, centered_roi, grok_available, grok_decode, metal_available, openjpeg_available,
-    openjpeg_decode, slidecodec_adaptive_decode, slidecodec_adaptive_decode_region,
-    slidecodec_adaptive_decode_scaled, slidecodec_adaptive_decode_tile_batch, slidecodec_decode,
-    slidecodec_decode_region, slidecodec_decode_scaled, slidecodec_decode_tile_batch,
+    bench_inputs, distinct_rgb_tile_batch_inputs, metal_available, slidecodec_adaptive_decode,
+    slidecodec_adaptive_decode_region, slidecodec_adaptive_decode_scaled,
+    slidecodec_adaptive_decode_tile_batch, slidecodec_decode, slidecodec_decode_region,
+    slidecodec_decode_scaled, slidecodec_decode_tile_batch, slidecodec_decode_tile_batch_distinct,
     slidecodec_inspect, slidecodec_metal_decode, slidecodec_metal_decode_region,
     slidecodec_metal_decode_scaled, slidecodec_metal_decode_tile_batch,
-    slidecodec_metal_supports_decode, slidecodec_metal_supports_region,
-    slidecodec_metal_supports_scaled, slidecodec_metal_supports_tile_batch, DecodeMode,
+    slidecodec_metal_decode_tile_batch_distinct, slidecodec_metal_supports_decode,
+    slidecodec_metal_supports_region, slidecodec_metal_supports_scaled,
+    slidecodec_metal_supports_tile_batch, slidecodec_metal_supports_tile_batch_distinct,
+    DecodeMode,
 };
 use criterion::{criterion_group, criterion_main, Criterion};
 use slidecodec_j2k::Downscale;
@@ -42,16 +44,6 @@ fn bench_compare(c: &mut Criterion) {
                 b.iter(|| slidecodec_metal_decode(&input.bytes, input.mode));
             });
         }
-        if openjpeg_available() && !input.is_ht {
-            decode_gray.bench_function(format!("openjpeg/{}", input.name), |b| {
-                b.iter(|| openjpeg_decode(input, None, None, 1));
-            });
-        }
-        if grok_available() && !input.is_ht {
-            decode_gray.bench_function(format!("grok/{}", input.name), |b| {
-                b.iter(|| grok_decode(input, None, None, 1));
-            });
-        }
     }
     decode_gray.finish();
 
@@ -65,16 +57,6 @@ fn bench_compare(c: &mut Criterion) {
                 b.iter(|| slidecodec_metal_decode(&input.bytes, input.mode));
             });
         }
-        if openjpeg_available() && !input.is_ht {
-            decode_rgb.bench_function(format!("openjpeg/{}", input.name), |b| {
-                b.iter(|| openjpeg_decode(input, None, None, 1));
-            });
-        }
-        if grok_available() && !input.is_ht {
-            decode_rgb.bench_function(format!("grok/{}", input.name), |b| {
-                b.iter(|| grok_decode(input, None, None, 1));
-            });
-        }
     }
     decode_rgb.finish();
 
@@ -83,7 +65,6 @@ fn bench_compare(c: &mut Criterion) {
         .iter()
         .filter(|input| input.mode == DecodeMode::Gray8)
     {
-        let roi = centered_roi(input.dimensions, 256);
         wsi_region.bench_function(format!("slidecodec/{}", input.name), |b| {
             b.iter(|| slidecodec_decode_region(&input.bytes, input.mode, 256));
         });
@@ -93,16 +74,6 @@ fn bench_compare(c: &mut Criterion) {
         if metal_available() && slidecodec_metal_supports_region(&input.bytes, input.mode, 256) {
             wsi_region.bench_function(format!("slidecodec-metal/{}", input.name), |b| {
                 b.iter(|| slidecodec_metal_decode_region(&input.bytes, input.mode, 256));
-            });
-        }
-        if openjpeg_available() && !input.is_ht {
-            wsi_region.bench_function(format!("openjpeg/{}", input.name), |b| {
-                b.iter(|| openjpeg_decode(input, None, Some(roi), 1));
-            });
-        }
-        if grok_available() && !input.is_ht {
-            wsi_region.bench_function(format!("grok/{}", input.name), |b| {
-                b.iter(|| grok_decode(input, None, Some(roi), 1));
             });
         }
     }
@@ -130,16 +101,6 @@ fn bench_compare(c: &mut Criterion) {
                 });
             });
         }
-        if openjpeg_available() && !input.is_ht {
-            wsi_scaled.bench_function(format!("openjpeg/{}", input.name), |b| {
-                b.iter(|| openjpeg_decode(input, Some(2), None, 1));
-            });
-        }
-        if grok_available() && !input.is_ht {
-            wsi_scaled.bench_function(format!("grok/{}", input.name), |b| {
-                b.iter(|| grok_decode(input, Some(2), None, 1));
-            });
-        }
     }
     wsi_scaled.finish();
 
@@ -157,16 +118,6 @@ fn bench_compare(c: &mut Criterion) {
         if metal_available() && slidecodec_metal_supports_tile_batch(&input.bytes, input.mode) {
             wsi_tile_batch.bench_function(format!("slidecodec-metal/{}", input.name), |b| {
                 b.iter(|| slidecodec_metal_decode_tile_batch(&input.bytes, input.mode, 16));
-            });
-        }
-        if openjpeg_available() && !input.is_ht {
-            wsi_tile_batch.bench_function(format!("openjpeg/{}", input.name), |b| {
-                b.iter(|| openjpeg_decode(input, None, None, 16));
-            });
-        }
-        if grok_available() && !input.is_ht {
-            wsi_tile_batch.bench_function(format!("grok/{}", input.name), |b| {
-                b.iter(|| grok_decode(input, None, None, 16));
             });
         }
     }
@@ -188,16 +139,6 @@ fn bench_compare(c: &mut Criterion) {
                 b.iter(|| slidecodec_metal_decode_tile_batch(&input.bytes, input.mode, 32));
             });
         }
-        if openjpeg_available() && !input.is_ht {
-            wsi_tile_batch_32.bench_function(format!("openjpeg/{}", input.name), |b| {
-                b.iter(|| openjpeg_decode(input, None, None, 32));
-            });
-        }
-        if grok_available() && !input.is_ht {
-            wsi_tile_batch_32.bench_function(format!("grok/{}", input.name), |b| {
-                b.iter(|| grok_decode(input, None, None, 32));
-            });
-        }
     }
     wsi_tile_batch_32.finish();
 
@@ -217,18 +158,42 @@ fn bench_compare(c: &mut Criterion) {
                 b.iter(|| slidecodec_metal_decode_tile_batch(&input.bytes, input.mode, 64));
             });
         }
-        if openjpeg_available() && !input.is_ht {
-            wsi_tile_batch_64.bench_function(format!("openjpeg/{}", input.name), |b| {
-                b.iter(|| openjpeg_decode(input, None, None, 64));
-            });
-        }
-        if grok_available() && !input.is_ht {
-            wsi_tile_batch_64.bench_function(format!("grok/{}", input.name), |b| {
-                b.iter(|| grok_decode(input, None, None, 64));
+    }
+    wsi_tile_batch_64.finish();
+
+    let mut wsi_tile_batch_rgb = c.benchmark_group("wsi_tile_batch_rgb");
+    for input in inputs.iter().filter(|input| input.mode == DecodeMode::Rgb8) {
+        wsi_tile_batch_rgb.bench_function(format!("slidecodec/{}", input.name), |b| {
+            b.iter(|| slidecodec_decode_tile_batch(&input.bytes, input.mode, 16));
+        });
+        if metal_available() && slidecodec_metal_supports_tile_batch(&input.bytes, input.mode) {
+            wsi_tile_batch_rgb.bench_function(format!("slidecodec-metal/{}", input.name), |b| {
+                b.iter(|| slidecodec_metal_decode_tile_batch(&input.bytes, input.mode, 16));
             });
         }
     }
-    wsi_tile_batch_64.finish();
+    wsi_tile_batch_rgb.finish();
+
+    let mut wsi_tile_batch_rgb_distinct = c.benchmark_group("wsi_tile_batch_rgb_distinct");
+    for input in inputs.iter().filter(|input| input.mode == DecodeMode::Rgb8) {
+        let distinct_inputs = distinct_rgb_tile_batch_inputs(input, 16);
+        wsi_tile_batch_rgb_distinct.bench_function(format!("slidecodec/{}", input.name), |b| {
+            b.iter(|| slidecodec_decode_tile_batch_distinct(&distinct_inputs, input.mode));
+        });
+        if metal_available()
+            && slidecodec_metal_supports_tile_batch_distinct(&distinct_inputs, input.mode)
+        {
+            wsi_tile_batch_rgb_distinct.bench_function(
+                format!("slidecodec-metal/{}", input.name),
+                |b| {
+                    b.iter(|| {
+                        slidecodec_metal_decode_tile_batch_distinct(&distinct_inputs, input.mode);
+                    });
+                },
+            );
+        }
+    }
+    wsi_tile_batch_rgb_distinct.finish();
 }
 
 criterion_group!(benches, bench_compare);

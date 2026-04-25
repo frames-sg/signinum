@@ -6,7 +6,9 @@ use slidecodec_core::{
     Rect, TileBatchDecodeSubmit,
 };
 use slidecodec_jpeg::{
-    Decoder as CpuDecoder, DecoderContext as JpegDecoderContext, ScratchPool as CpuScratchPool,
+    __private::summarize_device_batch, decode_tile_region_scaled_into_in_context,
+    decode_tile_scaled_into_in_context, Decoder as CpuDecoder,
+    DecoderContext as JpegDecoderContext, ScratchPool as CpuScratchPool,
 };
 use slidecodec_jpeg_metal::viewport::{
     compose_viewport_cpu, compose_viewport_cpu_to_surface, compose_viewport_hybrid,
@@ -15,6 +17,7 @@ use slidecodec_jpeg_metal::viewport::{
     ViewportTile, ViewportWorkload,
 };
 use slidecodec_jpeg_metal::{Codec, Decoder, MetalSession, ScratchPool};
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -39,6 +42,22 @@ struct BenchInput {
     dimensions: (u32, u32),
     mode: DecodeMode,
     input_class: CorpusInputClass,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DeviceBatchKey {
+    dimensions: (u32, u32),
+    restart_interval: Option<u16>,
+    checkpoint_count: usize,
+    matches_fast_420: bool,
+    matches_fast_422: bool,
+    matches_fast_444: bool,
+}
+
+struct DistinctTileBatch<'a> {
+    name: String,
+    coalesce_hit_rate: String,
+    tiles: Vec<&'a BenchInput>,
 }
 
 fn load_bench_inputs() -> Vec<BenchInput> {
@@ -173,6 +192,108 @@ fn classify_corpus_input(dimensions: (u32, u32), mode: DecodeMode) -> CorpusInpu
     }
 }
 
+fn parent_name(name: &str) -> &str {
+    name.rsplit_once('/').map_or("repo", |(parent, _)| parent)
+}
+
+fn display_parent_name(parent: &str) -> &str {
+    parent
+        .rsplit('/')
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or(parent)
+}
+
+fn device_batch_key(input: &BenchInput) -> Option<DeviceBatchKey> {
+    let decoder = CpuDecoder::new(&input.bytes).ok()?;
+    let summary = summarize_device_batch(&decoder, 4);
+    Some(DeviceBatchKey {
+        dimensions: input.dimensions,
+        restart_interval: summary.restart_interval,
+        checkpoint_count: summary.checkpoint_count,
+        matches_fast_420: summary.matches_fast_420,
+        matches_fast_422: summary.matches_fast_422,
+        matches_fast_444: summary.matches_fast_444,
+    })
+}
+
+fn digest_bytes(bytes: &[u8]) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01B3;
+    let mut hash = FNV_OFFSET;
+    for &byte in bytes {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
+}
+
+fn coalesce_hit_rate_label(hit_count: usize, total_count: usize) -> String {
+    let tenths = if total_count == 0 {
+        0
+    } else {
+        hit_count.saturating_mul(1000) / total_count
+    };
+    format!("coalesce_hits_{}p{}pct", tenths / 10, tenths % 10)
+}
+
+fn duplicate_hit_count(tiles: &[&BenchInput]) -> usize {
+    let mut seen = HashSet::with_capacity(tiles.len());
+    tiles
+        .iter()
+        .filter(|tile| !seen.insert((tile.bytes.len(), digest_bytes(&tile.bytes))))
+        .count()
+}
+
+fn distinct_region_scaled_batches<'a>(
+    inputs: &'a [BenchInput],
+    batch_size: usize,
+    side: u32,
+) -> Vec<DistinctTileBatch<'a>> {
+    let mut groups: Vec<(String, DeviceBatchKey, Vec<&'a BenchInput>)> = Vec::new();
+    for input in inputs.iter().filter(|input| {
+        input.mode == DecodeMode::Rgb && input.dimensions.0 >= side && input.dimensions.1 >= side
+    }) {
+        let Some(key) = device_batch_key(input) else {
+            continue;
+        };
+        let parent = parent_name(&input.name).to_string();
+        if let Some((_, _, tiles)) = groups
+            .iter_mut()
+            .find(|(group_parent, group_key, _)| *group_parent == parent && *group_key == key)
+        {
+            tiles.push(input);
+        } else {
+            groups.push((parent, key, vec![input]));
+        }
+    }
+
+    groups
+        .into_iter()
+        .filter_map(|(parent, key, tiles)| {
+            if tiles.len() < batch_size {
+                return None;
+            }
+            let tiles = tiles.into_iter().take(batch_size).collect::<Vec<_>>();
+            Some(DistinctTileBatch {
+                name: format!(
+                    "{}/{}x{}/distinct_{}_of_{}",
+                    display_parent_name(&parent),
+                    key.dimensions.0,
+                    key.dimensions.1,
+                    batch_size,
+                    batch_size
+                ),
+                coalesce_hit_rate: coalesce_hit_rate_label(
+                    duplicate_hit_count(&tiles),
+                    tiles.len(),
+                ),
+                tiles,
+            })
+        })
+        .collect()
+}
+
 fn centered_roi((width, height): (u32, u32), side: u32) -> Rect {
     let w = side.min(width);
     let h = side.min(height);
@@ -181,6 +302,15 @@ fn centered_roi((width, height): (u32, u32), side: u32) -> Rect {
         y: (height - h) / 2,
         w,
         h,
+    }
+}
+
+fn to_jpeg_rect(rect: Rect) -> slidecodec_jpeg::Rect {
+    slidecodec_jpeg::Rect {
+        x: rect.x,
+        y: rect.y,
+        w: rect.w,
+        h: rect.h,
     }
 }
 
@@ -204,6 +334,51 @@ fn cpu_decode_tile_batch(bytes: &[u8], batch_size: usize) {
     std::hint::black_box(out);
 }
 
+fn scaled_rect(rect: Rect, scale: Downscale) -> Rect {
+    let denom = scale.denominator();
+    let x_end = rect.x + rect.w;
+    let y_end = rect.y + rect.h;
+    let x0 = rect.x / denom;
+    let y0 = rect.y / denom;
+    let x1 = x_end.div_ceil(denom);
+    let y1 = y_end.div_ceil(denom);
+    Rect {
+        x: x0,
+        y: y0,
+        w: x1.saturating_sub(x0),
+        h: y1.saturating_sub(y0),
+    }
+}
+
+fn cpu_decode_full(bytes: &[u8]) {
+    let decoder = CpuDecoder::new(bytes).expect("cpu decoder");
+    let dims = decoder.info().dimensions;
+    let stride = dims.0 as usize * 3;
+    let mut out = vec![0u8; stride * dims.1 as usize];
+    decoder
+        .decode_into_with_scratch(
+            &mut CpuScratchPool::new(),
+            &mut out,
+            stride,
+            PixelFormat::Rgb8,
+        )
+        .expect("cpu full decode");
+    std::hint::black_box(out);
+}
+
+fn metal_decode_full(bytes: &[u8]) {
+    let mut decoder = Decoder::new(bytes).expect("metal decoder");
+    let mut session = MetalSession::default();
+    let submission = <Decoder<'_> as ImageDecodeSubmit<'_>>::submit_to_device(
+        &mut decoder,
+        &mut session,
+        PixelFormat::Rgb8,
+        BackendRequest::Metal,
+    )
+    .expect("full submit");
+    std::hint::black_box(submission.wait().expect("surface"));
+}
+
 fn cpu_decode_region(bytes: &[u8], side: u32) {
     let decoder = CpuDecoder::new(bytes).expect("cpu decoder");
     let roi = centered_roi(decoder.info().dimensions, side);
@@ -221,11 +396,102 @@ fn cpu_decode_region(bytes: &[u8], side: u32) {
     std::hint::black_box(out);
 }
 
+fn cpu_decode_region_scaled(bytes: &[u8], side: u32, factor: Downscale) {
+    let decoder = CpuDecoder::new(bytes).expect("cpu decoder");
+    let roi = centered_roi(decoder.info().dimensions, side);
+    let (out, _) = decoder
+        .decode_region_scaled(PixelFormat::Rgb8, to_jpeg_rect(roi), factor)
+        .expect("cpu region scaled decode");
+    std::hint::black_box(out);
+}
+
 fn cpu_decode_scaled(bytes: &[u8], factor: Downscale) {
     let decoder = CpuDecoder::new(bytes).expect("cpu decoder");
     let (out, _) = decoder
         .decode_scaled(PixelFormat::Rgb8, factor)
         .expect("cpu scaled decode");
+    std::hint::black_box(out);
+}
+
+fn cpu_decode_tile_batch_scaled(bytes: &[u8], batch_size: usize, factor: Downscale) {
+    let decoder = CpuDecoder::new(bytes).expect("cpu decoder");
+    let dims = decoder.info().dimensions;
+    let out_width = dims.0.div_ceil(factor.denominator());
+    let out_height = dims.1.div_ceil(factor.denominator());
+    let stride = out_width as usize * 3;
+    let mut out = vec![0u8; stride * out_height as usize];
+    let mut ctx = JpegDecoderContext::new();
+    let mut pool = CpuScratchPool::new();
+    for _ in 0..batch_size {
+        decode_tile_scaled_into_in_context(
+            bytes,
+            &mut ctx,
+            &mut pool,
+            &mut out,
+            stride,
+            PixelFormat::Rgb8,
+            factor,
+        )
+        .expect("cpu scaled tile batch");
+    }
+    std::hint::black_box(out);
+}
+
+fn cpu_decode_tile_batch_region_scaled(
+    bytes: &[u8],
+    batch_size: usize,
+    side: u32,
+    factor: Downscale,
+) {
+    let decoder = CpuDecoder::new(bytes).expect("cpu decoder");
+    let roi = centered_roi(decoder.info().dimensions, side);
+    let scaled = scaled_rect(roi, factor);
+    let stride = scaled.w as usize * 3;
+    let mut out = vec![0u8; stride * scaled.h as usize];
+    let mut ctx = JpegDecoderContext::new();
+    let mut pool = CpuScratchPool::new();
+    for _ in 0..batch_size {
+        decode_tile_region_scaled_into_in_context(
+            bytes,
+            &mut ctx,
+            &mut pool,
+            &mut out,
+            stride,
+            PixelFormat::Rgb8,
+            to_jpeg_rect(roi),
+            factor,
+        )
+        .expect("cpu region scaled tile batch");
+    }
+    std::hint::black_box(out);
+}
+
+fn cpu_decode_distinct_tile_batch_region_scaled(
+    tiles: &[&BenchInput],
+    side: u32,
+    factor: Downscale,
+) {
+    let mut ctx = JpegDecoderContext::new();
+    let mut pool = CpuScratchPool::new();
+    let mut out = Vec::new();
+    for tile in tiles {
+        let roi = centered_roi(tile.dimensions, side);
+        let scaled = scaled_rect(roi, factor);
+        let stride = scaled.w as usize * 3;
+        out.resize(stride * scaled.h as usize, 0);
+        decode_tile_region_scaled_into_in_context(
+            &tile.bytes,
+            &mut ctx,
+            &mut pool,
+            &mut out,
+            stride,
+            PixelFormat::Rgb8,
+            to_jpeg_rect(roi),
+            factor,
+        )
+        .expect("cpu distinct region scaled tile batch");
+        std::hint::black_box(out.as_slice());
+    }
     std::hint::black_box(out);
 }
 
@@ -251,6 +517,97 @@ fn metal_decode_tile_batch(bytes: &[u8], batch_size: usize) {
     }
 }
 
+fn metal_decode_tile_batch_scaled(bytes: &[u8], batch_size: usize, factor: Downscale) {
+    let mut ctx = DecoderContext::<JpegDecoderContext>::new();
+    let mut pool = ScratchPool::new();
+    let mut session = MetalSession::default();
+    let submissions = (0..batch_size)
+        .map(|_| {
+            <Codec as TileBatchDecodeSubmit>::submit_tile_scaled_to_device(
+                &mut ctx,
+                &mut session,
+                &mut pool,
+                bytes,
+                PixelFormat::Rgb8,
+                factor,
+                BackendRequest::Metal,
+            )
+            .expect("scaled submit")
+        })
+        .collect::<Vec<_>>();
+    for submission in submissions {
+        std::hint::black_box(submission.wait().expect("surface"));
+    }
+}
+
+fn metal_decode_tile_batch_region_scaled(
+    bytes: &[u8],
+    batch_size: usize,
+    side: u32,
+    factor: Downscale,
+) {
+    let cpu = CpuDecoder::new(bytes).expect("cpu decoder");
+    let roi = centered_roi(cpu.info().dimensions, side);
+    let mut ctx = DecoderContext::<JpegDecoderContext>::new();
+    let mut pool = ScratchPool::new();
+    let mut session = MetalSession::default();
+    let submissions = (0..batch_size)
+        .map(|_| {
+            Codec::submit_tile_region_scaled_to_device(
+                &mut ctx,
+                &mut session,
+                &mut pool,
+                bytes,
+                PixelFormat::Rgb8,
+                roi,
+                factor,
+                BackendRequest::Metal,
+            )
+            .expect("region scaled submit")
+        })
+        .collect::<Vec<_>>();
+    for submission in submissions {
+        std::hint::black_box(submission.wait().expect("surface"));
+    }
+    assert_eq!(
+        session.submissions(),
+        1,
+        "coalesced region+scaled tile batch should flush once"
+    );
+    std::hint::black_box(session.submissions());
+}
+
+fn metal_decode_distinct_tile_batch_region_scaled(
+    tiles: &[&BenchInput],
+    side: u32,
+    factor: Downscale,
+) {
+    let mut ctx = DecoderContext::<JpegDecoderContext>::new();
+    let mut pool = ScratchPool::new();
+    let mut session = MetalSession::default();
+    let submissions = tiles
+        .iter()
+        .map(|tile| {
+            let roi = centered_roi(tile.dimensions, side);
+            Codec::submit_tile_region_scaled_to_device(
+                &mut ctx,
+                &mut session,
+                &mut pool,
+                &tile.bytes,
+                PixelFormat::Rgb8,
+                roi,
+                factor,
+                BackendRequest::Metal,
+            )
+            .expect("distinct region scaled submit")
+        })
+        .collect::<Vec<_>>();
+    for submission in submissions {
+        std::hint::black_box(submission.wait().expect("surface"));
+    }
+    std::hint::black_box(session.submissions());
+}
+
 fn metal_decode_region(bytes: &[u8], side: u32) {
     let cpu = CpuDecoder::new(bytes).expect("cpu decoder");
     let roi = centered_roi(cpu.info().dimensions, side);
@@ -265,6 +622,16 @@ fn metal_decode_region(bytes: &[u8], side: u32) {
     )
     .expect("region submit");
     std::hint::black_box(submission.wait().expect("surface"));
+}
+
+fn metal_decode_region_scaled(bytes: &[u8], side: u32, factor: Downscale) {
+    let cpu = CpuDecoder::new(bytes).expect("cpu decoder");
+    let roi = centered_roi(cpu.info().dimensions, side);
+    let mut decoder = Decoder::new(bytes).expect("metal decoder");
+    let surface = decoder
+        .decode_region_scaled_to_device(PixelFormat::Rgb8, roi, factor, BackendRequest::Metal)
+        .expect("region scaled surface");
+    std::hint::black_box(surface);
 }
 
 fn metal_decode_scaled(bytes: &[u8], factor: Downscale) {
@@ -386,6 +753,21 @@ fn sparse_viewport_workload(workload: &ViewportWorkload) -> Option<ViewportWorkl
 
 fn bench_compare(c: &mut Criterion) {
     let inputs = load_bench_inputs();
+    let distinct_batches = distinct_region_scaled_batches(&inputs, 64, 256);
+    let coalesced_hit_rate = coalesce_hit_rate_label(63, 64);
+
+    let mut decode_rgb = c.benchmark_group("decode_rgb");
+    for input in inputs.iter().filter(|input| {
+        input.mode == DecodeMode::Rgb && input.input_class == CorpusInputClass::BoundedFullFrame
+    }) {
+        decode_rgb.bench_function(format!("{}/cpu", input.name), |b| {
+            b.iter(|| cpu_decode_full(&input.bytes));
+        });
+        decode_rgb.bench_function(format!("{}/metal", input.name), |b| {
+            b.iter(|| metal_decode_full(&input.bytes));
+        });
+    }
+    decode_rgb.finish();
 
     let mut wsi_tile_batch_rgb = c.benchmark_group("wsi_tile_batch_rgb");
     for input in inputs.iter().filter(|input| input.mode == DecodeMode::Rgb) {
@@ -436,6 +818,106 @@ fn bench_compare(c: &mut Criterion) {
         });
     }
     wsi_scaled_rgb_q8.finish();
+
+    let mut wsi_region_scaled_rgb_q4 = c.benchmark_group("wsi_region_scaled_rgb_q4");
+    for input in inputs.iter().filter(|input| {
+        input.mode == DecodeMode::Rgb && input.input_class == CorpusInputClass::BoundedFullFrame
+    }) {
+        wsi_region_scaled_rgb_q4.bench_function(format!("{}/cpu", input.name), |b| {
+            b.iter(|| cpu_decode_region_scaled(&input.bytes, 256, Downscale::Quarter));
+        });
+        wsi_region_scaled_rgb_q4.bench_function(format!("{}/metal", input.name), |b| {
+            b.iter(|| metal_decode_region_scaled(&input.bytes, 256, Downscale::Quarter));
+        });
+    }
+    wsi_region_scaled_rgb_q4.finish();
+
+    let mut wsi_region_scaled_rgb_q8 = c.benchmark_group("wsi_region_scaled_rgb_q8");
+    for input in inputs.iter().filter(|input| {
+        input.mode == DecodeMode::Rgb && input.input_class == CorpusInputClass::BoundedFullFrame
+    }) {
+        wsi_region_scaled_rgb_q8.bench_function(format!("{}/cpu", input.name), |b| {
+            b.iter(|| cpu_decode_region_scaled(&input.bytes, 256, Downscale::Eighth));
+        });
+        wsi_region_scaled_rgb_q8.bench_function(format!("{}/metal", input.name), |b| {
+            b.iter(|| metal_decode_region_scaled(&input.bytes, 256, Downscale::Eighth));
+        });
+    }
+    wsi_region_scaled_rgb_q8.finish();
+
+    let mut wsi_tile_batch_scaled_rgb_q4 = c.benchmark_group("wsi_tile_batch_scaled_rgb_q4");
+    for input in inputs.iter().filter(|input| input.mode == DecodeMode::Rgb) {
+        wsi_tile_batch_scaled_rgb_q4.bench_function(format!("{}/cpu", input.name), |b| {
+            b.iter(|| cpu_decode_tile_batch_scaled(&input.bytes, 64, Downscale::Quarter));
+        });
+        wsi_tile_batch_scaled_rgb_q4.bench_function(format!("{}/metal", input.name), |b| {
+            b.iter(|| metal_decode_tile_batch_scaled(&input.bytes, 64, Downscale::Quarter));
+        });
+    }
+    wsi_tile_batch_scaled_rgb_q4.finish();
+
+    let mut wsi_tile_batch_region_scaled_coalesced_rgb_q4 =
+        c.benchmark_group("wsi_tile_batch_region_scaled_coalesced_rgb_q4");
+    for input in inputs.iter().filter(|input| input.mode == DecodeMode::Rgb) {
+        wsi_tile_batch_region_scaled_coalesced_rgb_q4.bench_function(
+            format!("coalesce_all/{coalesced_hit_rate}/cpu/{}", input.name),
+            |b| {
+                b.iter(|| {
+                    cpu_decode_tile_batch_region_scaled(&input.bytes, 64, 256, Downscale::Quarter);
+                });
+            },
+        );
+        wsi_tile_batch_region_scaled_coalesced_rgb_q4.bench_function(
+            format!("coalesce_all/{coalesced_hit_rate}/metal/{}", input.name),
+            |b| {
+                b.iter(|| {
+                    metal_decode_tile_batch_region_scaled(
+                        &input.bytes,
+                        64,
+                        256,
+                        Downscale::Quarter,
+                    );
+                });
+            },
+        );
+    }
+    wsi_tile_batch_region_scaled_coalesced_rgb_q4.finish();
+
+    let mut wsi_tile_batch_region_scaled_distinct_rgb_q4 =
+        c.benchmark_group("wsi_tile_batch_region_scaled_distinct_rgb_q4");
+    for batch in &distinct_batches {
+        wsi_tile_batch_region_scaled_distinct_rgb_q4.bench_function(
+            format!(
+                "coalesce_none/{}/cpu/{}",
+                batch.coalesce_hit_rate, batch.name
+            ),
+            |b| {
+                b.iter(|| {
+                    cpu_decode_distinct_tile_batch_region_scaled(
+                        &batch.tiles,
+                        256,
+                        Downscale::Quarter,
+                    );
+                });
+            },
+        );
+        wsi_tile_batch_region_scaled_distinct_rgb_q4.bench_function(
+            format!(
+                "coalesce_none/{}/metal/{}",
+                batch.coalesce_hit_rate, batch.name
+            ),
+            |b| {
+                b.iter(|| {
+                    metal_decode_distinct_tile_batch_region_scaled(
+                        &batch.tiles,
+                        256,
+                        Downscale::Quarter,
+                    );
+                });
+            },
+        );
+    }
+    wsi_tile_batch_region_scaled_distinct_rgb_q4.finish();
 
     let mut viewer_region_scaled_composite_rgb =
         c.benchmark_group("viewer_region_scaled_composite_rgb");

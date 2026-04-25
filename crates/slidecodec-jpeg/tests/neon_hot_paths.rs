@@ -124,6 +124,7 @@ fn neon_420_row_pair_matches_reference_for_odd_widths_and_tail_cases() {
 }
 
 #[test]
+#[cfg(not(feature = "scalar-only"))]
 fn neon_420_row_pair_width_255_stays_on_neon_for_tail_dispatch() {
     let width = 255usize;
     let chroma_width = width.div_ceil(2);

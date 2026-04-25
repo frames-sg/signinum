@@ -173,7 +173,7 @@ impl Backend {
         match self.kind {
             BackendKind::Scalar => true,
             #[cfg(target_arch = "x86_64")]
-            BackendKind::Avx2 => false,
+            BackendKind::Avx2 => true,
             #[cfg(target_arch = "aarch64")]
             BackendKind::Neon => true,
         }

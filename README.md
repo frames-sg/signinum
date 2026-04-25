@@ -5,10 +5,13 @@ Pathology codec stack for whole-slide imaging workloads.
 ## Status
 
 `slidecodec` is a native-first codec workspace for pathology and WSI software.
+The current public-source version is `0.1.0`; the project remains pre-1.0 while
+the JPEG 2000 / HTJ2K ROI and GPU adapter APIs settle.
 The core stack in this repository is:
 
 - `slidecodec-jpeg` — native JPEG decode for WSI tiles
-- `slidecodec-jpeg-metal` — Apple Metal device-output adapter for JPEG tiles
+- `slidecodec-jpeg-metal` — Apple Metal JPEG tile decode and device-output
+  adapter for batched WSI workloads
 - `slidecodec-jpeg-cuda` — CUDA-facing JPEG device-output adapter with clean
   CPU fallback on non-CUDA hosts
 - `slidecodec-j2k` — native in-repo JPEG 2000 / HTJ2K inspect and decode;
@@ -42,9 +45,9 @@ consumer-image decode:
 - additive device-output adapters for Metal and CUDA consumers
 - explicit separation between image codecs and tile decompression codecs
 
-The project is structured so WSI readers can compose their own threading and
-container parsing around codec primitives instead of paying for a monolithic
-runtime.
+The project is structured so WSI readers can compose their own threading,
+vendor/container parsing, pyramid policy, caching, and prefetch around codec
+primitives instead of paying for a monolithic runtime.
 
 ## Current scope
 
@@ -56,7 +59,8 @@ runtime.
   `libjpeg-turbo` decode paths
 - Metal and CUDA adapter crates keep the core JPEG decoder pure-Rust CPU while
   exposing device-output surfaces for downstream GPU pipelines; the Metal path
-  now runs compute kernels for color conversion and packing after CPU decode
+  has optimized kernel paths for supported baseline JPEG tile shapes, including
+  batched 4:2:0 and 4:2:2 RGB WSI tile decode
 
 ### `slidecodec-j2k`
 
@@ -127,8 +131,8 @@ let surfaces = batch.decode_all()?;
 ```
 
 WSI readers should own vendor parsing, pyramid levels, tile coordinates,
-caching, prefetch, and viewport policy. `MetalTileBatch` only batches codec
-requests and returns decoded surfaces in submission order. If a caller already
+caching, prefetch, and viewport policy. The Metal adapters only batch codec
+requests and return decoded surfaces in submission order. If a caller already
 stores compressed tile payloads in `Arc<[u8]>`, the `push_shared_*` methods can
 queue them without another tile-byte copy. Use explicit `BackendRequest::Metal`
 when a batched caller wants Metal execution; `BackendRequest::Auto` remains
@@ -164,6 +168,8 @@ The repo now carries dedicated compare benches for:
 - `slidecodec-jpeg-metal`
 - `slidecodec-j2k-metal`
 - `slidecodec-tilecodec`
+
+Release staging notes live in [docs/release.md](docs/release.md).
 
 ## License
 

@@ -244,7 +244,6 @@ impl<'a> BitReader<'a> {
         self.bits = 0;
     }
 
-    #[cfg(test)]
     pub(crate) fn from_snapshot(bytes: &'a [u8], snapshot: BitReaderSnapshot) -> Self {
         Self {
             bytes,

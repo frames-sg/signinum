@@ -1,6 +1,12 @@
 [advisories]
 yanked     = "deny"
-ignore     = []
+ignore     = [
+    # Transitive via metal 0.33.0, the current Metal binding release.
+    # RUSTSEC-2024-0436 is an unmaintained advisory for paste, not a known
+    # memory-safety or code-execution vulnerability. Revisit when metal-rs
+    # removes paste or offers a maintained replacement path.
+    "RUSTSEC-2024-0436",
+]
 
 [licenses]
 allow = [

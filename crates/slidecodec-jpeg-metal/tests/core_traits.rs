@@ -1,10 +1,11 @@
 use slidecodec_core::{
-    BackendKind, BackendRequest, DeviceSubmission, DeviceSurface, ImageDecode, ImageDecodeDevice,
-    ImageDecodeSubmit, PixelFormat,
+    BackendKind, BackendRequest, DeviceSubmission, DeviceSurface, Downscale, ImageDecode,
+    ImageDecodeDevice, ImageDecodeSubmit, PixelFormat, Rect,
 };
 use slidecodec_jpeg_metal::{Decoder, MetalSession, ScratchPool};
 
 const BASELINE_420: &[u8] = include_bytes!("../../../corpus/conformance/baseline_420_16x16.jpg");
+const BASELINE_422: &[u8] = include_bytes!("../../../corpus/conformance/baseline_422_16x8.jpg");
 
 #[test]
 fn decode_to_metal_matches_cpu_decode_bytes() {
@@ -38,6 +39,30 @@ fn cpu_device_request_stays_host_backed() {
         .expect("cpu surface");
     assert_eq!(surface.backend_kind(), BackendKind::Cpu);
     assert_eq!(surface.pixel_format(), PixelFormat::Gray8);
+}
+
+#[test]
+fn fast422_decode_to_metal_matches_cpu_decode_bytes() {
+    let mut decoder = Decoder::new(BASELINE_422).expect("decoder");
+    let mut expected = <Decoder<'_> as ImageDecode<'_>>::from_view(
+        <Decoder<'_> as ImageDecode<'_>>::parse(BASELINE_422).expect("view"),
+    )
+    .expect("decoder from view");
+    let dims = expected.inner().info().dimensions;
+    let stride = dims.0 as usize * 3;
+    let mut host = vec![0u8; stride * dims.1 as usize];
+    expected
+        .decode_into(&mut host, stride, PixelFormat::Rgb8)
+        .expect("cpu decode");
+
+    let surface = decoder
+        .decode_to_device(PixelFormat::Rgb8, BackendRequest::Metal)
+        .expect("device decode");
+
+    assert_eq!(surface.backend_kind(), BackendKind::Metal);
+    assert_eq!(surface.dimensions(), dims);
+    assert_eq!(surface.pixel_format(), PixelFormat::Rgb8);
+    assert_eq!(surface.as_bytes(), host.as_slice());
 }
 
 #[test]
@@ -85,6 +110,50 @@ fn region_and_scaled_metal_bytes_match_cpu_decode() {
         )
         .expect("cpu scaled");
     assert_eq!(scaled_surface.as_bytes(), scaled_host.as_slice());
+}
+
+#[test]
+fn region_scaled_metal_bytes_match_cpu_decode() {
+    let roi = Rect {
+        x: 4,
+        y: 4,
+        w: 10,
+        h: 10,
+    };
+    let scale = Downscale::Quarter;
+
+    let mut metal_decoder = Decoder::new(BASELINE_420).expect("metal decoder");
+    let surface = metal_decoder
+        .decode_region_scaled_to_device(PixelFormat::Rgb8, roi, scale, BackendRequest::Metal)
+        .expect("region scaled surface");
+
+    let cpu_decoder = Decoder::new(BASELINE_420).expect("cpu decoder");
+    let denom = scale.denominator();
+    let scaled = Rect {
+        x: roi.x / denom,
+        y: roi.y / denom,
+        w: (roi.x + roi.w).div_ceil(denom) - roi.x / denom,
+        h: (roi.y + roi.h).div_ceil(denom) - roi.y / denom,
+    };
+    let mut host = vec![0u8; scaled.w as usize * scaled.h as usize * 3];
+    cpu_decoder
+        .inner()
+        .decode_region_scaled_into(
+            &mut host,
+            scaled.w as usize * 3,
+            PixelFormat::Rgb8,
+            slidecodec_jpeg::Rect {
+                x: roi.x,
+                y: roi.y,
+                w: roi.w,
+                h: roi.h,
+            },
+            scale,
+        )
+        .expect("cpu region scaled");
+
+    assert_eq!(surface.dimensions(), (scaled.w, scaled.h));
+    assert_eq!(surface.as_bytes(), host.as_slice());
 }
 
 #[test]

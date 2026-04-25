@@ -5,8 +5,6 @@ version.workspace      = true
 edition.workspace      = true
 rust-version.workspace = true
 license.workspace      = true
-repository.workspace   = true
-homepage.workspace     = true
 keywords.workspace     = true
 categories.workspace   = true
 
@@ -15,16 +13,16 @@ name = "slidecodec_j2k"
 path = "src/lib.rs"
 
 [dependencies]
-slidecodec-core = { path = "../slidecodec-core", version = "0.0.0" }
-slidecodec-j2k-native = { path = "../slidecodec-j2k-native", version = "0.0.0" }
+slidecodec-core = { path = "../slidecodec-core", version = "0.1.0" }
+slidecodec-j2k-native = { path = "../slidecodec-j2k-native", version = "0.1.0" }
 thiserror = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
 criterion = { workspace = true }
-slidecodec-j2k-compare = { path = "../slidecodec-j2k-compare", version = "0.0.0" }
-slidecodec-j2k-metal = { path = "../slidecodec-j2k-metal", version = "0.0.0" }
-slidecodec-j2k-native = { path = "../slidecodec-j2k-native", version = "0.0.0" }
+slidecodec-j2k-compare = { path = "../slidecodec-j2k-compare", version = "0.1.0" }
+slidecodec-j2k-metal = { path = "../slidecodec-j2k-metal", version = "0.1.0" }
+slidecodec-j2k-native = { path = "../slidecodec-j2k-native", version = "0.1.0" }
 
 [[bench]]
 name = "compare"

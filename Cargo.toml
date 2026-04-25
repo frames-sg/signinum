@@ -15,12 +15,10 @@ members = [
 ]
 
 [workspace.package]
-version      = "0.0.0"
+version      = "0.1.0"
 edition      = "2021"
 rust-version = "1.94"
 license      = "Apache-2.0"
-repository   = "https://github.com/YOUR_USER/slidecodec"
-homepage     = "https://github.com/YOUR_USER/slidecodec"
 keywords     = ["pathology", "wsi", "jpeg", "jpeg2000", "tiff"]
 categories   = ["multimedia::images"]
 

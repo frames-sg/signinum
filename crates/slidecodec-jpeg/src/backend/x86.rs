@@ -159,10 +159,77 @@ pub(crate) fn fill_rgb_row_pair_from_420_cropped(
     dst_top: &mut [u8],
     dst_bottom: Option<&mut [u8]>,
 ) {
-    scalar::fill_rgb_row_pair_from_420_cropped(
-        y_top, y_bottom, prev_cb, curr_cb, next_cb, prev_cr, curr_cr, next_cr, crop_start,
-        crop_width, dst_top, dst_bottom,
-    );
+    let crop_end = crop_start + crop_width;
+    debug_assert!(crop_end <= y_top.len());
+    debug_assert_eq!(dst_top.len(), crop_width * 3);
+    debug_assert!(y_bottom.is_none_or(|row| row.len() == y_top.len()));
+    debug_assert!(dst_bottom
+        .as_ref()
+        .is_none_or(|row| row.len() == crop_width * 3));
+    debug_assert_eq!(prev_cb.len(), curr_cb.len());
+    debug_assert_eq!(prev_cb.len(), next_cb.len());
+    debug_assert_eq!(prev_cr.len(), curr_cr.len());
+    debug_assert_eq!(prev_cr.len(), next_cr.len());
+
+    ROW_PAIR_SCRATCH.with(|scratch| {
+        let mut scratch = scratch.borrow_mut();
+        scratch.ensure_width(crop_width);
+        let cb_top = &mut scratch.cb_top[..crop_width];
+        let cr_top = &mut scratch.cr_top[..crop_width];
+        fill_cropped_h2v2_row(prev_cb, curr_cb, crop_start, cb_top);
+        fill_cropped_h2v2_row(prev_cr, curr_cr, crop_start, cr_top);
+        unsafe {
+            fill_rgb_row_from_ycbcr_avx2(&y_top[crop_start..crop_end], cb_top, cr_top, dst_top);
+        }
+
+        if let (Some(y_bottom), Some(dst_bottom)) = (y_bottom, dst_bottom) {
+            let cb_bottom = &mut scratch.cb_bottom[..crop_width];
+            let cr_bottom = &mut scratch.cr_bottom[..crop_width];
+            fill_cropped_h2v2_row(next_cb, curr_cb, crop_start, cb_bottom);
+            fill_cropped_h2v2_row(next_cr, curr_cr, crop_start, cr_bottom);
+            unsafe {
+                fill_rgb_row_from_ycbcr_avx2(
+                    &y_bottom[crop_start..crop_end],
+                    cb_bottom,
+                    cr_bottom,
+                    dst_bottom,
+                );
+            }
+        }
+    });
+}
+
+fn fill_cropped_h2v2_row(near: &[u8], curr: &[u8], crop_start: usize, out: &mut [u8]) {
+    for (local_x, slot) in out.iter_mut().enumerate() {
+        *slot = h2v2_sample(near, curr, crop_start + local_x);
+    }
+}
+
+fn h2v2_sample(near: &[u8], curr: &[u8], x: usize) -> u8 {
+    debug_assert_eq!(near.len(), curr.len());
+    let n = curr.len();
+    if n == 0 {
+        return 0;
+    }
+    let sample = (x / 2).min(n - 1);
+    let colsum = |idx: usize| 3 * u32::from(curr[idx]) + u32::from(near[idx]);
+    if n == 1 {
+        return ((4 * colsum(0) + 8) >> 4) as u8;
+    }
+
+    let this = colsum(sample);
+    match x {
+        0 => ((this * 4 + 8) >> 4) as u8,
+        _ if x == n * 2 - 1 => ((this * 4 + 7) >> 4) as u8,
+        _ if x.is_multiple_of(2) => {
+            let last = colsum(sample - 1);
+            ((this * 3 + last + 8) >> 4) as u8
+        }
+        _ => {
+            let next = colsum(sample + 1);
+            ((this * 3 + next + 7) >> 4) as u8
+        }
+    }
 }
 
 #[target_feature(enable = "avx2")]

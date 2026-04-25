@@ -24,6 +24,7 @@ pub struct DeviceDecodePlan {
     pub components: Vec<DeviceComponentPlan>,
     pub checkpoints: Vec<DeviceCheckpoint>,
     pub matches_fast_420: bool,
+    pub matches_fast_422: bool,
     pub matches_fast_444: bool,
 }
 
@@ -32,6 +33,7 @@ pub struct DeviceBatchSummary {
     pub restart_interval: Option<u16>,
     pub checkpoint_count: usize,
     pub matches_fast_420: bool,
+    pub matches_fast_422: bool,
     pub matches_fast_444: bool,
 }
 
@@ -66,6 +68,7 @@ pub fn build_device_plan(
             .collect(),
         checkpoints,
         matches_fast_420: plan.matches_fast_tile_shape(),
+        matches_fast_422: plan.matches_fast_rgb422_shape(),
         matches_fast_444: plan.matches_fast_rgb444_shape(),
     })
 }
@@ -94,6 +97,7 @@ pub fn summarize_device_batch(decoder: &Decoder<'_>, cadence_mcus: u32) -> Devic
         restart_interval,
         checkpoint_count,
         matches_fast_420: plan.matches_fast_tile_shape(),
+        matches_fast_422: plan.matches_fast_rgb422_shape(),
         matches_fast_444: plan.matches_fast_rgb444_shape(),
     }
 }

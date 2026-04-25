@@ -3,7 +3,12 @@
 use crate::entropy::block::{decode_block_with_activity, CoefficientBlock};
 use crate::entropy::sequential::PreparedDecodePlan;
 use crate::error::{JpegError, MarkerKind};
-use crate::internal::bit_reader::BitReader;
+use crate::internal::bit_reader::{BitReader, BitReaderSnapshot};
+
+#[derive(Debug, Default)]
+pub(crate) struct CpuCheckpointCache {
+    pub(crate) checkpoints: Vec<DeviceCheckpoint>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceCheckpoint {
@@ -83,6 +88,93 @@ pub(crate) fn build_checkpoint_plan(
     }
 
     Ok(checkpoints)
+}
+
+pub(crate) fn checkpoint_before_mcu(
+    plan: &PreparedDecodePlan,
+    scan_bytes: &[u8],
+    cadence_mcus: u32,
+    target_mcu: u32,
+    cache: &mut CpuCheckpointCache,
+) -> Result<Option<DeviceCheckpoint>, JpegError> {
+    if plan.restart_interval.is_some() || target_mcu == 0 {
+        return Ok(None);
+    }
+
+    let total_mcus = total_mcus(plan);
+    let target_mcu = target_mcu.min(total_mcus);
+    let cadence_mcus = cadence_mcus.max(1);
+    let target_checkpoint_mcu = (target_mcu / cadence_mcus) * cadence_mcus;
+    if target_checkpoint_mcu == 0 {
+        return Ok(None);
+    }
+
+    if cache.checkpoints.is_empty() {
+        cache.checkpoints.push(snapshot_checkpoint(
+            0,
+            &BitReader::new(scan_bytes),
+            [0; 4],
+            0,
+        ));
+    }
+
+    let last_mcu = cache
+        .checkpoints
+        .last()
+        .map_or(0, |checkpoint| checkpoint.mcu_index);
+    if last_mcu < target_checkpoint_mcu {
+        extend_non_restart_checkpoints(
+            plan,
+            scan_bytes,
+            cadence_mcus,
+            target_checkpoint_mcu,
+            cache,
+        )?;
+    }
+
+    Ok(cache
+        .checkpoints
+        .iter()
+        .rev()
+        .find(|checkpoint| checkpoint.mcu_index > 0 && checkpoint.mcu_index <= target_mcu)
+        .cloned())
+}
+
+fn extend_non_restart_checkpoints(
+    plan: &PreparedDecodePlan,
+    scan_bytes: &[u8],
+    cadence_mcus: u32,
+    target_checkpoint_mcu: u32,
+    cache: &mut CpuCheckpointCache,
+) -> Result<(), JpegError> {
+    let start = cache
+        .checkpoints
+        .last()
+        .cloned()
+        .unwrap_or_else(|| snapshot_checkpoint(0, &BitReader::new(scan_bytes), [0; 4], 0));
+    let mut br = BitReader::from_snapshot(
+        scan_bytes,
+        BitReaderSnapshot {
+            pos: start.scan_offset,
+            acc: start.bit_accumulator,
+            bits: start.bits_buffered,
+        },
+    );
+    let mut prev_dc = start.prev_dc;
+    let mut coeff = CoefficientBlock::default();
+    let mut mcu_index = start.mcu_index;
+
+    while mcu_index < target_checkpoint_mcu {
+        decode_one_mcu(plan, &mut br, &mut coeff, &mut prev_dc)?;
+        mcu_index += 1;
+        if mcu_index.is_multiple_of(cadence_mcus) {
+            cache
+                .checkpoints
+                .push(snapshot_checkpoint(mcu_index, &br, prev_dc, 0));
+        }
+    }
+
+    Ok(())
 }
 
 fn terminated_scan_bytes(scan_bytes: &[u8]) -> Vec<u8> {
@@ -234,6 +326,25 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn lazy_non_restart_checkpoint_extends_to_nearest_cadence_before_target() {
+        let bytes = grayscale_jpeg(48, 48);
+        let decoder = Decoder::new(&bytes).expect("decoder");
+        let plan = &decoder.plan;
+        let scan_bytes = &decoder.bytes[plan.scan_offset..];
+        let mut cache = CpuCheckpointCache::default();
+
+        let checkpoint = checkpoint_before_mcu(plan, scan_bytes, 4, 17, &mut cache)
+            .expect("checkpoint lookup")
+            .expect("target beyond one cadence should produce a checkpoint");
+
+        assert_eq!(checkpoint.mcu_index, 16);
+        assert!(cache
+            .checkpoints
+            .iter()
+            .any(|checkpoint| checkpoint.mcu_index == 16));
     }
 
     fn grayscale_jpeg(width: u16, height: u16) -> Vec<u8> {

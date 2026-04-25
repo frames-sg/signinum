@@ -75,11 +75,19 @@ performance signoff path.
   - `jpeg-decoder` / `zune-jpeg`: repeated fresh decode followed by in-memory
     `4×` decimation per tile
   - `libjpeg-turbo`: repeated scaled TurboJPEG decode with one reused handle
-- `wsi_tile_batch_region_scaled_rgb_q4`
+- `wsi_tile_batch_region_scaled_coalesced_rgb_q4`
   - `slidecodec-jpeg`: repeated
     `decode_tile_region_scaled_into_in_context(..., PixelFormat::Rgb8, roi, Downscale::Quarter)`
     with shared `DecoderContext`, shared `ScratchPool`, and one reused output
-    buffer
+    buffer; the Metal adapter queues 64 identical region+scaled requests, so
+    the device path reports a `coalesce_hits_98p4pct` request hit rate by
+    construction
+- `wsi_tile_batch_region_scaled_distinct_rgb_q4`
+  - `slidecodec-jpeg`: the same region+scaled tile-batch CPU path over 64
+    different RGB JPEG byte streams from one compatible input directory
+  - `slidecodec-jpeg-metal`: queued `BatchOp::RegionScaled` over those 64
+    distinct byte streams; this is the cold-pan WSI viewport case and should
+    report `coalesce_hits_0p0pct`
   - `jpeg-decoder` / `zune-jpeg`: repeated fresh decode, centered
     `256×256` crop, then `4×` in-memory decimation per tile
   - `libjpeg-turbo`: repeated scaled cropped decode with one reused handle
@@ -125,7 +133,8 @@ comparison, but it is not the decisive WSI-viewer workload.
   - `wsi_region_scaled_rgb_q8`
   - `wsi_tile_batch_rgb`
   - `wsi_tile_batch_scaled_rgb_q4`
-  - `wsi_tile_batch_region_scaled_rgb_q4`
+  - `wsi_tile_batch_region_scaled_coalesced_rgb_q4`
+  - `wsi_tile_batch_region_scaled_distinct_rgb_q4`
 - Tiny committed fixtures remain useful for `micro_*` and correctness
   regression only; they are not valid evidence for WSI performance claims.
 
@@ -280,23 +289,41 @@ Metal-surface path.
 
 Current v1 scope is explicit:
 
-- JPEG: CPU parse/entropy/IDCT stays in `slidecodec-jpeg`, then Metal compute
-  converts staged component rows to the requested packed surface
+- JPEG: supported baseline WSI tile shapes can run Metal kernel paths for full,
+  region, scaled, region+scaled, and batched RGB device-output decode;
+  compatible queued region+scaled requests use a real `BatchOp::RegionScaled`
+  path. The coalesced benchmark intentionally queues 64 identical requests and
+  can collapse them to one immutable Metal surface; the distinct benchmark
+  queues 64 different JPEG byte streams so it measures cold-pan batch
+  throughput instead of duplicate-input reuse. Unsupported shapes fall back
+  through CPU decode plus device-surface upload according to the requested
+  backend
 - J2K: CPU codestream/decode still reconstructs component planes, then Metal
   compute performs interleave/clamp/pack into the requested surface; ROI
   staging is still done on CPU for the current region path
-- these benches now measure a real GPU compute stage plus device-surface
-  production, but they are still not full-GPU entropy or inverse-transform
-  decoders
+- these benches measure complete codec-device tasks, including surface
+  production; they do not include WSI container parsing, tile lookup, caching,
+  or prefetch policy
 
-Bench names:
+`slidecodec-jpeg-metal` compare bench names:
 
-- `cpu_decode_rgb8`
-- `metal_surface_rgb8`
+- `decode_rgb`
+- `wsi_tile_batch_rgb`
+- `wsi_region_rgb`
+- `wsi_scaled_rgb_q4`
+- `wsi_scaled_rgb_q8`
+- `wsi_region_scaled_rgb_q4`
+- `wsi_region_scaled_rgb_q8`
+- `wsi_tile_batch_scaled_rgb_q4`
+- `wsi_tile_batch_region_scaled_coalesced_rgb_q4`
+- `wsi_tile_batch_region_scaled_distinct_rgb_q4`
+- viewer/composite groups for contiguous and sparse viewport-shaped device
+  output
 
 Compile the Metal benches:
 
 ```sh
+cargo bench -p slidecodec-jpeg-metal --bench compare --no-run
 cargo bench -p slidecodec-jpeg-metal --bench device_upload --no-run
 cargo bench -p slidecodec-j2k-metal --bench device_upload --no-run
 ```
@@ -304,6 +331,7 @@ cargo bench -p slidecodec-j2k-metal --bench device_upload --no-run
 Run them on Apple Silicon macOS:
 
 ```sh
+cargo bench -p slidecodec-jpeg-metal --bench compare -- --noplot
 cargo bench -p slidecodec-jpeg-metal --bench device_upload -- --noplot
 cargo bench -p slidecodec-j2k-metal --bench device_upload -- --noplot
 ```

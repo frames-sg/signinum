@@ -3,7 +3,10 @@
 use slidecodec_core::{BackendRequest, Downscale, PixelFormat, Rect};
 use slidecodec_jpeg::{
     Decoder as CpuDecoder, Rect as JpegRect, ScratchPool,
-    __private::{build_metal_fast420_packet_for_decoder, build_metal_fast444_packet_for_decoder},
+    __private::{
+        build_metal_fast420_packet_for_decoder, build_metal_fast422_packet_for_decoder,
+        build_metal_fast444_packet_for_decoder,
+    },
 };
 
 use crate::{Error, Surface};
@@ -414,6 +417,9 @@ pub fn decode_viewport_region_hybrid(
     let fast444_packet = use_direct_kernel
         .then(|| build_metal_fast444_packet_for_decoder(decoder).ok())
         .flatten();
+    let fast422_packet = use_direct_kernel
+        .then(|| build_metal_fast422_packet_for_decoder(decoder).ok())
+        .flatten();
     let fast420_packet = use_direct_kernel
         .then(|| build_metal_fast420_packet_for_decoder(decoder).ok())
         .flatten();
@@ -424,6 +430,7 @@ pub fn decode_viewport_region_hybrid(
         to_jpeg_rect(viewport_source_bounds(workload)),
         workload.scale,
         fast444_packet.as_ref(),
+        fast422_packet.as_ref(),
         fast420_packet.as_ref(),
     )
 }

@@ -657,6 +657,20 @@ fn avx2_420_cropped_row_pair_matches_scalar_reference() {
     assert_eq!(actual_bot, expected_bot);
 }
 
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn avx2_backend_prefers_cropped_420_region_when_available() {
+    if !std::is_x86_feature_detected!("avx2") {
+        return;
+    }
+
+    let backend = super::Backend {
+        kind: super::BackendKind::Avx2,
+    };
+
+    assert!(backend.prefers_cropped_420_region(4096, 257));
+}
+
 #[cfg(target_arch = "aarch64")]
 #[test]
 fn neon_ycbcr_rows_match_scalar_reference_for_tail_widths() {

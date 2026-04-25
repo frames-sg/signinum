@@ -98,9 +98,9 @@ pub(crate) mod writer;
 use crate::math::{dispatch, f32x8, Level, Simd, SIMD_WIDTH};
 #[doc(hidden)]
 pub use direct_plan::{
-    HtOwnedCodeBlockBatchJob, HtOwnedSubBandPlan, J2kDirectBandId, J2kDirectGrayscalePlan,
-    J2kDirectGrayscaleStep, J2kDirectIdwtStep, J2kDirectStoreStep, J2kOwnedCodeBlockBatchJob,
-    J2kOwnedSubBandPlan,
+    HtOwnedCodeBlockBatchJob, HtOwnedSubBandPlan, J2kDirectBandId, J2kDirectColorPlan,
+    J2kDirectGrayscalePlan, J2kDirectGrayscaleStep, J2kDirectIdwtStep, J2kDirectStoreStep,
+    J2kOwnedCodeBlockBatchJob, J2kOwnedSubBandPlan,
 };
 pub use error::{
     ColorError, DecodeError, DecodingError, FormatError, MarkerError, Result, TileError,
@@ -908,6 +908,21 @@ impl<'a> Image<'a> {
         }
 
         j2c::build_direct_grayscale_plan(self.codestream, &self.header, decoder_context)
+    }
+
+    /// Build a hidden RGB direct device plan without materializing host component planes.
+    #[doc(hidden)]
+    pub fn build_direct_color_plan_with_context(
+        &self,
+        decoder_context: &mut DecoderContext<'a>,
+    ) -> Result<J2kDirectColorPlan> {
+        if !matches!(self.color_space, ColorSpace::RGB) || self.has_alpha {
+            bail!(DecodingError::UnsupportedFeature(
+                "direct color plan only supports RGB images without alpha"
+            ));
+        }
+
+        j2c::build_direct_color_plan(self.codestream, &self.header, decoder_context)
     }
 
     /// Decode borrowed component planes while delegating HTJ2K code-block decode.

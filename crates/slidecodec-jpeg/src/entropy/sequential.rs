@@ -16,7 +16,8 @@ use crate::entropy::huffman::HuffmanTable;
 use crate::error::{HuffmanFailure, JpegError, Warning};
 use crate::idct::downscale;
 use crate::info::{ColorSpace, DownscaleFactor, Rect, SamplingFactors};
-use crate::internal::bit_reader::BitReader;
+use crate::internal::bit_reader::{BitReader, BitReaderSnapshot};
+use crate::internal::checkpoint::DeviceCheckpoint;
 use crate::internal::scratch::{
     RgbGenericRows, ScratchPool, SinkRows, YCbCr420Rows, YCbCrGenericRows,
 };
@@ -69,6 +70,20 @@ impl PreparedDecodePlan {
             && self.components.len() == 3
             && self.components[0].output_index == 0
             && self.components[0].h == 1
+            && self.components[0].v == 1
+            && self.components[1].output_index == 1
+            && self.components[1].h == 1
+            && self.components[1].v == 1
+            && self.components[2].output_index == 2
+            && self.components[2].h == 1
+            && self.components[2].v == 1
+    }
+
+    pub(crate) fn matches_fast_rgb422_shape(&self) -> bool {
+        self.color_space == ColorSpace::YCbCr
+            && self.components.len() == 3
+            && self.components[0].output_index == 0
+            && self.components[0].h == 2
             && self.components[0].v == 1
             && self.components[1].output_index == 1
             && self.components[1].h == 1
@@ -724,6 +739,19 @@ fn fast420_decode_mcu_row_end(roi: Rect, mcu_height_px: u32, mcu_rows: u32) -> u
     }
 }
 
+pub(crate) fn fast_tile_region_first_decode_mcu(
+    plan: &PreparedDecodePlan,
+    roi: Rect,
+    downscale: DownscaleFactor,
+) -> u32 {
+    let (width, _) = scaled_dimensions(plan.dimensions, downscale);
+    let block_size = downscale.output_block_size();
+    let mcu_width_px = block_size * u32::from(plan.sampling.max_h);
+    let mcu_height_px = block_size * u32::from(plan.sampling.max_v);
+    let mcus_per_row = width.div_ceil(mcu_width_px);
+    fast420_first_decode_mcu_row(roi, mcu_height_px) * mcus_per_row
+}
+
 #[inline]
 fn mcu_row_intersects_rect(stripe_index: u32, mcu_height_px: u32, rect: Rect) -> bool {
     let y0 = stripe_index * mcu_height_px;
@@ -750,6 +778,29 @@ fn finish_scan(br: &mut BitReader<'_>, validate_eoi: bool) -> Result<Vec<Warning
             Ok(warnings)
         }
     }
+}
+
+fn reader_from_checkpoint<'a>(
+    scan_bytes: &'a [u8],
+    checkpoint: Option<&DeviceCheckpoint>,
+    target_mcu: u32,
+) -> (BitReader<'a>, [i32; 4], u32) {
+    if let Some(checkpoint) = checkpoint.filter(|checkpoint| checkpoint.mcu_index <= target_mcu) {
+        return (
+            BitReader::from_snapshot(
+                scan_bytes,
+                BitReaderSnapshot {
+                    pos: checkpoint.scan_offset,
+                    acc: checkpoint.bit_accumulator,
+                    bits: checkpoint.bits_buffered,
+                },
+            ),
+            checkpoint.prev_dc,
+            checkpoint.mcu_index,
+        );
+    }
+
+    (BitReader::new(scan_bytes), [0; 4], 0)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -919,6 +970,7 @@ pub(crate) fn decode_scan_fast_tile_rgb_region<W: OutputWriter + InterleavedRgbW
     pool: &mut ScratchPool,
     writer: &mut W,
     roi: Rect,
+    checkpoint: Option<&DeviceCheckpoint>,
 ) -> Result<Vec<Warning>, JpegError> {
     debug_assert!(plan.matches_fast_tile_shape());
 
@@ -943,14 +995,16 @@ pub(crate) fn decode_scan_fast_tile_rgb_region<W: OutputWriter + InterleavedRgbW
 
     let mut crop_rows = pool.take_sink_rows(region_layout.row_width());
     let result = (|| {
-        let mut br = BitReader::new(scan_bytes);
         let mut coeff = CoefficientBlock::default();
         let mut pixels = [0u8; 64];
         let (y_comp, cb_comp, cr_comp) = fast_tile_components(plan);
-        let mut y_dc = 0i32;
-        let mut cb_dc = 0i32;
-        let mut cr_dc = 0i32;
-        for _ in 0..first_decode_mcu_row * mcus_per_row {
+        let target_mcu = first_decode_mcu_row * mcus_per_row;
+        let (mut br, prev_dc, start_mcu) =
+            reader_from_checkpoint(scan_bytes, checkpoint, target_mcu);
+        let mut y_dc = prev_dc[0];
+        let mut cb_dc = prev_dc[1];
+        let mut cr_dc = prev_dc[2];
+        for _ in start_mcu..target_mcu {
             skip_mcu_fast_tile_420(
                 y_comp, cb_comp, cr_comp, &mut br, &mut y_dc, &mut cb_dc, &mut cr_dc,
             )?;
@@ -1045,6 +1099,7 @@ pub(crate) fn decode_scan_fast_tile_rgb_region<W: OutputWriter + InterleavedRgbW
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn decode_scan_fast_tile_rgb_region_scaled<W: OutputWriter + InterleavedRgbWriter>(
     plan: &PreparedDecodePlan,
     backend: Backend,
@@ -1053,6 +1108,7 @@ pub(crate) fn decode_scan_fast_tile_rgb_region_scaled<W: OutputWriter + Interlea
     writer: &mut W,
     roi: Rect,
     downscale: DownscaleFactor,
+    checkpoint: Option<&DeviceCheckpoint>,
 ) -> Result<Vec<Warning>, JpegError> {
     debug_assert!(plan.matches_fast_tile_shape());
     debug_assert!(downscale != DownscaleFactor::Full);
@@ -1075,7 +1131,6 @@ pub(crate) fn decode_scan_fast_tile_rgb_region_scaled<W: OutputWriter + Interlea
 
     let mut crop_rows = pool.take_sink_rows(region_layout.row_width());
     let result = (|| {
-        let mut br = BitReader::new(scan_bytes);
         let mut coeff = CoefficientBlock::default();
         let ScratchPool {
             prev_dc,
@@ -1091,7 +1146,13 @@ pub(crate) fn decode_scan_fast_tile_rgb_region_scaled<W: OutputWriter + Interlea
         let y_dc = &mut y_dc_slice[0];
         let cb_dc = &mut cb_dc_slice[0];
         let cr_dc = &mut cr_dc_slice[0];
-        for _ in 0..first_decode_mcu_row * mcus_per_row {
+        let target_mcu = first_decode_mcu_row * mcus_per_row;
+        let (mut br, checkpoint_dc, start_mcu) =
+            reader_from_checkpoint(scan_bytes, checkpoint, target_mcu);
+        *y_dc = checkpoint_dc[0];
+        *cb_dc = checkpoint_dc[1];
+        *cr_dc = checkpoint_dc[2];
+        for _ in start_mcu..target_mcu {
             skip_mcu_fast_tile_420(
                 &plan.components[0],
                 &plan.components[1],
@@ -1233,8 +1294,7 @@ fn emit_stripe_rgb_420_region<W: OutputWriter + InterleavedRgbWriter>(
     let row_len = row_width * 3;
     let crop_width = region_layout.crop_end - region_layout.crop_start;
     let crop_len = crop_width * 3;
-    let use_direct_crop = downscale == DownscaleFactor::Full
-        && backend.prefers_cropped_420_region(row_width, crop_width);
+    let use_direct_crop = should_use_direct_420_crop(backend, downscale, row_width, crop_width);
     let mut local_y = 0usize;
     while local_y < stripe_rows {
         let next_local_y = local_y + 1;
@@ -1376,6 +1436,16 @@ fn emit_stripe_rgb_420_region<W: OutputWriter + InterleavedRgbWriter>(
     }
 
     Ok(())
+}
+
+#[inline]
+fn should_use_direct_420_crop(
+    backend: Backend,
+    _downscale: DownscaleFactor,
+    row_width: usize,
+    crop_width: usize,
+) -> bool {
+    backend.prefers_cropped_420_region(row_width, crop_width)
 }
 
 fn deposit_block_4x4(plane: &mut [u8], stride: usize, x: u32, y: u32, block: &[u8; 16]) {
@@ -3252,6 +3322,24 @@ mod tests {
         assert_eq!(layout.crop_end, 26);
         assert!(layout.y_decode_start <= roi.x as usize);
         assert!(layout.y_decode_end >= (roi.x + roi.w) as usize);
+    }
+
+    #[test]
+    fn direct_420_crop_policy_includes_scaled_regions_when_backend_supports_it() {
+        let backend = Backend::detect();
+        assert!(backend.prefers_cropped_420_region(64, 9));
+        assert!(should_use_direct_420_crop(
+            backend,
+            DownscaleFactor::Quarter,
+            64,
+            9
+        ));
+        assert!(should_use_direct_420_crop(
+            backend,
+            DownscaleFactor::Eighth,
+            64,
+            9
+        ));
     }
 
     #[test]

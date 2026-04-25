@@ -18,7 +18,7 @@ use core::convert::Infallible;
 use std::sync::Arc;
 #[cfg(target_os = "macos")]
 use std::{
-    collections::hash_map::DefaultHasher,
+    collections::{hash_map::DefaultHasher, HashMap},
     hash::{Hash, Hasher},
     sync::{Mutex, OnceLock},
 };
@@ -36,7 +36,7 @@ use slidecodec_j2k::{
 #[cfg(target_os = "macos")]
 use slidecodec_j2k_native::{
     DecodeSettings as NativeDecodeSettings, DecoderContext as NativeDecoderContext,
-    Image as NativeImage, J2kDirectGrayscalePlan,
+    Image as NativeImage, J2kDirectColorPlan, J2kDirectGrayscalePlan,
 };
 
 #[cfg(target_os = "macos")]
@@ -78,6 +78,7 @@ impl CodecError for Error {
     }
 }
 
+#[derive(Clone)]
 pub(crate) enum Storage {
     Host(Vec<u8>),
     #[cfg(target_os = "macos")]
@@ -87,18 +88,31 @@ pub(crate) enum Storage {
 #[cfg(target_os = "macos")]
 #[derive(Clone)]
 struct DirectGrayPlanCacheEntry {
-    key: u64,
     plan: J2kDirectGrayscalePlan,
     prepared: Arc<crate::compute::PreparedDirectGrayscalePlan>,
 }
 
 #[cfg(target_os = "macos")]
-static DIRECT_GRAY_PLAN_CACHE: OnceLock<Mutex<Option<DirectGrayPlanCacheEntry>>> = OnceLock::new();
+#[derive(Clone)]
+struct DirectColorPlanCacheEntry {
+    plan: J2kDirectColorPlan,
+    prepared: Arc<crate::compute::PreparedDirectColorPlan>,
+}
+
+#[cfg(target_os = "macos")]
+static DIRECT_GRAY_PLAN_CACHE: OnceLock<Mutex<HashMap<u64, DirectGrayPlanCacheEntry>>> =
+    OnceLock::new();
+#[cfg(target_os = "macos")]
+static DIRECT_COLOR_PLAN_CACHE: OnceLock<Mutex<HashMap<u64, DirectColorPlanCacheEntry>>> =
+    OnceLock::new();
+#[cfg(target_os = "macos")]
+const DIRECT_PLAN_CACHE_CAP: usize = 128;
 #[cfg(target_os = "macos")]
 const AUTO_REPEATED_GRAYSCALE_MIN_DIM: u32 = 512;
 #[cfg(target_os = "macos")]
 const AUTO_REPEATED_GRAYSCALE_MIN_COUNT: usize = 16;
 
+#[derive(Clone)]
 pub struct Surface {
     backend: BackendKind,
     dimensions: (u32, u32),
@@ -379,6 +393,10 @@ pub struct J2kDecoder<'a> {
     native_direct_gray_plan: Option<J2kDirectGrayscalePlan>,
     #[cfg(target_os = "macos")]
     native_prepared_direct_gray_plan: Option<Arc<crate::compute::PreparedDirectGrayscalePlan>>,
+    #[cfg(target_os = "macos")]
+    native_direct_color_plan: Option<J2kDirectColorPlan>,
+    #[cfg(target_os = "macos")]
+    native_prepared_direct_color_plan: Option<Arc<crate::compute::PreparedDirectColorPlan>>,
 }
 
 impl<'a> J2kDecoder<'a> {
@@ -394,6 +412,10 @@ impl<'a> J2kDecoder<'a> {
             native_direct_gray_plan: None,
             #[cfg(target_os = "macos")]
             native_prepared_direct_gray_plan: None,
+            #[cfg(target_os = "macos")]
+            native_direct_color_plan: None,
+            #[cfg(target_os = "macos")]
+            native_prepared_direct_color_plan: None,
         })
     }
 
@@ -409,6 +431,10 @@ impl<'a> J2kDecoder<'a> {
             native_direct_gray_plan: None,
             #[cfg(target_os = "macos")]
             native_prepared_direct_gray_plan: None,
+            #[cfg(target_os = "macos")]
+            native_direct_color_plan: None,
+            #[cfg(target_os = "macos")]
+            native_prepared_direct_color_plan: None,
         })
     }
 
@@ -469,13 +495,72 @@ impl<'a> J2kDecoder<'a> {
     }
 
     #[cfg(target_os = "macos")]
+    fn ensure_prepared_direct_color_plan(
+        &mut self,
+    ) -> Result<Option<Arc<crate::compute::PreparedDirectColorPlan>>, Error> {
+        let cache_key = direct_plan_cache_key(self.inner.bytes());
+        if self.native_prepared_direct_color_plan.is_none() {
+            if let Some((plan, prepared)) = cached_global_direct_color_plan(cache_key) {
+                self.native_direct_color_plan = Some(plan);
+                self.native_prepared_direct_color_plan = Some(prepared);
+            }
+        }
+        if self.native_prepared_direct_color_plan.is_none() {
+            self.ensure_native_image()?;
+            let (Some(image), native_context) =
+                (self.native_image.as_ref(), &mut self.native_context)
+            else {
+                return Err(Error::Decode(J2kError::Backend(
+                    "native image cache missing".to_string(),
+                )));
+            };
+
+            let plan = match image.build_direct_color_plan_with_context(native_context) {
+                Ok(plan) => plan,
+                Err(error) if direct::is_unsupported_direct_plan_error(&error.to_string()) => {
+                    return Ok(None);
+                }
+                Err(error) => {
+                    return Err(Error::Decode(J2kError::Backend(format!(
+                        "failed to build J2K MetalDirect color plan: {error}"
+                    ))));
+                }
+            };
+            let prepared = Arc::new(crate::compute::prepare_direct_color_plan(&plan)?);
+            store_global_direct_color_plan(cache_key, &plan, prepared.clone());
+            self.native_direct_color_plan = Some(plan);
+            self.native_prepared_direct_color_plan = Some(prepared);
+        }
+
+        Ok(self.native_prepared_direct_color_plan.clone())
+    }
+
+    #[cfg(target_os = "macos")]
     fn decode_direct_to_surface(&mut self, fmt: PixelFormat) -> Result<Option<Surface>, Error> {
-        let Some(plan) = self.ensure_prepared_direct_gray_plan()? else {
-            return Ok(None);
-        };
-        Ok(Some(
-            crate::compute::execute_prepared_direct_grayscale_plan(&plan, fmt)?,
-        ))
+        if matches!(fmt, PixelFormat::Gray8 | PixelFormat::Gray16) {
+            let Some(plan) = self.ensure_prepared_direct_gray_plan()? else {
+                return Ok(None);
+            };
+            return Ok(Some(
+                crate::compute::execute_prepared_direct_grayscale_plan(&plan, fmt)?,
+            ));
+        }
+
+        if matches!(
+            fmt,
+            PixelFormat::Rgb8 | PixelFormat::Rgba8 | PixelFormat::Rgb16
+        ) {
+            let Some(plan) = self.ensure_prepared_direct_color_plan()? else {
+                return Ok(None);
+            };
+            return match crate::compute::execute_prepared_direct_color_plan(&plan, fmt) {
+                Ok(surface) => Ok(Some(surface)),
+                Err(error) if is_direct_color_runtime_fallback_error(&error) => Ok(None),
+                Err(error) => Err(error),
+            };
+        }
+
+        Ok(None)
     }
 
     #[cfg(target_os = "macos")]
@@ -556,6 +641,20 @@ impl<'a> J2kDecoder<'a> {
             return Ok(Vec::new());
         };
         crate::compute::execute_repeated_prepared_direct_grayscale_plan(plan, fmt, count)
+    }
+
+    #[cfg(target_os = "macos")]
+    #[doc(hidden)]
+    pub fn decode_repeated_color_direct_to_device(
+        &mut self,
+        fmt: PixelFormat,
+        count: usize,
+    ) -> Result<Vec<Surface>, Error> {
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        let surface = self.decode_to_surface_impl(fmt, BackendRequest::Metal)?;
+        Ok(vec![surface; count])
     }
 
     #[cfg(target_os = "macos")]
@@ -799,10 +898,15 @@ impl<'a> J2kDecoder<'a> {
 }
 
 #[cfg(target_os = "macos")]
-fn direct_gray_plan_cache_key(bytes: &[u8]) -> u64 {
+fn direct_plan_cache_key(bytes: &[u8]) -> u64 {
     let mut hasher = DefaultHasher::new();
     bytes.hash(&mut hasher);
     hasher.finish()
+}
+
+#[cfg(target_os = "macos")]
+fn direct_gray_plan_cache_key(bytes: &[u8]) -> u64 {
+    direct_plan_cache_key(bytes)
 }
 
 #[cfg(target_os = "macos")]
@@ -812,11 +916,11 @@ fn cached_global_direct_gray_plan(
     J2kDirectGrayscalePlan,
     Arc<crate::compute::PreparedDirectGrayscalePlan>,
 )> {
-    let cache = DIRECT_GRAY_PLAN_CACHE.get_or_init(|| Mutex::new(None));
+    let cache = DIRECT_GRAY_PLAN_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     let guard = cache.lock().ok()?;
     guard
-        .as_ref()
-        .and_then(|entry| (entry.key == key).then(|| (entry.plan.clone(), entry.prepared.clone())))
+        .get(&key)
+        .map(|entry| (entry.plan.clone(), entry.prepared.clone()))
 }
 
 #[cfg(target_os = "macos")]
@@ -825,14 +929,70 @@ fn store_global_direct_gray_plan(
     plan: &J2kDirectGrayscalePlan,
     prepared: Arc<crate::compute::PreparedDirectGrayscalePlan>,
 ) {
-    let cache = DIRECT_GRAY_PLAN_CACHE.get_or_init(|| Mutex::new(None));
+    let cache = DIRECT_GRAY_PLAN_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Ok(mut guard) = cache.lock() {
-        *guard = Some(DirectGrayPlanCacheEntry {
+        evict_one_direct_plan_if_needed(&mut guard);
+        guard.insert(
             key,
-            plan: plan.clone(),
-            prepared,
-        });
+            DirectGrayPlanCacheEntry {
+                plan: plan.clone(),
+                prepared,
+            },
+        );
     }
+}
+
+#[cfg(target_os = "macos")]
+fn cached_global_direct_color_plan(
+    key: u64,
+) -> Option<(
+    J2kDirectColorPlan,
+    Arc<crate::compute::PreparedDirectColorPlan>,
+)> {
+    let cache = DIRECT_COLOR_PLAN_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let guard = cache.lock().ok()?;
+    guard
+        .get(&key)
+        .map(|entry| (entry.plan.clone(), entry.prepared.clone()))
+}
+
+#[cfg(target_os = "macos")]
+fn store_global_direct_color_plan(
+    key: u64,
+    plan: &J2kDirectColorPlan,
+    prepared: Arc<crate::compute::PreparedDirectColorPlan>,
+) {
+    let cache = DIRECT_COLOR_PLAN_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(mut guard) = cache.lock() {
+        evict_one_direct_plan_if_needed(&mut guard);
+        guard.insert(
+            key,
+            DirectColorPlanCacheEntry {
+                plan: plan.clone(),
+                prepared,
+            },
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn evict_one_direct_plan_if_needed<T>(cache: &mut HashMap<u64, T>) {
+    if cache.len() < DIRECT_PLAN_CACHE_CAP {
+        return;
+    }
+    if let Some(key) = cache.keys().next().copied() {
+        cache.remove(&key);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn is_direct_color_runtime_fallback_error(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::MetalKernel { message }
+            if message.contains("unsupported classic kernel input")
+                || message.contains("direct component plan")
+    )
 }
 
 #[cfg(target_os = "macos")]
@@ -862,6 +1022,138 @@ pub(crate) fn decode_full_grayscale_batch_direct_to_device(
         plans.push(plan);
     }
     crate::compute::execute_prepared_direct_grayscale_plan_batch(&plans, fmt)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn decode_full_color_batch_direct_to_device(
+    inputs: &[Arc<[u8]>],
+    fmt: PixelFormat,
+) -> Result<Vec<Surface>, Error> {
+    if inputs.is_empty() {
+        return Ok(Vec::new());
+    }
+    if !matches!(
+        fmt,
+        PixelFormat::Rgb8 | PixelFormat::Rgba8 | PixelFormat::Rgb16
+    ) {
+        return Err(Error::MetalKernel {
+            message: format!("J2K MetalDirect full color batch does not support {fmt:?}"),
+        });
+    }
+
+    let mut plans = Vec::with_capacity(inputs.len());
+    for input in inputs {
+        let mut decoder = J2kDecoder::new(input.as_ref())?;
+        let Some(plan) = decoder.ensure_prepared_direct_color_plan()? else {
+            return Err(Error::MetalKernel {
+                message: format!(
+                    "explicit J2K MetalDirect batch currently supports full RGB color only; fmt={fmt:?}"
+                ),
+            });
+        };
+        plans.push(plan);
+    }
+    match crate::compute::execute_prepared_direct_color_plan_batch(&plans, fmt) {
+        Ok(surfaces) => Ok(surfaces),
+        Err(error) if is_direct_color_runtime_fallback_error(&error) => {
+            decode_full_color_batch_cpu_to_stacked_metal(inputs, fmt)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn decode_full_color_batch_cpu_to_stacked_metal(
+    inputs: &[Arc<[u8]>],
+    fmt: PixelFormat,
+) -> Result<Vec<Surface>, Error> {
+    let mut stacked = Vec::new();
+    let mut dimensions = None;
+    let mut surface_bytes = None;
+
+    let worker_count = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .min(inputs.len())
+        .max(1);
+    let chunk_size = inputs.len().div_ceil(worker_count);
+    let decoded = std::thread::scope(|scope| {
+        let handles = inputs
+            .chunks(chunk_size)
+            .map(|chunk| {
+                scope.spawn(move || {
+                    chunk
+                        .iter()
+                        .map(|input| {
+                            let mut decoder = J2kDecoder::new(input.as_ref())?;
+                            let surface = decoder.decode_to_cpu_surface(fmt)?;
+                            Ok::<_, Error>((surface.dimensions, surface.as_bytes().to_vec()))
+                        })
+                        .collect::<Result<Vec<_>, Error>>()
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let mut decoded = Vec::with_capacity(inputs.len());
+        for handle in handles {
+            decoded.extend(handle.join().map_err(|_| Error::MetalKernel {
+                message: "J2K Metal color fallback worker panicked".to_string(),
+            })??);
+        }
+        Ok::<_, Error>(decoded)
+    })?;
+
+    for (surface_dimensions, bytes) in decoded {
+        if dimensions.is_some_and(|dims| dims != surface_dimensions) {
+            return Err(Error::MetalKernel {
+                message: "J2K MetalDirect color fallback batch requires matching dimensions"
+                    .to_string(),
+            });
+        }
+        dimensions = Some(surface_dimensions);
+        surface_bytes = Some(bytes.len());
+        stacked.extend_from_slice(&bytes);
+    }
+
+    let dimensions = dimensions.unwrap_or((0, 0));
+    let surface_bytes = surface_bytes.unwrap_or(0);
+    upload_stacked_metal_surfaces(&stacked, dimensions, fmt, inputs.len(), surface_bytes)
+}
+
+#[cfg(target_os = "macos")]
+fn upload_stacked_metal_surfaces(
+    bytes: &[u8],
+    dimensions: (u32, u32),
+    fmt: PixelFormat,
+    count: usize,
+    surface_bytes: usize,
+) -> Result<Vec<Surface>, Error> {
+    let expected = surface_bytes
+        .checked_mul(count)
+        .ok_or_else(|| Error::MetalKernel {
+            message: "J2K Metal stacked color surface size overflow".to_string(),
+        })?;
+    if bytes.len() != expected {
+        return Err(Error::MetalKernel {
+            message: "J2K Metal stacked color surface byte length mismatch".to_string(),
+        });
+    }
+    let device = Device::system_default().ok_or(Error::MetalUnavailable)?;
+    let buffer = device.new_buffer_with_data(
+        bytes.as_ptr().cast(),
+        bytes.len().max(1) as u64,
+        MTLResourceOptions::StorageModeShared,
+    );
+    Ok((0..count)
+        .map(|index| Surface {
+            backend: BackendKind::Metal,
+            dimensions,
+            fmt,
+            pitch_bytes: dimensions.0 as usize * fmt.bytes_per_pixel(),
+            byte_offset: index * surface_bytes,
+            storage: Storage::Metal(buffer.clone()),
+        })
+        .collect())
 }
 
 impl ImageCodec for J2kDecoder<'_> {

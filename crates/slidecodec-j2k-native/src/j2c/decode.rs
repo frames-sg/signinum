@@ -24,7 +24,7 @@ use super::progression::{
 use super::tag_tree::TagNode;
 use super::tile::{ComponentTile, ResolutionTile, Tile};
 use super::{bitplane, build, idwt, mct, segment, tile, ComponentData};
-use crate::error::{bail, DecodingError, Result, TileError};
+use crate::error::{bail, ColorError, DecodingError, Result, TileError};
 use crate::j2c::segment::MAX_BITPLANE_COUNT;
 use crate::math::SimdBuffer;
 use crate::reader::BitReader;
@@ -32,9 +32,9 @@ use crate::{
     decode_j2k_code_block_scalar, HtCodeBlockBatchJob, HtCodeBlockDecodeJob, HtCodeBlockDecoder,
     HtOwnedCodeBlockBatchJob, HtOwnedSubBandPlan, HtSubBandDecodeJob, J2kCodeBlockBatchJob,
     J2kCodeBlockDecodeJob, J2kCodeBlockSegment, J2kCodeBlockStyle, J2kDirectBandId,
-    J2kDirectGrayscalePlan, J2kDirectGrayscaleStep, J2kDirectIdwtStep, J2kDirectStoreStep,
-    J2kOwnedCodeBlockBatchJob, J2kOwnedSubBandPlan, J2kRect, J2kStoreComponentJob,
-    J2kSubBandDecodeJob, J2kSubBandType, J2kWaveletTransform,
+    J2kDirectColorPlan, J2kDirectGrayscalePlan, J2kDirectGrayscaleStep, J2kDirectIdwtStep,
+    J2kDirectStoreStep, J2kOwnedCodeBlockBatchJob, J2kOwnedSubBandPlan, J2kRect,
+    J2kStoreComponentJob, J2kSubBandDecodeJob, J2kSubBandType, J2kWaveletTransform,
 };
 use core::ops::{DerefMut, Range};
 
@@ -165,24 +165,139 @@ pub(crate) fn build_direct_grayscale_plan<'a>(
         };
     segment::parse(tile, progression_iterator, header, &mut ctx.storage)?;
 
-    build_grayscale_plan_from_storage(tile, header, &ctx.storage)
+    let component_info = &tile.component_infos[0];
+    build_component_plan_from_storage(
+        tile,
+        header,
+        &ctx.storage,
+        0,
+        (1_u32 << (component_info.size_info.precision - 1)) as f32,
+    )
 }
 
-fn build_grayscale_plan_from_storage(
+pub(crate) fn build_direct_color_plan<'a>(
+    data: &'a [u8],
+    header: &Header<'a>,
+    ctx: &mut DecoderContext<'a>,
+) -> Result<J2kDirectColorPlan> {
+    let mut reader = BitReader::new(data);
+    let tiles = tile::parse(&mut reader, header)?;
+
+    if tiles.len() != 1 {
+        bail!(DecodingError::UnsupportedFeature(
+            "direct color plan only supports single-tile codestreams"
+        ));
+    }
+
+    let tile = &tiles[0];
+    if tile.component_infos.len() != 3 {
+        bail!(DecodingError::UnsupportedFeature(
+            "direct color plan only supports three-component RGB codestreams"
+        ));
+    }
+    if header.skipped_resolution_levels != 0 {
+        bail!(DecodingError::UnsupportedFeature(
+            "direct color plan only supports full-resolution decode"
+        ));
+    }
+
+    let transform = tile.component_infos[0].wavelet_transform();
+    if tile.mct
+        && (transform != tile.component_infos[1].wavelet_transform()
+            || transform != tile.component_infos[2].wavelet_transform())
+    {
+        bail!(ColorError::Mct);
+    }
+
+    ctx.tile_decode_context.channel_data.clear();
+    ctx.tile_decode_context.output_region = None;
+    ctx.storage.reset();
+
+    build::build(tile, &mut ctx.storage)?;
+
+    let iter_input = IteratorInput::new(tile);
+    let progression_iterator: Box<dyn Iterator<Item = ProgressionData>> =
+        match tile.progression_order {
+            ProgressionOrder::LayerResolutionComponentPosition => {
+                Box::new(layer_resolution_component_position_progression(iter_input))
+            }
+            ProgressionOrder::ResolutionLayerComponentPosition => {
+                Box::new(resolution_layer_component_position_progression(iter_input))
+            }
+            ProgressionOrder::ResolutionPositionComponentLayer => Box::new(
+                resolution_position_component_layer_progression(iter_input)
+                    .ok_or(DecodingError::InvalidProgressionIterator)?,
+            ),
+            ProgressionOrder::PositionComponentResolutionLayer => Box::new(
+                position_component_resolution_layer_progression(iter_input)
+                    .ok_or(DecodingError::InvalidProgressionIterator)?,
+            ),
+            ProgressionOrder::ComponentPositionResolutionLayer => Box::new(
+                component_position_resolution_layer_progression(iter_input)
+                    .ok_or(DecodingError::InvalidProgressionIterator)?,
+            ),
+        };
+    segment::parse(tile, progression_iterator, header, &mut ctx.storage)?;
+
+    let mut bit_depths = [0_u8; 3];
+    let mut component_plans = Vec::with_capacity(3);
+    for component_idx in 0..3 {
+        let component_info = &tile.component_infos[component_idx];
+        bit_depths[component_idx] = component_info.size_info.precision;
+        let addend = if tile.mct {
+            0.0
+        } else {
+            (1_u32 << (component_info.size_info.precision - 1)) as f32
+        };
+        component_plans.push(build_component_plan_from_storage(
+            tile,
+            header,
+            &ctx.storage,
+            component_idx,
+            addend,
+        )?);
+    }
+
+    Ok(J2kDirectColorPlan {
+        dimensions: (
+            header.size_data.image_width(),
+            header.size_data.image_height(),
+        ),
+        bit_depths,
+        mct: tile.mct,
+        transform: external_transform(transform),
+        component_plans,
+    })
+}
+
+fn build_component_plan_from_storage(
     tile: &Tile<'_>,
     header: &Header<'_>,
     storage: &DecompositionStorage<'_>,
+    component_idx: usize,
+    store_addend: f32,
 ) -> Result<J2kDirectGrayscalePlan> {
-    let component_info = &tile.component_infos[0];
+    let component_info =
+        tile.component_infos
+            .get(component_idx)
+            .ok_or(DecodingError::UnsupportedFeature(
+                "direct component plan index is out of range",
+            ))?;
     if component_info.size_info.horizontal_resolution != 1
         || component_info.size_info.vertical_resolution != 1
     {
         bail!(DecodingError::UnsupportedFeature(
-            "direct grayscale plan only supports unit-sampled grayscale"
+            "direct component plan only supports unit-sampled components"
         ));
     }
 
-    let tile_decompositions = &storage.tile_decompositions[0];
+    let tile_decompositions =
+        storage
+            .tile_decompositions
+            .get(component_idx)
+            .ok_or(DecodingError::UnsupportedFeature(
+                "direct component decomposition index is out of range",
+            ))?;
     let mut steps = Vec::new();
     let mut next_band_id: J2kDirectBandId = 0;
     let mut sub_band_ids = vec![None; storage.sub_bands.len()];
@@ -269,7 +384,7 @@ fn build_grayscale_plan_from_storage(
         output_height: header.size_data.image_height(),
         output_x,
         output_y,
-        addend: (1_u32 << (component_info.size_info.precision - 1)) as f32,
+        addend: store_addend,
     }));
 
     Ok(J2kDirectGrayscalePlan {

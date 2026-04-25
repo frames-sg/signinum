@@ -117,14 +117,14 @@ checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
 name = "slidecodec-core"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "slidecodec-j2k"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "slidecodec-core",
  "slidecodec-j2k-native",
@@ -133,7 +133,7 @@ dependencies = [
 
 [[package]]
 name = "slidecodec-j2k-fuzz"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "libfuzzer-sys",
  "slidecodec-j2k",
@@ -141,7 +141,7 @@ dependencies = [
 
 [[package]]
 name = "slidecodec-j2k-native"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "fearless_simd",
 ]

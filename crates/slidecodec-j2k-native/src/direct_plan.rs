@@ -32,6 +32,22 @@ pub struct J2kDirectGrayscalePlan {
     pub steps: Vec<J2kDirectGrayscaleStep>,
 }
 
+/// Hidden RGB direct device plan for backend experimentation.
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct J2kDirectColorPlan {
+    /// Final output dimensions.
+    pub dimensions: (u32, u32),
+    /// Final output bit depths for the first three color components.
+    pub bit_depths: [u8; 3],
+    /// Whether inverse MCT must be applied after component stores.
+    pub mct: bool,
+    /// Wavelet transform used by the codestream's color transform.
+    pub transform: J2kWaveletTransform,
+    /// Per-component direct plans. RGB plans currently contain exactly three components.
+    pub component_plans: Vec<J2kDirectGrayscalePlan>,
+}
+
 /// Hidden owned classic J2K sub-band decode job.
 #[doc(hidden)]
 #[derive(Debug, Clone)]

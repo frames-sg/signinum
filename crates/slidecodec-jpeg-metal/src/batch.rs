@@ -3,7 +3,9 @@
 use std::sync::Arc;
 
 use slidecodec_core::{BackendRequest, DeviceSubmission, Downscale, PixelFormat, Rect};
-use slidecodec_jpeg::__private::{JpegMetalFast420PacketV1, JpegMetalFast444PacketV1};
+use slidecodec_jpeg::__private::{
+    JpegMetalFast420PacketV1, JpegMetalFast422PacketV1, JpegMetalFast444PacketV1,
+};
 
 use crate::{session::SharedSession, Error, Surface};
 
@@ -12,6 +14,7 @@ pub(crate) enum BatchOp {
     Full,
     Region(Rect),
     Scaled(Downscale),
+    RegionScaled { roi: Rect, scale: Downscale },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,12 +30,14 @@ pub(crate) enum BatchKind {
     Full,
     Region { dims: (u32, u32) },
     Scaled { scale: Downscale },
+    RegionScaled { dims: (u32, u32), scale: Downscale },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SamplingFamily {
     Unknown,
     Fast420,
+    Fast422,
     Fast444,
     Other,
 }
@@ -50,18 +55,21 @@ pub(crate) struct QueuedRequest {
     pub(crate) fmt: PixelFormat,
     pub(crate) backend: BackendRequest,
     pub(crate) op: BatchOp,
-    pub(crate) fast444_packet: Option<JpegMetalFast444PacketV1>,
-    pub(crate) fast420_packet: Option<JpegMetalFast420PacketV1>,
+    pub(crate) fast444_packet: Option<Arc<JpegMetalFast444PacketV1>>,
+    pub(crate) fast422_packet: Option<Arc<JpegMetalFast422PacketV1>>,
+    pub(crate) fast420_packet: Option<Arc<JpegMetalFast420PacketV1>>,
     pub(crate) output_slot: usize,
 }
 
 impl QueuedRequest {
+    #[cfg(test)]
     pub(crate) fn new(
         input: Arc<[u8]>,
         fmt: PixelFormat,
         backend: BackendRequest,
         op: BatchOp,
         fast444_packet: Option<JpegMetalFast444PacketV1>,
+        fast422_packet: Option<JpegMetalFast422PacketV1>,
         fast420_packet: Option<JpegMetalFast420PacketV1>,
     ) -> Self {
         Self {
@@ -69,7 +77,29 @@ impl QueuedRequest {
             fmt,
             backend,
             op,
+            fast444_packet: fast444_packet.map(Arc::new),
+            fast422_packet: fast422_packet.map(Arc::new),
+            fast420_packet: fast420_packet.map(Arc::new),
+            output_slot: usize::MAX,
+        }
+    }
+
+    pub(crate) fn new_shared(
+        input: Arc<[u8]>,
+        fmt: PixelFormat,
+        backend: BackendRequest,
+        op: BatchOp,
+        fast444_packet: Option<Arc<JpegMetalFast444PacketV1>>,
+        fast422_packet: Option<Arc<JpegMetalFast422PacketV1>>,
+        fast420_packet: Option<Arc<JpegMetalFast420PacketV1>>,
+    ) -> Self {
+        Self {
+            input,
+            fmt,
+            backend,
+            op,
             fast444_packet,
+            fast422_packet,
             fast420_packet,
             output_slot: usize::MAX,
         }
@@ -93,9 +123,32 @@ impl QueuedRequest {
                     dims: (roi.w, roi.h),
                 },
                 BatchOp::Scaled(scale) => BatchKind::Scaled { scale },
+                BatchOp::RegionScaled { roi, scale } => {
+                    let scaled = scaled_rect_covering(roi, scale);
+                    BatchKind::RegionScaled {
+                        dims: (scaled.w, scaled.h),
+                        scale,
+                    }
+                }
             },
             shape: session.resolve_batch_shape(&self.input, self.backend)?,
         })
+    }
+}
+
+fn scaled_rect_covering(rect: Rect, scale: Downscale) -> Rect {
+    let denom = scale.denominator();
+    let x_end = rect.x + rect.w;
+    let y_end = rect.y + rect.h;
+    let x0 = rect.x / denom;
+    let y0 = rect.y / denom;
+    let x1 = x_end.div_ceil(denom);
+    let y1 = y_end.div_ceil(denom);
+    Rect {
+        x: x0,
+        y: y0,
+        w: x1.saturating_sub(x0),
+        h: y1.saturating_sub(y0),
     }
 }
 
@@ -123,16 +176,33 @@ pub(crate) fn flush_if_needed(session: &mut crate::session::SessionState) {
     let batches = group_compatible_requests(std::mem::take(&mut session.queued), session);
     for batch in batches {
         session.submissions = session.submissions.saturating_add(1);
-        for request in batch {
-            let result = crate::decode_surface_from_bytes(
-                request.input.as_ref(),
-                request.fmt,
-                request.backend,
-                request.op,
-                request.fast444_packet,
-                request.fast420_packet,
-            );
-            session.completed[request.output_slot] = Some(result);
+        match crate::decode_compatible_batch(&batch) {
+            Ok(Some(results)) => {
+                for (request, result) in batch.into_iter().zip(results) {
+                    session.completed[request.output_slot] = Some(result);
+                }
+            }
+            Ok(None) => {
+                for request in batch {
+                    let result = crate::decode_surface_from_bytes(
+                        request.input.as_ref(),
+                        request.fmt,
+                        request.backend,
+                        request.op,
+                        request.fast444_packet,
+                        request.fast422_packet,
+                        request.fast420_packet,
+                    );
+                    session.completed[request.output_slot] = Some(result);
+                }
+            }
+            Err(err) => {
+                for request in batch {
+                    session.completed[request.output_slot] = Some(Err(Error::MetalKernel {
+                        message: format!("batched JPEG Metal decode failed: {err}"),
+                    }));
+                }
+            }
         }
     }
 }

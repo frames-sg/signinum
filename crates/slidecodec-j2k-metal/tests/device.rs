@@ -102,6 +102,42 @@ fn fixture_ht_gray8() -> Vec<u8> {
     encode_htj2k(&pixels, 4, 4, 1, 8, false, &options).expect("encode ht gray8")
 }
 
+fn fixture_direct_rgb8() -> Vec<u8> {
+    fixture_direct_rgb8_offset(0)
+}
+
+fn fixture_direct_rgb8_offset(offset: u8) -> Vec<u8> {
+    let pixels = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120];
+    let pixels = pixels.map(|sample: u8| sample.saturating_add(offset));
+    let options = EncodeOptions {
+        reversible: false,
+        guard_bits: 4,
+        num_decomposition_levels: 1,
+        ..EncodeOptions::default()
+    };
+    encode(&pixels, 2, 2, 3, 8, false, &options).expect("encode direct rgb8")
+}
+
+fn fixture_direct_rgb8_variant(seed: u8) -> Vec<u8> {
+    let mut pixels = Vec::with_capacity(8 * 8 * 3);
+    for y in 0..8u8 {
+        for x in 0..8u8 {
+            pixels.push(seed.wrapping_add(x.wrapping_mul(17)).wrapping_add(y));
+            pixels.push(seed.wrapping_add(x).wrapping_add(y.wrapping_mul(19)));
+            pixels.push(
+                seed.wrapping_add(x.wrapping_mul(7))
+                    .wrapping_add(y.wrapping_mul(11)),
+            );
+        }
+    }
+    let options = EncodeOptions {
+        reversible: true,
+        num_decomposition_levels: 1,
+        ..EncodeOptions::default()
+    };
+    encode(&pixels, 8, 8, 3, 8, false, &options).expect("encode direct rgb8 variant")
+}
+
 #[test]
 fn full_classic_grayscale_decode_to_metal_matches_host_decode() {
     let bytes = fixture_gray8();
@@ -378,6 +414,128 @@ fn submitted_distinct_full_grayscale_tiles_flush_as_one_device_batch() {
         session.submissions(),
         1,
         "distinct queued grayscale tiles should flush through one Metal command buffer"
+    );
+}
+
+#[test]
+fn submitted_full_rgb_tiles_flush_as_one_device_batch() {
+    let bytes = fixture_direct_rgb8();
+    let mut ctx = slidecodec_core::DecoderContext::<J2kContext>::new();
+    let mut session = MetalSession::default();
+    let mut pool = J2kScratchPool::new();
+
+    let submissions = (0..3)
+        .map(|_| {
+            Codec::submit_tile_to_device(
+                &mut ctx,
+                &mut session,
+                &mut pool,
+                &bytes,
+                PixelFormat::Rgb8,
+                BackendRequest::Metal,
+            )
+            .expect("submit rgb tile")
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        session.submissions(),
+        0,
+        "submitted RGB tile surfaces should stay queued until a wait flushes the session"
+    );
+
+    let mut host_decoder = J2kDecoder::new(&bytes).expect("host decoder");
+    let mut host = [0u8; 12];
+    host_decoder
+        .decode_into(&mut host, 6, PixelFormat::Rgb8)
+        .expect("host decode");
+
+    for submission in submissions {
+        let surface = submission.wait().expect("surface");
+        assert_eq!(surface.backend_kind(), BackendKind::Metal);
+        assert_eq!(surface.as_bytes(), host.as_slice());
+    }
+    assert_eq!(
+        session.submissions(),
+        1,
+        "compatible queued RGB tiles should flush through one Metal batch"
+    );
+}
+
+#[test]
+fn submitted_distinct_full_rgb_tiles_flush_as_one_device_batch() {
+    let rgb_tiles = [
+        fixture_direct_rgb8_variant(0),
+        fixture_direct_rgb8_variant(5),
+        fixture_direct_rgb8_variant(11),
+    ];
+    assert_ne!(rgb_tiles[0], rgb_tiles[1], "RGB batch fixtures must differ");
+    assert_ne!(rgb_tiles[1], rgb_tiles[2], "RGB batch fixtures must differ");
+    let mut ctx = slidecodec_core::DecoderContext::<J2kContext>::new();
+    let mut session = MetalSession::default();
+    let mut pool = J2kScratchPool::new();
+
+    let submissions = rgb_tiles
+        .iter()
+        .map(|bytes| {
+            Codec::submit_tile_to_device(
+                &mut ctx,
+                &mut session,
+                &mut pool,
+                bytes,
+                PixelFormat::Rgb8,
+                BackendRequest::Metal,
+            )
+            .expect("submit distinct rgb tile")
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        session.submissions(),
+        0,
+        "distinct RGB tile surfaces should stay queued until a wait flushes the session"
+    );
+
+    let expected = rgb_tiles
+        .iter()
+        .map(|bytes| {
+            let mut host_decoder = J2kDecoder::new(bytes).expect("host decoder");
+            let stride = 8 * 3;
+            let mut host = vec![0u8; stride * 8];
+            host_decoder
+                .decode_into(&mut host, stride, PixelFormat::Rgb8)
+                .expect("host decode");
+            host
+        })
+        .collect::<Vec<_>>();
+
+    let mut surfaces = Vec::with_capacity(submissions.len());
+    for (submission, host) in submissions.into_iter().zip(expected) {
+        let surface = submission.wait().expect("surface");
+        assert_eq!(surface.backend_kind(), BackendKind::Metal);
+        assert_eq!(surface.as_bytes(), host.as_slice());
+        surfaces.push(surface);
+    }
+    assert_eq!(
+        session.submissions(),
+        1,
+        "distinct queued RGB tiles should flush through one Metal command buffer"
+    );
+
+    let surface_bytes = surfaces[0].byte_len();
+    let offsets = surfaces
+        .iter()
+        .map(|surface| {
+            let (_buffer, offset) = surface.metal_buffer().expect("RGB batch Metal buffer");
+            offset
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        offsets,
+        (0..surfaces.len())
+            .map(|index| index * surface_bytes)
+            .collect::<Vec<_>>(),
+        "distinct queued RGB tiles should be packed as one stacked Metal batch output"
     );
 }
 

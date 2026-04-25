@@ -115,6 +115,7 @@ pub struct JpegMetalFast422PacketV1 {
     pub mcu_rows: u32,
     pub restart_interval_mcus: u32,
     pub restart_offsets: Vec<u32>,
+    pub entropy_checkpoints: Vec<JpegMetalEntropyCheckpointV1>,
     pub y_quant: [u16; 64],
     pub cb_quant: [u16; 64],
     pub cr_quant: [u16; 64],
@@ -171,6 +172,7 @@ struct EntropySegments {
 #[derive(Debug, Clone, Copy)]
 enum PlannerLayout {
     Fast420,
+    Fast422,
     Fast444,
 }
 
@@ -584,13 +586,27 @@ pub fn build_metal_fast422_packet(
         restart_offsets,
     } = extract_entropy_segments(&bytes[entropy_offset..], header.restart_interval)?;
     let (width, height) = header.dimensions;
+    let mcus_per_row = width.div_ceil(16);
+    let mcu_rows = height.div_ceil(8);
+    let entropy_checkpoints = build_triplet_entropy_checkpoints(
+        PlannerLayout::Fast422,
+        &entropy_bytes,
+        mcus_per_row
+            .checked_mul(mcu_rows)
+            .expect("JPEG Metal fast422 MCU count fits in u32"),
+        restart_interval_mcus,
+        &restart_offsets,
+        [&y_dc_table, &cb_dc_table, &cr_dc_table],
+        [&y_ac_table, &cb_ac_table, &cr_ac_table],
+    )?;
 
     Ok(JpegMetalFast422PacketV1 {
         dimensions: header.dimensions,
-        mcus_per_row: width.div_ceil(16),
-        mcu_rows: height.div_ceil(8),
+        mcus_per_row,
+        mcu_rows,
         restart_interval_mcus,
         restart_offsets,
+        entropy_checkpoints,
         y_quant,
         cb_quant,
         cr_quant,
@@ -865,6 +881,13 @@ fn skip_triplet_mcu(
     match layout {
         PlannerLayout::Fast420 => {
             for _ in 0..4 {
+                skip_block(reader, dc_tables[0], ac_tables[0], y_prev_dc)?;
+            }
+            skip_block(reader, dc_tables[1], ac_tables[1], cb_prev_dc)?;
+            skip_block(reader, dc_tables[2], ac_tables[2], cr_prev_dc)?;
+        }
+        PlannerLayout::Fast422 => {
+            for _ in 0..2 {
                 skip_block(reader, dc_tables[0], ac_tables[0], y_prev_dc)?;
             }
             skip_block(reader, dc_tables[1], ac_tables[1], cb_prev_dc)?;

@@ -267,6 +267,8 @@ fn ht_job(owned: &HtOwnedCodeBlockBatchJob) -> HtCodeBlockDecodeJob<'_> {
 #[cfg(target_os = "macos")]
 pub(crate) fn is_unsupported_direct_plan_error(message: &str) -> bool {
     message.contains("direct grayscale plan only supports")
+        || message.contains("direct color plan only supports")
+        || message.contains("direct component plan only supports")
         || message.contains("UnsupportedColorSpace")
         || message.contains("Unsupported color space")
 }

@@ -8,11 +8,12 @@ use crate::entropy::huffman::HuffmanTable;
 use crate::entropy::sequential::{
     decode_scan_baseline, decode_scan_baseline_rgb, decode_scan_fast_rgb_444,
     decode_scan_fast_tile_rgb, decode_scan_fast_tile_rgb_region,
-    decode_scan_fast_tile_rgb_region_scaled, stripe_region_layout, PreparedComponentPlan,
-    PreparedDecodePlan,
+    decode_scan_fast_tile_rgb_region_scaled, fast_tile_region_first_decode_mcu,
+    stripe_region_layout, PreparedComponentPlan, PreparedDecodePlan,
 };
 use crate::error::{JpegError, MarkerKind, Warning};
 use crate::info::{ColorSpace, DownscaleFactor, Info, OutputFormat, Rect, SofKind};
+use crate::internal::checkpoint::{checkpoint_before_mcu, CpuCheckpointCache, DeviceCheckpoint};
 use crate::internal::scratch::{ScratchPool, SinkRows};
 use crate::output::{
     validate_buffer, Gray8Writer, InterleavedRgbWriter, OutputWriter, Rgb8Writer, Rgba8Writer,
@@ -27,8 +28,11 @@ use slidecodec_core::{
     DecoderContext as CoreDecoderContext, Downscale, ImageCodec, ImageDecode, ImageDecodeRows,
     PixelFormat, RowSink, TileBatchDecode,
 };
+use std::sync::Mutex;
 
 const DEFAULT_MAX_DECODE_BYTES: usize = 512 * 1024 * 1024;
+const CPU_ROI_CHECKPOINT_CADENCE_MCUS: u32 = 1024;
+const CPU_ROI_CHECKPOINT_MIN_TARGET_MCUS: u32 = 4096;
 
 std::thread_local! {
     static DEFAULT_SCRATCH: RefCell<ScratchPool> = RefCell::new(ScratchPool::new());
@@ -111,6 +115,7 @@ pub struct Decoder<'a> {
     pub(crate) warnings: Arc<[Warning]>,
     pub(crate) backend: Backend,
     pub(crate) plan: PreparedDecodePlan,
+    pub(crate) cpu_entropy_checkpoints: Mutex<CpuCheckpointCache>,
 }
 
 impl<'a> Decoder<'a> {
@@ -181,6 +186,7 @@ impl<'a> Decoder<'a> {
             warnings,
             backend,
             plan,
+            cpu_entropy_checkpoints: Mutex::new(CpuCheckpointCache::default()),
         })
     }
 
@@ -618,6 +624,10 @@ impl<'a> Decoder<'a> {
                 {
                     let mut writer = Rgb8Writer::new(out, stride, scaled_roi.w);
                     let scan_bytes = &self.bytes[self.plan.scan_offset..];
+                    let checkpoint = self.checkpoint_for_mcu(
+                        scan_bytes,
+                        fast_tile_region_first_decode_mcu(&self.plan, roi, DownscaleFactor::Full),
+                    )?;
                     let scan_warnings = decode_scan_fast_tile_rgb_region(
                         &self.plan,
                         self.backend,
@@ -625,6 +635,7 @@ impl<'a> Decoder<'a> {
                         pool,
                         &mut writer,
                         roi,
+                        checkpoint.as_ref(),
                     )?;
                     Ok(DecodeOutcome {
                         decoded: roi,
@@ -635,6 +646,10 @@ impl<'a> Decoder<'a> {
                 {
                     let mut writer = Rgb8Writer::new(out, stride, scaled_roi.w);
                     let scan_bytes = &self.bytes[self.plan.scan_offset..];
+                    let checkpoint = self.checkpoint_for_mcu(
+                        scan_bytes,
+                        fast_tile_region_first_decode_mcu(&self.plan, scaled_roi, downscale),
+                    )?;
                     let scan_warnings = decode_scan_fast_tile_rgb_region_scaled(
                         &self.plan,
                         self.backend,
@@ -643,6 +658,7 @@ impl<'a> Decoder<'a> {
                         &mut writer,
                         scaled_roi,
                         downscale,
+                        checkpoint.as_ref(),
                     )?;
                     Ok(DecodeOutcome {
                         decoded: scaled_roi,
@@ -912,6 +928,28 @@ impl Decoder<'_> {
             });
         }
         Ok(self.plan.scratch_bytes)
+    }
+
+    fn checkpoint_for_mcu(
+        &self,
+        scan_bytes: &[u8],
+        target_mcu: u32,
+    ) -> Result<Option<DeviceCheckpoint>, JpegError> {
+        if self.plan.restart_interval.is_some() || target_mcu < CPU_ROI_CHECKPOINT_MIN_TARGET_MCUS {
+            return Ok(None);
+        }
+
+        let mut cache = self
+            .cpu_entropy_checkpoints
+            .lock()
+            .expect("CPU entropy checkpoint cache mutex poisoned");
+        checkpoint_before_mcu(
+            &self.plan,
+            scan_bytes,
+            CPU_ROI_CHECKPOINT_CADENCE_MCUS,
+            target_mcu,
+            &mut cache,
+        )
     }
 
     fn source_window_for_output_rect(
@@ -1742,6 +1780,49 @@ mod tests {
         v
     }
 
+    fn dc_only_420_jpeg(width: u16, height: u16) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(&[0xFF, 0xD8]);
+        v.extend_from_slice(&[0xFF, 0xDB, 0x00, 67, 0x00]);
+        v.extend(core::iter::repeat_n(1u8, 64));
+        v.extend_from_slice(&[
+            0xFF,
+            0xC0,
+            0x00,
+            17,
+            8,
+            (height >> 8) as u8,
+            height as u8,
+            (width >> 8) as u8,
+            width as u8,
+            3,
+            1,
+            (2 << 4) | 2,
+            0,
+            2,
+            (1 << 4) | 1,
+            0,
+            3,
+            (1 << 4) | 1,
+            0,
+        ]);
+        v.extend_from_slice(&[
+            0xFF, 0xC4, 0x00, 20, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ]);
+        v.extend_from_slice(&[
+            0xFF, 0xC4, 0x00, 20, 0x10, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ]);
+        v.extend_from_slice(&[0xFF, 0xDA, 0x00, 12, 3, 1, 0x00, 2, 0x00, 3, 0x00, 0, 63, 0]);
+
+        let mcus_per_row = u32::from(width).div_ceil(16);
+        let mcu_rows = u32::from(height).div_ceil(16);
+        let entropy_bits = mcus_per_row * mcu_rows * 12;
+        let entropy_bytes = (entropy_bits as usize).div_ceil(8) + 8;
+        v.extend(core::iter::repeat_n(0u8, entropy_bytes));
+        v.extend_from_slice(&[0xFF, 0xD9]);
+        v
+    }
+
     #[test]
     fn decoder_new_succeeds_on_baseline_stream() {
         let bytes = minimal_baseline_jpeg();
@@ -1802,6 +1883,39 @@ mod tests {
             .decode_into(&mut buf, 10, PixelFormat::Rgb8)
             .unwrap_err();
         assert!(matches!(err, JpegError::InvalidStride { .. }));
+    }
+
+    #[test]
+    fn large_fast_420_region_decode_populates_cpu_entropy_checkpoints() {
+        let bytes = dc_only_420_jpeg(1024, 2048);
+        let dec = Decoder::new(&bytes).expect("decoder");
+        assert!(dec.plan.matches_fast_tile_shape());
+
+        let roi = Rect {
+            x: 64,
+            y: 1536,
+            w: 64,
+            h: 64,
+        };
+        let mut out = vec![0u8; roi.w as usize * roi.h as usize * 3];
+        let mut pool = ScratchPool::new();
+        dec.decode_region_into_with_scratch(
+            &mut pool,
+            &mut out,
+            roi.w as usize * 3,
+            PixelFormat::Rgb8,
+            roi,
+        )
+        .expect("deep ROI decode");
+
+        let cache = dec
+            .cpu_entropy_checkpoints
+            .lock()
+            .expect("checkpoint cache mutex");
+        assert!(cache
+            .checkpoints
+            .iter()
+            .any(|checkpoint| checkpoint.mcu_index >= CPU_ROI_CHECKPOINT_MIN_TARGET_MCUS));
     }
 
     #[derive(Default)]

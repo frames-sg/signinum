@@ -18,9 +18,9 @@ use slidecodec_j2k_native::HtCodeBlockDecoder;
 use slidecodec_j2k_native::{
     ht_uvlc_table0, ht_uvlc_table1, ht_vlc_table0, ht_vlc_table1, ColorSpace as NativeColorSpace,
     DecodedComponents as NativeDecodedComponents, HtCodeBlockDecodeJob, HtSubBandDecodeJob,
-    J2kCodeBlockDecodeJob, J2kDirectBandId, J2kDirectGrayscalePlan, J2kDirectGrayscaleStep,
-    J2kDirectIdwtStep, J2kDirectStoreStep, J2kInverseMctJob, J2kSingleDecompositionIdwtJob,
-    J2kStoreComponentJob, J2kSubBandDecodeJob, J2kWaveletTransform,
+    J2kCodeBlockDecodeJob, J2kDirectBandId, J2kDirectColorPlan, J2kDirectGrayscalePlan,
+    J2kDirectGrayscaleStep, J2kDirectIdwtStep, J2kDirectStoreStep, J2kInverseMctJob,
+    J2kSingleDecompositionIdwtJob, J2kStoreComponentJob, J2kSubBandDecodeJob, J2kWaveletTransform,
 };
 #[cfg(target_os = "macos")]
 use slidecodec_j2k_native::{
@@ -119,6 +119,29 @@ struct J2kPackParams {
     float u16_scales[4];
 };
 
+struct J2kMctRgb8PackParams {
+    uint width;
+    uint height;
+    uint out_stride;
+    uint transform;
+    float addends[3];
+    float max_values[3];
+    float u8_scales[3];
+};
+
+struct J2kBatchedMctRgb8PackParams {
+    uint width;
+    uint height;
+    uint out_stride;
+    uint transform;
+    uint batch_count;
+    uint plane_stride;
+    uint output_stride;
+    float addends[3];
+    float max_values[3];
+    float u8_scales[3];
+};
+
 inline uchar scale_to_u8(float sample, float max_value, float scale) {
     const float clamped = clamp(sample, 0.0f, max_value);
     return uchar(min(floor(clamped * scale + 0.5f), 255.0f));
@@ -197,6 +220,81 @@ kernel void j2k_pack_rgb8(
     out[out_idx] = scale_to_u8(plane0[idx], params.max_values[0], params.u8_scales[0]);
     out[out_idx + 1] = scale_to_u8(plane1[idx], params.max_values[1], params.u8_scales[1]);
     out[out_idx + 2] = scale_to_u8(plane2[idx], params.max_values[2], params.u8_scales[2]);
+}
+
+kernel void j2k_pack_mct_rgb8(
+    device const float *plane0 [[buffer(0)]],
+    device const float *plane1 [[buffer(1)]],
+    device const float *plane2 [[buffer(2)]],
+    device uchar *out [[buffer(3)]],
+    constant J2kMctRgb8PackParams &params [[buffer(4)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= params.width || gid.y >= params.height) {
+        return;
+    }
+
+    const uint idx = gid.y * params.width + gid.x;
+    const float y0 = plane0[idx];
+    const float y1 = plane1[idx];
+    const float y2 = plane2[idx];
+    float rgb0;
+    float rgb1;
+    float rgb2;
+
+    if (params.transform == 0u) {
+        const float i1 = y0 - floor((y2 + y1) * 0.25f);
+        rgb0 = y2 + i1 + params.addends[0];
+        rgb1 = i1 + params.addends[1];
+        rgb2 = y1 + i1 + params.addends[2];
+    } else {
+        rgb0 = y2 * 1.402f + y0 + params.addends[0];
+        rgb1 = y2 * -0.71414f + y1 * -0.34413f + y0 + params.addends[1];
+        rgb2 = y1 * 1.772f + y0 + params.addends[2];
+    }
+
+    const uint out_idx = gid.y * params.out_stride + gid.x * 3u;
+    out[out_idx] = scale_to_u8(rgb0, params.max_values[0], params.u8_scales[0]);
+    out[out_idx + 1] = scale_to_u8(rgb1, params.max_values[1], params.u8_scales[1]);
+    out[out_idx + 2] = scale_to_u8(rgb2, params.max_values[2], params.u8_scales[2]);
+}
+
+kernel void j2k_pack_mct_rgb8_batched(
+    device const float *plane0 [[buffer(0)]],
+    device const float *plane1 [[buffer(1)]],
+    device const float *plane2 [[buffer(2)]],
+    device uchar *out [[buffer(3)]],
+    constant J2kBatchedMctRgb8PackParams &params [[buffer(4)]],
+    uint3 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= params.width || gid.y >= params.height || gid.z >= params.batch_count) {
+        return;
+    }
+
+    const uint plane_base = gid.z * params.plane_stride;
+    const uint idx = plane_base + gid.y * params.width + gid.x;
+    const float y0 = plane0[idx];
+    const float y1 = plane1[idx];
+    const float y2 = plane2[idx];
+    float rgb0;
+    float rgb1;
+    float rgb2;
+
+    if (params.transform == 0u) {
+        const float i1 = y0 - floor((y2 + y1) * 0.25f);
+        rgb0 = y2 + i1 + params.addends[0];
+        rgb1 = i1 + params.addends[1];
+        rgb2 = y1 + i1 + params.addends[2];
+    } else {
+        rgb0 = y2 * 1.402f + y0 + params.addends[0];
+        rgb1 = y2 * -0.71414f + y1 * -0.34413f + y0 + params.addends[1];
+        rgb2 = y1 * 1.772f + y0 + params.addends[2];
+    }
+
+    const uint out_idx = gid.z * params.output_stride + gid.y * params.out_stride + gid.x * 3u;
+    out[out_idx] = scale_to_u8(rgb0, params.max_values[0], params.u8_scales[0]);
+    out[out_idx + 1] = scale_to_u8(rgb1, params.max_values[1], params.u8_scales[1]);
+    out[out_idx + 2] = scale_to_u8(rgb2, params.max_values[2], params.u8_scales[2]);
 }
 
 kernel void j2k_pack_rgb_opaque_rgba8(
@@ -373,6 +471,35 @@ struct J2kPackParams {
     max_values: [f32; 4],
     u8_scales: [f32; 4],
     u16_scales: [f32; 4],
+}
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct J2kMctRgb8PackParams {
+    width: u32,
+    height: u32,
+    out_stride: u32,
+    transform: u32,
+    addends: [f32; 3],
+    max_values: [f32; 3],
+    u8_scales: [f32; 3],
+}
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct J2kBatchedMctRgb8PackParams {
+    width: u32,
+    height: u32,
+    out_stride: u32,
+    transform: u32,
+    batch_count: u32,
+    plane_stride: u32,
+    output_stride: u32,
+    addends: [f32; 3],
+    max_values: [f32; 3],
+    u8_scales: [f32; 3],
 }
 
 #[cfg(target_os = "macos")]
@@ -733,6 +860,8 @@ struct MetalRuntime {
     queue: CommandQueue,
     pack_gray8: ComputePipelineState,
     pack_rgb8: ComputePipelineState,
+    pack_mct_rgb8: ComputePipelineState,
+    pack_mct_rgb8_batched: ComputePipelineState,
     pack_rgb_opaque_rgba8: ComputePipelineState,
     pack_rgba8: ComputePipelineState,
     pack_gray16: ComputePipelineState,
@@ -892,6 +1021,8 @@ impl MetalRuntime {
             queue,
             pack_gray8: pipeline("j2k_pack_gray8")?,
             pack_rgb8: pipeline("j2k_pack_rgb8")?,
+            pack_mct_rgb8: pipeline("j2k_pack_mct_rgb8")?,
+            pack_mct_rgb8_batched: pipeline("j2k_pack_mct_rgb8_batched")?,
             pack_rgb_opaque_rgba8: pipeline("j2k_pack_rgb_opaque_rgba8")?,
             pack_rgba8: pipeline("j2k_pack_rgba8")?,
             pack_gray16: pipeline("j2k_pack_gray16")?,
@@ -987,6 +1118,7 @@ enum DirectStatusCheck {
     Classic { buffer: Buffer, len: usize },
     Ht { buffer: Buffer, len: usize },
     Idwt(Buffer),
+    Mct(Buffer),
 }
 
 #[cfg(target_os = "macos")]
@@ -1012,6 +1144,16 @@ pub(crate) struct PreparedDirectGrayscalePlan {
     steps: Vec<PreparedDirectGrayscaleStep>,
     classic_groups: Vec<PreparedClassicSubBandGroup>,
     ht_groups: Vec<PreparedHtSubBandGroup>,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone)]
+pub(crate) struct PreparedDirectColorPlan {
+    dimensions: (u32, u32),
+    bit_depths: [u8; 3],
+    mct: bool,
+    transform: J2kWaveletTransform,
+    component_plans: Vec<PreparedDirectGrayscalePlan>,
 }
 
 #[cfg(target_os = "macos")]
@@ -1043,7 +1185,7 @@ struct PreparedClassicSubBandGroup {
     start_step: usize,
     end_step: usize,
     total_coefficients: usize,
-    _coded_data: Vec<u8>,
+    coded_data: Vec<u8>,
     coded_buffer: Buffer,
     jobs: Vec<J2kClassicCleanupBatchJob>,
     jobs_buffer: Buffer,
@@ -1191,81 +1333,276 @@ impl PlaneStage {
         runtime: &MetalRuntime,
         fmt: PixelFormat,
     ) -> Result<Surface, Error> {
-        let pitch_bytes = self.dims.0 as usize * fmt.bytes_per_pixel();
-        let out_buffer = runtime.device.new_buffer(
-            (pitch_bytes * self.dims.1 as usize) as u64,
-            MTLResourceOptions::StorageModeShared,
-        );
-        let (output_channels, opaque_alpha, pipeline) = output_shape_for(
-            &self.color_space,
-            self.has_alpha,
-            self.plane_count,
-            fmt,
-            runtime,
-        )?;
-        let (max_values, u8_scales, u16_scales) = j2k_pack_scale_arrays(self.bit_depths);
-
-        let params = J2kPackParams {
-            width: self.dims.0,
-            height: self.dims.1,
-            out_stride: u32::try_from(pitch_bytes).expect("J2K Metal output stride fits in u32"),
-            output_channels,
-            opaque_alpha,
-            max_values,
-            u8_scales,
-            u16_scales,
-        };
-
         let command_buffer = runtime.queue.new_command_buffer();
-        let encoder = command_buffer.new_compute_command_encoder();
-        encoder.set_compute_pipeline_state(pipeline);
-        encoder.set_buffer(
-            0,
-            self.planes[0].as_ref().map(std::convert::AsRef::as_ref),
-            0,
-        );
-        encoder.set_buffer(
-            1,
-            self.planes[1].as_ref().map(std::convert::AsRef::as_ref),
-            0,
-        );
-        encoder.set_buffer(
-            2,
-            self.planes[2].as_ref().map(std::convert::AsRef::as_ref),
-            0,
-        );
-        encoder.set_buffer(
-            3,
-            self.planes[3].as_ref().map(std::convert::AsRef::as_ref),
-            0,
-        );
-        encoder.set_buffer(4, Some(&out_buffer), 0);
-        encoder.set_bytes(
-            5,
-            size_of::<J2kPackParams>() as u64,
-            (&raw const params).cast(),
-        );
-
-        let width = pipeline.thread_execution_width().max(1);
-        let max_threads = pipeline.max_total_threads_per_threadgroup().max(width);
-        let height = (max_threads / width).max(1);
-        encoder.dispatch_threads(
-            MTLSize {
-                width: u64::from(self.dims.0),
-                height: u64::from(self.dims.1),
-                depth: 1,
-            },
-            MTLSize {
-                width,
-                height,
-                depth: 1,
-            },
-        );
-        encoder.end_encoding();
+        let surface =
+            encode_plane_stage_to_surface_in_command_buffer(runtime, command_buffer, &self, fmt)?;
         command_buffer.commit();
         command_buffer.wait_until_completed();
+        Ok(surface)
+    }
+}
 
-        Ok(Surface::from_metal_buffer(out_buffer, self.dims, fmt))
+#[cfg(target_os = "macos")]
+fn encode_plane_stage_to_surface_in_command_buffer(
+    runtime: &MetalRuntime,
+    command_buffer: &CommandBufferRef,
+    stage: &PlaneStage,
+    fmt: PixelFormat,
+) -> Result<Surface, Error> {
+    let pitch_bytes = stage.dims.0 as usize * fmt.bytes_per_pixel();
+    let out_buffer = runtime.device.new_buffer(
+        (pitch_bytes * stage.dims.1 as usize) as u64,
+        MTLResourceOptions::StorageModeShared,
+    );
+    let (output_channels, opaque_alpha, pipeline) = output_shape_for(
+        &stage.color_space,
+        stage.has_alpha,
+        stage.plane_count,
+        fmt,
+        runtime,
+    )?;
+    let (max_values, u8_scales, u16_scales) = j2k_pack_scale_arrays(stage.bit_depths);
+
+    let params = J2kPackParams {
+        width: stage.dims.0,
+        height: stage.dims.1,
+        out_stride: u32::try_from(pitch_bytes).expect("J2K Metal output stride fits in u32"),
+        output_channels,
+        opaque_alpha,
+        max_values,
+        u8_scales,
+        u16_scales,
+    };
+
+    let encoder = command_buffer.new_compute_command_encoder();
+    encoder.set_compute_pipeline_state(pipeline);
+    encoder.set_buffer(
+        0,
+        stage.planes[0].as_ref().map(std::convert::AsRef::as_ref),
+        0,
+    );
+    encoder.set_buffer(
+        1,
+        stage.planes[1].as_ref().map(std::convert::AsRef::as_ref),
+        0,
+    );
+    encoder.set_buffer(
+        2,
+        stage.planes[2].as_ref().map(std::convert::AsRef::as_ref),
+        0,
+    );
+    encoder.set_buffer(
+        3,
+        stage.planes[3].as_ref().map(std::convert::AsRef::as_ref),
+        0,
+    );
+    encoder.set_buffer(4, Some(&out_buffer), 0);
+    encoder.set_bytes(
+        5,
+        size_of::<J2kPackParams>() as u64,
+        (&raw const params).cast(),
+    );
+
+    let width = pipeline.thread_execution_width().max(1);
+    let max_threads = pipeline.max_total_threads_per_threadgroup().max(width);
+    let height = (max_threads / width).max(1);
+    encoder.dispatch_threads(
+        MTLSize {
+            width: u64::from(stage.dims.0),
+            height: u64::from(stage.dims.1),
+            depth: 1,
+        },
+        MTLSize {
+            width,
+            height,
+            depth: 1,
+        },
+    );
+    encoder.end_encoding();
+
+    Ok(Surface::from_metal_buffer(out_buffer, stage.dims, fmt))
+}
+
+#[cfg(target_os = "macos")]
+fn encode_mct_rgb8_to_surface_in_command_buffer(
+    runtime: &MetalRuntime,
+    command_buffer: &CommandBufferRef,
+    planes: [&Buffer; 3],
+    dims: (u32, u32),
+    bit_depths: [u8; 3],
+    transform: J2kWaveletTransform,
+) -> Surface {
+    let pitch_bytes = dims.0 as usize * PixelFormat::Rgb8.bytes_per_pixel();
+    let out_buffer = runtime.device.new_buffer(
+        (pitch_bytes * dims.1 as usize) as u64,
+        MTLResourceOptions::StorageModeShared,
+    );
+    let (max_values, u8_scales, _) = j2k_pack_scale_arrays([
+        u32::from(bit_depths[0]),
+        u32::from(bit_depths[1]),
+        u32::from(bit_depths[2]),
+        0,
+    ]);
+    let params = J2kMctRgb8PackParams {
+        width: dims.0,
+        height: dims.1,
+        out_stride: u32::try_from(pitch_bytes).expect("J2K Metal output stride fits in u32"),
+        transform: mct_transform_code(transform),
+        addends: [
+            signed_sample_bias(bit_depths[0]),
+            signed_sample_bias(bit_depths[1]),
+            signed_sample_bias(bit_depths[2]),
+        ],
+        max_values: [max_values[0], max_values[1], max_values[2]],
+        u8_scales: [u8_scales[0], u8_scales[1], u8_scales[2]],
+    };
+
+    let encoder = command_buffer.new_compute_command_encoder();
+    encoder.set_compute_pipeline_state(&runtime.pack_mct_rgb8);
+    encoder.set_buffer(0, Some(planes[0]), 0);
+    encoder.set_buffer(1, Some(planes[1]), 0);
+    encoder.set_buffer(2, Some(planes[2]), 0);
+    encoder.set_buffer(3, Some(&out_buffer), 0);
+    encoder.set_bytes(
+        4,
+        size_of::<J2kMctRgb8PackParams>() as u64,
+        (&raw const params).cast(),
+    );
+
+    let width = runtime.pack_mct_rgb8.thread_execution_width().max(1);
+    let max_threads = runtime
+        .pack_mct_rgb8
+        .max_total_threads_per_threadgroup()
+        .max(width);
+    let height = (max_threads / width).max(1);
+    encoder.dispatch_threads(
+        MTLSize {
+            width: u64::from(dims.0),
+            height: u64::from(dims.1),
+            depth: 1,
+        },
+        MTLSize {
+            width,
+            height,
+            depth: 1,
+        },
+    );
+    encoder.end_encoding();
+
+    Surface::from_metal_buffer(out_buffer, dims, PixelFormat::Rgb8)
+}
+
+#[cfg(target_os = "macos")]
+fn encode_batched_mct_rgb8_to_surfaces_in_command_buffer(
+    runtime: &MetalRuntime,
+    command_buffer: &CommandBufferRef,
+    planes: [&Buffer; 3],
+    dims: (u32, u32),
+    count: usize,
+    bit_depths: [u8; 3],
+    transform: J2kWaveletTransform,
+) -> Result<Vec<Surface>, Error> {
+    let count_u32 = u32::try_from(count).map_err(|_| Error::MetalKernel {
+        message: "J2K MetalDirect color batch count exceeds u32".to_string(),
+    })?;
+    let pitch_bytes = dims.0 as usize * PixelFormat::Rgb8.bytes_per_pixel();
+    let surface_bytes =
+        pitch_bytes
+            .checked_mul(dims.1 as usize)
+            .ok_or_else(|| Error::MetalKernel {
+                message: "J2K MetalDirect color batch output size overflow".to_string(),
+            })?;
+    let total_bytes = surface_bytes
+        .checked_mul(count)
+        .ok_or_else(|| Error::MetalKernel {
+            message: "J2K MetalDirect color batch output size overflow".to_string(),
+        })?;
+    let out_buffer = runtime
+        .device
+        .new_buffer(total_bytes as u64, MTLResourceOptions::StorageModeShared);
+    let plane_stride = dims
+        .0
+        .checked_mul(dims.1)
+        .ok_or_else(|| Error::MetalKernel {
+            message: "J2K MetalDirect color batch plane stride overflow".to_string(),
+        })?;
+    let (max_values, u8_scales, _) = j2k_pack_scale_arrays([
+        u32::from(bit_depths[0]),
+        u32::from(bit_depths[1]),
+        u32::from(bit_depths[2]),
+        0,
+    ]);
+    let params = J2kBatchedMctRgb8PackParams {
+        width: dims.0,
+        height: dims.1,
+        out_stride: u32::try_from(pitch_bytes).expect("J2K Metal output stride fits in u32"),
+        transform: mct_transform_code(transform),
+        batch_count: count_u32,
+        plane_stride,
+        output_stride: u32::try_from(surface_bytes).map_err(|_| Error::MetalKernel {
+            message: "J2K MetalDirect color batch surface stride exceeds u32".to_string(),
+        })?,
+        addends: [
+            signed_sample_bias(bit_depths[0]),
+            signed_sample_bias(bit_depths[1]),
+            signed_sample_bias(bit_depths[2]),
+        ],
+        max_values: [max_values[0], max_values[1], max_values[2]],
+        u8_scales: [u8_scales[0], u8_scales[1], u8_scales[2]],
+    };
+
+    let encoder = command_buffer.new_compute_command_encoder();
+    encoder.set_compute_pipeline_state(&runtime.pack_mct_rgb8_batched);
+    encoder.set_buffer(0, Some(planes[0]), 0);
+    encoder.set_buffer(1, Some(planes[1]), 0);
+    encoder.set_buffer(2, Some(planes[2]), 0);
+    encoder.set_buffer(3, Some(&out_buffer), 0);
+    encoder.set_bytes(
+        4,
+        size_of::<J2kBatchedMctRgb8PackParams>() as u64,
+        (&raw const params).cast(),
+    );
+
+    let width = runtime
+        .pack_mct_rgb8_batched
+        .thread_execution_width()
+        .max(1);
+    let max_threads = runtime
+        .pack_mct_rgb8_batched
+        .max_total_threads_per_threadgroup()
+        .max(width);
+    let height = (max_threads / width).max(1);
+    encoder.dispatch_threads(
+        MTLSize {
+            width: u64::from(dims.0),
+            height: u64::from(dims.1),
+            depth: u64::from(count_u32),
+        },
+        MTLSize {
+            width,
+            height,
+            depth: 1,
+        },
+    );
+    encoder.end_encoding();
+
+    Ok((0..count)
+        .map(|index| {
+            Surface::from_metal_buffer_with_offset(
+                out_buffer.clone(),
+                dims,
+                PixelFormat::Rgb8,
+                index * surface_bytes,
+            )
+        })
+        .collect())
+}
+
+#[cfg(target_os = "macos")]
+fn mct_transform_code(transform: J2kWaveletTransform) -> u32 {
+    match transform {
+        J2kWaveletTransform::Reversible53 => 0,
+        J2kWaveletTransform::Irreversible97 => 1,
     }
 }
 
@@ -1489,7 +1826,7 @@ fn prepare_classic_sub_band_group(
             start_step,
             end_step,
             total_coefficients: output_base,
-            _coded_data: coded_data,
+            coded_data,
             coded_buffer,
             jobs,
             jobs_buffer,
@@ -1677,6 +2014,32 @@ pub(crate) fn prepare_direct_grayscale_plan(
         steps,
         classic_groups,
         ht_groups,
+    })
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn prepare_direct_color_plan(
+    plan: &J2kDirectColorPlan,
+) -> Result<PreparedDirectColorPlan, Error> {
+    let component_plans = plan
+        .component_plans
+        .iter()
+        .map(prepare_direct_grayscale_plan)
+        .collect::<Result<Vec<_>, _>>()?;
+    if component_plans.len() != 3 {
+        return Err(Error::MetalKernel {
+            message: format!(
+                "J2K MetalDirect color plan expected 3 component plans, got {}",
+                component_plans.len()
+            ),
+        });
+    }
+    Ok(PreparedDirectColorPlan {
+        dimensions: plan.dimensions,
+        bit_depths: plan.bit_depths,
+        mct: plan.mct,
+        transform: plan.transform,
+        component_plans,
     })
 }
 
@@ -2194,6 +2557,225 @@ fn encode_prepared_direct_grayscale_plan_in_command_buffer(
 }
 
 #[cfg(target_os = "macos")]
+fn encode_prepared_direct_component_plane_in_command_buffer(
+    runtime: &MetalRuntime,
+    command_buffer: &CommandBufferRef,
+    plan: &PreparedDirectGrayscalePlan,
+    retained_buffers: &mut Vec<Buffer>,
+    status_checks: &mut Vec<DirectStatusCheck>,
+    scratch_buffers: &mut Vec<DirectScratchBuffer>,
+) -> Result<Buffer, Error> {
+    let encoder = command_buffer.new_compute_command_encoder();
+    let result = (|| {
+        let mut bands = Vec::<DirectBandSlice>::new();
+        let mut final_plane = None;
+        let mut step_idx = 0;
+
+        while step_idx < plan.steps.len() {
+            if let Some(group) = plan.classic_group_starting_at(step_idx) {
+                let output = take_f32_scratch_buffer(runtime, group.total_coefficients);
+                let (buffers, status_check) =
+                    encode_prepared_classic_sub_band_group_to_buffer_in_encoder(
+                        runtime,
+                        encoder,
+                        group,
+                        &output.buffer,
+                        scratch_buffers,
+                    )?;
+                retained_buffers.extend(buffers);
+                status_checks.push(status_check);
+                for member in &group.members {
+                    bands.push(DirectBandSlice {
+                        band_id: member.band_id,
+                        buffer: output.buffer.clone(),
+                        offset_bytes: member.offset_elements * size_of::<f32>(),
+                    });
+                }
+                scratch_buffers.push(output);
+                step_idx = group.end_step;
+                continue;
+            }
+
+            if let Some(group) = plan.ht_group_starting_at(step_idx) {
+                let output = take_f32_scratch_buffer(runtime, group.total_coefficients);
+                let (buffers, status_check) =
+                    encode_prepared_ht_sub_band_group_to_buffer_in_encoder(
+                        runtime,
+                        encoder,
+                        group,
+                        &output.buffer,
+                    );
+                retained_buffers.extend(buffers);
+                status_checks.push(status_check);
+                for member in &group.members {
+                    bands.push(DirectBandSlice {
+                        band_id: member.band_id,
+                        buffer: output.buffer.clone(),
+                        offset_bytes: member.offset_elements * size_of::<f32>(),
+                    });
+                }
+                scratch_buffers.push(output);
+                step_idx = group.end_step;
+                continue;
+            }
+
+            match &plan.steps[step_idx] {
+                PreparedDirectGrayscaleStep::ClassicSubBand(sub_band) => {
+                    let output = take_f32_scratch_buffer(
+                        runtime,
+                        sub_band.width as usize * sub_band.height as usize,
+                    );
+                    let (buffers, status_check) =
+                        encode_prepared_classic_sub_band_to_buffer_in_encoder(
+                            runtime,
+                            encoder,
+                            sub_band,
+                            &output.buffer,
+                            scratch_buffers,
+                        )?;
+                    retained_buffers.extend(buffers);
+                    status_checks.push(status_check);
+                    bands.push(DirectBandSlice {
+                        band_id: sub_band.band_id,
+                        buffer: output.buffer.clone(),
+                        offset_bytes: 0,
+                    });
+                    scratch_buffers.push(output);
+                }
+                PreparedDirectGrayscaleStep::HtSubBand(sub_band) => {
+                    let output = take_f32_scratch_buffer(
+                        runtime,
+                        sub_band.width as usize * sub_band.height as usize,
+                    );
+                    let (buffers, status_check) = encode_prepared_ht_sub_band_to_buffer_in_encoder(
+                        runtime,
+                        encoder,
+                        sub_band,
+                        &output.buffer,
+                    );
+                    retained_buffers.extend(buffers);
+                    status_checks.push(status_check);
+                    bands.push(DirectBandSlice {
+                        band_id: sub_band.band_id,
+                        buffer: output.buffer.clone(),
+                        offset_bytes: 0,
+                    });
+                    scratch_buffers.push(output);
+                }
+                PreparedDirectGrayscaleStep::Idwt(idwt) => {
+                    let (ll, ll_offset) =
+                        lookup_direct_band_slice(&bands, idwt.ll_band_id, idwt.ll)?;
+                    let (hl, hl_offset) =
+                        lookup_direct_band_slice(&bands, idwt.hl_band_id, idwt.hl)?;
+                    let (lh, lh_offset) =
+                        lookup_direct_band_slice(&bands, idwt.lh_band_id, idwt.lh)?;
+                    let (hh, hh_offset) =
+                        lookup_direct_band_slice(&bands, idwt.hh_band_id, idwt.hh)?;
+                    let params = J2kIdwtSingleDecompositionParams {
+                        x0: idwt.rect.x0,
+                        y0: idwt.rect.y0,
+                        width: idwt.rect.width(),
+                        height: idwt.rect.height(),
+                        ll_width: idwt.ll.width(),
+                        ll_height: idwt.ll.height(),
+                        hl_width: idwt.hl.width(),
+                        hl_height: idwt.hl.height(),
+                        lh_width: idwt.lh.width(),
+                        lh_height: idwt.lh.height(),
+                        hh_width: idwt.hh.width(),
+                        hh_height: idwt.hh.height(),
+                    };
+                    let output = take_f32_scratch_buffer(
+                        runtime,
+                        idwt.rect.width() as usize * idwt.rect.height() as usize,
+                    );
+                    match idwt.transform {
+                        J2kWaveletTransform::Reversible53 => {
+                            dispatch_reversible53_single_decomposition_buffers_in_encoder_with_offsets(
+                                runtime,
+                                encoder,
+                                &ll,
+                                ll_offset,
+                                &hl,
+                                hl_offset,
+                                &lh,
+                                lh_offset,
+                                &hh,
+                                hh_offset,
+                                params,
+                                &output.buffer,
+                                0,
+                            );
+                        }
+                        J2kWaveletTransform::Irreversible97 => {
+                            status_checks.push(
+                                dispatch_irreversible97_single_decomposition_buffers_in_encoder_with_offsets(
+                                    runtime,
+                                    encoder,
+                                    &ll,
+                                    ll_offset,
+                                    &hl,
+                                    hl_offset,
+                                    &lh,
+                                    lh_offset,
+                                    &hh,
+                                    hh_offset,
+                                    params,
+                                    &output.buffer,
+                                    0,
+                                ),
+                            );
+                        }
+                    }
+                    bands.push(DirectBandSlice {
+                        band_id: idwt.output_band_id,
+                        buffer: output.buffer.clone(),
+                        offset_bytes: 0,
+                    });
+                    scratch_buffers.push(output);
+                }
+                PreparedDirectGrayscaleStep::Store(store) => {
+                    let (input, input_offset) =
+                        lookup_direct_band_slice(&bands, store.input_band_id, store.input_rect)?;
+                    let output = take_f32_scratch_buffer(
+                        runtime,
+                        store.output_width as usize * store.output_height as usize,
+                    );
+                    dispatch_store_component_buffer_in_encoder_with_offsets(
+                        runtime,
+                        encoder,
+                        &input,
+                        input_offset,
+                        &output.buffer,
+                        0,
+                        J2kStoreParams {
+                            input_width: store.input_rect.width(),
+                            source_x: store.source_x,
+                            source_y: store.source_y,
+                            copy_width: store.copy_width,
+                            copy_height: store.copy_height,
+                            output_width: store.output_width,
+                            output_x: store.output_x,
+                            output_y: store.output_y,
+                            addend: store.addend,
+                        },
+                    );
+                    final_plane = Some(output.buffer.clone());
+                    scratch_buffers.push(output);
+                }
+            }
+            step_idx += 1;
+        }
+
+        final_plane.ok_or_else(|| Error::MetalKernel {
+            message: "J2K MetalDirect component plan did not produce a stored plane".to_string(),
+        })
+    })();
+    encoder.end_encoding();
+    result
+}
+
+#[cfg(target_os = "macos")]
 pub(crate) fn execute_repeated_prepared_direct_grayscale_plan(
     plan: &PreparedDirectGrayscalePlan,
     fmt: PixelFormat,
@@ -2298,6 +2880,171 @@ pub(crate) fn execute_prepared_direct_grayscale_plan_batch(
 }
 
 #[cfg(target_os = "macos")]
+pub(crate) fn execute_prepared_direct_color_plan(
+    plan: &PreparedDirectColorPlan,
+    fmt: PixelFormat,
+) -> Result<Surface, Error> {
+    let plans = [Arc::new(plan.clone())];
+    let mut surfaces = execute_prepared_direct_color_plan_batch(&plans, fmt)?;
+    surfaces.pop().ok_or_else(|| Error::MetalKernel {
+        message: "J2K MetalDirect color plan produced no surface".to_string(),
+    })
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn execute_prepared_direct_color_plan_batch(
+    plans: &[Arc<PreparedDirectColorPlan>],
+    fmt: PixelFormat,
+) -> Result<Vec<Surface>, Error> {
+    if plans.is_empty() {
+        return Ok(Vec::new());
+    }
+    if plans
+        .iter()
+        .any(|plan| !prepared_direct_color_plan_supports_runtime(plan, fmt))
+    {
+        return Err(Error::MetalKernel {
+            message: "unsupported classic kernel input in direct component plan".to_string(),
+        });
+    }
+
+    with_runtime(|runtime| {
+        let command_buffer = runtime.queue.new_command_buffer();
+        let mut retained_buffers = Vec::new();
+        let mut status_checks = Vec::new();
+        let mut scratch_buffers = Vec::new();
+
+        if fmt == PixelFormat::Rgb8 {
+            if let Some(surfaces) = try_encode_stacked_mct_rgb8_direct_color_batch(
+                runtime,
+                command_buffer,
+                plans,
+                &mut retained_buffers,
+                &mut status_checks,
+                &mut scratch_buffers,
+            )? {
+                command_buffer.commit();
+                command_buffer.wait_until_completed();
+                for status_check in status_checks {
+                    validate_direct_status(status_check)?;
+                }
+                drop(retained_buffers);
+                recycle_scratch_buffers(runtime, scratch_buffers);
+                return Ok(surfaces);
+            }
+        }
+
+        let mut surfaces = Vec::with_capacity(plans.len());
+
+        for plan in plans {
+            let surface = encode_prepared_direct_color_plan_in_command_buffer(
+                runtime,
+                command_buffer,
+                plan,
+                fmt,
+                &mut retained_buffers,
+                &mut status_checks,
+                &mut scratch_buffers,
+            )?;
+            surfaces.push(surface);
+        }
+
+        command_buffer.commit();
+        command_buffer.wait_until_completed();
+        for status_check in status_checks {
+            validate_direct_status(status_check)?;
+        }
+        drop(retained_buffers);
+        recycle_scratch_buffers(runtime, scratch_buffers);
+        Ok(surfaces)
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn signed_sample_bias(bit_depth: u8) -> f32 {
+    2.0_f32.powi(i32::from(bit_depth) - 1)
+}
+
+#[cfg(target_os = "macos")]
+fn encode_prepared_direct_color_plan_in_command_buffer(
+    runtime: &MetalRuntime,
+    command_buffer: &CommandBufferRef,
+    plan: &PreparedDirectColorPlan,
+    fmt: PixelFormat,
+    retained_buffers: &mut Vec<Buffer>,
+    status_checks: &mut Vec<DirectStatusCheck>,
+    scratch_buffers: &mut Vec<DirectScratchBuffer>,
+) -> Result<Surface, Error> {
+    if plan.component_plans.len() != 3 {
+        return Err(Error::MetalKernel {
+            message: format!(
+                "J2K MetalDirect color execution expected 3 component plans, got {}",
+                plan.component_plans.len()
+            ),
+        });
+    }
+
+    let mut planes = Vec::with_capacity(3);
+    for component_plan in &plan.component_plans {
+        planes.push(encode_prepared_direct_component_plane_in_command_buffer(
+            runtime,
+            command_buffer,
+            component_plan,
+            retained_buffers,
+            status_checks,
+            scratch_buffers,
+        )?);
+    }
+
+    if plan.mct && fmt == PixelFormat::Rgb8 {
+        return Ok(encode_mct_rgb8_to_surface_in_command_buffer(
+            runtime,
+            command_buffer,
+            [&planes[0], &planes[1], &planes[2]],
+            plan.dimensions,
+            plan.bit_depths,
+            plan.transform,
+        ));
+    }
+
+    if plan.mct {
+        let len = plan.dimensions.0 as usize * plan.dimensions.1 as usize;
+        status_checks.push(dispatch_inverse_mct_buffers_in_command_buffer(
+            runtime,
+            command_buffer,
+            [&planes[0], &planes[1], &planes[2]],
+            len,
+            plan.transform,
+            [
+                signed_sample_bias(plan.bit_depths[0]),
+                signed_sample_bias(plan.bit_depths[1]),
+                signed_sample_bias(plan.bit_depths[2]),
+            ],
+        )?);
+    }
+
+    let stage = PlaneStage {
+        dims: plan.dimensions,
+        plane_count: 3,
+        color_space: NativeColorSpace::RGB,
+        has_alpha: false,
+        bit_depths: [
+            u32::from(plan.bit_depths[0]),
+            u32::from(plan.bit_depths[1]),
+            u32::from(plan.bit_depths[2]),
+            0,
+        ],
+        planes: [
+            Some(planes[0].clone()),
+            Some(planes[1].clone()),
+            Some(planes[2].clone()),
+            None,
+        ],
+    };
+    encode_plane_stage_to_surface_in_command_buffer(runtime, command_buffer, &stage, fmt)
+}
+
+#[cfg(target_os = "macos")]
 #[derive(Clone)]
 struct DirectBandSlice {
     band_id: J2kDirectBandId,
@@ -2353,6 +3100,588 @@ fn lookup_repeated_direct_band_layout(
             message: "J2K MetalDirect repeated band stride exceeds u32".to_string(),
         })?;
     Ok((buffer, offset_bytes, stride_elements))
+}
+
+#[cfg(target_os = "macos")]
+struct StackedDirectComponentPlane {
+    buffer: Buffer,
+    dimensions: (u32, u32),
+    count: usize,
+}
+
+#[cfg(target_os = "macos")]
+fn try_encode_stacked_mct_rgb8_direct_color_batch(
+    runtime: &MetalRuntime,
+    command_buffer: &CommandBufferRef,
+    plans: &[Arc<PreparedDirectColorPlan>],
+    retained_buffers: &mut Vec<Buffer>,
+    status_checks: &mut Vec<DirectStatusCheck>,
+    scratch_buffers: &mut Vec<DirectScratchBuffer>,
+) -> Result<Option<Vec<Surface>>, Error> {
+    let Some(first) = plans.first() else {
+        return Ok(Some(Vec::new()));
+    };
+    if plans.len() <= 1
+        || !first.mct
+        || first.component_plans.len() != 3
+        || !plans.iter().all(|plan| {
+            plan.mct
+                && plan.dimensions == first.dimensions
+                && plan.bit_depths == first.bit_depths
+                && plan.transform == first.transform
+                && plan.component_plans.len() == 3
+        })
+    {
+        return Ok(None);
+    }
+
+    let mut stacked_planes = Vec::with_capacity(3);
+    for component_idx in 0..3 {
+        let component_plan_refs = plans
+            .iter()
+            .map(|plan| &plan.component_plans[component_idx])
+            .collect::<Vec<_>>();
+        if !supports_stacked_direct_component_plane_batch(&component_plan_refs) {
+            return Ok(None);
+        }
+        stacked_planes.push(encode_stacked_direct_component_plane_batch(
+            runtime,
+            command_buffer,
+            &component_plan_refs,
+            retained_buffers,
+            status_checks,
+            scratch_buffers,
+        )?);
+    }
+
+    if !stacked_planes
+        .iter()
+        .all(|plane| plane.dimensions == first.dimensions && plane.count == plans.len())
+    {
+        return Ok(None);
+    }
+
+    let surfaces = encode_batched_mct_rgb8_to_surfaces_in_command_buffer(
+        runtime,
+        command_buffer,
+        [
+            &stacked_planes[0].buffer,
+            &stacked_planes[1].buffer,
+            &stacked_planes[2].buffer,
+        ],
+        first.dimensions,
+        plans.len(),
+        first.bit_depths,
+        first.transform,
+    )?;
+    Ok(Some(surfaces))
+}
+
+#[cfg(target_os = "macos")]
+fn supports_stacked_direct_component_plane_batch(plans: &[&PreparedDirectGrayscalePlan]) -> bool {
+    let Some(first) = plans.first() else {
+        return false;
+    };
+    if plans.iter().any(|plan| {
+        plan.dimensions != first.dimensions
+            || plan.bit_depth != first.bit_depth
+            || plan.steps.len() != first.steps.len()
+    }) {
+        return false;
+    }
+
+    let mut step_idx = 0;
+    while step_idx < first.steps.len() {
+        if let Some(group) = first.classic_group_starting_at(step_idx) {
+            if group.end_step <= step_idx
+                || !plans.iter().all(|plan| {
+                    plan.classic_group_starting_at(step_idx)
+                        .is_some_and(|other| classic_group_shapes_match(group, other))
+                })
+            {
+                return false;
+            }
+            step_idx = group.end_step;
+            continue;
+        }
+        if first.ht_group_starting_at(step_idx).is_some() {
+            return false;
+        }
+
+        match &first.steps[step_idx] {
+            PreparedDirectGrayscaleStep::ClassicSubBand(sub_band) => {
+                if !plans.iter().all(|plan| {
+                    matches!(
+                        &plan.steps[step_idx],
+                        PreparedDirectGrayscaleStep::ClassicSubBand(other)
+                            if classic_sub_band_shapes_match(sub_band, other)
+                    )
+                }) {
+                    return false;
+                }
+            }
+            PreparedDirectGrayscaleStep::HtSubBand(_) => return false,
+            PreparedDirectGrayscaleStep::Idwt(idwt) => {
+                if !plans.iter().all(|plan| {
+                    matches!(
+                        &plan.steps[step_idx],
+                        PreparedDirectGrayscaleStep::Idwt(other)
+                            if idwt_shapes_match(idwt, other)
+                    )
+                }) {
+                    return false;
+                }
+            }
+            PreparedDirectGrayscaleStep::Store(store) => {
+                if !plans.iter().all(|plan| {
+                    matches!(
+                        &plan.steps[step_idx],
+                        PreparedDirectGrayscaleStep::Store(other)
+                            if store_shapes_match(store, other)
+                    )
+                }) {
+                    return false;
+                }
+            }
+        }
+        step_idx += 1;
+    }
+
+    true
+}
+
+#[cfg(target_os = "macos")]
+fn prepared_direct_color_plan_supports_runtime(
+    plan: &PreparedDirectColorPlan,
+    fmt: PixelFormat,
+) -> bool {
+    matches!(
+        fmt,
+        PixelFormat::Rgb8 | PixelFormat::Rgba8 | PixelFormat::Rgb16
+    ) && plan.component_plans.len() == 3
+        && plan
+            .component_plans
+            .iter()
+            .all(prepared_direct_component_plan_supports_runtime)
+}
+
+#[cfg(target_os = "macos")]
+fn prepared_direct_component_plan_supports_runtime(plan: &PreparedDirectGrayscalePlan) -> bool {
+    plan.steps.iter().all(|step| match step {
+        PreparedDirectGrayscaleStep::ClassicSubBand(sub_band) => sub_band
+            .jobs
+            .iter()
+            .all(|job| classic_prepared_job_supports_runtime(job, &sub_band.segments)),
+        PreparedDirectGrayscaleStep::HtSubBand(_)
+        | PreparedDirectGrayscaleStep::Idwt(_)
+        | PreparedDirectGrayscaleStep::Store(_) => true,
+    }) && plan.classic_groups.iter().all(|group| {
+        group
+            .jobs
+            .iter()
+            .all(|job| classic_prepared_job_supports_runtime(job, &group.segments))
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn classic_prepared_job_supports_runtime(
+    job: &J2kClassicCleanupBatchJob,
+    segments: &[J2kClassicSegment],
+) -> bool {
+    if job.width == 0 || job.height == 0 {
+        return true;
+    }
+    if job.width > J2K_CLASSIC_MAX_WIDTH || job.height > J2K_CLASSIC_MAX_HEIGHT {
+        return false;
+    }
+    if job.output_stride < job.width {
+        return false;
+    }
+    if job.total_bitplanes == 0 || job.total_bitplanes > 31 || job.missing_msbs >= 31 {
+        return false;
+    }
+    let bitplanes = job.total_bitplanes.saturating_sub(job.missing_msbs);
+    if bitplanes == 0 {
+        return false;
+    }
+    let max_coding_passes = 1 + 3 * (bitplanes - 1);
+    if job.number_of_coding_passes == 0 || job.number_of_coding_passes > max_coding_passes {
+        return false;
+    }
+
+    let start = job.segment_offset as usize;
+    let count = job.segment_count as usize;
+    let Some(end) = start.checked_add(count) else {
+        return false;
+    };
+    if end > segments.len() || count == 0 {
+        return false;
+    }
+
+    let uses_bypass = (job.style_flags & J2K_CLASSIC_STYLE_SELECTIVE_ARITHMETIC_CODING_BYPASS) != 0;
+    let mut expected_start = 0u32;
+    let mut expected_offset = job.coded_offset;
+    for segment in &segments[start..end] {
+        if segment.start_coding_pass != expected_start
+            || segment.start_coding_pass > segment.end_coding_pass
+        {
+            return false;
+        }
+        if uses_bypass {
+            let expected_arithmetic =
+                segment.start_coding_pass <= 9 || segment.start_coding_pass % 3 == 0;
+            if (segment.use_arithmetic != 0) != expected_arithmetic {
+                return false;
+            }
+            if segment.use_arithmetic == 0 {
+                if segment.start_coding_pass % 3 != 1 {
+                    return false;
+                }
+                if segment
+                    .end_coding_pass
+                    .saturating_sub(segment.start_coding_pass)
+                    > 2
+                {
+                    return false;
+                }
+                if (segment.start_coding_pass..segment.end_coding_pass).any(|pass| pass % 3 == 0) {
+                    return false;
+                }
+            }
+        } else if segment.use_arithmetic == 0 {
+            return false;
+        }
+
+        let Some(data_end) = segment.data_offset.checked_add(segment.data_length) else {
+            return false;
+        };
+        if segment.data_offset != expected_offset
+            || segment.data_offset < job.coded_offset
+            || data_end > job.coded_offset.saturating_add(job.coded_len)
+        {
+            return false;
+        }
+        expected_offset = data_end;
+        expected_start = segment.end_coding_pass;
+    }
+
+    expected_start == job.number_of_coding_passes
+        && expected_offset == job.coded_offset.saturating_add(job.coded_len)
+}
+
+#[cfg(target_os = "macos")]
+fn classic_group_shapes_match(
+    first: &PreparedClassicSubBandGroup,
+    other: &PreparedClassicSubBandGroup,
+) -> bool {
+    first.end_step == other.end_step
+        && first.total_coefficients == other.total_coefficients
+        && first.members.len() == other.members.len()
+        && first
+            .members
+            .iter()
+            .zip(&other.members)
+            .all(|(left, right)| left.offset_elements == right.offset_elements)
+}
+
+#[cfg(target_os = "macos")]
+fn classic_sub_band_shapes_match(
+    first: &PreparedClassicSubBand,
+    other: &PreparedClassicSubBand,
+) -> bool {
+    first.width == other.width && first.height == other.height
+}
+
+#[cfg(target_os = "macos")]
+fn rect_shapes_match(
+    first: slidecodec_j2k_native::J2kRect,
+    other: slidecodec_j2k_native::J2kRect,
+) -> bool {
+    first.x0 == other.x0 && first.y0 == other.y0 && first.x1 == other.x1 && first.y1 == other.y1
+}
+
+#[cfg(target_os = "macos")]
+fn idwt_shapes_match(first: &J2kDirectIdwtStep, other: &J2kDirectIdwtStep) -> bool {
+    first.transform == other.transform
+        && rect_shapes_match(first.rect, other.rect)
+        && rect_shapes_match(first.ll, other.ll)
+        && rect_shapes_match(first.hl, other.hl)
+        && rect_shapes_match(first.lh, other.lh)
+        && rect_shapes_match(first.hh, other.hh)
+}
+
+#[cfg(target_os = "macos")]
+fn store_shapes_match(first: &J2kDirectStoreStep, other: &J2kDirectStoreStep) -> bool {
+    rect_shapes_match(first.input_rect, other.input_rect)
+        && first.source_x == other.source_x
+        && first.source_y == other.source_y
+        && first.copy_width == other.copy_width
+        && first.copy_height == other.copy_height
+        && first.output_width == other.output_width
+        && first.output_height == other.output_height
+        && first.output_x == other.output_x
+        && first.output_y == other.output_y
+        && first.addend.to_bits() == other.addend.to_bits()
+}
+
+#[cfg(target_os = "macos")]
+fn encode_stacked_direct_component_plane_batch(
+    runtime: &MetalRuntime,
+    command_buffer: &CommandBufferRef,
+    plans: &[&PreparedDirectGrayscalePlan],
+    retained_buffers: &mut Vec<Buffer>,
+    status_checks: &mut Vec<DirectStatusCheck>,
+    scratch_buffers: &mut Vec<DirectScratchBuffer>,
+) -> Result<StackedDirectComponentPlane, Error> {
+    let Some(first) = plans.first() else {
+        return Err(Error::MetalKernel {
+            message: "J2K MetalDirect color batch has no component plans".to_string(),
+        });
+    };
+
+    let count = plans.len();
+    let mut band_sets = vec![Vec::<DirectBandSlice>::new(); count];
+    let mut final_plane = None;
+    let mut step_idx = 0;
+
+    while step_idx < first.steps.len() {
+        if let Some(group) = first.classic_group_starting_at(step_idx) {
+            let groups = plans
+                .iter()
+                .map(|plan| {
+                    plan.classic_group_starting_at(step_idx)
+                        .expect("preflight validated classic group")
+                })
+                .collect::<Vec<_>>();
+            let output = take_f32_scratch_buffer(runtime, group.total_coefficients * count);
+            let (buffers, status_check) =
+                encode_distinct_classic_sub_band_groups_to_buffer_in_command_buffer(
+                    runtime,
+                    command_buffer,
+                    &groups,
+                    &output.buffer,
+                    scratch_buffers,
+                )?;
+            retained_buffers.extend(buffers);
+            status_checks.push(status_check);
+            let stride_bytes = group.total_coefficients * size_of::<f32>();
+            for (instance_idx, bands) in band_sets.iter_mut().enumerate() {
+                for member in &groups[instance_idx].members {
+                    bands.push(DirectBandSlice {
+                        band_id: member.band_id,
+                        buffer: output.buffer.clone(),
+                        offset_bytes: instance_idx * stride_bytes
+                            + member.offset_elements * size_of::<f32>(),
+                    });
+                }
+            }
+            scratch_buffers.push(output);
+            step_idx = group.end_step;
+            continue;
+        }
+
+        match &first.steps[step_idx] {
+            PreparedDirectGrayscaleStep::ClassicSubBand(sub_band) => {
+                let sub_bands = plans
+                    .iter()
+                    .map(|plan| match &plan.steps[step_idx] {
+                        PreparedDirectGrayscaleStep::ClassicSubBand(other) => other,
+                        _ => unreachable!("preflight validated classic sub-band"),
+                    })
+                    .collect::<Vec<_>>();
+                let per_instance_len = sub_band.width as usize * sub_band.height as usize;
+                let output = take_f32_scratch_buffer(runtime, per_instance_len * count);
+                let (buffers, status_check) =
+                    encode_distinct_classic_sub_bands_to_buffer_in_command_buffer(
+                        runtime,
+                        command_buffer,
+                        &sub_bands,
+                        &output.buffer,
+                        scratch_buffers,
+                    )?;
+                retained_buffers.extend(buffers);
+                status_checks.push(status_check);
+                let stride_bytes = per_instance_len * size_of::<f32>();
+                for (instance_idx, bands) in band_sets.iter_mut().enumerate() {
+                    bands.push(DirectBandSlice {
+                        band_id: sub_bands[instance_idx].band_id,
+                        buffer: output.buffer.clone(),
+                        offset_bytes: instance_idx * stride_bytes,
+                    });
+                }
+                scratch_buffers.push(output);
+            }
+            PreparedDirectGrayscaleStep::HtSubBand(_) => unreachable!("preflight rejected HT"),
+            PreparedDirectGrayscaleStep::Idwt(idwt) => {
+                let per_instance_len = idwt.rect.width() as usize * idwt.rect.height() as usize;
+                let output = take_f32_scratch_buffer(runtime, per_instance_len * count);
+                match idwt.transform {
+                    J2kWaveletTransform::Reversible53 => {
+                        let (ll, ll_offset, low_low_stride) = lookup_repeated_direct_band_layout(
+                            &band_sets,
+                            idwt.ll_band_id,
+                            idwt.ll,
+                        )?;
+                        let (hl, hl_offset, high_low_stride) = lookup_repeated_direct_band_layout(
+                            &band_sets,
+                            idwt.hl_band_id,
+                            idwt.hl,
+                        )?;
+                        let (lh, lh_offset, low_high_stride) = lookup_repeated_direct_band_layout(
+                            &band_sets,
+                            idwt.lh_band_id,
+                            idwt.lh,
+                        )?;
+                        let (hh, hh_offset, high_high_stride) = lookup_repeated_direct_band_layout(
+                            &band_sets,
+                            idwt.hh_band_id,
+                            idwt.hh,
+                        )?;
+                        dispatch_reversible53_repeated_buffers_in_command_buffer_with_offsets(
+                            runtime,
+                            command_buffer,
+                            &ll,
+                            ll_offset,
+                            &hl,
+                            hl_offset,
+                            &lh,
+                            lh_offset,
+                            &hh,
+                            hh_offset,
+                            J2kRepeatedIdwtSingleDecompositionParams {
+                                x0: idwt.rect.x0,
+                                y0: idwt.rect.y0,
+                                width: idwt.rect.width(),
+                                height: idwt.rect.height(),
+                                ll_width: idwt.ll.width(),
+                                ll_height: idwt.ll.height(),
+                                hl_width: idwt.hl.width(),
+                                hl_height: idwt.hl.height(),
+                                lh_width: idwt.lh.width(),
+                                lh_height: idwt.lh.height(),
+                                hh_width: idwt.hh.width(),
+                                hh_height: idwt.hh.height(),
+                                ll_instance_stride: low_low_stride,
+                                hl_instance_stride: high_low_stride,
+                                lh_instance_stride: low_high_stride,
+                                hh_instance_stride: high_high_stride,
+                                batch_count: u32::try_from(count).map_err(|_| {
+                                    Error::MetalKernel {
+                                        message:
+                                            "J2K MetalDirect color IDWT batch count exceeds u32"
+                                                .to_string(),
+                                    }
+                                })?,
+                            },
+                            &output.buffer,
+                        );
+                    }
+                    J2kWaveletTransform::Irreversible97 => {
+                        for (instance_idx, bands) in band_sets.iter().enumerate() {
+                            let PreparedDirectGrayscaleStep::Idwt(step) =
+                                &plans[instance_idx].steps[step_idx]
+                            else {
+                                unreachable!("preflight validated IDWT")
+                            };
+                            let (ll, ll_offset) =
+                                lookup_direct_band_slice(bands, step.ll_band_id, step.ll)?;
+                            let (hl, hl_offset) =
+                                lookup_direct_band_slice(bands, step.hl_band_id, step.hl)?;
+                            let (lh, lh_offset) =
+                                lookup_direct_band_slice(bands, step.lh_band_id, step.lh)?;
+                            let (hh, hh_offset) =
+                                lookup_direct_band_slice(bands, step.hh_band_id, step.hh)?;
+                            status_checks.push(
+                                dispatch_irreversible97_single_decomposition_buffers_in_command_buffer_with_offsets(
+                                    runtime,
+                                    command_buffer,
+                                    &ll,
+                                    ll_offset,
+                                    &hl,
+                                    hl_offset,
+                                    &lh,
+                                    lh_offset,
+                                    &hh,
+                                    hh_offset,
+                                    J2kIdwtSingleDecompositionParams {
+                                        x0: step.rect.x0,
+                                        y0: step.rect.y0,
+                                        width: step.rect.width(),
+                                        height: step.rect.height(),
+                                        ll_width: step.ll.width(),
+                                        ll_height: step.ll.height(),
+                                        hl_width: step.hl.width(),
+                                        hl_height: step.hl.height(),
+                                        lh_width: step.lh.width(),
+                                        lh_height: step.lh.height(),
+                                        hh_width: step.hh.width(),
+                                        hh_height: step.hh.height(),
+                                    },
+                                    &output.buffer,
+                                    instance_idx * per_instance_len * size_of::<f32>(),
+                                ),
+                            );
+                        }
+                    }
+                }
+                let stride_bytes = per_instance_len * size_of::<f32>();
+                for (instance_idx, bands) in band_sets.iter_mut().enumerate() {
+                    let PreparedDirectGrayscaleStep::Idwt(step) =
+                        &plans[instance_idx].steps[step_idx]
+                    else {
+                        unreachable!("preflight validated IDWT")
+                    };
+                    bands.push(DirectBandSlice {
+                        band_id: step.output_band_id,
+                        buffer: output.buffer.clone(),
+                        offset_bytes: instance_idx * stride_bytes,
+                    });
+                }
+                scratch_buffers.push(output);
+            }
+            PreparedDirectGrayscaleStep::Store(store) => {
+                let (input, _) =
+                    lookup_direct_band_slice(&band_sets[0], store.input_band_id, store.input_rect)?;
+                let per_instance_len = store.output_width as usize * store.output_height as usize;
+                let output = take_f32_scratch_buffer(runtime, per_instance_len * count);
+                dispatch_store_component_repeated_in_command_buffer(
+                    runtime,
+                    command_buffer,
+                    &input,
+                    &output.buffer,
+                    J2kRepeatedStoreParams {
+                        input_width: store.input_rect.width(),
+                        input_height: store.input_rect.height(),
+                        source_x: store.source_x,
+                        source_y: store.source_y,
+                        copy_width: store.copy_width,
+                        copy_height: store.copy_height,
+                        output_width: store.output_width,
+                        output_height: store.output_height,
+                        output_x: store.output_x,
+                        output_y: store.output_y,
+                        addend: store.addend,
+                        batch_count: u32::try_from(count).map_err(|_| Error::MetalKernel {
+                            message: "J2K MetalDirect color store batch count exceeds u32"
+                                .to_string(),
+                        })?,
+                    },
+                );
+                final_plane = Some(output.buffer.clone());
+                scratch_buffers.push(output);
+            }
+        }
+        step_idx += 1;
+    }
+
+    let buffer = final_plane.ok_or_else(|| Error::MetalKernel {
+        message: "J2K MetalDirect color component batch did not produce a final plane".to_string(),
+    })?;
+    Ok(StackedDirectComponentPlane {
+        buffer,
+        dimensions: first.dimensions,
+        count,
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -2831,6 +4160,12 @@ fn validate_direct_status(status_check: DirectStatusCheck) -> Result<(), Error> 
             let status = unsafe { buffer.contents().cast::<J2kIdwtStatus>().read() };
             if status.code != J2K_IDWT_STATUS_OK {
                 return Err(decode_idwt_status_error(status));
+            }
+        }
+        DirectStatusCheck::Mct(buffer) => {
+            let status = unsafe { buffer.contents().cast::<J2kMctStatus>().read() };
+            if status.code != J2K_MCT_STATUS_OK {
+                return Err(decode_mct_status_error(status));
             }
         }
     }
@@ -3388,6 +4723,70 @@ pub(crate) fn decode_inverse_mct(job: J2kInverseMctJob<'_>) -> Result<Vec<Buffer
 }
 
 #[cfg(target_os = "macos")]
+fn dispatch_inverse_mct_buffers_in_command_buffer(
+    runtime: &MetalRuntime,
+    command_buffer: &CommandBufferRef,
+    planes: [&Buffer; 3],
+    len: usize,
+    transform: J2kWaveletTransform,
+    addends: [f32; 3],
+) -> Result<DirectStatusCheck, Error> {
+    if len == 0 {
+        return Err(Error::MetalKernel {
+            message: "J2K MetalDirect color MCT cannot run on an empty plane".to_string(),
+        });
+    }
+
+    let transform = match transform {
+        J2kWaveletTransform::Reversible53 => 0,
+        J2kWaveletTransform::Irreversible97 => 1,
+    };
+    let params = J2kInverseMctParams {
+        len: u32::try_from(len).map_err(|_| Error::MetalKernel {
+            message: "J2K MetalDirect color MCT plane length exceeds u32".to_string(),
+        })?,
+        transform,
+        addend0: addends[0],
+        addend1: addends[1],
+        addend2: addends[2],
+    };
+    let status = J2kMctStatus::default();
+    let status_buffer = runtime.device.new_buffer_with_data(
+        (&raw const status).cast(),
+        size_of::<J2kMctStatus>() as u64,
+        MTLResourceOptions::StorageModeShared,
+    );
+
+    let encoder = command_buffer.new_compute_command_encoder();
+    encoder.set_compute_pipeline_state(&runtime.inverse_mct);
+    encoder.set_buffer(0, Some(planes[0]), 0);
+    encoder.set_buffer(1, Some(planes[1]), 0);
+    encoder.set_buffer(2, Some(planes[2]), 0);
+    encoder.set_bytes(
+        3,
+        size_of::<J2kInverseMctParams>() as u64,
+        (&raw const params).cast(),
+    );
+    encoder.set_buffer(4, Some(&status_buffer), 0);
+    let width = runtime.inverse_mct.thread_execution_width().max(1);
+    encoder.dispatch_threads(
+        MTLSize {
+            width: len as u64,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width,
+            height: 1,
+            depth: 1,
+        },
+    );
+    encoder.end_encoding();
+
+    Ok(DirectStatusCheck::Mct(status_buffer))
+}
+
+#[cfg(target_os = "macos")]
 pub(crate) fn decode_store_component_and_capture(
     job: J2kStoreComponentJob<'_>,
 ) -> Result<Buffer, Error> {
@@ -3619,7 +5018,6 @@ fn dispatch_store_component_buffer_in_encoder_with_offsets(
     );
 }
 
-#[cfg(target_os = "macos")]
 fn dispatch_store_component_repeated_in_command_buffer(
     runtime: &MetalRuntime,
     command_buffer: &CommandBufferRef,
@@ -5319,6 +6717,197 @@ fn encode_classic_sub_band_to_buffer_in_command_buffer(
         retained_buffers,
         status_check,
     ))
+}
+
+#[cfg(target_os = "macos")]
+fn encode_distinct_classic_sub_bands_to_buffer_in_command_buffer(
+    runtime: &MetalRuntime,
+    command_buffer: &CommandBufferRef,
+    sub_bands: &[&PreparedClassicSubBand],
+    output: &Buffer,
+    scratch_buffers: &mut Vec<DirectScratchBuffer>,
+) -> Result<(Vec<Buffer>, DirectStatusCheck), Error> {
+    let Some(first) = sub_bands.first() else {
+        let empty = runtime
+            .device
+            .new_buffer(1, MTLResourceOptions::StorageModeShared);
+        return Ok((
+            vec![empty.clone()],
+            DirectStatusCheck::Classic {
+                buffer: empty,
+                len: 0,
+            },
+        ));
+    };
+    let per_instance_len = first.width as usize * first.height as usize;
+    encode_distinct_classic_batches_to_buffer_in_command_buffer(
+        runtime,
+        command_buffer,
+        sub_bands.iter().map(|sub_band| DistinctClassicBatch {
+            coded_data: &sub_band.coded_data,
+            jobs: &sub_band.jobs,
+            segments: &sub_band.segments,
+            output_base: sub_bands
+                .iter()
+                .position(|candidate| core::ptr::eq(*candidate, *sub_band))
+                .expect("sub-band exists")
+                * per_instance_len,
+        }),
+        output,
+        scratch_buffers,
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn encode_distinct_classic_sub_band_groups_to_buffer_in_command_buffer(
+    runtime: &MetalRuntime,
+    command_buffer: &CommandBufferRef,
+    groups: &[&PreparedClassicSubBandGroup],
+    output: &Buffer,
+    scratch_buffers: &mut Vec<DirectScratchBuffer>,
+) -> Result<(Vec<Buffer>, DirectStatusCheck), Error> {
+    let Some(first) = groups.first() else {
+        let empty = runtime
+            .device
+            .new_buffer(1, MTLResourceOptions::StorageModeShared);
+        return Ok((
+            vec![empty.clone()],
+            DirectStatusCheck::Classic {
+                buffer: empty,
+                len: 0,
+            },
+        ));
+    };
+    let per_instance_len = first.total_coefficients;
+    encode_distinct_classic_batches_to_buffer_in_command_buffer(
+        runtime,
+        command_buffer,
+        groups
+            .iter()
+            .enumerate()
+            .map(|(index, group)| DistinctClassicBatch {
+                coded_data: &group.coded_data,
+                jobs: &group.jobs,
+                segments: &group.segments,
+                output_base: index * per_instance_len,
+            }),
+        output,
+        scratch_buffers,
+    )
+}
+
+#[cfg(target_os = "macos")]
+struct DistinctClassicBatch<'a> {
+    coded_data: &'a [u8],
+    jobs: &'a [J2kClassicCleanupBatchJob],
+    segments: &'a [J2kClassicSegment],
+    output_base: usize,
+}
+
+#[cfg(target_os = "macos")]
+fn encode_distinct_classic_batches_to_buffer_in_command_buffer<'a>(
+    runtime: &MetalRuntime,
+    command_buffer: &CommandBufferRef,
+    batches: impl IntoIterator<Item = DistinctClassicBatch<'a>>,
+    output: &Buffer,
+    scratch_buffers: &mut Vec<DirectScratchBuffer>,
+) -> Result<(Vec<Buffer>, DirectStatusCheck), Error> {
+    let mut coded_data = Vec::new();
+    let mut jobs = Vec::new();
+    let mut segments = Vec::new();
+
+    for batch in batches {
+        let coded_base = u32::try_from(coded_data.len()).map_err(|_| Error::MetalKernel {
+            message: "classic J2K MetalDirect distinct color coded payload exceeds u32".to_string(),
+        })?;
+        let segment_base = u32::try_from(segments.len()).map_err(|_| Error::MetalKernel {
+            message: "classic J2K MetalDirect distinct color segment table exceeds u32".to_string(),
+        })?;
+        coded_data.extend_from_slice(batch.coded_data);
+        for segment in batch.segments {
+            let mut adjusted = *segment;
+            adjusted.data_offset =
+                adjusted
+                    .data_offset
+                    .checked_add(coded_base)
+                    .ok_or_else(|| Error::MetalKernel {
+                        message: "classic J2K MetalDirect distinct color segment offset overflow"
+                            .to_string(),
+                    })?;
+            segments.push(adjusted);
+        }
+        let output_base = u32::try_from(batch.output_base).map_err(|_| Error::MetalKernel {
+            message: "classic J2K MetalDirect distinct color output offset exceeds u32".to_string(),
+        })?;
+        for job in batch.jobs {
+            let mut adjusted = *job;
+            adjusted.coded_offset =
+                adjusted
+                    .coded_offset
+                    .checked_add(coded_base)
+                    .ok_or_else(|| Error::MetalKernel {
+                        message: "classic J2K MetalDirect distinct color job coded offset overflow"
+                            .to_string(),
+                    })?;
+            adjusted.segment_offset = adjusted
+                .segment_offset
+                .checked_add(segment_base)
+                .ok_or_else(|| Error::MetalKernel {
+                    message: "classic J2K MetalDirect distinct color job segment offset overflow"
+                        .to_string(),
+                })?;
+            adjusted.output_offset =
+                adjusted
+                    .output_offset
+                    .checked_add(output_base)
+                    .ok_or_else(|| Error::MetalKernel {
+                        message:
+                            "classic J2K MetalDirect distinct color job output offset overflow"
+                                .to_string(),
+                    })?;
+            jobs.push(adjusted);
+        }
+    }
+
+    if jobs.is_empty() {
+        let empty = runtime
+            .device
+            .new_buffer(1, MTLResourceOptions::StorageModeShared);
+        return Ok((
+            vec![empty.clone()],
+            DirectStatusCheck::Classic {
+                buffer: empty,
+                len: 0,
+            },
+        ));
+    }
+
+    let coded_buffer = owned_slice_buffer(&runtime.device, &coded_data);
+    let jobs_buffer = owned_slice_buffer(&runtime.device, &jobs);
+    let segments_buffer = owned_slice_buffer(&runtime.device, &segments);
+    let use_plain_fast_path = classic_batch_uses_plain_fast_path(&jobs, &segments)
+        && runtime
+            .classic_cleanup_plain_batched
+            .max_total_threads_per_threadgroup()
+            >= 32;
+    let coefficients_scratch = take_classic_coefficients_scratch_buffer(runtime, jobs.len())?;
+    let (status_check, states_scratch) = dispatch_classic_cleanup_batched_in_command_buffer(
+        runtime,
+        command_buffer,
+        &coded_buffer,
+        &jobs_buffer,
+        jobs.len(),
+        use_plain_fast_path,
+        &segments_buffer,
+        output,
+        &coefficients_scratch.buffer,
+    );
+    let mut retained_buffers = vec![coded_buffer, jobs_buffer, segments_buffer];
+    scratch_buffers.push(coefficients_scratch);
+    if let Some(states_scratch) = states_scratch {
+        retained_buffers.push(states_scratch);
+    }
+    Ok((retained_buffers, status_check))
 }
 
 #[cfg(target_os = "macos")]

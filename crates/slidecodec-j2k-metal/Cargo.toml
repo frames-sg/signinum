@@ -5,8 +5,6 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-repository.workspace = true
-homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
@@ -15,9 +13,9 @@ name = "slidecodec_j2k_metal"
 path = "src/lib.rs"
 
 [dependencies]
-slidecodec-core = { path = "../slidecodec-core", version = "0.0.0" }
-slidecodec-j2k = { path = "../slidecodec-j2k", version = "0.0.0" }
-slidecodec-j2k-native = { path = "../slidecodec-j2k-native", version = "0.0.0" }
+slidecodec-core = { path = "../slidecodec-core", version = "0.1.0" }
+slidecodec-j2k = { path = "../slidecodec-j2k", version = "0.1.0" }
+slidecodec-j2k-native = { path = "../slidecodec-j2k-native", version = "0.1.0" }
 thiserror = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]

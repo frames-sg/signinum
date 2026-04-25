@@ -34,7 +34,7 @@ use crate::{resolve_alpha_and_color_space, DecodeSettings, Image};
 use crate::math::{SimdBuffer, SIMD_WIDTH};
 pub(crate) use codestream::Header;
 pub use decode::DecoderContext;
-pub(crate) use decode::{build_direct_grayscale_plan, decode};
+pub(crate) use decode::{build_direct_color_plan, build_direct_grayscale_plan, decode};
 
 pub(crate) struct ParsedCodestream<'a> {
     pub(crate) header: Header<'a>,

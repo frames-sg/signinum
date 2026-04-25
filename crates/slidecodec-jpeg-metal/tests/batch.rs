@@ -2,7 +2,7 @@ use slidecodec_core::{
     BackendKind, BackendRequest, DecoderContext, DeviceSubmission, DeviceSurface, Downscale,
     PixelFormat, Rect, TileBatchDecodeDevice, TileBatchDecodeSubmit,
 };
-use slidecodec_jpeg::DecoderContext as JpegDecoderContext;
+use slidecodec_jpeg::{Decoder as CpuDecoder, DecoderContext as JpegDecoderContext};
 use slidecodec_jpeg_metal::{Codec, MetalSession, ScratchPool};
 
 const BASELINE_420: &[u8] = include_bytes!("../../../corpus/conformance/baseline_420_16x16.jpg");
@@ -71,6 +71,10 @@ fn compatible_tile_submits_flush_once() {
     let mut ctx = DecoderContext::<JpegDecoderContext>::new();
     let mut pool = ScratchPool::new();
     let mut session = MetalSession::default();
+    let (expected, _) = CpuDecoder::new(BASELINE_420)
+        .expect("cpu decoder")
+        .decode(PixelFormat::Rgb8)
+        .expect("cpu decode");
 
     let submissions = (0..4)
         .map(|_| {
@@ -89,6 +93,59 @@ fn compatible_tile_submits_flush_once() {
     for submission in submissions {
         let surface = submission.wait().expect("surface");
         assert_eq!(surface.backend_kind(), BackendKind::Metal);
+        assert_eq!(surface.as_bytes(), expected.as_slice());
+    }
+
+    assert_eq!(session.submissions(), 1);
+}
+
+#[test]
+fn compatible_region_scaled_tile_submits_flush_once() {
+    let mut ctx = DecoderContext::<JpegDecoderContext>::new();
+    let mut pool = ScratchPool::new();
+    let mut session = MetalSession::default();
+    let roi = Rect {
+        x: 4,
+        y: 4,
+        w: 8,
+        h: 8,
+    };
+    let scale = Downscale::Quarter;
+    let (expected, _) = CpuDecoder::new(BASELINE_420)
+        .expect("cpu decoder")
+        .decode_region_scaled(
+            PixelFormat::Rgb8,
+            slidecodec_jpeg::Rect {
+                x: roi.x,
+                y: roi.y,
+                w: roi.w,
+                h: roi.h,
+            },
+            scale,
+        )
+        .expect("cpu region scaled");
+
+    let submissions = (0..4)
+        .map(|_| {
+            Codec::submit_tile_region_scaled_to_device(
+                &mut ctx,
+                &mut session,
+                &mut pool,
+                BASELINE_420,
+                PixelFormat::Rgb8,
+                roi,
+                scale,
+                BackendRequest::Metal,
+            )
+            .expect("submit")
+        })
+        .collect::<Vec<_>>();
+
+    for submission in submissions {
+        let surface = submission.wait().expect("surface");
+        assert_eq!(surface.backend_kind(), BackendKind::Metal);
+        assert_eq!(surface.dimensions(), (2, 2));
+        assert_eq!(surface.as_bytes(), expected.as_slice());
     }
 
     assert_eq!(session.submissions(), 1);

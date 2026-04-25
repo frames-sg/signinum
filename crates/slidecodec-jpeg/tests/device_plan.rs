@@ -1,6 +1,7 @@
 use slidecodec_jpeg::{ColorSpace, Decoder, Warning};
 
 const BASELINE_420: &[u8] = include_bytes!("../../../corpus/conformance/baseline_420_16x16.jpg");
+const BASELINE_422: &[u8] = include_bytes!("../../../corpus/conformance/baseline_422_16x8.jpg");
 
 #[test]
 fn hidden_device_plan_exposes_scan_metadata() {
@@ -20,6 +21,17 @@ fn hidden_device_plan_keeps_fast_420_shape_information() {
     let plan = slidecodec_jpeg::__private::build_device_plan(&decoder, 4).expect("device plan");
 
     assert!(plan.matches_fast_420);
+    assert!(!plan.matches_fast_422);
+    assert!(!plan.matches_fast_444);
+}
+
+#[test]
+fn hidden_device_plan_keeps_fast_422_shape_information() {
+    let decoder = Decoder::new(BASELINE_422).expect("decoder");
+    let plan = slidecodec_jpeg::__private::build_device_plan(&decoder, 4).expect("device plan");
+
+    assert!(!plan.matches_fast_420);
+    assert!(plan.matches_fast_422);
     assert!(!plan.matches_fast_444);
 }
 

@@ -11,18 +11,11 @@ use slidecodec_j2k::{
     DecoderContext, Downscale, J2kCodec, J2kContext, J2kDecoder, J2kScratchPool, PixelFormat, Rect,
     TileBatchDecode,
 };
-use slidecodec_j2k_compare::{grok as grok_compare, openjpeg as openjpeg_compare};
 use slidecodec_j2k_metal::{
     Codec as MetalJ2kCodec, J2kDecoder as MetalJ2kDecoder, J2kScratchPool as MetalJ2kScratchPool,
     MetalSession,
 };
 use slidecodec_j2k_native::{encode, encode_htj2k, EncodeOptions};
-use std::{
-    fs,
-    path::{Path, PathBuf},
-    process::Command,
-    sync::OnceLock,
-};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DecodeMode {
@@ -68,6 +61,19 @@ pub(crate) fn bench_inputs() -> Vec<BenchInput> {
             ),
             dimensions: (512, 512),
             mode: DecodeMode::Gray8,
+            is_ht: false,
+        },
+        BenchInput {
+            name: "j2k_rgb_1024",
+            bytes: classic_bench_bytes(
+                "j2k_rgb_1024",
+                &gradient_u8(1024, 1024, 3),
+                1024,
+                1024,
+                DecodeMode::Rgb8,
+            ),
+            dimensions: (1024, 1024),
+            mode: DecodeMode::Rgb8,
             is_ht: false,
         },
         BenchInput {
@@ -194,6 +200,39 @@ pub(crate) fn slidecodec_decode_tile_batch(bytes: &[u8], mode: DecodeMode, count
     black_box(out);
 }
 
+pub(crate) fn distinct_rgb_tile_batch_inputs(input: &BenchInput, count: usize) -> Vec<Vec<u8>> {
+    assert_eq!(input.mode, DecodeMode::Rgb8);
+    (0..count)
+        .map(|index| {
+            let name = format!("{}_distinct_{index}", input.name);
+            classic_bench_bytes(
+                &name,
+                &gradient_variant_u8(input.dimensions.0, input.dimensions.1, 3, index as u32),
+                input.dimensions.0,
+                input.dimensions.1,
+                input.mode,
+            )
+        })
+        .collect()
+}
+
+pub(crate) fn slidecodec_decode_tile_batch_distinct(inputs: &[Vec<u8>], mode: DecodeMode) {
+    let Some(first) = inputs.first() else {
+        return;
+    };
+    let mut ctx = DecoderContext::<J2kContext>::new();
+    let mut pool = J2kScratchPool::new();
+    let decoder = J2kDecoder::new(first).expect("slidecodec decoder");
+    let dims = decoder.info().dimensions;
+    let (fmt, stride) = mode_geometry(mode, dims);
+    let mut out = vec![0_u8; stride * dims.1 as usize];
+    for bytes in inputs {
+        J2kCodec::decode_tile(&mut ctx, &mut pool, bytes, &mut out, stride, fmt)
+            .expect("tile decode");
+    }
+    black_box(out);
+}
+
 pub(crate) fn metal_available() -> bool {
     cfg!(target_os = "macos")
 }
@@ -287,6 +326,31 @@ pub(crate) fn slidecodec_metal_decode_tile_batch(bytes: &[u8], mode: DecodeMode,
     black_box(surfaces);
 }
 
+pub(crate) fn slidecodec_metal_decode_tile_batch_distinct(inputs: &[Vec<u8>], mode: DecodeMode) {
+    let mut ctx = DecoderContext::<J2kContext>::new();
+    let mut session = MetalSession::default();
+    let mut pool = MetalJ2kScratchPool::new();
+    let submissions = inputs
+        .iter()
+        .map(|bytes| {
+            MetalJ2kCodec::submit_tile_to_device(
+                &mut ctx,
+                &mut session,
+                &mut pool,
+                bytes,
+                mode_format(mode),
+                BackendRequest::Metal,
+            )
+            .expect("slidecodec metal tile submit")
+        })
+        .collect::<Vec<_>>();
+    let surfaces = submissions
+        .into_iter()
+        .map(|submission| submission.wait().expect("slidecodec metal tile decode"))
+        .collect::<Vec<_>>();
+    black_box(surfaces);
+}
+
 fn slidecodec_adaptive_decode_tile_batch_to_device(input: &BenchInput, count: usize) {
     let mut ctx = DecoderContext::<J2kContext>::new();
     let mut session = MetalSession::default();
@@ -344,76 +408,20 @@ pub(crate) fn slidecodec_metal_supports_tile_batch(bytes: &[u8], mode: DecodeMod
     .is_ok()
 }
 
-pub(crate) fn openjpeg_available() -> bool {
-    openjpeg_compare::is_available()
-}
-
-pub(crate) fn grok_available() -> bool {
-    grok_compare::is_available()
-}
-
-pub(crate) fn openjpeg_decode(
-    input: &BenchInput,
-    reduce: Option<u32>,
-    region: Option<Rect>,
-    batch: usize,
-) {
-    for _ in 0..batch {
-        let out = match (input.mode, reduce, region) {
-            (DecodeMode::Gray8, None, None) => openjpeg_compare::decode_gray(&input.bytes),
-            (DecodeMode::Gray8, Some(reduce), None) => {
-                openjpeg_compare::decode_gray_scaled(&input.bytes, reduce)
-            }
-            (DecodeMode::Gray8, None, Some(region)) => {
-                openjpeg_compare::decode_gray_region(&input.bytes, region)
-            }
-            (DecodeMode::Rgb8, None, None) => openjpeg_compare::decode_rgb(&input.bytes),
-            (DecodeMode::Rgb8, Some(reduce), None) => {
-                openjpeg_compare::decode_rgb_scaled(&input.bytes, reduce)
-            }
-            (DecodeMode::Rgb8, None, Some(region)) => {
-                openjpeg_compare::decode_rgb_region(&input.bytes, region)
-            }
-            _ => panic!("unsupported OpenJPEG bench shape"),
-        }
-        .expect("openjpeg decode");
-        black_box(out);
-    }
-}
-
-pub(crate) fn grok_decode(
-    input: &BenchInput,
-    reduce: Option<u32>,
-    region: Option<Rect>,
-    batch: usize,
-) {
-    for _ in 0..batch {
-        let out = match (input.mode, reduce, region) {
-            (DecodeMode::Gray8, None, None) => grok_compare::decode_gray(&input.bytes),
-            (DecodeMode::Gray8, Some(reduce), None) => {
-                grok_compare::decode_gray_scaled(&input.bytes, reduce)
-            }
-            (DecodeMode::Gray8, None, Some(region)) => {
-                grok_compare::decode_gray_region(&input.bytes, region)
-            }
-            (DecodeMode::Rgb8, None, None) => grok_compare::decode_rgb(&input.bytes),
-            (DecodeMode::Rgb8, Some(reduce), None) => {
-                grok_compare::decode_rgb_scaled(&input.bytes, reduce)
-            }
-            (DecodeMode::Rgb8, None, Some(region)) => {
-                grok_compare::decode_rgb_region(&input.bytes, region)
-            }
-            _ => panic!("unsupported Grok bench shape"),
-        }
-        .expect("grok decode");
-        black_box(out);
-    }
+pub(crate) fn slidecodec_metal_supports_tile_batch_distinct(
+    inputs: &[Vec<u8>],
+    mode: DecodeMode,
+) -> bool {
+    inputs
+        .iter()
+        .all(|bytes| slidecodec_metal_supports_tile_batch(bytes, mode))
 }
 
 fn encode_j2k(pixels: &[u8], width: u32, height: u32, components: u8, bit_depth: u8) -> Vec<u8> {
     let options = EncodeOptions {
         reversible: true,
         num_decomposition_levels: 3,
+        guard_bits: 2,
         ..EncodeOptions::default()
     };
     encode(
@@ -432,6 +440,7 @@ fn try_encode_ht(
     let options = EncodeOptions {
         reversible: true,
         num_decomposition_levels: 3,
+        guard_bits: 2,
         ..EncodeOptions::default()
     };
     encode_htj2k(
@@ -441,15 +450,12 @@ fn try_encode_ht(
 }
 
 fn classic_bench_bytes(
-    name: &str,
+    _name: &str,
     pixels: &[u8],
     width: u32,
     height: u32,
     mode: DecodeMode,
 ) -> Vec<u8> {
-    if let Some(bytes) = openjpeg_encode_jp2(name, pixels, width, height, mode) {
-        return bytes;
-    }
     let (components, colorspace) = match mode {
         DecodeMode::Gray8 => (1_u16, 17_u32),
         DecodeMode::Rgb8 => (3_u16, 16_u32),
@@ -465,11 +471,15 @@ fn classic_bench_bytes(
 }
 
 fn gradient_u8(width: u32, height: u32, channels: usize) -> Vec<u8> {
+    gradient_variant_u8(width, height, channels, 0)
+}
+
+fn gradient_variant_u8(width: u32, height: u32, channels: usize, seed: u32) -> Vec<u8> {
     let mut out = Vec::with_capacity(width as usize * height as usize * channels);
     for y in 0..height {
         for x in 0..width {
             for c in 0..channels {
-                out.push(((x + y + (c as u32 * 17)) & 0xFF) as u8);
+                out.push(((x + y + seed * 13 + (c as u32 * 17)) & 0xFF) as u8);
             }
         }
     }
@@ -535,77 +545,4 @@ fn mode_geometry(mode: DecodeMode, dims: (u32, u32)) -> (PixelFormat, usize) {
 fn scaled_dims(dims: (u32, u32), scale: Downscale) -> (u32, u32) {
     let denom = scale.denominator();
     (dims.0.div_ceil(denom), dims.1.div_ceil(denom))
-}
-
-fn openjpeg_compress_bin() -> Option<PathBuf> {
-    static OPENJPEG_COMPRESS: OnceLock<Option<PathBuf>> = OnceLock::new();
-    OPENJPEG_COMPRESS
-        .get_or_init(|| {
-            if let Some(path) = std::env::var_os("SLIDECODEC_OPENJPEG_COMPRESS_BIN") {
-                return Some(PathBuf::from(path));
-            }
-            let default = PathBuf::from("/opt/homebrew/bin/opj_compress");
-            if default.exists() {
-                return Some(default);
-            }
-            None
-        })
-        .clone()
-}
-
-fn openjpeg_encode_jp2(
-    name: &str,
-    pixels: &[u8],
-    width: u32,
-    height: u32,
-    mode: DecodeMode,
-) -> Option<Vec<u8>> {
-    let bin = openjpeg_compress_bin()?;
-    let dir = openjpeg_temp_dir();
-    let src_path = dir.join(match mode {
-        DecodeMode::Gray8 => format!("{name}.pgm"),
-        DecodeMode::Rgb8 => format!("{name}.ppm"),
-    });
-    let out_path = dir.join(format!("{name}.jp2"));
-    write_pnm(&src_path, pixels, width, height, mode).ok()?;
-    let status = Command::new(bin)
-        .arg("-i")
-        .arg(&src_path)
-        .arg("-o")
-        .arg(&out_path)
-        .status()
-        .ok()?;
-    if !status.success() {
-        return None;
-    }
-    fs::read(out_path).ok()
-}
-
-fn openjpeg_temp_dir() -> &'static Path {
-    static DIR: OnceLock<PathBuf> = OnceLock::new();
-    DIR.get_or_init(|| {
-        let dir = std::env::temp_dir().join(format!("slidecodec-j2k-bench-{}", std::process::id()));
-        fs::create_dir_all(&dir).expect("create OpenJPEG temp dir");
-        dir
-    })
-}
-
-fn write_pnm(
-    path: &Path,
-    pixels: &[u8],
-    width: u32,
-    height: u32,
-    mode: DecodeMode,
-) -> std::io::Result<()> {
-    let mut bytes = Vec::new();
-    match mode {
-        DecodeMode::Gray8 => {
-            bytes.extend_from_slice(format!("P5\n{width} {height}\n255\n").as_bytes());
-        }
-        DecodeMode::Rgb8 => {
-            bytes.extend_from_slice(format!("P6\n{width} {height}\n255\n").as_bytes());
-        }
-    }
-    bytes.extend_from_slice(pixels);
-    fs::write(path, bytes)
 }

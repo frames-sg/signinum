@@ -4,12 +4,10 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-repository.workspace = true
-homepage.workspace = true
 publish = false
 
 [dependencies]
-slidecodec-core = { path = "../slidecodec-core", version = "0.0.0" }
+slidecodec-core = { path = "../slidecodec-core", version = "0.1.0" }
 openjpeg-sys = "1.0.12"
 
 [build-dependencies]

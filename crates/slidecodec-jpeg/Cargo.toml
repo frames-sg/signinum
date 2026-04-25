@@ -5,8 +5,6 @@ version.workspace      = true
 edition.workspace      = true
 rust-version.workspace = true
 license.workspace      = true
-repository.workspace   = true
-homepage.workspace     = true
 keywords.workspace     = true
 categories.workspace   = true
 readme                 = "README.md"
@@ -20,7 +18,7 @@ path = "src/lib.rs"
 scalar-only  = []   # retained for fuzz/reference decode until native SIMD backends land
 
 [dependencies]
-slidecodec-core = { path = "../slidecodec-core", version = "0.0.0" }
+slidecodec-core = { path = "../slidecodec-core", version = "0.1.0" }
 thiserror = { workspace = true }
 memchr = { version = "2.7.6", default-features = false }
 

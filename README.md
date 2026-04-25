@@ -5,22 +5,24 @@ Pathology codec stack for whole-slide imaging workloads.
 ## Status
 
 `slidecodec` is a native-first codec workspace for pathology and WSI software.
-The current public-source version is `0.1.0`; the project remains pre-1.0 while
-the JPEG 2000 / HTJ2K ROI and GPU adapter APIs settle.
+The current public-source version is `0.1.0`. The project is in active API
+stabilization toward 1.0, with the WSI-shaped CPU decode APIs as the primary
+supported surface and GPU adapter APIs still being hardened.
 The core stack in this repository is:
 
 - `slidecodec-jpeg` — native JPEG decode for WSI tiles
 - `slidecodec-jpeg-metal` — Apple Metal JPEG tile decode and device-output
   adapter for batched WSI workloads
-- `slidecodec-jpeg-cuda` — CUDA-facing JPEG device-output adapter with clean
-  CPU fallback on non-CUDA hosts
+- `slidecodec-jpeg-cuda` — CUDA-facing JPEG device-output API adapter; today it
+  validates explicit CUDA-unavailable behavior and CPU fallback surfaces
 - `slidecodec-j2k` — native in-repo JPEG 2000 / HTJ2K inspect and decode;
   WSI-native ROI/context optimization milestones are still in progress, so the
   workspace remains pre-1.0
 - `slidecodec-j2k-metal` — Apple Metal device-output adapter for JPEG 2000 /
   HTJ2K tiles
-- `slidecodec-j2k-cuda` — CUDA-facing JPEG 2000 / HTJ2K device-output adapter
-  with clean CPU fallback on non-CUDA hosts
+- `slidecodec-j2k-cuda` — CUDA-facing JPEG 2000 / HTJ2K device-output API
+  adapter; today it validates explicit CUDA-unavailable behavior and CPU
+  fallback surfaces
 - `slidecodec-tilecodec` — tile decompression primitives for Deflate, Zstd,
   LZW, and Uncompressed payloads
 - `slidecodec-core` — shared traits, pixel/sample types, scratch/context
@@ -29,8 +31,19 @@ The core stack in this repository is:
 
 Target decode hosts are native `x86_64` and `aarch64`.
 Metal device-output adapters are validated on Apple Silicon macOS. CUDA crates
-compile and expose explicit unavailable/fallback behavior on this host, but
-runtime NVIDIA validation requires a separate CUDA machine.
+are source-published as fallback-only API compatibility adapters in this
+checkpoint; no runtime CUDA implementation or NVIDIA performance claim is made
+for `0.1.0`.
+
+## Stabilization roadmap
+
+Before 1.0, the project is focused on:
+
+- completing JPEG 2000 / HTJ2K ROI and reduced-resolution performance work
+- tightening public API documentation for the WSI decode surfaces
+- promoting the GPU adapter APIs from compatibility surfaces to validated
+  multi-host implementations
+- adding x86_64 GPU benchmark coverage and broadening release CI
 
 ## What this is
 
@@ -60,7 +73,8 @@ primitives instead of paying for a monolithic runtime.
 - Metal and CUDA adapter crates keep the core JPEG decoder pure-Rust CPU while
   exposing device-output surfaces for downstream GPU pipelines; the Metal path
   has optimized kernel paths for supported baseline JPEG tile shapes, including
-  batched 4:2:0 and 4:2:2 RGB WSI tile decode
+  batched 4:2:0 and 4:2:2 RGB WSI tile decode, while the CUDA crate is
+  fallback-only in this checkpoint
 
 ### `slidecodec-j2k`
 
@@ -72,7 +86,8 @@ primitives instead of paying for a monolithic runtime.
 - Metal and CUDA adapter crates expose device-output surfaces without moving
   the core decoder crate onto GPU-specific dependencies; the Metal path now
   runs compute kernels for component-plane interleave/clamp/pack after CPU
-  decode, with ROI staging still performed on CPU today
+  decode, with ROI staging still performed on CPU today, while the CUDA crate
+  is fallback-only in this checkpoint
 
 ### `slidecodec-tilecodec`
 
@@ -157,6 +172,12 @@ CLI inspect:
 $ slidecodec inspect tile.jp2
 1024×1024 Srgb bit=8 comps=3 levels=6 tiles=Some(...)
 ```
+
+Runnable crate examples are available under:
+
+- `crates/slidecodec-jpeg/examples`
+- `crates/slidecodec-j2k/examples`
+- `crates/slidecodec-tilecodec/examples`
 
 ## Benchmarks
 

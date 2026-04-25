@@ -1,3 +1,9 @@
+//! Shared traits and value types for the `slidecodec` workspace.
+//!
+//! Codec crates use this crate to expose common pixel formats, decode
+//! outcomes, row sinks, caller-owned scratch pools, and CPU/GPU backend
+//! selection contracts without depending on each other.
+
 #![no_std]
 #![warn(unreachable_pub)]
 

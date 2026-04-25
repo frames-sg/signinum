@@ -14,6 +14,43 @@ The current benchmark contract is native-only: run and compare on `x86_64`
 and `aarch64` hosts. wasm and `no_std` builds are no longer part of the
 performance signoff path.
 
+## Host setup
+
+The in-tree correctness tests do not require system codec libraries. Comparator
+benchmark rows are optional and are enabled only when their local dependency can
+be discovered.
+
+On macOS with Homebrew:
+
+```sh
+brew install pkg-config jpeg-turbo openjpeg
+```
+
+On Ubuntu/Debian:
+
+```sh
+sudo apt-get update
+sudo apt-get install -y pkg-config libturbojpeg0-dev libjpeg-dev openjpeg-tools
+```
+
+JPEG comparator behavior:
+
+- `libjpeg-turbo` is discovered with `pkg-config --libs libturbojpeg libjpeg`.
+- If it is not available, the `libjpeg-turbo` benchmark rows are skipped.
+- Set `SLIDECODEC_REQUIRE_LIBJPEG_TURBO=1` on signoff hosts to fail when the
+  direct comparator is missing.
+
+JPEG 2000 comparator behavior:
+
+- OpenJPEG in-process comparator code is provided by the Rust `openjpeg-sys`
+  dependency.
+- The optional `opj_compress` binary is used only for generating one
+  OpenJPEG-shaped fixture path when it is present; otherwise the bench falls
+  back to the in-tree encoder for deterministic inputs.
+- Grok rows are skipped unless `SLIDECODEC_GROK_SOURCE` and
+  `SLIDECODEC_GROK_ROOT` point to a local Grok build with headers and shared
+  libraries.
+
 ## Compared operations
 
 - `inspect`

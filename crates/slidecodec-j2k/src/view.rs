@@ -21,6 +21,10 @@ use slidecodec_core::{
     PixelFormat, Rect, RowSink, TileBatchDecode,
 };
 
+/// Borrowed parse result for a JP2 or raw JPEG 2000 / HTJ2K codestream.
+///
+/// Use this when a caller wants to inspect metadata once and build a decoder
+/// later without copying compressed tile bytes.
 pub struct J2kView<'a> {
     bytes: &'a [u8],
     info: Info,
@@ -28,6 +32,11 @@ pub struct J2kView<'a> {
 }
 
 impl<'a> J2kView<'a> {
+    /// Parse container/codestream metadata into a borrowed view.
+    ///
+    /// # Errors
+    /// Returns [`J2kError`] when the input is not a supported JP2/J2C/HTJ2K
+    /// stream or when backend inspection rejects the codestream.
     pub fn parse(input: &'a [u8]) -> Result<Self, J2kError> {
         let info = match parse_info(input) {
             Ok(info) => info,
@@ -42,15 +51,22 @@ impl<'a> J2kView<'a> {
         })
     }
 
+    /// Header-derived image metadata.
     pub fn info(&self) -> &Info {
         &self.info
     }
 
+    /// Original compressed bytes backing this view.
     pub fn bytes(&self) -> &'a [u8] {
         self.bytes
     }
 }
 
+/// JPEG 2000 / HTJ2K decoder with WSI-shaped full-frame, ROI, and scaled
+/// output methods.
+///
+/// The decoder borrows compressed tile bytes and owns reusable native decode
+/// context so repeated operations can avoid reparsing backend state.
 pub struct J2kDecoder<'a> {
     bytes: &'a [u8],
     info: Info,
@@ -59,9 +75,15 @@ pub struct J2kDecoder<'a> {
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+/// Marker type used by generic tile-batch decode traits.
 pub struct J2kCodec;
 
 impl<'a> J2kDecoder<'a> {
+    /// Inspect JP2/J2C/HTJ2K metadata without decoding pixels.
+    ///
+    /// # Errors
+    /// Returns [`J2kError`] when the input cannot be parsed or inspected as a
+    /// supported JPEG 2000 / HTJ2K image.
     pub fn inspect(input: &'a [u8]) -> Result<Info, J2kError> {
         match parse_info(input) {
             Ok(info) => Ok(info),
@@ -70,10 +92,18 @@ impl<'a> J2kDecoder<'a> {
         }
     }
 
+    /// Create a decoder from compressed bytes.
+    ///
+    /// # Errors
+    /// Returns [`J2kError`] for unsupported or malformed input.
     pub fn new(input: &'a [u8]) -> Result<Self, J2kError> {
         Self::from_view(J2kView::parse(input)?)
     }
 
+    /// Create a decoder from a previously parsed [`J2kView`].
+    ///
+    /// # Errors
+    /// Returns [`J2kError`] if the parsed view cannot be promoted to a decoder.
     pub fn from_view(view: J2kView<'a>) -> Result<Self, J2kError> {
         Ok(Self {
             bytes: view.bytes,
@@ -83,14 +113,21 @@ impl<'a> J2kDecoder<'a> {
         })
     }
 
+    /// Header-derived image metadata.
     pub fn info(&self) -> &Info {
         &self.info
     }
 
+    /// Original compressed bytes backing this decoder.
     pub fn bytes(&self) -> &'a [u8] {
         self.bytes
     }
 
+    /// Decode the full image into `out` using `stride` bytes per output row.
+    ///
+    /// # Errors
+    /// Returns [`J2kError`] when the format is unsupported, the output buffer
+    /// is too small, or the codestream fails during decode.
     pub fn decode_into(
         &mut self,
         out: &mut [u8],
@@ -100,6 +137,13 @@ impl<'a> J2kDecoder<'a> {
         self.decode_into_with_scratch(&mut J2kScratchPool::new(), out, stride, fmt)
     }
 
+    /// Decode the full image with caller-owned scratch.
+    ///
+    /// The scratch pool is reserved for API symmetry with other codecs and for
+    /// future reduced-allocation paths.
+    ///
+    /// # Errors
+    /// Same as [`Self::decode_into`].
     pub fn decode_into_with_scratch(
         &mut self,
         _pool: &mut J2kScratchPool,
@@ -122,6 +166,15 @@ impl<'a> J2kDecoder<'a> {
         })
     }
 
+    /// Decode a source-coordinate region into `out`.
+    ///
+    /// `roi` is expressed in full-resolution source pixels. The output buffer
+    /// must hold `roi.w * roi.h * fmt.bytes_per_pixel()` bytes with the
+    /// provided row stride.
+    ///
+    /// # Errors
+    /// Returns [`J2kError`] when the region is out of bounds, the output buffer
+    /// is too small, the format is unsupported, or decode fails.
     pub fn decode_region_into(
         &mut self,
         pool: &mut J2kScratchPool,
@@ -147,6 +200,14 @@ impl<'a> J2kDecoder<'a> {
         })
     }
 
+    /// Decode the full image at a reduced resolution.
+    ///
+    /// `scale` uses the shared [`Downscale`] contract; `Downscale::None`
+    /// delegates to full-resolution decode.
+    ///
+    /// # Errors
+    /// Returns [`J2kError`] when the format or scale request is unsupported,
+    /// the output buffer is too small, or decode fails.
     pub fn decode_scaled_into(
         &mut self,
         pool: &mut J2kScratchPool,

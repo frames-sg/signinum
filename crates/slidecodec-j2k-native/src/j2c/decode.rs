@@ -241,9 +241,9 @@ pub(crate) fn build_direct_color_plan<'a>(
 
     let mut bit_depths = [0_u8; 3];
     let mut component_plans = Vec::with_capacity(3);
-    for component_idx in 0..3 {
+    for (component_idx, bit_depth) in bit_depths.iter_mut().enumerate() {
         let component_info = &tile.component_infos[component_idx];
-        bit_depths[component_idx] = component_info.size_info.precision;
+        *bit_depth = component_info.size_info.precision;
         let addend = if tile.mct {
             0.0
         } else {
@@ -645,7 +645,7 @@ fn collect_classic_code_block_data(
                         if segment_start_coding_pass <= 9 {
                             true
                         } else {
-                            segment_start_coding_pass % 3 == 0
+                            segment_start_coding_pass.is_multiple_of(3)
                         }
                     } else {
                         true
@@ -677,7 +677,7 @@ fn collect_classic_code_block_data(
             if segment_start_coding_pass <= 9 {
                 true
             } else {
-                segment_start_coding_pass % 3 == 0
+                segment_start_coding_pass.is_multiple_of(3)
             }
         } else {
             true

@@ -161,7 +161,7 @@ fn decode_inner(
                     true
                 } else {
                     // Only for cleanup pass.
-                    start_coding_pass % 3 == 0
+                    start_coding_pass.is_multiple_of(3)
                 }
             } else {
                 true

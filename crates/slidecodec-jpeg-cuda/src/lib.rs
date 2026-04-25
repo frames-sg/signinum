@@ -1,5 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
+//! CUDA-facing device-output adapter for `slidecodec-jpeg`.
+//!
+//! This crate intentionally exposes the same backend-selection surface as the
+//! Metal adapter, but the `0.1.0` implementation is fallback-only: CPU and
+//! auto requests return host-backed surfaces, while explicit CUDA requests
+//! report CUDA as unavailable.
+
 #![warn(unreachable_pub)]
 
 use slidecodec_core::{

@@ -455,7 +455,7 @@ pub(crate) fn encode_code_block_segments_with_style(
             }
         }
 
-        let current_bitplane = usize::from((coding_pass + 2) / 3);
+        let current_bitplane = usize::from(coding_pass.div_ceil(3));
         let bit_mask = 1u32 << (num_bitplanes as usize - 1 - current_bitplane);
         match coding_pass % 3 {
             0 => {

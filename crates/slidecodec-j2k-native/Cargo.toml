@@ -26,5 +26,5 @@ unsafe_code = "forbid"
 unreachable_pub = "warn"
 
 [lints.clippy]
-all = "allow"
+all = { level = "warn", priority = -1 }
 pedantic = "allow"

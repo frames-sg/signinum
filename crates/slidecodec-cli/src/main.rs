@@ -72,13 +72,17 @@ fn inspect_bytes(bytes: &[u8]) -> Result<String, String> {
     match detect_inspect_format(bytes) {
         InspectFormat::Jpeg => match slidecodec_jpeg::Decoder::inspect(bytes) {
             Ok(info) => Ok(format!(
-                "{}×{} {:?} {:?} bit={} samp={:?} rst={:?} scans={}",
+                "{}×{} {:?} {:?} bit={} samp={:?} mcu={}x{} units={}x{} rst={:?} scans={}",
                 info.dimensions.0,
                 info.dimensions.1,
                 info.sof_kind,
                 info.color_space,
                 info.bit_depth,
                 info.sampling.components(),
+                info.mcu_geometry.width,
+                info.mcu_geometry.height,
+                info.mcu_geometry.columns,
+                info.mcu_geometry.rows,
                 info.restart_interval,
                 info.scan_count,
             )),

@@ -7,9 +7,19 @@ for project positioning and MSRV.
 use slidecodec_jpeg::{Decoder, JpegError, JpegView, RowSink};
 
 let info = Decoder::inspect(bytes)?;
-println!("{}×{} {:?}", info.dimensions.0, info.dimensions.1, info.sof_kind);
+println!(
+    "{}×{} {:?} mcu={:?} restart={:?}",
+    info.dimensions.0,
+    info.dimensions.1,
+    info.sof_kind,
+    info.mcu_geometry,
+    info.restart_interval
+);
 
 let view = JpegView::parse(bytes)?;
+if let Some(index) = view.restart_index()? {
+    println!("restart segments={}", index.segments.len());
+}
 let decoder = Decoder::from_view(view)?;
 
 struct Sink;

@@ -103,11 +103,20 @@ These codecs expose the shared `TileDecompress` trait from `slidecodec-core`.
 JPEG inspect:
 
 ```rust
-use slidecodec_jpeg::Decoder;
+use slidecodec_jpeg::{Decoder, JpegView};
 
 let bytes = std::fs::read("tile.jpg")?;
 let info = Decoder::inspect(&bytes)?;
-println!("{:?} {:?}", info.dimensions, info.color_space);
+println!(
+    "{:?} {:?} mcu={:?} restart={:?}",
+    info.dimensions,
+    info.color_space,
+    info.mcu_geometry,
+    info.restart_interval
+);
+if let Some(index) = JpegView::parse(&bytes)?.restart_index()? {
+    println!("restart segments={}", index.segments.len());
+}
 ```
 
 JPEG 2000 decode:

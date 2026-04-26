@@ -42,6 +42,24 @@ fn cpu_device_request_stays_host_backed() {
 }
 
 #[test]
+fn metal_surface_exposes_buffer_for_on_device_consumers() {
+    let mut metal_decoder = Decoder::new(BASELINE_420).expect("metal decoder");
+    let metal_surface = metal_decoder
+        .decode_to_device(PixelFormat::Rgb8, BackendRequest::Metal)
+        .expect("metal surface");
+    let (buffer, byte_offset) = metal_surface.metal_buffer().expect("metal buffer");
+    assert_eq!(byte_offset, 0);
+    let buffer_len = usize::try_from(buffer.length()).expect("metal buffer length fits usize");
+    assert!(buffer_len >= metal_surface.byte_len());
+
+    let mut cpu_decoder = Decoder::new(BASELINE_420).expect("cpu decoder");
+    let cpu_surface = cpu_decoder
+        .decode_to_device(PixelFormat::Rgb8, BackendRequest::Cpu)
+        .expect("cpu surface");
+    assert!(cpu_surface.metal_buffer().is_none());
+}
+
+#[test]
 fn fast422_decode_to_metal_matches_cpu_decode_bytes() {
     let mut decoder = Decoder::new(BASELINE_422).expect("decoder");
     let mut expected = <Decoder<'_> as ImageDecode<'_>>::from_view(

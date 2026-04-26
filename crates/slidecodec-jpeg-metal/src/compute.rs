@@ -365,6 +365,10 @@ impl MetalRuntime {
     fn new() -> Result<Self, String> {
         let device = Device::system_default()
             .ok_or_else(|| "Metal is unavailable on this host".to_string())?;
+        Self::new_with_device(device)
+    }
+
+    fn new_with_device(device: Device) -> Result<Self, String> {
         let options = CompileOptions::new();
         let library = device.new_library_with_source(SHADER_SOURCE, &options)?;
         let pack_function = library.get_function("jpeg_pack", None)?;
@@ -595,6 +599,16 @@ fn with_runtime<R>(f: impl FnOnce(&MetalRuntime) -> Result<R, Error>) -> Result<
             }),
         }
     })
+}
+
+#[cfg(target_os = "macos")]
+fn with_runtime_for_device<R>(
+    device: &Device,
+    f: impl FnOnce(&MetalRuntime) -> Result<R, Error>,
+) -> Result<R, Error> {
+    let runtime = MetalRuntime::new_with_device(device.clone())
+        .map_err(|message| Error::MetalKernel { message })?;
+    f(&runtime)
 }
 
 #[cfg(target_os = "macos")]
@@ -7588,25 +7602,67 @@ pub(crate) fn decode_to_surface(
     fast420_packet: Option<&JpegMetalFast420PacketV1>,
 ) -> Result<Surface, Error> {
     with_runtime(|runtime| {
-        if let Some(surface) = try_decode_fast444_to_surface(runtime, decoder, fast444_packet, fmt)?
-        {
-            return Ok(surface);
-        }
-        if let Some(surface) = try_decode_fast422_to_surface(runtime, fast422_packet, fmt)? {
-            return Ok(surface);
-        }
-        if let Some(surface) = try_decode_fast420_to_surface(runtime, decoder, fast420_packet, fmt)?
-        {
-            return Ok(surface);
-        }
-        let mut stage = PlaneStage::new(
-            &runtime.device,
-            decoder.info().color_space,
-            decoder.info().dimensions,
-        )?;
-        decoder.decode_component_rows_with_scratch(pool, &mut stage)?;
-        stage.finish_with_runtime(runtime, fmt)
+        decode_to_surface_with_runtime(
+            runtime,
+            decoder,
+            pool,
+            fmt,
+            fast444_packet,
+            fast422_packet,
+            fast420_packet,
+        )
     })
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn decode_to_surface_with_device(
+    decoder: &CpuDecoder<'_>,
+    pool: &mut slidecodec_jpeg::ScratchPool,
+    fmt: PixelFormat,
+    fast444_packet: Option<&JpegMetalFast444PacketV1>,
+    fast422_packet: Option<&JpegMetalFast422PacketV1>,
+    fast420_packet: Option<&JpegMetalFast420PacketV1>,
+    device: &Device,
+) -> Result<Surface, Error> {
+    with_runtime_for_device(device, |runtime| {
+        decode_to_surface_with_runtime(
+            runtime,
+            decoder,
+            pool,
+            fmt,
+            fast444_packet,
+            fast422_packet,
+            fast420_packet,
+        )
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn decode_to_surface_with_runtime(
+    runtime: &MetalRuntime,
+    decoder: &CpuDecoder<'_>,
+    pool: &mut slidecodec_jpeg::ScratchPool,
+    fmt: PixelFormat,
+    fast444_packet: Option<&JpegMetalFast444PacketV1>,
+    fast422_packet: Option<&JpegMetalFast422PacketV1>,
+    fast420_packet: Option<&JpegMetalFast420PacketV1>,
+) -> Result<Surface, Error> {
+    if let Some(surface) = try_decode_fast444_to_surface(runtime, decoder, fast444_packet, fmt)? {
+        return Ok(surface);
+    }
+    if let Some(surface) = try_decode_fast422_to_surface(runtime, fast422_packet, fmt)? {
+        return Ok(surface);
+    }
+    if let Some(surface) = try_decode_fast420_to_surface(runtime, decoder, fast420_packet, fmt)? {
+        return Ok(surface);
+    }
+    let mut stage = PlaneStage::new(
+        &runtime.device,
+        decoder.info().color_space,
+        decoder.info().dimensions,
+    )?;
+    decoder.decode_component_rows_with_scratch(pool, &mut stage)?;
+    stage.finish_with_runtime(runtime, fmt)
 }
 
 #[cfg(target_os = "macos")]

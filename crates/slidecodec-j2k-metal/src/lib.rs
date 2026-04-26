@@ -210,6 +210,51 @@ impl DeviceSurface for Surface {
     }
 }
 
+#[cfg(target_os = "macos")]
+#[derive(Clone)]
+pub struct MetalBackendSession {
+    device: Device,
+}
+
+#[cfg(target_os = "macos")]
+impl MetalBackendSession {
+    pub fn new(device: Device) -> Self {
+        Self { device }
+    }
+
+    pub fn system_default() -> Result<Self, Error> {
+        Device::system_default()
+            .map(Self::new)
+            .ok_or(Error::MetalUnavailable)
+    }
+
+    pub fn device(&self) -> &metal::DeviceRef {
+        self.device.as_ref()
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl core::fmt::Debug for MetalBackendSession {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("MetalBackendSession")
+            .field("device", &self.device.name())
+            .finish()
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MetalBackendSession {
+    _private: (),
+}
+
+#[cfg(not(target_os = "macos"))]
+impl MetalBackendSession {
+    pub fn system_default() -> Result<Self, Error> {
+        Err(Error::MetalUnavailable)
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct MetalSession {
     shared: batch::SharedSession,
@@ -442,6 +487,28 @@ impl<'a> J2kDecoder<'a> {
         &self.inner
     }
 
+    pub fn decode_to_device_with_session(
+        &mut self,
+        fmt: PixelFormat,
+        session: &MetalBackendSession,
+    ) -> Result<Surface, Error> {
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(surface) =
+                self.decode_direct_to_surface_with_device(fmt, &session.device)?
+            {
+                Ok(surface)
+            } else {
+                self.decode_full_to_metal_surface_with_device(fmt, &session.device)
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (fmt, session);
+            Err(Error::MetalUnavailable)
+        }
+    }
+
     #[cfg(target_os = "macos")]
     fn ensure_native_image(&mut self) -> Result<(), Error> {
         if self.native_image.is_none() {
@@ -564,6 +631,42 @@ impl<'a> J2kDecoder<'a> {
     }
 
     #[cfg(target_os = "macos")]
+    fn decode_direct_to_surface_with_device(
+        &mut self,
+        fmt: PixelFormat,
+        device: &Device,
+    ) -> Result<Option<Surface>, Error> {
+        if matches!(fmt, PixelFormat::Gray8 | PixelFormat::Gray16) {
+            let Some(plan) = self.ensure_prepared_direct_gray_plan()? else {
+                return Ok(None);
+            };
+            return Ok(Some(
+                crate::compute::execute_prepared_direct_grayscale_plan_with_device(
+                    &plan, fmt, device,
+                )?,
+            ));
+        }
+
+        if matches!(
+            fmt,
+            PixelFormat::Rgb8 | PixelFormat::Rgba8 | PixelFormat::Rgb16
+        ) {
+            let Some(plan) = self.ensure_prepared_direct_color_plan()? else {
+                return Ok(None);
+            };
+            return match crate::compute::execute_prepared_direct_color_plan_with_device(
+                &plan, fmt, device,
+            ) {
+                Ok(surface) => Ok(Some(surface)),
+                Err(error) if is_direct_color_runtime_fallback_error(&error) => Ok(None),
+                Err(error) => Err(error),
+            };
+        }
+
+        Ok(None)
+    }
+
+    #[cfg(target_os = "macos")]
     fn decode_full_to_metal_surface(&mut self, fmt: PixelFormat) -> Result<Surface, Error> {
         self.ensure_native_image()?;
         let (Some(image), native_context) = (self.native_image.as_ref(), &mut self.native_context)
@@ -573,6 +676,22 @@ impl<'a> J2kDecoder<'a> {
             )));
         };
         crate::compute::decode_image_to_surface(image, native_context, fmt)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn decode_full_to_metal_surface_with_device(
+        &mut self,
+        fmt: PixelFormat,
+        device: &Device,
+    ) -> Result<Surface, Error> {
+        self.ensure_native_image()?;
+        let (Some(image), native_context) = (self.native_image.as_ref(), &mut self.native_context)
+        else {
+            return Err(Error::Decode(J2kError::Backend(
+                "native image cache missing".to_string(),
+            )));
+        };
+        crate::compute::decode_image_to_surface_with_device(image, native_context, fmt, device)
     }
 
     #[cfg(target_os = "macos")]
@@ -781,6 +900,46 @@ impl<'a> J2kDecoder<'a> {
         crate::compute::decode_scaled_to_surface(self.inner.bytes(), plan.source_dims(), fmt, scale)
     }
 
+    #[cfg(target_os = "macos")]
+    fn decode_region_to_metal_surface_with_device(
+        &mut self,
+        fmt: PixelFormat,
+        plan: DeviceDecodePlan,
+        device: &Device,
+    ) -> Result<Surface, Error> {
+        self.ensure_native_image()?;
+        let (Some(image), native_context) = (self.native_image.as_ref(), &mut self.native_context)
+        else {
+            return Err(Error::Decode(J2kError::Backend(
+                "native image cache missing".to_string(),
+            )));
+        };
+        crate::compute::decode_image_region_to_surface_with_device(
+            image,
+            native_context,
+            fmt,
+            plan.source_rect(),
+            device,
+        )
+    }
+
+    #[cfg(target_os = "macos")]
+    fn decode_scaled_to_metal_surface_with_device(
+        &mut self,
+        fmt: PixelFormat,
+        scale: Downscale,
+        plan: DeviceDecodePlan,
+        device: &Device,
+    ) -> Result<Surface, Error> {
+        crate::compute::decode_scaled_to_surface_with_device(
+            self.inner.bytes(),
+            plan.source_dims(),
+            fmt,
+            scale,
+            device,
+        )
+    }
+
     pub(crate) fn decode_to_surface_impl(
         &mut self,
         fmt: PixelFormat,
@@ -858,6 +1017,27 @@ impl<'a> J2kDecoder<'a> {
         }
     }
 
+    pub fn decode_region_to_device_with_session(
+        &mut self,
+        fmt: PixelFormat,
+        roi: Rect,
+        session: &MetalBackendSession,
+    ) -> Result<Surface, Error> {
+        #[cfg(target_os = "macos")]
+        {
+            let plan = DeviceDecodePlan::for_image(
+                self.inner.info().dimensions,
+                DeviceDecodeRequest::Region { roi },
+            )?;
+            self.decode_region_to_metal_surface_with_device(fmt, plan, &session.device)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (fmt, roi, session);
+            Err(Error::MetalUnavailable)
+        }
+    }
+
     pub(crate) fn decode_scaled_to_surface_impl(
         &mut self,
         fmt: PixelFormat,
@@ -893,6 +1073,27 @@ impl<'a> J2kDecoder<'a> {
                 unreachable!("Metal scaled path is gated above");
             }
             BackendRequest::Cuda => Err(Error::UnsupportedBackend { request: backend }),
+        }
+    }
+
+    pub fn decode_scaled_to_device_with_session(
+        &mut self,
+        fmt: PixelFormat,
+        scale: Downscale,
+        session: &MetalBackendSession,
+    ) -> Result<Surface, Error> {
+        #[cfg(target_os = "macos")]
+        {
+            let plan = DeviceDecodePlan::for_image(
+                self.inner.info().dimensions,
+                DeviceDecodeRequest::Scaled { scale },
+            )?;
+            self.decode_scaled_to_metal_surface_with_device(fmt, scale, plan, &session.device)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (fmt, scale, session);
+            Err(Error::MetalUnavailable)
         }
     }
 }

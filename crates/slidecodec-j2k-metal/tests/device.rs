@@ -6,7 +6,7 @@ use slidecodec_core::{
 };
 use slidecodec_j2k::J2kContext;
 use slidecodec_j2k_metal::{
-    Codec, Error, J2kDecoder, J2kScratchPool, MetalSession, MetalTileBatch,
+    Codec, Error, J2kDecoder, J2kScratchPool, MetalBackendSession, MetalSession, MetalTileBatch,
 };
 use slidecodec_j2k_native::{encode, encode_htj2k, EncodeOptions};
 
@@ -272,6 +272,24 @@ fn metal_surface_exposes_buffer_for_on_device_consumers() {
         .decode_to_device(PixelFormat::Gray8, BackendRequest::Cpu)
         .expect("cpu surface");
     assert!(cpu_surface.metal_buffer().is_none());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn decode_to_device_with_session_uses_session_device() {
+    use metal::foreign_types::ForeignTypeRef;
+
+    let bytes = fixture_gray8();
+    let session = MetalBackendSession::system_default().expect("Metal backend session");
+    let mut decoder = J2kDecoder::new(&bytes).expect("metal decoder");
+
+    let surface = decoder
+        .decode_to_device_with_session(PixelFormat::Gray8, &session)
+        .expect("session decode");
+
+    assert_eq!(surface.backend_kind(), BackendKind::Metal);
+    let (buffer, _) = surface.metal_buffer().expect("metal buffer");
+    assert_eq!(buffer.device().as_ptr(), session.device().as_ptr());
 }
 
 #[test]

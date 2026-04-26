@@ -2,7 +2,7 @@ use slidecodec_core::{
     BackendKind, BackendRequest, DeviceSubmission, DeviceSurface, Downscale, ImageDecode,
     ImageDecodeDevice, ImageDecodeSubmit, PixelFormat, Rect,
 };
-use slidecodec_jpeg_metal::{Decoder, MetalSession, ScratchPool};
+use slidecodec_jpeg_metal::{Decoder, MetalBackendSession, MetalSession, ScratchPool};
 
 const BASELINE_420: &[u8] = include_bytes!("../../../corpus/conformance/baseline_420_16x16.jpg");
 const BASELINE_422: &[u8] = include_bytes!("../../../corpus/conformance/baseline_422_16x8.jpg");
@@ -57,6 +57,23 @@ fn metal_surface_exposes_buffer_for_on_device_consumers() {
         .decode_to_device(PixelFormat::Rgb8, BackendRequest::Cpu)
         .expect("cpu surface");
     assert!(cpu_surface.metal_buffer().is_none());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn decode_to_device_with_session_uses_session_device() {
+    use metal::foreign_types::ForeignTypeRef;
+
+    let session = MetalBackendSession::system_default().expect("Metal backend session");
+    let mut decoder = Decoder::new(BASELINE_420).expect("metal decoder");
+
+    let surface = decoder
+        .decode_to_device_with_session(PixelFormat::Rgb8, &session)
+        .expect("session decode");
+
+    assert_eq!(surface.backend_kind(), BackendKind::Metal);
+    let (buffer, _) = surface.metal_buffer().expect("metal buffer");
+    assert_eq!(buffer.device().as_ptr(), session.device().as_ptr());
 }
 
 #[test]

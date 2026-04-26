@@ -2,6 +2,7 @@
 
 #[cfg(target_os = "macos")]
 use std::{
+    cell::RefCell,
     collections::HashMap,
     mem::{size_of, size_of_val},
     sync::{Arc, Mutex, OnceLock},
@@ -855,6 +856,11 @@ struct J2kHtStatus {
 static METAL_RUNTIME: OnceLock<Result<Arc<MetalRuntime>, String>> = OnceLock::new();
 
 #[cfg(target_os = "macos")]
+thread_local! {
+    static METAL_RUNTIME_OVERRIDE: RefCell<Option<Arc<MetalRuntime>>> = const { RefCell::new(None) };
+}
+
+#[cfg(target_os = "macos")]
 struct MetalRuntime {
     device: Device,
     queue: CommandQueue,
@@ -906,6 +912,10 @@ impl MetalRuntime {
     fn new() -> Result<Self, String> {
         let device = Device::system_default()
             .ok_or_else(|| "Metal is unavailable on this host".to_string())?;
+        Self::new_with_device(device)
+    }
+
+    fn new_with_device(device: Device) -> Result<Self, String> {
         let options = CompileOptions::new();
         let library = device.new_library_with_source(SHADER_SOURCE, &options)?;
         let pipeline = |name: &str| {
@@ -1105,12 +1115,46 @@ impl MetalRuntime {
 
 #[cfg(target_os = "macos")]
 fn with_runtime<R>(f: impl FnOnce(&MetalRuntime) -> Result<R, Error>) -> Result<R, Error> {
+    let override_runtime = METAL_RUNTIME_OVERRIDE.with(|slot| slot.borrow().clone());
+    if let Some(runtime) = override_runtime {
+        return f(&runtime);
+    }
+
     match METAL_RUNTIME.get_or_init(|| MetalRuntime::new().map(Arc::new)) {
         Ok(runtime) => f(runtime),
         Err(message) => Err(Error::MetalKernel {
             message: message.clone(),
         }),
     }
+}
+
+#[cfg(target_os = "macos")]
+struct RuntimeOverrideGuard {
+    previous: Option<Arc<MetalRuntime>>,
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for RuntimeOverrideGuard {
+    fn drop(&mut self) {
+        let previous = self.previous.take();
+        METAL_RUNTIME_OVERRIDE.with(|slot| {
+            slot.replace(previous);
+        });
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn with_runtime_for_device<R>(
+    device: &Device,
+    f: impl FnOnce(&MetalRuntime) -> Result<R, Error>,
+) -> Result<R, Error> {
+    let runtime = Arc::new(
+        MetalRuntime::new_with_device(device.clone())
+            .map_err(|message| Error::MetalKernel { message })?,
+    );
+    let previous = METAL_RUNTIME_OVERRIDE.with(|slot| slot.replace(Some(runtime.clone())));
+    let _guard = RuntimeOverrideGuard { previous };
+    f(&runtime)
 }
 
 #[cfg(target_os = "macos")]
@@ -2841,6 +2885,17 @@ pub(crate) fn execute_prepared_direct_grayscale_plan(
 }
 
 #[cfg(target_os = "macos")]
+pub(crate) fn execute_prepared_direct_grayscale_plan_with_device(
+    plan: &PreparedDirectGrayscalePlan,
+    fmt: PixelFormat,
+    device: &Device,
+) -> Result<Surface, Error> {
+    with_runtime_for_device(device, |_| {
+        execute_prepared_direct_grayscale_plan(plan, fmt)
+    })
+}
+
+#[cfg(target_os = "macos")]
 pub(crate) fn execute_prepared_direct_grayscale_plan_batch(
     plans: &[Arc<PreparedDirectGrayscalePlan>],
     fmt: PixelFormat,
@@ -2889,6 +2944,15 @@ pub(crate) fn execute_prepared_direct_color_plan(
     surfaces.pop().ok_or_else(|| Error::MetalKernel {
         message: "J2K MetalDirect color plan produced no surface".to_string(),
     })
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn execute_prepared_direct_color_plan_with_device(
+    plan: &PreparedDirectColorPlan,
+    fmt: PixelFormat,
+    device: &Device,
+) -> Result<Surface, Error> {
+    with_runtime_for_device(device, |_| execute_prepared_direct_color_plan(plan, fmt))
 }
 
 #[cfg(target_os = "macos")]
@@ -8546,6 +8610,16 @@ pub(crate) fn decode_image_to_surface<'a>(
 }
 
 #[cfg(target_os = "macos")]
+pub(crate) fn decode_image_to_surface_with_device<'a>(
+    image: &NativeImage<'a>,
+    context: &mut NativeDecoderContext<'a>,
+    fmt: PixelFormat,
+    device: &Device,
+) -> Result<Surface, Error> {
+    with_runtime_for_device(device, |_| decode_image_to_surface(image, context, fmt))
+}
+
+#[cfg(target_os = "macos")]
 pub(crate) fn decode_image_region_to_surface<'a>(
     image: &NativeImage<'a>,
     context: &mut NativeDecoderContext<'a>,
@@ -8563,6 +8637,19 @@ pub(crate) fn decode_image_region_to_surface<'a>(
             .map_err(|error| Error::Decode(slidecodec_j2k::J2kError::Backend(error.to_string())))?;
         let stage = select_plane_stage(runtime, image, &decoded, &mut code_block_decoder)?;
         stage.finish_with_runtime(runtime, fmt)
+    })
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn decode_image_region_to_surface_with_device<'a>(
+    image: &NativeImage<'a>,
+    context: &mut NativeDecoderContext<'a>,
+    fmt: PixelFormat,
+    roi: Rect,
+    device: &Device,
+) -> Result<Surface, Error> {
+    with_runtime_for_device(device, |_| {
+        decode_image_region_to_surface(image, context, fmt, roi)
     })
 }
 
@@ -8620,4 +8707,17 @@ pub(crate) fn decode_scaled_to_surface(
         .map_err(|error| Error::Decode(slidecodec_j2k::J2kError::Backend(error.to_string())))?;
     let mut context = NativeDecoderContext::default();
     decode_image_to_surface(&image, &mut context, fmt)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn decode_scaled_to_surface_with_device(
+    bytes: &[u8],
+    dims: (u32, u32),
+    fmt: PixelFormat,
+    scale: slidecodec_core::Downscale,
+    device: &Device,
+) -> Result<Surface, Error> {
+    with_runtime_for_device(device, |_| {
+        decode_scaled_to_surface(bytes, dims, fmt, scale)
+    })
 }

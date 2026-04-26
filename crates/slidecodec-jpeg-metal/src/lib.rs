@@ -160,6 +160,51 @@ impl DeviceSurface for Surface {
     }
 }
 
+#[cfg(target_os = "macos")]
+#[derive(Clone)]
+pub struct MetalBackendSession {
+    device: Device,
+}
+
+#[cfg(target_os = "macos")]
+impl MetalBackendSession {
+    pub fn new(device: Device) -> Self {
+        Self { device }
+    }
+
+    pub fn system_default() -> Result<Self, Error> {
+        Device::system_default()
+            .map(Self::new)
+            .ok_or(Error::MetalUnavailable)
+    }
+
+    pub fn device(&self) -> &metal::DeviceRef {
+        self.device.as_ref()
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl core::fmt::Debug for MetalBackendSession {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("MetalBackendSession")
+            .field("device", &self.device.name())
+            .finish()
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MetalBackendSession {
+    _private: (),
+}
+
+#[cfg(not(target_os = "macos"))]
+impl MetalBackendSession {
+    pub fn system_default() -> Result<Self, Error> {
+        Err(Error::MetalUnavailable)
+    }
+}
+
 #[derive(Default)]
 pub struct MetalSession {
     shared: session::SharedSession,
@@ -253,6 +298,31 @@ impl<'a> Decoder<'a> {
             self.fast422_packet.as_deref(),
             self.fast420_packet.as_deref(),
         )
+    }
+
+    pub fn decode_to_device_with_session(
+        &mut self,
+        fmt: PixelFormat,
+        session: &MetalBackendSession,
+    ) -> Result<Surface, Error> {
+        #[cfg(target_os = "macos")]
+        {
+            let mut pool = CpuScratchPool::new();
+            compute::decode_to_surface_with_device(
+                &self.inner,
+                &mut pool,
+                fmt,
+                self.fast444_packet.as_deref(),
+                self.fast422_packet.as_deref(),
+                self.fast420_packet.as_deref(),
+                &session.device,
+            )
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (fmt, session);
+            Err(Error::MetalUnavailable)
+        }
     }
 }
 

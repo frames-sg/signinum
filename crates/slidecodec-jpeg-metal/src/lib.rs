@@ -109,6 +109,14 @@ impl Surface {
     }
 
     #[cfg(target_os = "macos")]
+    pub fn metal_buffer(&self) -> Option<(&Buffer, usize)> {
+        match &self.storage {
+            Storage::Metal { buffer, offset } => Some((buffer, *offset)),
+            Storage::Host(_) => None,
+        }
+    }
+
+    #[cfg(target_os = "macos")]
     pub(crate) fn from_metal_buffer(
         buffer: Buffer,
         dimensions: (u32, u32),

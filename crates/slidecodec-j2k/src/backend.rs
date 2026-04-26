@@ -23,6 +23,8 @@ pub(crate) fn inspect_info_from_image(image: &Image<'_>) -> Info {
         colorspace: map_colorspace(image.color_space()),
         bit_depth: image.original_bit_depth(),
         tile_layout: None,
+        coded_unit_layout: None,
+        restart_interval: None,
         resolution_levels: 1,
     }
 }

@@ -536,6 +536,13 @@ fn convert_info(info: &slidecodec_jpeg::Info) -> slidecodec_core::Info {
         },
         bit_depth: info.bit_depth,
         tile_layout: None,
+        coded_unit_layout: Some(slidecodec_core::CodedUnitLayout {
+            unit_width: info.mcu_geometry.width,
+            unit_height: info.mcu_geometry.height,
+            units_x: info.mcu_geometry.columns,
+            units_y: info.mcu_geometry.rows,
+        }),
+        restart_interval: info.restart_interval.map(u32::from),
         resolution_levels: 1,
     }
 }

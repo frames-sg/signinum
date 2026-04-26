@@ -4,7 +4,7 @@
 //! Produces the `Info` struct returned by `Decoder::inspect`.
 
 use crate::error::{JpegError, MarkerKind, Warning};
-use crate::info::{ColorSpace, Info, SamplingFactors, SofKind};
+use crate::info::{ColorSpace, Info, McuGeometry, SamplingFactors, SofKind};
 use crate::parse::adobe_app14::{parse_adobe_app14, AdobeTransform};
 use crate::parse::markers::MarkerWalker;
 use crate::parse::scan::{parse_scan_header, ParsedScan};
@@ -57,6 +57,7 @@ impl ParsedHeader {
             sof_kind: self.sof_kind,
             bit_depth: self.bit_depth,
             restart_interval: self.restart_interval,
+            mcu_geometry: McuGeometry::from_sampling(self.dimensions, self.sampling),
             scan_count: self.scan_count,
         }
     }
@@ -130,13 +131,15 @@ pub(crate) fn parse_info(bytes: &[u8]) -> Result<Info, JpegError> {
     let sof = sof.ok_or(JpegError::MissingMarker {
         marker: MarkerKind::Sof,
     })?;
+    let dimensions = (u32::from(sof.width), u32::from(sof.height));
     Ok(Info {
-        dimensions: (u32::from(sof.width), u32::from(sof.height)),
+        dimensions,
         color_space: color_space_for_components(sof.sampling.len(), adobe),
         sampling: sof.sampling,
         sof_kind: sof.sof_kind,
         bit_depth: sof.bit_depth,
         restart_interval,
+        mcu_geometry: McuGeometry::from_sampling(dimensions, sof.sampling),
         scan_count,
     })
 }

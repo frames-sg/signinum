@@ -7,6 +7,8 @@
 //! cycle. `DecodeOutcome`, which does need `Warning`, lives in `decoder.rs`
 //! and is added in M1b when the decode methods are introduced.
 
+use alloc::vec::Vec;
+
 /// Start-of-frame variant. Determines the decode pipeline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SofKind {
@@ -85,6 +87,61 @@ impl SamplingFactors {
 
     pub(crate) fn iter(&self) -> impl Iterator<Item = (u8, u8)> + '_ {
         self.components().iter().copied()
+    }
+}
+
+/// Minimum coded unit geometry derived from SOF sampling factors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct McuGeometry {
+    /// MCU width in output pixels.
+    pub width: u32,
+    /// MCU height in output pixels.
+    pub height: u32,
+    /// Number of MCU columns covering the image.
+    pub columns: u32,
+    /// Number of MCU rows covering the image.
+    pub rows: u32,
+    /// Total MCU count in scan order.
+    pub count: u32,
+}
+
+/// Restart-marker index for a single-scan JPEG stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestartIndex {
+    /// Absolute byte offset of the first entropy byte after the SOS header.
+    pub scan_data_offset: usize,
+    /// Restart interval from DRI, in MCUs.
+    pub interval_mcus: u32,
+    /// Restart-addressable scan segments in MCU order.
+    pub segments: Vec<RestartSegment>,
+}
+
+/// One restart-addressable entropy segment in the original JPEG byte stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RestartSegment {
+    /// First MCU index decoded from this segment.
+    pub start_mcu: u32,
+    /// Absolute byte offset of the first entropy byte for this segment.
+    pub entropy_offset: usize,
+    /// Absolute byte offset of the preceding RST marker's leading `0xff`.
+    pub marker_offset: Option<usize>,
+    /// Preceding marker byte (`0xd0..=0xd7`) for this segment.
+    pub marker: Option<u8>,
+}
+
+impl McuGeometry {
+    pub(crate) fn from_sampling(dimensions: (u32, u32), sampling: SamplingFactors) -> Self {
+        let width = u32::from(sampling.max_h) * 8;
+        let height = u32::from(sampling.max_v) * 8;
+        let columns = dimensions.0.div_ceil(width);
+        let rows = dimensions.1.div_ceil(height);
+        Self {
+            width,
+            height,
+            columns,
+            rows,
+            count: columns.saturating_mul(rows),
+        }
     }
 }
 
@@ -182,6 +239,47 @@ pub enum ColorTransform {
     ForceYCbCr,
 }
 
+/// Public decode options for JPEG reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecodeOptions {
+    color_transform: ColorTransform,
+}
+
+impl Default for DecodeOptions {
+    fn default() -> Self {
+        Self {
+            color_transform: ColorTransform::Auto,
+        }
+    }
+}
+
+impl DecodeOptions {
+    /// Override APP14 color-transform detection.
+    pub fn set_color_transform(&mut self, color_transform: ColorTransform) {
+        self.color_transform = color_transform;
+    }
+
+    /// Current color-transform override.
+    pub fn color_transform(&self) -> ColorTransform {
+        self.color_transform
+    }
+
+    /// Builder-style color-transform override.
+    pub fn with_color_transform(mut self, color_transform: ColorTransform) -> Self {
+        self.set_color_transform(color_transform);
+        self
+    }
+
+    pub(crate) fn apply_to_info(self, info: &mut Info) {
+        match (self.color_transform, info.sampling.len()) {
+            (ColorTransform::Auto, _) => {}
+            (ColorTransform::ForceRgb, 3) => info.color_space = ColorSpace::Rgb,
+            (ColorTransform::ForceYCbCr, 3) => info.color_space = ColorSpace::YCbCr,
+            (ColorTransform::ForceRgb | ColorTransform::ForceYCbCr, _) => {}
+        }
+    }
+}
+
 /// Header-derived image metadata. Populated by `Decoder::inspect` and by
 /// `Decoder::new`. `scan_count` is the number of SOS markers observed in
 /// the input — for sequential this is always 1; for progressive it is the
@@ -194,6 +292,7 @@ pub struct Info {
     pub sof_kind: SofKind,
     pub bit_depth: u8,
     pub restart_interval: Option<u16>,
+    pub mcu_geometry: McuGeometry,
     pub scan_count: u16,
 }
 

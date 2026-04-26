@@ -1,6 +1,6 @@
 use slidecodec_core::{
-    DecoderContext as CoreDecoderContext, Downscale, ImageDecode, ImageDecodeRows, PixelFormat,
-    RowSink, TileBatchDecode,
+    CodedUnitLayout, DecoderContext as CoreDecoderContext, Downscale, ImageDecode, ImageDecodeRows,
+    PixelFormat, RowSink, TileBatchDecode,
 };
 use slidecodec_jpeg::{Decoder, DecoderContext, JpegCodec, JpegError, ScratchPool};
 
@@ -26,6 +26,16 @@ fn decoder_implements_core_traits_for_rgb_decode() {
     .expect("decoder");
     let info = <Decoder<'_> as ImageDecode<'_>>::inspect(bytes).expect("inspect");
     assert_eq!(info.dimensions, (16, 16));
+    assert_eq!(
+        info.coded_unit_layout,
+        Some(CodedUnitLayout {
+            unit_width: 16,
+            unit_height: 16,
+            units_x: 1,
+            units_y: 1,
+        })
+    );
+    assert_eq!(info.restart_interval, None);
 
     let mut out = vec![0u8; 16 * 16 * 3];
     let outcome = <Decoder<'_> as ImageDecode<'_>>::decode_into(
@@ -36,6 +46,24 @@ fn decoder_implements_core_traits_for_rgb_decode() {
     )
     .expect("decode");
     assert_eq!(outcome.decoded.w, 16);
+}
+
+#[test]
+fn core_inspect_exposes_restart_interval_and_coded_units_for_wsi_planning() {
+    let bytes = include_bytes!("../../../corpus/conformance/baseline_420_restart_32x16.jpg");
+    let info = <Decoder<'_> as ImageDecode<'_>>::inspect(bytes).expect("inspect");
+
+    assert_eq!(info.dimensions, (32, 16));
+    assert_eq!(
+        info.coded_unit_layout,
+        Some(CodedUnitLayout {
+            unit_width: 16,
+            unit_height: 16,
+            units_x: 2,
+            units_y: 1,
+        })
+    );
+    assert_eq!(info.restart_interval, Some(2));
 }
 
 #[test]

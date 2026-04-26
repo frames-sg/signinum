@@ -15,7 +15,10 @@ compile_error!("slidecodec-jpeg currently supports only x86_64 and aarch64 targe
 extern crate alloc;
 
 pub mod info;
-pub use info::{ColorSpace, ColorTransform, Info, Rect, SamplingFactors, SofKind};
+pub use info::{
+    ColorSpace, ColorTransform, DecodeOptions, Info, McuGeometry, Rect, RestartIndex,
+    RestartSegment, SamplingFactors, SofKind,
+};
 pub use slidecodec_core::{
     CacheStats, CodecContext, DecodeRowsError, Downscale, ImageCodec, ImageDecode, ImageDecodeRows,
     PixelFormat, PixelLayout, RowSink, Sample, SampleType, TileBatchDecode, TileDecompress,

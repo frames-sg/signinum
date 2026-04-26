@@ -33,4 +33,4 @@ pub use traits::{
     ImageDecodeRows, ImageDecodeSubmit, ReadySubmission, TileBatchDecode, TileBatchDecodeDevice,
     TileBatchDecodeSubmit, TileDecompress,
 };
-pub use types::{Colorspace, DecodeOutcome, Info, Rect, TileLayout, WarningKind};
+pub use types::{CodedUnitLayout, Colorspace, DecodeOutcome, Info, Rect, TileLayout, WarningKind};

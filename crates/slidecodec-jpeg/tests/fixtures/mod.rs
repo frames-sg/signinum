@@ -36,7 +36,7 @@ pub(crate) fn baseline_422_16x8_rgb() -> Vec<u8> {
     include_bytes!("../../../../corpus/conformance/baseline_422_16x8.rgb").to_vec()
 }
 
-/// A 32×16 baseline JPEG with 4:2:0 sampling and restart markers every MCU.
+/// A 32×16 baseline JPEG with 4:2:0 sampling and restart coding.
 pub(crate) fn baseline_420_restart_32x16_jpeg() -> Vec<u8> {
     include_bytes!("../../../../corpus/conformance/baseline_420_restart_32x16.jpg").to_vec()
 }

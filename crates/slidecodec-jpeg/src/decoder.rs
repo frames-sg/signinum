@@ -12,7 +12,10 @@ use crate::entropy::sequential::{
     stripe_region_layout, PreparedComponentPlan, PreparedDecodePlan,
 };
 use crate::error::{JpegError, MarkerKind, Warning};
-use crate::info::{ColorSpace, DownscaleFactor, Info, OutputFormat, Rect, SofKind};
+use crate::info::{
+    ColorSpace, DecodeOptions, DownscaleFactor, Info, OutputFormat, Rect, RestartIndex,
+    RestartSegment, SofKind,
+};
 use crate::internal::checkpoint::{checkpoint_before_mcu, CpuCheckpointCache, DeviceCheckpoint};
 use crate::internal::scratch::{ScratchPool, SinkRows};
 use crate::output::{
@@ -86,23 +89,44 @@ pub struct JpegView<'a> {
     bytes: &'a [u8],
     header: ParsedHeader,
     info: Info,
+    options: DecodeOptions,
 }
 
 impl<'a> JpegView<'a> {
     /// Parse the stream into a borrowed view that can later build a decoder.
     pub fn parse(input: &'a [u8]) -> Result<Self, JpegError> {
+        Self::parse_with_options(input, DecodeOptions::default())
+    }
+
+    /// Parse the stream with explicit decode options.
+    pub fn parse_with_options(input: &'a [u8], options: DecodeOptions) -> Result<Self, JpegError> {
         let header = parse_header(input)?;
-        let info = header.info();
+        let mut info = header.info();
+        options.apply_to_info(&mut info);
         Ok(Self {
             bytes: input,
             header,
             info,
+            options,
         })
     }
 
     /// Header-derived metadata for the parsed stream.
     pub fn info(&self) -> &Info {
         &self.info
+    }
+
+    /// Build a restart-marker byte-offset index for the first scan.
+    ///
+    /// Offsets are absolute byte positions in the original JPEG byte slice.
+    /// Returns `Ok(None)` when the stream has no non-zero DRI marker.
+    pub fn restart_index(&self) -> Result<Option<RestartIndex>, JpegError> {
+        restart_index_for_stream(
+            self.bytes,
+            self.header.sos_offset,
+            &self.info,
+            self.info.restart_interval,
+        )
     }
 }
 
@@ -127,7 +151,26 @@ impl<'a> Decoder<'a> {
     /// Returns any structural, unsupported-SOF, or sanity-check error
     /// encountered before the Start-of-Scan marker. See [`JpegError`].
     pub fn inspect(input: &'a [u8]) -> Result<Info, JpegError> {
-        parse_info(input)
+        Self::inspect_with_options(input, DecodeOptions::default())
+    }
+
+    /// Parse headers with explicit decode options, without decoding pixels.
+    ///
+    /// The options are applied to the returned [`Info`] exactly as they would
+    /// be for [`Self::new_with_options`].
+    pub fn inspect_with_options(
+        input: &'a [u8],
+        options: DecodeOptions,
+    ) -> Result<Info, JpegError> {
+        let mut info = parse_info(input)?;
+        options.apply_to_info(&mut info);
+        Ok(info)
+    }
+
+    /// Build a decoder with explicit decode options.
+    pub fn new_with_options(input: &'a [u8], options: DecodeOptions) -> Result<Self, JpegError> {
+        let view = JpegView::parse_with_options(input, options)?;
+        DEFAULT_CONTEXT.with(|ctx| Self::from_view_in_context(view, &mut ctx.borrow_mut()))
     }
 
     /// Build a decoder ready for `decode_into`. Parses the full header, pre-
@@ -141,8 +184,7 @@ impl<'a> Decoder<'a> {
     /// - [`JpegError::MissingHuffmanTable`] if the scan references a DC/AC
     ///   table slot that was never defined by a DHT segment.
     pub fn new(input: &'a [u8]) -> Result<Self, JpegError> {
-        let view = JpegView::parse(input)?;
-        DEFAULT_CONTEXT.with(|ctx| Self::from_view_in_context(view, &mut ctx.borrow_mut()))
+        Self::new_with_options(input, DecodeOptions::default())
     }
 
     /// Build a decoder from a previously parsed [`JpegView`].
@@ -160,18 +202,28 @@ impl<'a> Decoder<'a> {
             bytes,
             header,
             info,
+            options,
         } = view;
         let backend = Backend::detect();
-        let (info, warnings, plan) = if let Some(scan_offset) = header.sos_offset {
-            let header_prefix = &bytes[..scan_offset];
-            ctx.resolve_decode_plan(header_prefix, |ctx| {
+        let (info, warnings, plan) = if options == DecodeOptions::default() {
+            if let Some(scan_offset) = header.sos_offset {
+                let header_prefix = &bytes[..scan_offset];
+                ctx.resolve_decode_plan(header_prefix, |ctx| {
+                    let plan = Self::build_prepared_plan(&header, &info, ctx)?;
+                    Ok((
+                        info.clone(),
+                        Arc::<[Warning]>::from(header.warnings.as_slice()),
+                        plan,
+                    ))
+                })?
+            } else {
                 let plan = Self::build_prepared_plan(&header, &info, ctx)?;
-                Ok((
-                    info.clone(),
+                (
+                    info,
                     Arc::<[Warning]>::from(header.warnings.as_slice()),
                     plan,
-                ))
-            })?
+                )
+            }
         } else {
             let plan = Self::build_prepared_plan(&header, &info, ctx)?;
             (
@@ -268,6 +320,19 @@ impl<'a> Decoder<'a> {
     /// The parsed header as a public [`Info`].
     pub fn info(&self) -> &Info {
         &self.info
+    }
+
+    /// Build a restart-marker byte-offset index for the first scan.
+    ///
+    /// Offsets are absolute byte positions in the original JPEG byte slice.
+    /// Returns `Ok(None)` when the stream has no non-zero DRI marker.
+    pub fn restart_index(&self) -> Result<Option<RestartIndex>, JpegError> {
+        restart_index_for_stream(
+            self.bytes,
+            Some(self.plan.scan_offset),
+            &self.info,
+            self.plan.restart_interval,
+        )
     }
 
     /// Decode the full image into the caller's buffer.
@@ -1022,6 +1087,117 @@ impl Decoder<'_> {
     }
 }
 
+fn restart_index_for_stream(
+    bytes: &[u8],
+    scan_data_offset: Option<usize>,
+    info: &Info,
+    restart_interval: Option<u16>,
+) -> Result<Option<RestartIndex>, JpegError> {
+    let Some(interval_mcus) = restart_interval
+        .filter(|&interval| interval > 0)
+        .map(u32::from)
+    else {
+        return Ok(None);
+    };
+    let scan_data_offset = scan_data_offset.ok_or(JpegError::MissingMarker {
+        marker: MarkerKind::Sos,
+    })?;
+    if !matches!(info.sof_kind, SofKind::Baseline8 | SofKind::Extended8) || info.scan_count != 1 {
+        return Err(JpegError::NotImplemented { sof: info.sof_kind });
+    }
+    let total_mcus = info.mcu_geometry.count;
+    let expected_restarts = total_mcus.saturating_sub(1) / interval_mcus;
+    let mut segments = Vec::new();
+    segments.push(RestartSegment {
+        start_mcu: 0,
+        entropy_offset: scan_data_offset,
+        marker_offset: None,
+        marker: None,
+    });
+
+    let mut found_restarts = 0u32;
+    let mut expected_rst = 0xd0u8;
+    let mut pos = scan_data_offset;
+    while pos < bytes.len() {
+        if bytes[pos] != 0xff {
+            pos += 1;
+            continue;
+        }
+
+        let mut marker_code_pos = pos + 1;
+        while marker_code_pos < bytes.len() && bytes[marker_code_pos] == 0xff {
+            marker_code_pos += 1;
+        }
+        if marker_code_pos >= bytes.len() {
+            return Err(JpegError::Truncated {
+                offset: pos,
+                expected: 1,
+            });
+        }
+
+        let marker = bytes[marker_code_pos];
+        let marker_offset = marker_code_pos - 1;
+        match marker {
+            0x00 => pos = marker_code_pos + 1,
+            0xd0..=0xd7 => {
+                if found_restarts >= expected_restarts {
+                    return Err(JpegError::UnexpectedMarker {
+                        offset: marker_offset,
+                        expected: MarkerKind::Eoi,
+                        found: marker,
+                    });
+                }
+                if marker != expected_rst {
+                    return Err(JpegError::RestartMismatch {
+                        offset: marker_offset,
+                        expected: expected_rst & 0x07,
+                        found: marker,
+                    });
+                }
+                found_restarts += 1;
+                segments.push(RestartSegment {
+                    start_mcu: found_restarts.saturating_mul(interval_mcus),
+                    entropy_offset: marker_code_pos + 1,
+                    marker_offset: Some(marker_offset),
+                    marker: Some(marker),
+                });
+                expected_rst = if expected_rst == 0xd7 {
+                    0xd0
+                } else {
+                    expected_rst + 1
+                };
+                pos = marker_code_pos + 1;
+            }
+            0xd9 => {
+                if found_restarts != expected_restarts {
+                    return Err(JpegError::UnexpectedEoi {
+                        mcu_at: found_restarts
+                            .saturating_add(1)
+                            .saturating_mul(interval_mcus),
+                        mcu_total: total_mcus,
+                    });
+                }
+                return Ok(Some(RestartIndex {
+                    scan_data_offset,
+                    interval_mcus,
+                    segments,
+                }));
+            }
+            found => {
+                return Err(JpegError::UnexpectedMarker {
+                    offset: marker_offset,
+                    expected: MarkerKind::Eoi,
+                    found,
+                });
+            }
+        }
+    }
+
+    Err(JpegError::MissingMarker {
+        marker: MarkerKind::Eoi,
+    })
+}
+
 fn merged_warnings(header_warnings: &[Warning], scan_warnings: Vec<Warning>) -> Vec<Warning> {
     if header_warnings.is_empty() {
         return scan_warnings;
@@ -1052,6 +1228,13 @@ fn core_info(info: &Info) -> slidecodec_core::Info {
         colorspace: core_colorspace(info.color_space),
         bit_depth: info.bit_depth,
         tile_layout: None,
+        coded_unit_layout: Some(slidecodec_core::CodedUnitLayout {
+            unit_width: info.mcu_geometry.width,
+            unit_height: info.mcu_geometry.height,
+            units_x: info.mcu_geometry.columns,
+            units_y: info.mcu_geometry.rows,
+        }),
+        restart_interval: info.restart_interval.map(u32::from),
         resolution_levels: 1,
     }
 }

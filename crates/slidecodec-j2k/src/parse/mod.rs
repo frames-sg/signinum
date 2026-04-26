@@ -56,6 +56,8 @@ impl CodestreamInfo {
             }),
             bit_depth: self.siz.bit_depth,
             tile_layout: Some(self.siz.tile_layout),
+            coded_unit_layout: None,
+            restart_interval: None,
             resolution_levels: self.cod.resolution_levels,
         }
     }

@@ -248,6 +248,13 @@ mod tests {
                         sof_kind: SofKind::Baseline8,
                         bit_depth: 8,
                         restart_interval: None,
+                        mcu_geometry: crate::info::McuGeometry {
+                            width: 16,
+                            height: 16,
+                            columns: 1,
+                            rows: 1,
+                            count: 1,
+                        },
                         scan_count: 1,
                     },
                     Arc::clone(&warnings),

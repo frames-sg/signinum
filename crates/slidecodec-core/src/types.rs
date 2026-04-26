@@ -26,6 +26,20 @@ pub struct TileLayout {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CodedUnitLayout {
+    pub unit_width: u32,
+    pub unit_height: u32,
+    pub units_x: u32,
+    pub units_y: u32,
+}
+
+impl CodedUnitLayout {
+    pub const fn unit_count(&self) -> u32 {
+        self.units_x.saturating_mul(self.units_y)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rect {
     pub x: u32,
     pub y: u32,
@@ -57,6 +71,8 @@ pub struct Info {
     pub colorspace: Colorspace,
     pub bit_depth: u8,
     pub tile_layout: Option<TileLayout>,
+    pub coded_unit_layout: Option<CodedUnitLayout>,
+    pub restart_interval: Option<u32>,
     pub resolution_levels: u8,
 }
 

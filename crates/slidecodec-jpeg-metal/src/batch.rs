@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use slidecodec_core::{BackendRequest, DeviceSubmission, Downscale, PixelFormat, Rect};
-use slidecodec_jpeg::__private::{
+use slidecodec_jpeg::adapter::{
     JpegMetalFast420PacketV1, JpegMetalFast422PacketV1, JpegMetalFast444PacketV1,
 };
 
@@ -17,7 +18,7 @@ pub(crate) enum BatchOp {
     RegionScaled { roi: Rect, scale: Downscale },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct BatchKey {
     fmt: PixelFormat,
     backend: BackendRequest,
@@ -25,7 +26,7 @@ pub(crate) struct BatchKey {
     shape: BatchShape,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum BatchKind {
     Full,
     Region { dims: (u32, u32) },
@@ -33,7 +34,7 @@ pub(crate) enum BatchKind {
     RegionScaled { dims: (u32, u32), scale: Downscale },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum SamplingFamily {
     Unknown,
     Fast420,
@@ -42,7 +43,7 @@ pub(crate) enum SamplingFamily {
     Other,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct BatchShape {
     pub(crate) restart_interval: Option<u16>,
     pub(crate) checkpoint_count: usize,
@@ -211,7 +212,8 @@ fn group_compatible_requests(
     queued: Vec<QueuedRequest>,
     session: &mut crate::session::SessionState,
 ) -> Vec<Vec<QueuedRequest>> {
-    let mut batches: Vec<(BatchKey, Vec<QueuedRequest>)> = Vec::new();
+    let mut key_to_batch = HashMap::<BatchKey, usize>::new();
+    let mut batches: Vec<Vec<QueuedRequest>> = Vec::new();
     for request in queued {
         let key = match request.key(session) {
             Ok(key) => key,
@@ -220,13 +222,13 @@ fn group_compatible_requests(
                 continue;
             }
         };
-        if let Some((_, batch)) = batches.iter_mut().find(|(batch_key, _)| *batch_key == key) {
-            batch.push(request);
-        } else {
-            batches.push((key, vec![request]));
-        }
+        let batch_index = *key_to_batch.entry(key).or_insert_with(|| {
+            batches.push(Vec::new());
+            batches.len() - 1
+        });
+        batches[batch_index].push(request);
     }
-    batches.into_iter().map(|(_, batch)| batch).collect()
+    batches
 }
 
 fn take_surface(session: &mut crate::session::SessionState, slot: usize) -> Result<Surface, Error> {

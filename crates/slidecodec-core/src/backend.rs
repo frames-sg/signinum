@@ -5,14 +5,14 @@ compile_error!("slidecodec-core only supports x86_64 and aarch64 targets");
 
 use core::sync::atomic::{AtomicU8, Ordering};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BackendKind {
     Cpu,
     Metal,
     Cuda,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum BackendRequest {
     #[default]
     Auto,
@@ -21,7 +21,7 @@ pub enum BackendRequest {
     Cuda,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct CpuFeatures {
     pub avx2: bool,
     pub sse41: bool,

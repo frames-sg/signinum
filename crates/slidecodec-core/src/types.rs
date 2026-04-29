@@ -17,7 +17,7 @@ pub enum Colorspace {
     Ict,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TileLayout {
     pub tile_width: u32,
     pub tile_height: u32,
@@ -25,7 +25,7 @@ pub struct TileLayout {
     pub tiles_y: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CodedUnitLayout {
     pub unit_width: u32,
     pub unit_height: u32,
@@ -39,7 +39,7 @@ impl CodedUnitLayout {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Rect {
     pub x: u32,
     pub y: u32,

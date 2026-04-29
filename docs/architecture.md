@@ -87,6 +87,8 @@ matures, mirroring harness-engineering structural tests):
    in `crates/slidecodec-jpeg/src/backend/`. `slidecodec-j2k-native` keeps
    its SIMD behind `fearless_simd` so the engine can stay
    `#![forbid(unsafe_code)]`.
+7. Adapter crates consume codec planning hooks through public `adapter`
+   modules. Imports from codec `__private` modules are not allowed.
 
 ## Crate dependency graph
 

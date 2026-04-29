@@ -2,11 +2,11 @@
 
 use slidecodec_core::{BackendRequest, Downscale, PixelFormat, Rect};
 use slidecodec_jpeg::{
-    Decoder as CpuDecoder, Rect as JpegRect, ScratchPool,
-    __private::{
+    adapter::{
         build_metal_fast420_packet_for_decoder, build_metal_fast422_packet_for_decoder,
         build_metal_fast444_packet_for_decoder,
     },
+    Decoder as CpuDecoder, Rect as JpegRect, ScratchPool,
 };
 
 use crate::{Error, Surface};
@@ -354,11 +354,17 @@ pub fn decode_viewport_region_cpu_to_surface(
 
 #[cfg(not(target_os = "macos"))]
 pub fn decode_viewport_region_cpu_to_surface(
-    _decoder: &CpuDecoder<'_>,
-    _pool: &mut ScratchPool,
-    _workload: &ViewportWorkload,
+    decoder: &CpuDecoder<'_>,
+    pool: &mut ScratchPool,
+    workload: &ViewportWorkload,
 ) -> Result<Surface, Error> {
-    Err(Error::MetalUnavailable)
+    let bytes = decode_viewport_region_cpu(decoder, pool, PixelFormat::Rgb8, workload)?;
+    crate::upload_surface(
+        bytes,
+        workload.viewport_dims,
+        PixelFormat::Rgb8,
+        slidecodec_core::BackendRequest::Cpu,
+    )
 }
 
 #[cfg(target_os = "macos")]
@@ -387,13 +393,26 @@ pub fn compose_viewport_cpu_to_surface(
 
 #[cfg(not(target_os = "macos"))]
 pub fn compose_viewport_cpu_to_surface(
-    _decoder: &CpuDecoder<'_>,
-    _pool: &mut ScratchPool,
-    _scale: Downscale,
-    _viewport_dims: (u32, u32),
-    _tiles: &[ViewportTile],
+    decoder: &CpuDecoder<'_>,
+    pool: &mut ScratchPool,
+    scale: Downscale,
+    viewport_dims: (u32, u32),
+    tiles: &[ViewportTile],
 ) -> Result<Surface, Error> {
-    Err(Error::MetalUnavailable)
+    let bytes = compose_viewport_cpu(
+        decoder,
+        pool,
+        PixelFormat::Rgb8,
+        scale,
+        viewport_dims,
+        tiles,
+    )?;
+    crate::upload_surface(
+        bytes,
+        viewport_dims,
+        PixelFormat::Rgb8,
+        slidecodec_core::BackendRequest::Cpu,
+    )
 }
 
 #[cfg(target_os = "macos")]

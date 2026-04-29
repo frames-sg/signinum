@@ -15,11 +15,11 @@ use metal::{
 };
 use slidecodec_core::{BackendRequest, PixelFormat, Rect};
 use slidecodec_jpeg::{
-    ColorSpace as JpegColorSpace, ComponentRowWriter, Decoder as CpuDecoder,
-    __private::{
+    adapter::{
         JpegMetalEntropyCheckpointV1, JpegMetalFast420PacketV1, JpegMetalFast422PacketV1,
         JpegMetalFast444PacketV1, MetalHuffmanTable as PacketHuffmanTable,
     },
+    ColorSpace as JpegColorSpace, ComponentRowWriter, Decoder as CpuDecoder,
 };
 
 use crate::viewport::ViewportTile;
@@ -7920,7 +7920,7 @@ mod tests {
 
     #[test]
     fn auto_batched_packets_skip_distinct_region_scaled_requests() {
-        let packet = slidecodec_jpeg::__private::build_metal_fast420_packet(BASELINE_420_RESTART)
+        let packet = slidecodec_jpeg::adapter::build_metal_fast420_packet(BASELINE_420_RESTART)
             .expect("packet");
         let roi = Rect {
             x: 0,
@@ -7964,7 +7964,7 @@ mod tests {
     fn auto_batched_packets_allow_large_repeated_region_scaled_requests() {
         let input = Arc::<[u8]>::from(BASELINE_420);
         let packet =
-            slidecodec_jpeg::__private::build_metal_fast420_packet(BASELINE_420).expect("packet");
+            slidecodec_jpeg::adapter::build_metal_fast420_packet(BASELINE_420).expect("packet");
         let roi = Rect {
             x: 0,
             y: 0,
@@ -8001,7 +8001,7 @@ mod tests {
     fn fast420_packet_scaled_decode_matches_cpu_scaled_bytes() {
         let decoder = CpuDecoder::new(BASELINE_420).expect("decoder");
         let packet =
-            slidecodec_jpeg::__private::build_metal_fast420_packet(BASELINE_420).expect("packet");
+            slidecodec_jpeg::adapter::build_metal_fast420_packet(BASELINE_420).expect("packet");
         for scale in [
             slidecodec_core::Downscale::Half,
             slidecodec_core::Downscale::Quarter,
@@ -8031,7 +8031,7 @@ mod tests {
     fn fast420_packet_region_decode_matches_cpu_region_bytes() {
         let decoder = CpuDecoder::new(BASELINE_420).expect("decoder");
         let packet =
-            slidecodec_jpeg::__private::build_metal_fast420_packet(BASELINE_420).expect("packet");
+            slidecodec_jpeg::adapter::build_metal_fast420_packet(BASELINE_420).expect("packet");
         let roi = slidecodec_jpeg::Rect {
             x: 3,
             y: 2,
@@ -8064,7 +8064,7 @@ mod tests {
     fn fast420_region_batch_decode_matches_cpu_region_bytes() {
         let input = Arc::<[u8]>::from(BASELINE_420);
         let packet =
-            slidecodec_jpeg::__private::build_metal_fast420_packet(BASELINE_420).expect("packet");
+            slidecodec_jpeg::adapter::build_metal_fast420_packet(BASELINE_420).expect("packet");
         let roi = Rect {
             x: 4,
             y: 4,
@@ -8121,7 +8121,7 @@ mod tests {
     fn fast420_full_batch_decode_uses_shared_surface_offsets() {
         let input = Arc::<[u8]>::from(BASELINE_420);
         let packet =
-            slidecodec_jpeg::__private::build_metal_fast420_packet(BASELINE_420).expect("packet");
+            slidecodec_jpeg::adapter::build_metal_fast420_packet(BASELINE_420).expect("packet");
         let requests = vec![
             batch::QueuedRequest::new(
                 Arc::clone(&input),
@@ -8166,7 +8166,7 @@ mod tests {
     fn fast420_packet_region_scaled_decode_matches_cpu_region_scaled_bytes() {
         let decoder = CpuDecoder::new(BASELINE_420).expect("decoder");
         let packet =
-            slidecodec_jpeg::__private::build_metal_fast420_packet(BASELINE_420).expect("packet");
+            slidecodec_jpeg::adapter::build_metal_fast420_packet(BASELINE_420).expect("packet");
         let roi = slidecodec_jpeg::Rect {
             x: 3,
             y: 2,
@@ -8207,7 +8207,7 @@ mod tests {
     fn fast420_region_scaled_batch_decode_matches_cpu_region_scaled_bytes() {
         let input = Arc::<[u8]>::from(BASELINE_420);
         let packet =
-            slidecodec_jpeg::__private::build_metal_fast420_packet(BASELINE_420).expect("packet");
+            slidecodec_jpeg::adapter::build_metal_fast420_packet(BASELINE_420).expect("packet");
         let roi = Rect {
             x: 3,
             y: 2,
@@ -8267,7 +8267,7 @@ mod tests {
     fn fast420_scaled_batch_decode_matches_cpu_scaled_bytes() {
         let input = Arc::<[u8]>::from(BASELINE_420);
         let packet =
-            slidecodec_jpeg::__private::build_metal_fast420_packet(BASELINE_420).expect("packet");
+            slidecodec_jpeg::adapter::build_metal_fast420_packet(BASELINE_420).expect("packet");
         let scale = slidecodec_core::Downscale::Quarter;
         let requests = vec![
             batch::QueuedRequest::new(
@@ -8311,7 +8311,7 @@ mod tests {
     fn fast422_packet_full_decode_matches_cpu_bytes() {
         let decoder = CpuDecoder::new(BASELINE_422).expect("decoder");
         let packet =
-            slidecodec_jpeg::__private::build_metal_fast422_packet(BASELINE_422).expect("packet");
+            slidecodec_jpeg::adapter::build_metal_fast422_packet(BASELINE_422).expect("packet");
         let (expected, _) = decoder.decode(PixelFormat::Rgb8).expect("cpu full decode");
 
         let surface = with_runtime(|runtime| {
@@ -8328,7 +8328,7 @@ mod tests {
     fn fast422_full_batch_decode_matches_cpu_bytes() {
         let input = Arc::<[u8]>::from(BASELINE_422);
         let packet =
-            slidecodec_jpeg::__private::build_metal_fast422_packet(BASELINE_422).expect("packet");
+            slidecodec_jpeg::adapter::build_metal_fast422_packet(BASELINE_422).expect("packet");
         let requests = vec![
             batch::QueuedRequest::new(
                 Arc::clone(&input),
@@ -8373,7 +8373,7 @@ mod tests {
     fn fast422_packet_region_decode_matches_cpu_region_bytes() {
         let decoder = CpuDecoder::new(BASELINE_422).expect("decoder");
         let packet =
-            slidecodec_jpeg::__private::build_metal_fast422_packet(BASELINE_422).expect("packet");
+            slidecodec_jpeg::adapter::build_metal_fast422_packet(BASELINE_422).expect("packet");
         let roi = slidecodec_jpeg::Rect {
             x: 3,
             y: 1,
@@ -8405,7 +8405,7 @@ mod tests {
     fn fast422_region_batch_decode_matches_cpu_region_bytes() {
         let input = Arc::<[u8]>::from(BASELINE_422);
         let packet =
-            slidecodec_jpeg::__private::build_metal_fast422_packet(BASELINE_422).expect("packet");
+            slidecodec_jpeg::adapter::build_metal_fast422_packet(BASELINE_422).expect("packet");
         let roi = Rect {
             x: 3,
             y: 1,
@@ -8462,7 +8462,7 @@ mod tests {
     fn fast422_packet_scaled_decode_matches_cpu_scaled_bytes() {
         let decoder = CpuDecoder::new(BASELINE_422).expect("decoder");
         let packet =
-            slidecodec_jpeg::__private::build_metal_fast422_packet(BASELINE_422).expect("packet");
+            slidecodec_jpeg::adapter::build_metal_fast422_packet(BASELINE_422).expect("packet");
         for (scale, dims) in [
             (slidecodec_core::Downscale::Half, (8, 4)),
             (slidecodec_core::Downscale::Quarter, (4, 2)),
@@ -8493,7 +8493,7 @@ mod tests {
     fn fast422_scaled_batch_decode_matches_cpu_scaled_bytes() {
         let input = Arc::<[u8]>::from(BASELINE_422);
         let packet =
-            slidecodec_jpeg::__private::build_metal_fast422_packet(BASELINE_422).expect("packet");
+            slidecodec_jpeg::adapter::build_metal_fast422_packet(BASELINE_422).expect("packet");
         let scale = slidecodec_core::Downscale::Quarter;
         let requests = vec![
             batch::QueuedRequest::new(
@@ -8537,7 +8537,7 @@ mod tests {
     fn fast422_packet_region_scaled_decode_matches_cpu_region_scaled_bytes() {
         let decoder = CpuDecoder::new(BASELINE_422).expect("decoder");
         let packet =
-            slidecodec_jpeg::__private::build_metal_fast422_packet(BASELINE_422).expect("packet");
+            slidecodec_jpeg::adapter::build_metal_fast422_packet(BASELINE_422).expect("packet");
         let roi = slidecodec_jpeg::Rect {
             x: 3,
             y: 1,
@@ -8577,7 +8577,7 @@ mod tests {
     fn fast422_region_scaled_batch_decode_matches_cpu_region_scaled_bytes() {
         let input = Arc::<[u8]>::from(BASELINE_422);
         let packet =
-            slidecodec_jpeg::__private::build_metal_fast422_packet(BASELINE_422).expect("packet");
+            slidecodec_jpeg::adapter::build_metal_fast422_packet(BASELINE_422).expect("packet");
         let roi = Rect {
             x: 3,
             y: 1,
@@ -8637,7 +8637,7 @@ mod tests {
     fn fast444_packet_full_decode_matches_cpu_bytes() {
         let decoder = CpuDecoder::new(BASELINE_444).expect("decoder");
         let packet =
-            slidecodec_jpeg::__private::build_metal_fast444_packet(BASELINE_444).expect("packet");
+            slidecodec_jpeg::adapter::build_metal_fast444_packet(BASELINE_444).expect("packet");
         let (expected, _) = decoder.decode(PixelFormat::Rgb8).expect("cpu full decode");
 
         let surface = with_runtime(|runtime| {
@@ -8655,7 +8655,7 @@ mod tests {
     fn fast444_packet_scaled_decode_matches_cpu_scaled_bytes() {
         let decoder = CpuDecoder::new(BASELINE_444).expect("decoder");
         let packet =
-            slidecodec_jpeg::__private::build_metal_fast444_packet(BASELINE_444).expect("packet");
+            slidecodec_jpeg::adapter::build_metal_fast444_packet(BASELINE_444).expect("packet");
         for scale in [
             slidecodec_core::Downscale::Half,
             slidecodec_core::Downscale::Quarter,
@@ -8685,7 +8685,7 @@ mod tests {
     fn fast444_packet_region_decode_matches_cpu_region_bytes() {
         let decoder = CpuDecoder::new(BASELINE_444).expect("decoder");
         let packet =
-            slidecodec_jpeg::__private::build_metal_fast444_packet(BASELINE_444).expect("packet");
+            slidecodec_jpeg::adapter::build_metal_fast444_packet(BASELINE_444).expect("packet");
         let roi = slidecodec_jpeg::Rect {
             x: 1,
             y: 2,
@@ -8718,7 +8718,7 @@ mod tests {
     fn fast444_region_batch_decode_matches_cpu_region_bytes() {
         let input = Arc::<[u8]>::from(BASELINE_444);
         let packet =
-            slidecodec_jpeg::__private::build_metal_fast444_packet(BASELINE_444).expect("packet");
+            slidecodec_jpeg::adapter::build_metal_fast444_packet(BASELINE_444).expect("packet");
         let roi = Rect {
             x: 1,
             y: 2,
@@ -8775,7 +8775,7 @@ mod tests {
     fn fast444_packet_region_scaled_decode_matches_cpu_region_scaled_bytes() {
         let decoder = CpuDecoder::new(BASELINE_444).expect("decoder");
         let packet =
-            slidecodec_jpeg::__private::build_metal_fast444_packet(BASELINE_444).expect("packet");
+            slidecodec_jpeg::adapter::build_metal_fast444_packet(BASELINE_444).expect("packet");
         let roi = slidecodec_jpeg::Rect {
             x: 1,
             y: 2,
@@ -8816,7 +8816,7 @@ mod tests {
     fn fast444_region_scaled_batch_decode_matches_cpu_region_scaled_bytes() {
         let input = Arc::<[u8]>::from(BASELINE_444);
         let packet =
-            slidecodec_jpeg::__private::build_metal_fast444_packet(BASELINE_444).expect("packet");
+            slidecodec_jpeg::adapter::build_metal_fast444_packet(BASELINE_444).expect("packet");
         let roi = Rect {
             x: 1,
             y: 2,
@@ -8876,7 +8876,7 @@ mod tests {
     fn fast444_scaled_batch_decode_matches_cpu_scaled_bytes() {
         let input = Arc::<[u8]>::from(BASELINE_444);
         let packet =
-            slidecodec_jpeg::__private::build_metal_fast444_packet(BASELINE_444).expect("packet");
+            slidecodec_jpeg::adapter::build_metal_fast444_packet(BASELINE_444).expect("packet");
         let scale = slidecodec_core::Downscale::Quarter;
         let requests = vec![
             batch::QueuedRequest::new(

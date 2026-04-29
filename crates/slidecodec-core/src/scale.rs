@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Downscale {
     None,

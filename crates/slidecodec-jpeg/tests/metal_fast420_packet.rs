@@ -1,6 +1,6 @@
 mod fixtures;
 
-use slidecodec_jpeg::__private::metal_fast420::{
+use slidecodec_jpeg::adapter::metal_fast420::{
     build_metal_fast420_packet, build_metal_fast422_packet, build_metal_fast444_packet,
     build_metal_gray_packet, MetalFast420PacketError,
 };

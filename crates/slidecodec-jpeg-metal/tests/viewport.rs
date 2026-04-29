@@ -378,3 +378,43 @@ fn auto_viewport_surface_path_prefers_cpu_for_small_contiguous_workloads() {
 
     assert_eq!(actual.as_bytes(), expected.as_bytes());
 }
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn non_macos_auto_viewport_surface_returns_cpu_surface() {
+    let decoder = Decoder::new(BASELINE_420).expect("decoder");
+    let mut pool = ScratchPool::new();
+    let workload = slidecodec_jpeg_metal::viewport::ViewportWorkload {
+        scale: Downscale::None,
+        viewport_dims: (16, 16),
+        tiles: quadrant_tiles().to_vec(),
+    };
+
+    let surface = decode_viewport_to_surface(&decoder, &mut pool, &workload, BackendRequest::Auto)
+        .expect("auto viewport surface");
+
+    assert_eq!(
+        slidecodec_core::DeviceSurface::backend_kind(&surface),
+        slidecodec_core::BackendKind::Cpu
+    );
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn non_macos_explicit_metal_viewport_surface_is_unavailable() {
+    let decoder = Decoder::new(BASELINE_420).expect("decoder");
+    let mut pool = ScratchPool::new();
+    let workload = slidecodec_jpeg_metal::viewport::ViewportWorkload {
+        scale: Downscale::None,
+        viewport_dims: (16, 16),
+        tiles: quadrant_tiles().to_vec(),
+    };
+
+    let err = decode_viewport_to_surface(&decoder, &mut pool, &workload, BackendRequest::Metal)
+        .expect_err("explicit Metal should be unavailable");
+
+    assert!(matches!(
+        err,
+        slidecodec_jpeg_metal::Error::MetalUnavailable
+    ));
+}

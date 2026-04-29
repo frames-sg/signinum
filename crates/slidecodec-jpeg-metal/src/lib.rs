@@ -17,15 +17,15 @@ use slidecodec_core::{
     PixelFormat, Rect, TileBatchDecodeDevice, TileBatchDecodeSubmit,
 };
 use slidecodec_jpeg::{
-    ColorSpace as JpegColorSpace, DecodeOutcome as JpegDecodeOutcome, Decoder as CpuDecoder,
-    DecoderContext as CpuDecoderContext, JpegError, JpegView, Rect as JpegRect,
-    ScratchPool as CpuScratchPool, Warning as CpuWarning,
-    __private::{
+    adapter::{
         build_metal_fast420_packet, build_metal_fast420_packet_for_decoder,
         build_metal_fast422_packet, build_metal_fast422_packet_for_decoder,
         build_metal_fast444_packet, build_metal_fast444_packet_for_decoder, decoder_bytes,
         JpegMetalFast420PacketV1, JpegMetalFast422PacketV1, JpegMetalFast444PacketV1,
     },
+    ColorSpace as JpegColorSpace, DecodeOutcome as JpegDecodeOutcome, Decoder as CpuDecoder,
+    DecoderContext as CpuDecoderContext, JpegError, JpegView, Rect as JpegRect,
+    ScratchPool as CpuScratchPool, Warning as CpuWarning,
 };
 
 #[cfg(target_os = "macos")]
@@ -1400,7 +1400,7 @@ pub use slidecodec_jpeg::{Info, Rect as JpegRectPublic};
 #[cfg(test)]
 mod tests {
     use super::*;
-    use slidecodec_jpeg::__private::{build_metal_fast420_packet, build_metal_fast444_packet};
+    use slidecodec_jpeg::adapter::{build_metal_fast420_packet, build_metal_fast444_packet};
 
     const BASELINE_420: &[u8] =
         include_bytes!("../../../corpus/conformance/baseline_420_16x16.jpg");

@@ -2,7 +2,7 @@
 
 use crate::sample::SampleType;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum PixelLayout {
     Rgb,
@@ -10,7 +10,7 @@ pub enum PixelLayout {
     Gray,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum PixelFormat {
     Rgb8,

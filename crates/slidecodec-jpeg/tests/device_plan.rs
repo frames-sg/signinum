@@ -1,12 +1,14 @@
+use std::borrow::Cow;
+
 use slidecodec_jpeg::{ColorSpace, Decoder, Warning};
 
 const BASELINE_420: &[u8] = include_bytes!("../../../corpus/conformance/baseline_420_16x16.jpg");
 const BASELINE_422: &[u8] = include_bytes!("../../../corpus/conformance/baseline_422_16x8.jpg");
 
 #[test]
-fn hidden_device_plan_exposes_scan_metadata() {
+fn adapter_device_plan_exposes_scan_metadata() {
     let decoder = Decoder::new(BASELINE_420).expect("decoder");
-    let plan = slidecodec_jpeg::__private::build_device_plan(&decoder, 4).expect("device plan");
+    let plan = slidecodec_jpeg::adapter::build_device_plan(&decoder, 4).expect("device plan");
 
     assert_eq!(plan.dimensions, (16, 16));
     assert_eq!(plan.color_space, ColorSpace::YCbCr);
@@ -16,9 +18,17 @@ fn hidden_device_plan_exposes_scan_metadata() {
 }
 
 #[test]
-fn hidden_device_plan_keeps_fast_420_shape_information() {
+fn adapter_device_plan_borrows_scan_bytes_for_well_formed_streams() {
     let decoder = Decoder::new(BASELINE_420).expect("decoder");
-    let plan = slidecodec_jpeg::__private::build_device_plan(&decoder, 4).expect("device plan");
+    let plan = slidecodec_jpeg::adapter::build_device_plan(&decoder, 4).expect("device plan");
+
+    assert!(matches!(plan.scan_bytes, Cow::Borrowed(_)));
+}
+
+#[test]
+fn adapter_device_plan_keeps_fast_420_shape_information() {
+    let decoder = Decoder::new(BASELINE_420).expect("decoder");
+    let plan = slidecodec_jpeg::adapter::build_device_plan(&decoder, 4).expect("device plan");
 
     assert!(plan.matches_fast_420);
     assert!(!plan.matches_fast_422);
@@ -26,9 +36,9 @@ fn hidden_device_plan_keeps_fast_420_shape_information() {
 }
 
 #[test]
-fn hidden_device_plan_keeps_fast_422_shape_information() {
+fn adapter_device_plan_keeps_fast_422_shape_information() {
     let decoder = Decoder::new(BASELINE_422).expect("decoder");
-    let plan = slidecodec_jpeg::__private::build_device_plan(&decoder, 4).expect("device plan");
+    let plan = slidecodec_jpeg::adapter::build_device_plan(&decoder, 4).expect("device plan");
 
     assert!(!plan.matches_fast_420);
     assert!(plan.matches_fast_422);
@@ -36,22 +46,22 @@ fn hidden_device_plan_keeps_fast_422_shape_information() {
 }
 
 #[test]
-fn hidden_device_plan_scan_bytes_keep_terminal_eoi() {
+fn adapter_device_plan_scan_bytes_keep_terminal_eoi() {
     let decoder = Decoder::new(BASELINE_420).expect("decoder");
-    let plan = slidecodec_jpeg::__private::build_device_plan(&decoder, 4).expect("device plan");
+    let plan = slidecodec_jpeg::adapter::build_device_plan(&decoder, 4).expect("device plan");
 
     assert!(plan.scan_bytes.ends_with(&[0xff, 0xd9]));
 }
 
 #[test]
-fn hidden_device_plan_checkpoint_cadence_handles_multi_mcu_inputs() {
+fn adapter_device_plan_checkpoint_cadence_handles_multi_mcu_inputs() {
     let bytes = grayscale_jpeg(24, 24);
     let decoder = Decoder::new(&bytes).expect("grayscale decoder");
 
     let cadence_zero =
-        slidecodec_jpeg::__private::build_device_plan(&decoder, 0).expect("zero-cadence plan");
+        slidecodec_jpeg::adapter::build_device_plan(&decoder, 0).expect("zero-cadence plan");
     let cadence_two =
-        slidecodec_jpeg::__private::build_device_plan(&decoder, 2).expect("cadence-two plan");
+        slidecodec_jpeg::adapter::build_device_plan(&decoder, 2).expect("cadence-two plan");
 
     assert_eq!(
         cadence_zero
@@ -92,10 +102,10 @@ fn hidden_device_plan_checkpoint_cadence_handles_multi_mcu_inputs() {
 }
 
 #[test]
-fn hidden_device_plan_restart_checkpoints_capture_resume_state() {
+fn adapter_device_plan_restart_checkpoints_capture_resume_state() {
     let bytes = restart_coded_grayscale_jpeg(24, 24);
     let decoder = Decoder::new(&bytes).expect("restart-coded decoder");
-    let plan = slidecodec_jpeg::__private::build_device_plan(&decoder, 2).expect("device plan");
+    let plan = slidecodec_jpeg::adapter::build_device_plan(&decoder, 2).expect("device plan");
 
     assert_eq!(
         plan.checkpoints
@@ -125,10 +135,10 @@ fn hidden_device_plan_restart_checkpoints_capture_resume_state() {
 }
 
 #[test]
-fn hidden_device_plan_treats_dri_zero_as_non_restart_fast_path() {
+fn adapter_device_plan_treats_dri_zero_as_non_restart_fast_path() {
     let bytes = insert_restart_interval(BASELINE_420.to_vec(), 0);
     let decoder = Decoder::new(&bytes).expect("decoder");
-    let plan = slidecodec_jpeg::__private::build_device_plan(&decoder, 2).expect("device plan");
+    let plan = slidecodec_jpeg::adapter::build_device_plan(&decoder, 2).expect("device plan");
 
     assert_eq!(plan.restart_interval, None);
     assert!(plan.matches_fast_420);
@@ -142,10 +152,10 @@ fn hidden_device_plan_treats_dri_zero_as_non_restart_fast_path() {
 }
 
 #[test]
-fn hidden_device_plan_handles_restart_after_partial_entropy_byte() {
+fn adapter_device_plan_handles_restart_after_partial_entropy_byte() {
     let bytes = grayscale_restart_jpeg();
     let decoder = Decoder::new(&bytes).expect("restart-coded decoder");
-    let plan = slidecodec_jpeg::__private::build_device_plan(&decoder, 2).expect("device plan");
+    let plan = slidecodec_jpeg::adapter::build_device_plan(&decoder, 2).expect("device plan");
 
     assert_eq!(plan.checkpoints.len(), 2);
     assert_eq!(plan.checkpoints[1].mcu_index, 1);
@@ -154,24 +164,24 @@ fn hidden_device_plan_handles_restart_after_partial_entropy_byte() {
 }
 
 #[test]
-fn hidden_device_plan_surfaces_missing_eoi_warning() {
+fn adapter_device_plan_surfaces_missing_eoi_warning() {
     let mut bytes = grayscale_jpeg(24, 24);
     bytes.truncate(bytes.len() - 2);
 
     let decoder = Decoder::new(&bytes).expect("decoder");
-    let plan = slidecodec_jpeg::__private::build_device_plan(&decoder, 2)
+    let plan = slidecodec_jpeg::adapter::build_device_plan(&decoder, 2)
         .expect("missing EOI should remain decodable");
 
     assert!(plan.warnings.contains(&Warning::MissingEoi));
 }
 
 #[test]
-fn hidden_device_plan_treats_trailing_ff_as_missing_eoi() {
+fn adapter_device_plan_treats_trailing_ff_as_missing_eoi() {
     let mut bytes = grayscale_jpeg(24, 24);
     bytes.truncate(bytes.len() - 1);
 
     let decoder = Decoder::new(&bytes).expect("decoder");
-    let plan = slidecodec_jpeg::__private::build_device_plan(&decoder, 2)
+    let plan = slidecodec_jpeg::adapter::build_device_plan(&decoder, 2)
         .expect("trailing FF should remain decodable");
 
     assert!(plan.warnings.contains(&Warning::MissingEoi));
@@ -179,7 +189,7 @@ fn hidden_device_plan_treats_trailing_ff_as_missing_eoi() {
 }
 
 #[test]
-fn hidden_device_plan_rejects_non_eoi_marker_after_entropy() {
+fn adapter_device_plan_rejects_non_eoi_marker_after_entropy() {
     let mut bytes = restart_coded_grayscale_jpeg(24, 24);
     let marker = bytes
         .windows(2)
@@ -188,7 +198,7 @@ fn hidden_device_plan_rejects_non_eoi_marker_after_entropy() {
     bytes[marker + 1] = 0xe0;
 
     let decoder = Decoder::new(&bytes).expect("restart-coded decoder");
-    let err = slidecodec_jpeg::__private::build_device_plan(&decoder, 2)
+    let err = slidecodec_jpeg::adapter::build_device_plan(&decoder, 2)
         .expect_err("unexpected marker should fail");
 
     assert!(matches!(
@@ -202,10 +212,10 @@ fn hidden_device_plan_rejects_non_eoi_marker_after_entropy() {
 }
 
 #[test]
-fn hidden_device_plan_rejects_restart_marker_without_dri() {
+fn adapter_device_plan_rejects_restart_marker_without_dri() {
     let bytes = insert_entropy_marker(BASELINE_420.to_vec(), 0xd0);
     let decoder = Decoder::new(&bytes).expect("decoder");
-    let err = slidecodec_jpeg::__private::build_device_plan(&decoder, 2)
+    let err = slidecodec_jpeg::adapter::build_device_plan(&decoder, 2)
         .expect_err("restart marker without DRI must fail");
 
     assert!(matches!(
@@ -219,12 +229,12 @@ fn hidden_device_plan_rejects_restart_marker_without_dri() {
 }
 
 #[test]
-fn hidden_device_plan_rejects_doubled_ff_before_terminal_eoi() {
+fn adapter_device_plan_rejects_doubled_ff_before_terminal_eoi() {
     let mut bytes = grayscale_jpeg(24, 24);
     bytes.insert(bytes.len() - 1, 0xff);
 
     let decoder = Decoder::new(&bytes).expect("decoder");
-    let err = slidecodec_jpeg::__private::build_device_plan(&decoder, 2)
+    let err = slidecodec_jpeg::adapter::build_device_plan(&decoder, 2)
         .expect_err("double-FF terminal marker should fail");
 
     assert!(matches!(

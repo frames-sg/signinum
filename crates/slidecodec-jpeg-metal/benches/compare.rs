@@ -6,7 +6,7 @@ use slidecodec_core::{
     Rect, TileBatchDecodeSubmit,
 };
 use slidecodec_jpeg::{
-    __private::summarize_device_batch, decode_tile_region_scaled_into_in_context,
+    adapter::summarize_device_batch, decode_tile_region_scaled_into_in_context,
     decode_tile_scaled_into_in_context, Decoder as CpuDecoder,
     DecoderContext as JpegDecoderContext, ScratchPool as CpuScratchPool,
 };

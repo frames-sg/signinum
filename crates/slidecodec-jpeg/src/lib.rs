@@ -27,6 +27,8 @@ pub use slidecodec_core::{
 pub mod context;
 pub use context::DecoderContext;
 
+pub mod adapter;
+
 pub mod error;
 pub use error::{
     BuilderConflictReason, HuffmanFailure, JpegError, MarkerKind, TableKind, UnsupportedReason,
@@ -58,9 +60,6 @@ pub use internal::scratch::ScratchPool;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct JpegCodec;
-
-#[doc(hidden)]
-pub mod __private;
 
 #[doc(hidden)]
 pub mod bench_support;

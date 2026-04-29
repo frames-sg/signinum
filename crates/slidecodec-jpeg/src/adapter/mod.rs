@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
-#[doc(hidden)]
+//! Public adapter-facing JPEG planning APIs.
+//!
+//! GPU and device-output adapter crates use this module to build validated
+//! decode plans without depending on private codec internals.
+
 mod device_plan;
-#[doc(hidden)]
 pub mod metal_fast420;
 
 use crate::Decoder;

@@ -244,34 +244,6 @@ pub(crate) fn validate_region(roi: Rect, dims: (u32, u32)) -> Result<(), J2kErro
     })
 }
 
-pub fn decode_image_into_with_native_context_and_ht_decoder<'a>(
-    image: &Image<'a>,
-    native_context: &mut slidecodec_j2k_native::DecoderContext<'a>,
-    ht_decoder: &mut dyn slidecodec_j2k_native::HtCodeBlockDecoder,
-    out: &mut [u8],
-    stride: usize,
-    fmt: PixelFormat,
-) -> Result<(), J2kError> {
-    let dims = (image.width(), image.height());
-    validate_buffer(dims, out.len(), stride, fmt)?;
-    match fmt {
-        PixelFormat::Rgb8 | PixelFormat::Rgba8 | PixelFormat::Gray8 => {
-            let decoded = image
-                .decode_components_with_ht_decoder(native_context, ht_decoder)
-                .map_err(|err| J2kError::Backend(err.to_string()))?;
-            write_component_planes_u8_output(&decoded, out, stride, fmt)
-        }
-        PixelFormat::Rgb16 | PixelFormat::Gray16 | PixelFormat::Rgba16 => Err(Unsupported {
-            what: "HTJ2K backend hook path currently supports only 8-bit output",
-        }
-        .into()),
-        _ => Err(Unsupported {
-            what: "pixel format is not yet supported by slidecodec-j2k",
-        }
-        .into()),
-    }
-}
-
 fn write_u8_output(
     color_space: &ColorSpace,
     has_alpha: bool,
@@ -302,51 +274,6 @@ fn write_u8_output(
         }
         (ColorSpace::Gray, false, PixelFormat::Gray8) => {
             copy_rows_exact(decoded, out, stride, width, height);
-            Ok(())
-        }
-        _ => Err(Unsupported {
-            what: "backend color space cannot be mapped to requested 8-bit pixel format",
-        }
-        .into()),
-    }
-}
-
-fn write_component_planes_u8_output(
-    decoded: &slidecodec_j2k_native::DecodedComponents<'_>,
-    out: &mut [u8],
-    stride: usize,
-    fmt: PixelFormat,
-) -> Result<(), J2kError> {
-    let dims = decoded.dimensions();
-    validate_buffer(dims, out.len(), stride, fmt)?;
-    let width = dims.0 as usize;
-    let height = dims.1 as usize;
-    let planes = decoded.planes();
-
-    match (
-        decoded.color_space(),
-        decoded.has_alpha(),
-        planes.len(),
-        fmt,
-    ) {
-        (ColorSpace::Gray, false, 1, PixelFormat::Gray8) => {
-            let plane = &planes[0];
-            for (row_idx, samples) in plane.samples().chunks_exact(width).enumerate().take(height) {
-                let dst_row = &mut out[row_idx * stride..row_idx * stride + width];
-                for (dst, sample) in dst_row.iter_mut().zip(samples.iter().copied()) {
-                    *dst = scale_sample_to_u8(sample, plane.bit_depth());
-                }
-            }
-            Ok(())
-        }
-        (ColorSpace::RGB, false, 3, PixelFormat::Rgb8)
-        | (ColorSpace::RGB, true, 4, PixelFormat::Rgb8) => {
-            write_rgb_component_planes_u8(planes, out, stride, width, height, false);
-            Ok(())
-        }
-        (ColorSpace::RGB, false, 3, PixelFormat::Rgba8)
-        | (ColorSpace::RGB, true, 4, PixelFormat::Rgba8) => {
-            write_rgb_component_planes_u8(planes, out, stride, width, height, true);
             Ok(())
         }
         _ => Err(Unsupported {
@@ -395,53 +322,6 @@ fn write_u16_output(
             what: "backend color space cannot be mapped to requested 16-bit pixel format",
         }
         .into()),
-    }
-}
-
-fn scale_sample_to_u8(sample: f32, bit_depth: u8) -> u8 {
-    let clamped_bit_depth = u32::from(bit_depth.min(16));
-    let max_value = f32::from(((1u32 << clamped_bit_depth) - 1).max(1) as u16);
-    let clamped = sample.clamp(0.0, max_value);
-    ((clamped * 255.0 / max_value + 0.5).floor().min(255.0)) as u8
-}
-
-fn write_rgb_component_planes_u8(
-    planes: &[slidecodec_j2k_native::ComponentPlane<'_>],
-    out: &mut [u8],
-    stride: usize,
-    width: usize,
-    height: usize,
-    write_alpha: bool,
-) {
-    let channels = if write_alpha { 4 } else { 3 };
-    let first_plane = &planes[0];
-    let second_plane = &planes[1];
-    let third_plane = &planes[2];
-    let alpha_plane = if write_alpha && planes.len() == 4 {
-        Some(&planes[3])
-    } else {
-        None
-    };
-
-    for row_idx in 0..height {
-        let dst_row = &mut out[row_idx * stride..row_idx * stride + width * channels];
-        let first_row = &first_plane.samples()[row_idx * width..(row_idx + 1) * width];
-        let second_row = &second_plane.samples()[row_idx * width..(row_idx + 1) * width];
-        let third_row = &third_plane.samples()[row_idx * width..(row_idx + 1) * width];
-        let alpha_row =
-            alpha_plane.map(|plane| &plane.samples()[row_idx * width..(row_idx + 1) * width]);
-
-        for x in 0..width {
-            let dst = &mut dst_row[x * channels..(x + 1) * channels];
-            dst[0] = scale_sample_to_u8(first_row[x], first_plane.bit_depth());
-            dst[1] = scale_sample_to_u8(second_row[x], second_plane.bit_depth());
-            dst[2] = scale_sample_to_u8(third_row[x], third_plane.bit_depth());
-            if write_alpha {
-                dst[3] = alpha_row.map_or(u8::MAX, |row| {
-                    scale_sample_to_u8(row[x], planes[3].bit_depth())
-                });
-            }
-        }
     }
 }
 

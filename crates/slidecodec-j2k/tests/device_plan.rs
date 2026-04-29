@@ -1,5 +1,5 @@
 use slidecodec_core::{Downscale, Rect};
-use slidecodec_j2k::__private::device_plan::{DeviceDecodePlan, DeviceDecodeRequest};
+use slidecodec_j2k::adapter::device_plan::{DeviceDecodePlan, DeviceDecodeRequest};
 
 #[test]
 fn full_request_plan_uses_full_source_rect() {

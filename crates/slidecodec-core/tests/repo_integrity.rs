@@ -43,3 +43,44 @@ fn corpus_readme_does_not_claim_committed_fixtures_are_absent() {
         "corpus README still claims the committed fixture corpus is empty"
     );
 }
+
+#[test]
+fn adapter_crates_do_not_import_codec_private_modules() {
+    let root = repo_root();
+    let adapter_crates = [
+        "crates/slidecodec-jpeg-metal",
+        "crates/slidecodec-jpeg-cuda",
+        "crates/slidecodec-j2k-metal",
+        "crates/slidecodec-j2k-cuda",
+    ];
+
+    for crate_dir in adapter_crates {
+        for path in rust_sources(&root.join(crate_dir)) {
+            let source = fs::read_to_string(&path)
+                .unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
+            assert!(
+                !source.contains("::__private") && !source.contains(" __private::"),
+                "adapter source {} imports a codec __private module; use the public adapter API",
+                path.strip_prefix(root).unwrap_or(&path).display()
+            );
+        }
+    }
+}
+
+fn rust_sources(dir: &Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    collect_rust_sources(dir, &mut out);
+    out
+}
+
+fn collect_rust_sources(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+    for entry in fs::read_dir(dir).unwrap_or_else(|err| panic!("read {}: {err}", dir.display())) {
+        let entry = entry.expect("read directory entry");
+        let path = entry.path();
+        if path.is_dir() {
+            collect_rust_sources(&path, out);
+        } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+            out.push(path);
+        }
+    }
+}

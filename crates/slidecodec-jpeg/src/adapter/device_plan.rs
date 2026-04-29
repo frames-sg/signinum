@@ -5,6 +5,7 @@ use crate::error::{JpegError, MarkerKind};
 use crate::info::ColorSpace;
 use crate::internal::checkpoint::{build_checkpoint_plan, DeviceCheckpoint};
 use crate::Warning;
+use alloc::borrow::Cow;
 use alloc::vec::Vec;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,12 +16,12 @@ pub struct DeviceComponentPlan {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DeviceDecodePlan {
+pub struct DeviceDecodePlan<'a> {
     pub dimensions: (u32, u32),
     pub color_space: ColorSpace,
     pub restart_interval: Option<u16>,
     pub warnings: Vec<Warning>,
-    pub scan_bytes: Vec<u8>,
+    pub scan_bytes: Cow<'a, [u8]>,
     pub components: Vec<DeviceComponentPlan>,
     pub checkpoints: Vec<DeviceCheckpoint>,
     pub matches_fast_420: bool,
@@ -37,15 +38,15 @@ pub struct DeviceBatchSummary {
     pub matches_fast_444: bool,
 }
 
-pub fn build_device_plan(
-    decoder: &Decoder<'_>,
+pub fn build_device_plan<'a>(
+    decoder: &'a Decoder<'a>,
     cadence_mcus: u32,
-) -> Result<DeviceDecodePlan, JpegError> {
+) -> Result<DeviceDecodePlan<'a>, JpegError> {
     let plan = &decoder.plan;
     let restart_interval = plan.restart_interval.filter(|&interval| interval > 0);
     let (scan_bytes, missing_eoi) =
         scan_payload_bytes(decoder.bytes, plan.scan_offset, restart_interval.is_some())?;
-    let checkpoints = build_checkpoint_plan(plan, &scan_bytes, cadence_mcus)?;
+    let checkpoints = build_checkpoint_plan(plan, scan_bytes.as_ref(), cadence_mcus)?;
     let mut warnings = decoder.warnings.to_vec();
     if missing_eoi {
         warnings.push(Warning::MissingEoi);
@@ -106,7 +107,7 @@ fn scan_payload_bytes(
     bytes: &[u8],
     scan_offset: usize,
     allow_restart_markers: bool,
-) -> Result<(Vec<u8>, bool), JpegError> {
+) -> Result<(Cow<'_, [u8]>, bool), JpegError> {
     let scan = &bytes[scan_offset..];
     let mut index = 0usize;
     while index < scan.len() {
@@ -118,7 +119,7 @@ fn scan_payload_bytes(
         let marker_start = index;
         let next = index + 1;
         if next >= scan.len() {
-            return Ok((scan.to_vec(), true));
+            return Ok((Cow::Borrowed(scan), true));
         }
 
         match scan[next] {
@@ -128,7 +129,7 @@ fn scan_payload_bytes(
             0xd0..=0xd7 if allow_restart_markers => {
                 index = next + 1;
             }
-            0xd9 => return Ok((scan[..=next].to_vec(), false)),
+            0xd9 => return Ok((Cow::Borrowed(&scan[..=next]), false)),
             found => {
                 return Err(JpegError::UnexpectedMarker {
                     offset: scan_offset + marker_start,
@@ -139,7 +140,7 @@ fn scan_payload_bytes(
         }
     }
 
-    Ok((scan.to_vec(), true))
+    Ok((Cow::Borrowed(scan), true))
 }
 
 fn total_mcus(plan: &crate::entropy::sequential::PreparedDecodePlan) -> u32 {

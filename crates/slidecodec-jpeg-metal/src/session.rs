@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use slidecodec_core::BackendRequest;
-use slidecodec_jpeg::__private::{
+use slidecodec_jpeg::adapter::{
     build_metal_fast420_packet, build_metal_fast422_packet, build_metal_fast444_packet,
     JpegMetalFast420PacketV1, JpegMetalFast422PacketV1, JpegMetalFast444PacketV1,
 };
@@ -132,7 +132,7 @@ impl SessionState {
         }
 
         let decoder = slidecodec_jpeg::Decoder::new(input.as_ref())?;
-        let summary = slidecodec_jpeg::__private::summarize_device_batch(&decoder, 4);
+        let summary = slidecodec_jpeg::adapter::summarize_device_batch(&decoder, 4);
         let shape = batch::BatchShape {
             restart_interval: summary.restart_interval,
             checkpoint_count: summary.checkpoint_count,

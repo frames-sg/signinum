@@ -29,9 +29,9 @@ use slidecodec_core::{
     PixelFormat, ReadySubmission, Rect, TileBatchDecodeDevice, TileBatchDecodeSubmit,
 };
 use slidecodec_j2k::{
+    adapter::device_plan::{DeviceDecodePlan, DeviceDecodeRequest},
     J2kContext as CpuJ2kContext, J2kDecoder as CpuDecoder, J2kError,
     J2kScratchPool as CpuJ2kScratchPool, J2kView,
-    __private::device_plan::{DeviceDecodePlan, DeviceDecodeRequest},
 };
 #[cfg(target_os = "macos")]
 use slidecodec_j2k_native::{

@@ -9,8 +9,6 @@
 
 #![warn(unreachable_pub)]
 
-mod ht;
-
 use core::convert::Infallible;
 
 use slidecodec_core::{
@@ -22,15 +20,8 @@ use slidecodec_core::{
 use slidecodec_j2k::{
     J2kCodec as CpuCodec, J2kContext as CpuJ2kContext, J2kDecoder as CpuDecoder, J2kError,
     J2kScratchPool as CpuJ2kScratchPool, J2kView,
-    __private::decode_image_into_with_native_context_and_ht_decoder,
     __private::device_plan::{DeviceDecodePlan, DeviceDecodeRequest},
 };
-use slidecodec_j2k_native::{
-    DecodeSettings as NativeDecodeSettings, DecoderContext as NativeDecoderContext,
-    Image as NativeImage,
-};
-
-use crate::ht::CudaHtBlockDecoder;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -125,8 +116,6 @@ impl CudaSession {
 pub struct J2kDecoder<'a> {
     inner: CpuDecoder<'a>,
     pool: CpuJ2kScratchPool,
-    native_image: Option<NativeImage<'a>>,
-    native_context: NativeDecoderContext<'a>,
 }
 
 impl<'a> J2kDecoder<'a> {
@@ -134,42 +123,7 @@ impl<'a> J2kDecoder<'a> {
         Ok(Self {
             inner: CpuDecoder::new(input)?,
             pool: CpuJ2kScratchPool::new(),
-            native_image: None,
-            native_context: NativeDecoderContext::default(),
         })
-    }
-
-    fn ensure_native_image(&mut self) -> Result<(), Error> {
-        if self.native_image.is_none() {
-            self.native_image = Some(
-                NativeImage::new(self.inner.bytes(), &NativeDecodeSettings::default())
-                    .map_err(|error| J2kError::Backend(error.to_string()))?,
-            );
-        }
-        Ok(())
-    }
-
-    fn decode_to_host_surface_with_cuda_ht(&mut self, fmt: PixelFormat) -> Result<Surface, Error> {
-        self.ensure_native_image()?;
-        let dims = self.inner.info().dimensions;
-        let stride = dims.0 as usize * fmt.bytes_per_pixel();
-        let mut out = vec![0u8; stride * dims.1 as usize];
-        let (Some(image), native_context) = (self.native_image.as_ref(), &mut self.native_context)
-        else {
-            return Err(Error::Decode(J2kError::Backend(
-                "native image cache missing".to_string(),
-            )));
-        };
-        let mut ht_decoder = CudaHtBlockDecoder::default();
-        decode_image_into_with_native_context_and_ht_decoder(
-            image,
-            native_context,
-            &mut ht_decoder,
-            &mut out,
-            stride,
-            fmt,
-        )?;
-        wrap_surface(out, dims, fmt, BackendRequest::Auto)
     }
 
     fn decode_to_surface_impl(
@@ -177,29 +131,13 @@ impl<'a> J2kDecoder<'a> {
         fmt: PixelFormat,
         backend: BackendRequest,
     ) -> Result<Surface, Error> {
+        validate_host_surface_request(backend)?;
         let dims = self.inner.info().dimensions;
-        match backend {
-            BackendRequest::Cpu => {
-                let stride = dims.0 as usize * fmt.bytes_per_pixel();
-                let mut out = vec![0u8; stride * dims.1 as usize];
-                self.inner
-                    .decode_into_with_scratch(&mut self.pool, &mut out, stride, fmt)?;
-                wrap_surface(out, dims, fmt, backend)
-            }
-            BackendRequest::Auto => match self.decode_to_host_surface_with_cuda_ht(fmt) {
-                Ok(surface) => Ok(surface),
-                Err(error) if error.is_unsupported() || error.is_not_implemented() => {
-                    let stride = dims.0 as usize * fmt.bytes_per_pixel();
-                    let mut out = vec![0u8; stride * dims.1 as usize];
-                    self.inner
-                        .decode_into_with_scratch(&mut self.pool, &mut out, stride, fmt)?;
-                    wrap_surface(out, dims, fmt, backend)
-                }
-                Err(error) => Err(error),
-            },
-            BackendRequest::Cuda => Err(Error::CudaUnavailable),
-            BackendRequest::Metal => Err(Error::UnsupportedBackend { request: backend }),
-        }
+        let stride = dims.0 as usize * fmt.bytes_per_pixel();
+        let mut out = vec![0u8; stride * dims.1 as usize];
+        self.inner
+            .decode_into_with_scratch(&mut self.pool, &mut out, stride, fmt)?;
+        wrap_surface(out, dims, fmt, backend)
     }
 
     fn decode_region_to_surface_impl(
@@ -208,6 +146,7 @@ impl<'a> J2kDecoder<'a> {
         roi: Rect,
         backend: BackendRequest,
     ) -> Result<Surface, Error> {
+        validate_host_surface_request(backend)?;
         let plan = DeviceDecodePlan::for_image(
             self.inner.info().dimensions,
             DeviceDecodeRequest::Region { roi },
@@ -226,6 +165,7 @@ impl<'a> J2kDecoder<'a> {
         scale: Downscale,
         backend: BackendRequest,
     ) -> Result<Surface, Error> {
+        validate_host_surface_request(backend)?;
         let dims = DeviceDecodePlan::for_image(
             self.inner.info().dimensions,
             DeviceDecodeRequest::Scaled { scale },
@@ -260,8 +200,6 @@ impl<'a> ImageDecode<'a> for J2kDecoder<'a> {
         Ok(Self {
             inner: CpuDecoder::from_view(view)?,
             pool: CpuJ2kScratchPool::new(),
-            native_image: None,
-            native_context: NativeDecoderContext::default(),
         })
     }
 
@@ -375,6 +313,7 @@ impl Codec {
         fmt: PixelFormat,
         backend: BackendRequest,
     ) -> Result<Surface, Error> {
+        validate_host_surface_request(backend)?;
         let dims = CpuDecoder::inspect(input)?.dimensions;
         let stride = dims.0 as usize * fmt.bytes_per_pixel();
         let mut out = vec![0u8; stride * dims.1 as usize];
@@ -390,6 +329,7 @@ impl Codec {
         roi: Rect,
         backend: BackendRequest,
     ) -> Result<Surface, Error> {
+        validate_host_surface_request(backend)?;
         let dims = DeviceDecodePlan::for_image(
             CpuDecoder::inspect(input)?.dimensions,
             DeviceDecodeRequest::Region { roi },
@@ -409,6 +349,7 @@ impl Codec {
         scale: Downscale,
         backend: BackendRequest,
     ) -> Result<Surface, Error> {
+        validate_host_surface_request(backend)?;
         let dims = DeviceDecodePlan::for_image(
             CpuDecoder::inspect(input)?.dimensions,
             DeviceDecodeRequest::Scaled { scale },
@@ -432,6 +373,7 @@ impl<'a> ImageDecodeSubmit<'a> for J2kDecoder<'a> {
         fmt: PixelFormat,
         backend: BackendRequest,
     ) -> Result<Self::SubmittedSurface, Self::Error> {
+        validate_host_surface_request(backend)?;
         session.record_submit();
         Ok(ReadySubmission::from_result(
             self.decode_to_surface_impl(fmt, backend),
@@ -445,6 +387,7 @@ impl<'a> ImageDecodeSubmit<'a> for J2kDecoder<'a> {
         roi: Rect,
         backend: BackendRequest,
     ) -> Result<Self::SubmittedSurface, Self::Error> {
+        validate_host_surface_request(backend)?;
         session.record_submit();
         Ok(ReadySubmission::from_result(
             self.decode_region_to_surface_impl(fmt, roi, backend),
@@ -458,6 +401,7 @@ impl<'a> ImageDecodeSubmit<'a> for J2kDecoder<'a> {
         scale: Downscale,
         backend: BackendRequest,
     ) -> Result<Self::SubmittedSurface, Self::Error> {
+        validate_host_surface_request(backend)?;
         session.record_submit();
         Ok(ReadySubmission::from_result(
             self.decode_scaled_to_surface_impl(fmt, scale, backend),
@@ -479,6 +423,7 @@ impl TileBatchDecodeSubmit for Codec {
         fmt: PixelFormat,
         backend: BackendRequest,
     ) -> Result<Self::SubmittedSurface, Self::Error> {
+        validate_host_surface_request(backend)?;
         session.record_submit();
         Ok(ReadySubmission::from_result(
             Self::decode_tile_to_surface_impl(ctx, pool, input, fmt, backend),
@@ -494,6 +439,7 @@ impl TileBatchDecodeSubmit for Codec {
         roi: Rect,
         backend: BackendRequest,
     ) -> Result<Self::SubmittedSurface, Self::Error> {
+        validate_host_surface_request(backend)?;
         session.record_submit();
         Ok(ReadySubmission::from_result(
             Self::decode_tile_region_to_surface_impl(ctx, pool, input, fmt, roi, backend),
@@ -509,6 +455,7 @@ impl TileBatchDecodeSubmit for Codec {
         scale: Downscale,
         backend: BackendRequest,
     ) -> Result<Self::SubmittedSurface, Self::Error> {
+        validate_host_surface_request(backend)?;
         session.record_submit();
         Ok(ReadySubmission::from_result(
             Self::decode_tile_scaled_to_surface_impl(ctx, pool, input, fmt, scale, backend),
@@ -588,14 +535,19 @@ fn wrap_surface(
     fmt: PixelFormat,
     backend: BackendRequest,
 ) -> Result<Surface, Error> {
+    validate_host_surface_request(backend)?;
+    Ok(Surface {
+        backend: BackendKind::Cpu,
+        dimensions,
+        fmt,
+        pitch_bytes: dimensions.0 as usize * fmt.bytes_per_pixel(),
+        bytes,
+    })
+}
+
+fn validate_host_surface_request(backend: BackendRequest) -> Result<(), Error> {
     match backend {
-        BackendRequest::Cpu | BackendRequest::Auto => Ok(Surface {
-            backend: BackendKind::Cpu,
-            dimensions,
-            fmt,
-            pitch_bytes: dimensions.0 as usize * fmt.bytes_per_pixel(),
-            bytes,
-        }),
+        BackendRequest::Cpu | BackendRequest::Auto => Ok(()),
         BackendRequest::Cuda => Err(Error::CudaUnavailable),
         BackendRequest::Metal => Err(Error::UnsupportedBackend { request: backend }),
     }

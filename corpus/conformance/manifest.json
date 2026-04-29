@@ -12,6 +12,33 @@
       "sampling":  "4:2:0"
     },
     {
+      "input":     "baseline_420_restart_32x16.jpg",
+      "reference": "baseline_420_restart_32x16.rgb",
+      "format":    "Rgb8",
+      "width":     32,
+      "height":    16,
+      "tolerance": "bit_exact",
+      "sampling":  "4:2:0 restart-coded"
+    },
+    {
+      "input":     "baseline_422_16x8.jpg",
+      "reference": "baseline_422_16x8.rgb",
+      "format":    "Rgb8",
+      "width":     16,
+      "height":    8,
+      "tolerance": "bit_exact",
+      "sampling":  "4:2:2"
+    },
+    {
+      "input":     "baseline_444_8x8.jpg",
+      "reference": "baseline_444_8x8.rgb",
+      "format":    "Rgb8",
+      "width":     8,
+      "height":    8,
+      "tolerance": "bit_exact",
+      "sampling":  "4:4:4"
+    },
+    {
       "input":     "grayscale_8x8.jpg",
       "reference": "grayscale_8x8.gray",
       "format":    "Gray8",

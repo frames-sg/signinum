@@ -164,11 +164,11 @@ fn inspect_jp2_uses_container_colorspace() {
 
 #[test]
 fn view_and_decoder_share_inspect_info() {
-    let bytes = minimal_jp2();
+    let bytes = ht_jp2();
     let view = J2kView::parse(&bytes).expect("view");
     let dec = J2kDecoder::from_view(view).expect("decoder");
-    assert_eq!(dec.info().dimensions, (128, 64));
-    assert_eq!(dec.info().components, 3);
+    assert_eq!(dec.info().dimensions, (2, 2));
+    assert_eq!(dec.info().components, 1);
 }
 
 #[test]

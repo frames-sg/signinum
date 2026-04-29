@@ -100,8 +100,9 @@ CUDA implementation.
 Correctness and maintainability are handled through parser-level inspection,
 reference-comparator tests, fixture manifests, fuzz targets, and benchmark
 groups documented in `docs/bench.md` and `docs/parity.md`. The JPEG 2000
-native engine is kept under `#![forbid(unsafe_code)]`; the JPEG crate confines
-its `unsafe` code to architecture-specific SIMD backends.
+native engine is kept under `#![forbid(unsafe_code)]`; unavoidable `unsafe`
+in the public workspace is isolated to CPU feature detection and audited
+JPEG hot paths such as SIMD and low-level entropy-buffer handling.
 
 # Research impact statement
 

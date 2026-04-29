@@ -20,8 +20,8 @@ design notes that an agent can reach without leaving the repo.
 - [`docs/release.md`](release.md) — release staging notes.
 - [`docs/superpowers/HANDOFF-2026-04-23-adaptive-codec-runtime.md`](superpowers/HANDOFF-2026-04-23-adaptive-codec-runtime.md)
   — most recent in-flight design handoff (adaptive backend routing).
-- Per-crate `README.md` under each `crates/<name>/` — crate-scoped contracts
-  and feature notes.
+- Crate-level `README.md` files where present — crate-scoped contracts and
+  feature notes.
 
 ## System map
 
@@ -35,7 +35,7 @@ and `rust-version = 1.94`.
 | `slidecodec-tilecodec` | codec | Tile decompression primitives: Deflate, Zstd, LZW, Uncompressed. Implements `TileDecompress` from `core`. |
 | `slidecodec-jpeg` | codec | Native pure-Rust JPEG decode for WSI tiles. CPU-first. Owns SIMD backends and fused entropy/IDCT/upsample paths. |
 | `slidecodec-j2k-native` | codec engine | Internal, unpublished pure-Rust JPEG 2000 / HTJ2K engine. Lives under `#![forbid(unsafe_code)]` and uses `fearless_simd`. |
-| `slidecodec-j2k` | codec | Public JPEG 2000 / HTJ2K crate. Wraps `j2k-native` with the slidecodec-core trait surface (inspect, decode, ROI, scaled, row, tile-batch). |
+| `slidecodec-j2k` | codec | Public JPEG 2000 / HTJ2K crate. Wraps `j2k-native` with the slidecodec-core trait surface (inspect, decode, ROI, scaled, row-bounded, tile-batch). |
 | `slidecodec-j2k-compare` | dev-only | OpenJPEG FFI bindings used as a reference decoder for conformance and parity testing. Unpublished. |
 | `slidecodec-jpeg-metal` | adapter | Apple Metal device-output adapter for `slidecodec-jpeg`. Hosts compute kernels for color conversion, interleave/pack, and `MTLBuffer` production. |
 | `slidecodec-j2k-metal` | adapter | Apple Metal device-output adapter for `slidecodec-j2k`. Same shape as the JPEG adapter. |
@@ -62,7 +62,7 @@ foundation  →  codec engines  →  codecs  →  adapters  →  binary
 
 | Layer | Members | May depend on |
 |-------|---------|---------------|
-| foundation | `slidecodec-core` | `thiserror` only. No other workspace crate. `no_std + alloc` posture. No `unsafe`. |
+| foundation | `slidecodec-core` | `thiserror` only. No other workspace crate. `no_std + alloc` posture. Contains only the x86 CPUID/XGETBV unsafe required for CPU feature detection. |
 | codec engines | `slidecodec-j2k-native` | foundation. Internal only. Not re-exported. |
 | codecs | `slidecodec-jpeg`, `slidecodec-j2k`, `slidecodec-tilecodec` | foundation, codec engines. Must not depend on each other. Must not depend on adapters or `cli`. |
 | adapters | `slidecodec-jpeg-metal`, `slidecodec-j2k-metal`, `slidecodec-jpeg-cuda`, `slidecodec-j2k-cuda` | foundation, exactly one matching codec, optional engine for the matching codec. Adapters in different format families must not depend on each other. |
@@ -122,7 +122,7 @@ implements. New extension points belong here.
 - `ImageDecode<'a>` — CPU decode surface. Methods include `inspect`, `parse`,
   `decode_into`, `decode_into_with_scratch`, `decode_region_into`,
   `decode_scaled_into`.
-- `ImageDecodeRows<'a, S: RowSink<_>>` — row-streaming decode for large tiles.
+- `ImageDecodeRows<'a, S: RowSink<_>>` — row-bounded decode for large tiles.
 - `ImageDecodeDevice<'a>` — synchronous device decode; returns a
   `DeviceSurface`.
 - `ImageDecodeSubmit<'a>` — asynchronous device decode; returns a
@@ -134,8 +134,9 @@ implements. New extension points belong here.
 ### Backend and surface model
 
 - `BackendKind` — `Cpu | Metal | Cuda`.
-- `BackendRequest` — `Auto | Cpu | Metal | Cuda`. Callers state intent;
-  codecs may downgrade to CPU when the request is not satisfiable.
+- `BackendRequest` — `Auto | Cpu | Metal | Cuda`. Callers state intent.
+  `Auto` may resolve to a CPU-backed surface; explicit unsupported device
+  requests return an error before decode work.
 - `DeviceSurface` — trait describing decoded data sitting on a backend
   (CPU buffer, `MTLBuffer`, etc.). Queryable for backend kind, dimensions,
   pixel format, byte length.
@@ -192,7 +193,7 @@ decoder = Decoder::from_view(view)
     │           fearless_simd (j2k-native)                     │
     │   returns DecodeOutcome<Warning>                         │
     │                                                           │
-    └─ Device path (Metal today, CUDA fallback) ───────────────┘
+    └─ Device path (Metal today, CUDA API-only) ───────────────┘
         submit_to_device(session, fmt, BackendRequest::Metal)
             │
             ▼
@@ -202,8 +203,8 @@ decoder = Decoder::from_view(view)
             │   dispatch compute kernel (color conv, interleave/pack)
             │   → DeviceSubmission → wait() → Surface (with MTLBuffer)
             │
-            └─ unsupported / unavailable: fall back to CPU decode,
-                wrap output in a CPU-backed DeviceSurface
+            └─ unsupported explicit backend: fail before decode;
+                Auto/Cpu may wrap CPU output in a host-backed DeviceSurface
 ```
 
 JPEG is fully fused on CPU: entropy decode, IDCT scheduling, upsampling, ROI,
@@ -232,9 +233,9 @@ There are three target backends. Selection is explicit in the public API.
   produces `MTLBuffer`-backed `DeviceSurface`s so downstream GPU pipelines
   can consume the result without an extra download.
 - **CUDA** — API-only in `0.1.0`. The adapter validates that explicit
-  `BackendRequest::Cuda` either succeeds (when a CUDA implementation exists)
-  or returns the documented unavailable error and a CPU surface. No
-  performance claim is made in this checkpoint.
+  `BackendRequest::Cuda` returns the documented unavailable error before
+  decode work. `Auto` and `Cpu` return CPU-backed host surfaces. No CUDA
+  runtime or performance claim is made in this checkpoint.
 
 `BackendRequest::Auto` stays conservative: small or low-yield decodes are
 served from CPU; larger batches with supported shapes can be routed to a
@@ -281,8 +282,9 @@ between codec crates.
   to build by design.
 - Metal adapters compile and run on Apple Silicon macOS. On other hosts the
   adapter crate compiles to a fallback surface.
-- CUDA adapter crates currently expose the API surface only; no CUDA runtime
-  is required to build or test the workspace.
+- CUDA adapter crates currently expose the API surface only. No CUDA runtime
+  is required to build or test the workspace, and explicit CUDA requests fail
+  as unavailable before decode validation.
 - Release profile: `lto = "fat"`, `codegen-units = 1`, `strip = "symbols"`,
   `opt-level = 3`. `release-bench` inherits `release` but keeps debug info.
 - Notable feature flags:

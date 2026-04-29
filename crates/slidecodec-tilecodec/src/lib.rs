@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+mod bounded;
 mod deflate;
 mod error;
 mod lzw;

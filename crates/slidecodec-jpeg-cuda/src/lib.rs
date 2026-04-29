@@ -127,6 +127,7 @@ impl<'a> Decoder<'a> {
         fmt: PixelFormat,
         backend: BackendRequest,
     ) -> Result<Surface, Error> {
+        validate_host_surface_request(backend)?;
         let (bytes, _outcome) = self.inner.decode(fmt)?;
         wrap_surface(bytes, self.inner.info().dimensions, fmt, backend)
     }
@@ -137,6 +138,7 @@ impl<'a> Decoder<'a> {
         roi: Rect,
         backend: BackendRequest,
     ) -> Result<Surface, Error> {
+        validate_host_surface_request(backend)?;
         let (bytes, outcome) = self.inner.decode_region(fmt, to_jpeg_rect(roi))?;
         wrap_surface(bytes, (outcome.decoded.w, outcome.decoded.h), fmt, backend)
     }
@@ -147,6 +149,7 @@ impl<'a> Decoder<'a> {
         scale: Downscale,
         backend: BackendRequest,
     ) -> Result<Surface, Error> {
+        validate_host_surface_request(backend)?;
         let (bytes, outcome) = self.inner.decode_scaled(fmt, scale)?;
         wrap_surface(bytes, (outcome.decoded.w, outcome.decoded.h), fmt, backend)
     }
@@ -295,6 +298,7 @@ impl Codec {
         fmt: PixelFormat,
         backend: BackendRequest,
     ) -> Result<Surface, Error> {
+        validate_host_surface_request(backend)?;
         let dims = CpuDecoder::inspect(input)?.dimensions;
         let stride = dims.0 as usize * fmt.bytes_per_pixel();
         let mut out = vec![0u8; stride * dims.1 as usize];
@@ -310,6 +314,7 @@ impl Codec {
         roi: Rect,
         backend: BackendRequest,
     ) -> Result<Surface, Error> {
+        validate_host_surface_request(backend)?;
         let dims = (roi.w, roi.h);
         let stride = dims.0 as usize * fmt.bytes_per_pixel();
         let mut out = vec![0u8; stride * dims.1 as usize];
@@ -333,6 +338,7 @@ impl Codec {
         scale: Downscale,
         backend: BackendRequest,
     ) -> Result<Surface, Error> {
+        validate_host_surface_request(backend)?;
         let dims = (
             CpuDecoder::inspect(input)?
                 .dimensions
@@ -369,6 +375,7 @@ impl<'a> ImageDecodeSubmit<'a> for Decoder<'a> {
         fmt: PixelFormat,
         backend: BackendRequest,
     ) -> Result<Self::SubmittedSurface, Self::Error> {
+        validate_host_surface_request(backend)?;
         session.record_submit();
         Ok(ReadySubmission::from_result(
             self.decode_to_surface_impl(fmt, backend),
@@ -382,6 +389,7 @@ impl<'a> ImageDecodeSubmit<'a> for Decoder<'a> {
         roi: Rect,
         backend: BackendRequest,
     ) -> Result<Self::SubmittedSurface, Self::Error> {
+        validate_host_surface_request(backend)?;
         session.record_submit();
         Ok(ReadySubmission::from_result(
             self.decode_region_to_surface_impl(fmt, roi, backend),
@@ -395,6 +403,7 @@ impl<'a> ImageDecodeSubmit<'a> for Decoder<'a> {
         scale: Downscale,
         backend: BackendRequest,
     ) -> Result<Self::SubmittedSurface, Self::Error> {
+        validate_host_surface_request(backend)?;
         session.record_submit();
         Ok(ReadySubmission::from_result(
             self.decode_scaled_to_surface_impl(fmt, scale, backend),
@@ -416,6 +425,7 @@ impl TileBatchDecodeSubmit for Codec {
         fmt: PixelFormat,
         backend: BackendRequest,
     ) -> Result<Self::SubmittedSurface, Self::Error> {
+        validate_host_surface_request(backend)?;
         session.record_submit();
         Ok(ReadySubmission::from_result(
             Self::decode_tile_to_surface_impl(ctx, pool, input, fmt, backend),
@@ -431,6 +441,7 @@ impl TileBatchDecodeSubmit for Codec {
         roi: Rect,
         backend: BackendRequest,
     ) -> Result<Self::SubmittedSurface, Self::Error> {
+        validate_host_surface_request(backend)?;
         session.record_submit();
         Ok(ReadySubmission::from_result(
             Self::decode_tile_region_to_surface_impl(ctx, pool, input, fmt, roi, backend),
@@ -446,6 +457,7 @@ impl TileBatchDecodeSubmit for Codec {
         scale: Downscale,
         backend: BackendRequest,
     ) -> Result<Self::SubmittedSurface, Self::Error> {
+        validate_host_surface_request(backend)?;
         session.record_submit();
         Ok(ReadySubmission::from_result(
             Self::decode_tile_scaled_to_surface_impl(ctx, pool, input, fmt, scale, backend),
@@ -574,14 +586,19 @@ fn wrap_surface(
     fmt: PixelFormat,
     backend: BackendRequest,
 ) -> Result<Surface, Error> {
+    validate_host_surface_request(backend)?;
+    Ok(Surface {
+        backend: BackendKind::Cpu,
+        dimensions,
+        fmt,
+        pitch_bytes: dimensions.0 as usize * fmt.bytes_per_pixel(),
+        bytes,
+    })
+}
+
+fn validate_host_surface_request(backend: BackendRequest) -> Result<(), Error> {
     match backend {
-        BackendRequest::Cpu | BackendRequest::Auto => Ok(Surface {
-            backend: BackendKind::Cpu,
-            dimensions,
-            fmt,
-            pitch_bytes: dimensions.0 as usize * fmt.bytes_per_pixel(),
-            bytes,
-        }),
+        BackendRequest::Cpu | BackendRequest::Auto => Ok(()),
         BackendRequest::Cuda => Err(Error::CudaUnavailable),
         BackendRequest::Metal => Err(Error::UnsupportedBackend { request: backend }),
     }

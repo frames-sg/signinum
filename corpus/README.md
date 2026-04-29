@@ -18,7 +18,9 @@ Test data committed to this repo. Size budget: ~30 MB total.
   restart markers, truncated streams, zero-sized tables). Used to seed
   `cargo-fuzz` targets.
 
-Populated in M5 (Hardening). This directory is intentionally empty until then.
+The committed corpus is intentionally small. `conformance/` currently carries
+baseline RGB, grayscale, restart-coded, and sampling-variant JPEG fixtures with
+raw reference outputs listed in `conformance/manifest.json`.
 
 ## Generating conformance fixtures
 
@@ -28,7 +30,7 @@ recording the libjpeg-turbo version. Commit the results — CI does **not**
 regenerate them.
 
 Regenerate on:
-- First-time repo setup (M1b initial fixtures land in `baseline_420_16x16.*`
-  and `grayscale_8x8.*`).
+- First-time repo setup.
+- Adding, removing, or replacing a committed fixture.
 - libjpeg-turbo version bump recorded in `manifest.json` (tracks Risk #3 in
   the design spec).

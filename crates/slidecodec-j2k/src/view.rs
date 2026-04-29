@@ -43,7 +43,7 @@ impl<'a> J2kView<'a> {
             Err(error) if should_retry_with_backend(&error) => inspect_info(input)?,
             Err(error) => return Err(error),
         };
-        let image = backend_image(input, DecodeSettings::default()).ok();
+        let image = Some(backend_image(input, DecodeSettings::default())?);
         Ok(Self {
             bytes: input,
             info,
@@ -134,19 +134,29 @@ impl<'a> J2kDecoder<'a> {
         stride: usize,
         fmt: PixelFormat,
     ) -> Result<J2kDecodeOutcome, J2kError> {
-        self.decode_into_with_scratch(&mut J2kScratchPool::new(), out, stride, fmt)
+        self.decode_into_cached(out, stride, fmt)
     }
 
     /// Decode the full image with caller-owned scratch.
     ///
-    /// The scratch pool is reserved for API symmetry with other codecs and for
-    /// future reduced-allocation paths.
+    /// The current native full-frame path writes directly into the caller's
+    /// output buffer; the pool is accepted to satisfy the shared codec trait
+    /// and is used by reduced-resolution and row-bounded paths.
     ///
     /// # Errors
     /// Same as [`Self::decode_into`].
     pub fn decode_into_with_scratch(
         &mut self,
         _pool: &mut J2kScratchPool,
+        out: &mut [u8],
+        stride: usize,
+        fmt: PixelFormat,
+    ) -> Result<J2kDecodeOutcome, J2kError> {
+        self.decode_into_cached(out, stride, fmt)
+    }
+
+    fn decode_into_cached(
+        &mut self,
         out: &mut [u8],
         stride: usize,
         fmt: PixelFormat,
@@ -177,13 +187,22 @@ impl<'a> J2kDecoder<'a> {
     /// is too small, the format is unsupported, or decode fails.
     pub fn decode_region_into(
         &mut self,
-        pool: &mut J2kScratchPool,
+        _pool: &mut J2kScratchPool,
         out: &mut [u8],
         stride: usize,
         fmt: PixelFormat,
         roi: Rect,
     ) -> Result<J2kDecodeOutcome, J2kError> {
-        let _ = pool;
+        self.decode_region_into_cached(out, stride, fmt, roi)
+    }
+
+    fn decode_region_into_cached(
+        &mut self,
+        out: &mut [u8],
+        stride: usize,
+        fmt: PixelFormat,
+        roi: Rect,
+    ) -> Result<J2kDecodeOutcome, J2kError> {
         validate_supported_format(fmt)?;
         validate_region(roi, self.info.dimensions)?;
         validate_buffer((roi.w, roi.h), out.len(), stride, fmt)?;
@@ -318,15 +337,22 @@ impl<'a> ImageDecodeRows<'a, u8> for J2kDecoder<'a> {
     {
         let fmt = row_format_u8(self.info()).map_err(DecodeRowsError::Decode)?;
         let row_bytes = row_bytes_for(self.info(), fmt).map_err(DecodeRowsError::Decode)?;
-        let total_len =
-            total_output_bytes(self.info(), row_bytes).map_err(DecodeRowsError::Decode)?;
         let mut pool = J2kScratchPool::new();
-        let packed = pool.packed_bytes(total_len);
-        self.decode_into(packed, row_bytes, fmt)
+        let row = pool.packed_bytes(row_bytes);
+        for y in 0..self.info.dimensions.1 {
+            self.decode_region_into_cached(
+                row,
+                row_bytes,
+                fmt,
+                Rect {
+                    x: 0,
+                    y,
+                    w: self.info.dimensions.0,
+                    h: 1,
+                },
+            )
             .map_err(DecodeRowsError::Decode)?;
-        for (y, row) in packed.chunks_exact(row_bytes).enumerate() {
-            sink.write_row(y as u32, row)
-                .map_err(DecodeRowsError::Sink)?;
+            sink.write_row(y, row).map_err(DecodeRowsError::Sink)?;
         }
         Ok(slidecodec_core::DecodeOutcome {
             decoded: Rect::full(self.info.dimensions),
@@ -344,18 +370,25 @@ impl<'a> ImageDecodeRows<'a, u16> for J2kDecoder<'a> {
         let fmt = row_format_u16(self.info()).map_err(DecodeRowsError::Decode)?;
         let row_bytes = row_bytes_for(self.info(), fmt).map_err(DecodeRowsError::Decode)?;
         let samples_per_row = row_samples_for(self.info(), fmt).map_err(DecodeRowsError::Decode)?;
-        let total_len =
-            total_output_bytes(self.info(), row_bytes).map_err(DecodeRowsError::Decode)?;
         let mut pool = J2kScratchPool::new();
-        let (packed, row) = pool.packed_bytes_and_row_u16(total_len, samples_per_row);
-        self.decode_into(packed, row_bytes, fmt)
+        let (packed, row) = pool.packed_bytes_and_row_u16(row_bytes, samples_per_row);
+        for y in 0..self.info.dimensions.1 {
+            self.decode_region_into_cached(
+                packed,
+                row_bytes,
+                fmt,
+                Rect {
+                    x: 0,
+                    y,
+                    w: self.info.dimensions.0,
+                    h: 1,
+                },
+            )
             .map_err(DecodeRowsError::Decode)?;
-        for (y, row_bytes) in packed.chunks_exact(row_bytes).enumerate() {
-            for (dst, src) in row.iter_mut().zip(row_bytes.chunks_exact(2)) {
+            for (dst, src) in row.iter_mut().zip(packed.chunks_exact(2)) {
                 *dst = u16::from_le_bytes([src[0], src[1]]);
             }
-            sink.write_row(y as u32, row)
-                .map_err(DecodeRowsError::Sink)?;
+            sink.write_row(y, row).map_err(DecodeRowsError::Sink)?;
         }
         Ok(slidecodec_core::DecodeOutcome {
             decoded: Rect::full(self.info.dimensions),
@@ -374,19 +407,20 @@ impl TileBatchDecode for J2kCodec {
     type Context = J2kContext;
 
     fn decode_tile(
-        _ctx: &mut DecoderContext<Self::Context>,
+        ctx: &mut DecoderContext<Self::Context>,
         pool: &mut Self::Pool,
         input: &[u8],
         out: &mut [u8],
         stride: usize,
         fmt: PixelFormat,
     ) -> Result<slidecodec_core::DecodeOutcome<Self::Warning>, Self::Error> {
+        ctx.codec_mut().record_tile_decode();
         let mut decoder = J2kDecoder::new(input)?;
         decoder.decode_into_with_scratch(pool, out, stride, fmt)
     }
 
     fn decode_tile_region(
-        _ctx: &mut DecoderContext<Self::Context>,
+        ctx: &mut DecoderContext<Self::Context>,
         pool: &mut Self::Pool,
         input: &[u8],
         out: &mut [u8],
@@ -394,12 +428,13 @@ impl TileBatchDecode for J2kCodec {
         fmt: PixelFormat,
         roi: Rect,
     ) -> Result<slidecodec_core::DecodeOutcome<Self::Warning>, Self::Error> {
+        ctx.codec_mut().record_tile_decode();
         let mut decoder = J2kDecoder::new(input)?;
         decoder.decode_region_into(pool, out, stride, fmt, roi)
     }
 
     fn decode_tile_scaled(
-        _ctx: &mut DecoderContext<Self::Context>,
+        ctx: &mut DecoderContext<Self::Context>,
         pool: &mut Self::Pool,
         input: &[u8],
         out: &mut [u8],
@@ -407,6 +442,7 @@ impl TileBatchDecode for J2kCodec {
         fmt: PixelFormat,
         scale: Downscale,
     ) -> Result<slidecodec_core::DecodeOutcome<Self::Warning>, Self::Error> {
+        ctx.codec_mut().record_tile_decode();
         let mut decoder = J2kDecoder::new(input)?;
         decoder.decode_scaled_into(pool, out, stride, fmt, scale)
     }
@@ -451,15 +487,6 @@ fn row_bytes_for(info: &Info, fmt: PixelFormat) -> Result<usize, J2kError> {
 fn row_samples_for(info: &Info, fmt: PixelFormat) -> Result<usize, J2kError> {
     (info.dimensions.0 as usize)
         .checked_mul(fmt.channels())
-        .ok_or(J2kError::DimensionOverflow {
-            width: info.dimensions.0,
-            height: info.dimensions.1,
-        })
-}
-
-fn total_output_bytes(info: &Info, row_bytes: usize) -> Result<usize, J2kError> {
-    row_bytes
-        .checked_mul(info.dimensions.1 as usize)
         .ok_or(J2kError::DimensionOverflow {
             width: info.dimensions.0,
             height: info.dimensions.1,

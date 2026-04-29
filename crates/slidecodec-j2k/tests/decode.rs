@@ -104,6 +104,32 @@ fn backend_decode_u8_region(bytes: &[u8], roi: Rect) -> Vec<u8> {
         .data
 }
 
+fn locally_inspectable_codestream_without_decode_headers() -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&[0xFF, 0x4F]);
+
+    bytes.extend_from_slice(&[0xFF, 0x51]);
+    bytes.extend_from_slice(&41_u16.to_be_bytes());
+    bytes.extend_from_slice(&0_u16.to_be_bytes());
+    bytes.extend_from_slice(&2_u32.to_be_bytes());
+    bytes.extend_from_slice(&2_u32.to_be_bytes());
+    bytes.extend_from_slice(&0_u32.to_be_bytes());
+    bytes.extend_from_slice(&0_u32.to_be_bytes());
+    bytes.extend_from_slice(&2_u32.to_be_bytes());
+    bytes.extend_from_slice(&2_u32.to_be_bytes());
+    bytes.extend_from_slice(&0_u32.to_be_bytes());
+    bytes.extend_from_slice(&0_u32.to_be_bytes());
+    bytes.extend_from_slice(&1_u16.to_be_bytes());
+    bytes.extend_from_slice(&[7, 1, 1]);
+
+    bytes.extend_from_slice(&[0xFF, 0x52]);
+    bytes.extend_from_slice(&12_u16.to_be_bytes());
+    bytes.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+
+    bytes.extend_from_slice(&[0xFF, 0x90]);
+    bytes
+}
+
 fn crop_u8(full: &[u8], full_width: usize, channels: usize, roi: Rect) -> Vec<u8> {
     let mut out = Vec::with_capacity(roi.w as usize * roi.h as usize * channels);
     let row_bytes = full_width * channels;
@@ -155,6 +181,21 @@ fn decode_rgb8_codestream_roundtrips_reversible_pixels() {
         .expect("decode");
     assert_eq!(outcome.decoded, slidecodec_core::Rect::full((2, 2)));
     assert_eq!(out, expected.as_slice());
+}
+
+#[test]
+fn decoder_new_rejects_codestream_that_only_header_inspection_accepts() {
+    let malformed = locally_inspectable_codestream_without_decode_headers();
+
+    J2kDecoder::inspect(&malformed).expect("header inspection still succeeds");
+    let Err(err) = J2kDecoder::new(&malformed) else {
+        panic!("decoder construction must validate backend");
+    };
+
+    assert!(
+        matches!(err, J2kError::Backend(_)),
+        "expected backend construction error, got {err:?}"
+    );
 }
 
 #[test]
@@ -417,6 +458,7 @@ fn tile_batch_decode_matches_borrowed_decoder_decode() {
     .expect("tile decode");
     assert_eq!(outcome.decoded, Rect::full((2, 1)));
     assert_eq!(out, expected);
+    assert_eq!(ctx.cache_stats().misses, 1);
 }
 
 #[test]

@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{pool::ZstdPool, TileCodecError};
-use slidecodec_core::{BufferError, TileDecompress};
-use std::io::Read;
+use crate::{
+    bounded::{copy_scratch_to_output, read_to_scratch_bounded, BoundedReadError},
+    pool::ZstdPool,
+    TileCodecError,
+};
+use slidecodec_core::TileDecompress;
 
 pub struct ZstdCodec;
 
@@ -23,17 +26,17 @@ impl TileDecompress for ZstdCodec {
         let mut decoder = zstd::stream::read::Decoder::new(input).map_err(|error| {
             TileCodecError::Backend(format!("zstd decoder init failed: {error}"))
         })?;
-        decoder
-            .read_to_end(&mut pool.scratch)
-            .map_err(|error| TileCodecError::Backend(format!("zstd decode failed: {error}")))?;
+        let written = match read_to_scratch_bounded(&mut decoder, &mut pool.scratch, out.len()) {
+            Ok(written) => written,
+            Err(BoundedReadError::OutputTooSmall(error)) => return Err(error.into()),
+            Err(BoundedReadError::Io(error)) => {
+                return Err(TileCodecError::Backend(format!(
+                    "zstd decode failed: {error}"
+                )));
+            }
+        };
 
-        if out.len() < pool.scratch.len() {
-            return Err(TileCodecError::Buffer(BufferError::OutputTooSmall {
-                required: pool.scratch.len(),
-                have: out.len(),
-            }));
-        }
-        out[..pool.scratch.len()].copy_from_slice(&pool.scratch);
-        Ok(pool.scratch.len())
+        copy_scratch_to_output(&pool.scratch, out);
+        Ok(written)
     }
 }

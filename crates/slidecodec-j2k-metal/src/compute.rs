@@ -912,10 +912,10 @@ impl MetalRuntime {
     fn new() -> Result<Self, String> {
         let device = Device::system_default()
             .ok_or_else(|| "Metal is unavailable on this host".to_string())?;
-        Self::new_with_device(device)
+        Self::new_with_device(&device)
     }
 
-    fn new_with_device(device: Device) -> Result<Self, String> {
+    fn new_with_device(device: &Device) -> Result<Self, String> {
         let options = CompileOptions::new();
         let library = device.new_library_with_source(SHADER_SOURCE, &options)?;
         let pipeline = |name: &str| {
@@ -1149,8 +1149,7 @@ fn with_runtime_for_device<R>(
     f: impl FnOnce(&MetalRuntime) -> Result<R, Error>,
 ) -> Result<R, Error> {
     let runtime = Arc::new(
-        MetalRuntime::new_with_device(device.clone())
-            .map_err(|message| Error::MetalKernel { message })?,
+        MetalRuntime::new_with_device(device).map_err(|message| Error::MetalKernel { message })?,
     );
     let previous = METAL_RUNTIME_OVERRIDE.with(|slot| slot.replace(Some(runtime.clone())));
     let _guard = RuntimeOverrideGuard { previous };

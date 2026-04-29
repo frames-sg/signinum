@@ -128,6 +128,81 @@ fn codecs_reject_undersized_output() {
 }
 
 #[test]
+fn deflate_codec_rejects_oversized_zlib_without_full_scratch_allocation() {
+    let source = vec![0xA5; 1 << 20];
+    let mut compressor = ZlibEncoder::new(Vec::new(), Compression::best());
+    compressor.write_all(&source).expect("write zlib");
+    let encoded_bytes = compressor.finish().expect("finish zlib");
+
+    let mut pool = DeflatePool::new();
+    let mut tiny = vec![0_u8; 128];
+    let err = DeflateCodec::decompress_into(&mut pool, &encoded_bytes, &mut tiny).unwrap_err();
+
+    assert!(matches!(
+        err,
+        TileCodecError::Buffer(slidecodec_core::BufferError::OutputTooSmall {
+            required,
+            have: 128
+        }) if required == 129
+    ));
+    assert!(
+        pool.bytes_allocated() < source.len() / 16,
+        "deflate scratch grew to {} bytes for {} decoded bytes",
+        pool.bytes_allocated(),
+        source.len()
+    );
+}
+
+#[test]
+fn zstd_codec_rejects_oversized_payload_without_full_scratch_allocation() {
+    let source = vec![0x5A; 1 << 20];
+    let encoded = zstd::stream::encode_all(std::io::Cursor::new(&source), 19).expect("zstd encode");
+
+    let mut pool = ZstdPool::new();
+    let mut tiny = vec![0_u8; 128];
+    let err = ZstdCodec::decompress_into(&mut pool, &encoded, &mut tiny).unwrap_err();
+
+    assert!(matches!(
+        err,
+        TileCodecError::Buffer(slidecodec_core::BufferError::OutputTooSmall {
+            required,
+            have: 128
+        }) if required == 129
+    ));
+    assert!(
+        pool.bytes_allocated() < source.len() / 16,
+        "zstd scratch grew to {} bytes for {} decoded bytes",
+        pool.bytes_allocated(),
+        source.len()
+    );
+}
+
+#[test]
+fn lzw_codec_rejects_oversized_payload_without_full_scratch_allocation() {
+    let source = vec![0x33; 1 << 20];
+    let mut compressor = Encoder::new(BitOrder::Msb, 8);
+    let encoded_bytes = compressor.encode(&source).expect("lzw encode");
+
+    let mut pool = LzwPool::new();
+    let mut tiny = vec![0_u8; 128];
+    let err = LzwCodec::decompress_into(&mut pool, &encoded_bytes, &mut tiny).unwrap_err();
+
+    assert!(matches!(
+        err,
+        TileCodecError::Buffer(slidecodec_core::BufferError::OutputTooSmall {
+            required,
+            have: 128
+        }) if required == 129
+    ));
+    assert!(
+        pool.bytes_allocated() < source.len() / 16,
+        "lzw scratch grew to {} bytes for {} decoded bytes",
+        pool.bytes_allocated(),
+        source.len()
+    );
+}
+
+#[test]
 fn pools_can_be_reused_across_calls() {
     let source = sample_bytes();
     let encoded = zstd::stream::encode_all(std::io::Cursor::new(&source), 1).expect("zstd encode");

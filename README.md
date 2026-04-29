@@ -14,15 +14,16 @@ The core stack in this repository is:
 - `slidecodec-jpeg-metal` — Apple Metal JPEG tile decode and device-output
   adapter for batched WSI workloads
 - `slidecodec-jpeg-cuda` — CUDA-facing JPEG device-output API adapter; today it
-  validates explicit CUDA-unavailable behavior and CPU fallback surfaces
+  validates explicit CUDA-unavailable behavior and CPU-backed `Auto`/`Cpu`
+  surfaces
 - `slidecodec-j2k` — native in-repo JPEG 2000 / HTJ2K inspect and decode;
   WSI-native ROI/context optimization milestones are still in progress, so the
   workspace remains pre-1.0
 - `slidecodec-j2k-metal` — Apple Metal device-output adapter for JPEG 2000 /
   HTJ2K tiles
 - `slidecodec-j2k-cuda` — CUDA-facing JPEG 2000 / HTJ2K device-output API
-  adapter; today it validates explicit CUDA-unavailable behavior and CPU
-  fallback surfaces
+  adapter; today it validates explicit CUDA-unavailable behavior and CPU-backed
+  `Auto`/`Cpu` surfaces
 - `slidecodec-tilecodec` — tile decompression primitives for Deflate, Zstd,
   LZW, and Uncompressed payloads
 - `slidecodec-core` — shared traits, pixel/sample types, scratch/context
@@ -53,7 +54,7 @@ consumer-image decode:
 - borrowed parse/decode surfaces
 - caller-owned scratch pools and decoder contexts
 - decode-time ROI and reduced-resolution output
-- row-streaming output for large tiles and stripes
+- row-bounded output for large tiles and stripes
 - tile-batch APIs for repeated viewer workloads
 - additive device-output adapters for Metal and CUDA consumers
 - explicit separation between image codecs and tile decompression codecs
@@ -79,7 +80,7 @@ primitives instead of paying for a monolithic runtime.
 ### `slidecodec-j2k`
 
 - JP2 / raw codestream inspect
-- full-frame, region, scaled, row-streaming, and tile-batch decode
+- full-frame, region, scaled, row-bounded, and tile-batch decode
 - repo-local pure-Rust JPEG 2000 / HTJ2K decode engine
 - native ROI/context/performance rewrite still in progress
 - parity and benchmark coverage against Grok and OpenJPEG on CPU

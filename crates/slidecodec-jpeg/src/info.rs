@@ -265,6 +265,7 @@ impl DecodeOptions {
     }
 
     /// Builder-style color-transform override.
+    #[must_use]
     pub fn with_color_transform(mut self, color_transform: ColorTransform) -> Self {
         self.set_color_transform(color_transform);
         self

@@ -29,6 +29,10 @@ impl J2kContext {
         }
     }
 
+    pub(crate) fn record_tile_decode(&mut self) {
+        self.misses = self.misses.saturating_add(1);
+    }
+
     #[cfg(target_os = "macos")]
     #[doc(hidden)]
     pub fn cached_direct_gray_plan(&mut self, key: u64) -> Option<J2kDirectGrayscalePlan> {

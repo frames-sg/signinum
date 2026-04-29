@@ -1,8 +1,8 @@
 use slidecodec_core::{
     BackendRequest, CodecError, DeviceSubmission, DeviceSurface, ImageDecodeDevice,
-    ImageDecodeSubmit, PixelFormat,
+    ImageDecodeSubmit, PixelFormat, Rect,
 };
-use slidecodec_jpeg_cuda::{CudaSession, Decoder};
+use slidecodec_jpeg_cuda::{CudaSession, Decoder, Error};
 
 const BASELINE_420: &[u8] = include_bytes!("../../../corpus/conformance/baseline_420_16x16.jpg");
 
@@ -23,6 +23,30 @@ fn explicit_cuda_request_reports_unavailable() {
         .decode_to_device(PixelFormat::Rgb8, BackendRequest::Cuda)
         .expect_err("cuda unavailable");
     assert!(error.is_unsupported());
+}
+
+#[test]
+fn explicit_cuda_request_short_circuits_before_decode_validation() {
+    let mut decoder = Decoder::new(BASELINE_420).expect("decoder");
+
+    let error = decoder
+        .decode_to_device(PixelFormat::Rgba16, BackendRequest::Cuda)
+        .expect_err("cuda unavailable");
+    assert!(matches!(error, Error::CudaUnavailable));
+
+    let error = decoder
+        .decode_region_to_device(
+            PixelFormat::Rgb8,
+            Rect {
+                x: 1000,
+                y: 1000,
+                w: 1000,
+                h: 1000,
+            },
+            BackendRequest::Cuda,
+        )
+        .expect_err("cuda unavailable");
+    assert!(matches!(error, Error::CudaUnavailable));
 }
 
 #[test]

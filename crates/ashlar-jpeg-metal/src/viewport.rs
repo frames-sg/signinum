@@ -597,7 +597,11 @@ mod tests {
         assert_eq!(
             choose_viewport_surface_strategy_for_decoder(&decoder, &workload, BackendRequest::Auto)
                 .expect("strategy"),
-            ViewportSurfaceStrategy::HybridContiguous
+            if cfg!(target_os = "macos") {
+                ViewportSurfaceStrategy::HybridContiguous
+            } else {
+                ViewportSurfaceStrategy::CpuContiguous
+            }
         );
     }
 

@@ -1,3 +1,5 @@
+#![cfg(target_os = "macos")]
+
 use std::sync::Arc;
 
 use ashlar_core::{

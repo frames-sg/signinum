@@ -45,6 +45,8 @@ impl HtCodeBlockDecoder for MetalStoreDecoder {
             self.kernel_dispatches = self.kernel_dispatches.saturating_add(1);
             return Ok(true);
         }
+        #[cfg(not(target_os = "macos"))]
+        let _ = job;
 
         Ok(false)
     }

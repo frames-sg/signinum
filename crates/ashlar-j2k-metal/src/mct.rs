@@ -38,6 +38,8 @@ impl HtCodeBlockDecoder for MetalMctDecoder {
             self.kernel_dispatches = self.kernel_dispatches.saturating_add(1);
             return Ok(true);
         }
+        #[cfg(not(target_os = "macos"))]
+        let _ = job;
 
         Ok(false)
     }
@@ -180,6 +182,8 @@ mod tests {
         let components = image
             .decode_components_with_ht_decoder(&mut context, &mut decoder)
             .expect("hooked decode");
+        #[cfg(not(target_os = "macos"))]
+        let _ = components;
 
         #[cfg(target_os = "macos")]
         {

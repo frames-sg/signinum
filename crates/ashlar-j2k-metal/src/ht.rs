@@ -2,9 +2,11 @@
 
 #[cfg(target_os = "macos")]
 use crate::compute;
+#[cfg(target_os = "macos")]
+use ashlar_j2k_native::DecodingError;
 use ashlar_j2k_native::{
-    decode_ht_code_block_scalar, DecodingError, HtCodeBlockDecodeJob, HtCodeBlockDecoder,
-    HtSubBandDecodeJob, Result,
+    decode_ht_code_block_scalar, HtCodeBlockDecodeJob, HtCodeBlockDecoder, HtSubBandDecodeJob,
+    Result,
 };
 
 #[allow(dead_code)]
@@ -54,6 +56,8 @@ impl HtCodeBlockDecoder for MetalHtBlockDecoder {
             self.batched_kernel_dispatches = self.batched_kernel_dispatches.saturating_add(1);
             return Ok(true);
         }
+        #[cfg(not(target_os = "macos"))]
+        let _ = (job, output);
 
         Ok(false)
     }
@@ -111,6 +115,8 @@ fn supports_metal_ht_kernel(job: &HtCodeBlockDecodeJob<'_>) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #![allow(dead_code)]
+
     use super::MetalHtBlockDecoder;
     #[cfg(target_os = "macos")]
     use crate::compute;

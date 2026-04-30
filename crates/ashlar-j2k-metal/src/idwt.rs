@@ -2,9 +2,11 @@
 
 #[cfg(target_os = "macos")]
 use crate::compute;
+#[cfg(target_os = "macos")]
+use ashlar_j2k_native::J2kWaveletTransform;
 use ashlar_j2k_native::{
     decode_ht_code_block_scalar, HtCodeBlockDecodeJob, HtCodeBlockDecoder,
-    J2kSingleDecompositionIdwtJob, J2kWaveletTransform, Result,
+    J2kSingleDecompositionIdwtJob, Result,
 };
 
 #[allow(dead_code)]
@@ -41,6 +43,8 @@ impl HtCodeBlockDecoder for MetalIdwtDecoder {
             self.kernel_dispatches = self.kernel_dispatches.saturating_add(1);
             return Ok(true);
         }
+        #[cfg(not(target_os = "macos"))]
+        let _ = (job, output);
 
         Ok(false)
     }

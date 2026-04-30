@@ -2,10 +2,11 @@
 
 #[cfg(target_os = "macos")]
 use crate::compute;
+#[cfg(target_os = "macos")]
+use ashlar_j2k_native::DecodingError;
 use ashlar_j2k_native::{
     decode_ht_code_block_scalar, decode_j2k_code_block_scalar, decode_j2k_sub_band_scalar,
-    DecodingError, HtCodeBlockDecodeJob, HtCodeBlockDecoder, J2kCodeBlockDecodeJob,
-    J2kSubBandDecodeJob, Result,
+    HtCodeBlockDecodeJob, HtCodeBlockDecoder, J2kCodeBlockDecodeJob, J2kSubBandDecodeJob, Result,
 };
 
 #[allow(dead_code)]
@@ -180,6 +181,8 @@ fn supports_metal_classic_kernel(job: &J2kCodeBlockDecodeJob<'_>) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #![allow(dead_code)]
+
     use super::MetalClassicBlockDecoder;
     #[cfg(target_os = "macos")]
     use crate::compute;

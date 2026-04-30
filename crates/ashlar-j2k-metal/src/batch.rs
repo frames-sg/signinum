@@ -11,6 +11,7 @@ pub(crate) enum BatchOp {
     Full,
     Region(Rect),
     Scaled(Downscale),
+    RegionScaled { roi: Rect, scale: Downscale },
 }
 
 #[derive(Clone)]
@@ -436,6 +437,9 @@ fn decode_individual(request: &QueuedRequest) -> Result<Surface, Error> {
         }
         BatchOp::Scaled(scale) => {
             decoder.decode_scaled_to_surface_impl(request.fmt, scale, request.backend)
+        }
+        BatchOp::RegionScaled { roi, scale } => {
+            decoder.decode_region_scaled_to_surface_impl(request.fmt, roi, scale, request.backend)
         }
     }
 }

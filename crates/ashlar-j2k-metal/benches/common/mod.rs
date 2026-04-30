@@ -186,6 +186,25 @@ pub(crate) fn ashlar_decode_scaled(bytes: &[u8], mode: DecodeMode, scale: Downsc
     black_box(out);
 }
 
+pub(crate) fn ashlar_decode_region_scaled(
+    bytes: &[u8],
+    mode: DecodeMode,
+    edge: u32,
+    scale: Downscale,
+) {
+    let mut decoder = J2kDecoder::new(bytes).expect("ashlar decoder");
+    let roi = centered_roi(decoder.info().dimensions, edge);
+    let scaled = roi.scaled_covering(scale);
+    let fmt = mode_format(mode);
+    let stride = scaled.w as usize * fmt.bytes_per_pixel();
+    let mut pool = J2kScratchPool::new();
+    let mut out = vec![0_u8; stride * scaled.h as usize];
+    decoder
+        .decode_region_scaled_into(&mut pool, &mut out, stride, fmt, roi, scale)
+        .expect("ashlar region scaled decode");
+    black_box(out);
+}
+
 pub(crate) fn ashlar_decode_tile_batch(bytes: &[u8], mode: DecodeMode, count: usize) {
     let mut ctx = DecoderContext::<J2kContext>::new();
     let mut pool = J2kScratchPool::new();
@@ -196,6 +215,30 @@ pub(crate) fn ashlar_decode_tile_batch(bytes: &[u8], mode: DecodeMode, count: us
     for _ in 0..count {
         J2kCodec::decode_tile(&mut ctx, &mut pool, bytes, &mut out, stride, fmt)
             .expect("tile decode");
+    }
+    black_box(out);
+}
+
+pub(crate) fn ashlar_decode_tile_batch_region_scaled(
+    bytes: &[u8],
+    mode: DecodeMode,
+    edge: u32,
+    scale: Downscale,
+    count: usize,
+) {
+    let mut ctx = DecoderContext::<J2kContext>::new();
+    let mut pool = J2kScratchPool::new();
+    let decoder = J2kDecoder::new(bytes).expect("ashlar decoder");
+    let roi = centered_roi(decoder.info().dimensions, edge);
+    let scaled = roi.scaled_covering(scale);
+    let fmt = mode_format(mode);
+    let stride = scaled.w as usize * fmt.bytes_per_pixel();
+    let mut out = vec![0_u8; stride * scaled.h as usize];
+    for _ in 0..count {
+        J2kCodec::decode_tile_region_scaled(
+            &mut ctx, &mut pool, bytes, &mut out, stride, fmt, roi, scale,
+        )
+        .expect("tile region scaled decode");
     }
     black_box(out);
 }
@@ -291,6 +334,30 @@ pub(crate) fn ashlar_adaptive_decode_scaled(bytes: &[u8], mode: DecodeMode, scal
     ashlar_decode_scaled(bytes, mode, scale);
 }
 
+pub(crate) fn ashlar_metal_decode_region_scaled(
+    bytes: &[u8],
+    mode: DecodeMode,
+    edge: u32,
+    scale: Downscale,
+) {
+    let cpu_decoder = J2kDecoder::new(bytes).expect("ashlar decoder");
+    let roi = centered_roi(cpu_decoder.info().dimensions, edge);
+    let mut decoder = MetalJ2kDecoder::new(bytes).expect("ashlar metal decoder");
+    let surface = decoder
+        .decode_region_scaled_to_device(mode_format(mode), roi, scale, BackendRequest::Metal)
+        .expect("ashlar metal region scaled decode");
+    black_box(surface);
+}
+
+pub(crate) fn ashlar_adaptive_decode_region_scaled(
+    bytes: &[u8],
+    mode: DecodeMode,
+    edge: u32,
+    scale: Downscale,
+) {
+    ashlar_decode_region_scaled(bytes, mode, edge, scale);
+}
+
 pub(crate) fn ashlar_metal_supports_scaled(
     bytes: &[u8],
     mode: DecodeMode,
@@ -299,6 +366,20 @@ pub(crate) fn ashlar_metal_supports_scaled(
     let mut decoder = MetalJ2kDecoder::new(bytes).expect("ashlar metal decoder");
     decoder
         .decode_scaled_to_device(mode_format(mode), scale, BackendRequest::Metal)
+        .is_ok()
+}
+
+pub(crate) fn ashlar_metal_supports_region_scaled(
+    bytes: &[u8],
+    mode: DecodeMode,
+    edge: u32,
+    scale: Downscale,
+) -> bool {
+    let cpu_decoder = J2kDecoder::new(bytes).expect("ashlar decoder");
+    let roi = centered_roi(cpu_decoder.info().dimensions, edge);
+    let mut decoder = MetalJ2kDecoder::new(bytes).expect("ashlar metal decoder");
+    decoder
+        .decode_region_scaled_to_device(mode_format(mode), roi, scale, BackendRequest::Metal)
         .is_ok()
 }
 
@@ -322,6 +403,44 @@ pub(crate) fn ashlar_metal_decode_tile_batch(bytes: &[u8], mode: DecodeMode, cou
     let surfaces = submissions
         .into_iter()
         .map(|submission| submission.wait().expect("ashlar metal tile decode"))
+        .collect::<Vec<_>>();
+    black_box(surfaces);
+}
+
+pub(crate) fn ashlar_metal_decode_tile_batch_region_scaled(
+    bytes: &[u8],
+    mode: DecodeMode,
+    edge: u32,
+    scale: Downscale,
+    count: usize,
+) {
+    let cpu_decoder = J2kDecoder::new(bytes).expect("ashlar decoder");
+    let roi = centered_roi(cpu_decoder.info().dimensions, edge);
+    let mut ctx = DecoderContext::<J2kContext>::new();
+    let mut session = MetalSession::default();
+    let mut pool = MetalJ2kScratchPool::new();
+    let submissions = (0..count)
+        .map(|_| {
+            MetalJ2kCodec::submit_tile_region_scaled_to_device(
+                &mut ctx,
+                &mut session,
+                &mut pool,
+                bytes,
+                mode_format(mode),
+                roi,
+                scale,
+                BackendRequest::Metal,
+            )
+            .expect("ashlar metal tile region scaled submit")
+        })
+        .collect::<Vec<_>>();
+    let surfaces = submissions
+        .into_iter()
+        .map(|submission| {
+            submission
+                .wait()
+                .expect("ashlar metal tile region scaled decode")
+        })
         .collect::<Vec<_>>();
     black_box(surfaces);
 }
@@ -385,6 +504,15 @@ pub(crate) fn ashlar_adaptive_decode_tile_batch(input: &BenchInput, count: usize
     ashlar_decode_tile_batch(&input.bytes, input.mode, count);
 }
 
+pub(crate) fn ashlar_adaptive_decode_tile_batch_region_scaled(
+    input: &BenchInput,
+    edge: u32,
+    scale: Downscale,
+    count: usize,
+) {
+    ashlar_decode_tile_batch_region_scaled(&input.bytes, input.mode, edge, scale, count);
+}
+
 fn should_auto_use_direct_grayscale_input(input: &BenchInput, count: usize) -> bool {
     if input.mode != DecodeMode::Gray8 || count == 0 {
         return false;
@@ -403,6 +531,28 @@ pub(crate) fn ashlar_metal_supports_tile_batch(bytes: &[u8], mode: DecodeMode) -
         &mut pool,
         bytes,
         mode_format(mode),
+        BackendRequest::Metal,
+    )
+    .is_ok()
+}
+
+pub(crate) fn ashlar_metal_supports_tile_batch_region_scaled(
+    bytes: &[u8],
+    mode: DecodeMode,
+    edge: u32,
+    scale: Downscale,
+) -> bool {
+    let cpu_decoder = J2kDecoder::new(bytes).expect("ashlar decoder");
+    let roi = centered_roi(cpu_decoder.info().dimensions, edge);
+    let mut ctx = DecoderContext::<J2kContext>::new();
+    let mut pool = MetalJ2kScratchPool::new();
+    MetalJ2kCodec::decode_tile_region_scaled_to_device(
+        &mut ctx,
+        &mut pool,
+        bytes,
+        mode_format(mode),
+        roi,
+        scale,
         BackendRequest::Metal,
     )
     .is_ok()

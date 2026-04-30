@@ -141,6 +141,33 @@ fn crop_u8(full: &[u8], full_width: usize, channels: usize, roi: Rect) -> Vec<u8
     out
 }
 
+fn crop_bytes(full: &[u8], full_width: usize, bytes_per_pixel: usize, roi: Rect) -> Vec<u8> {
+    let mut out = Vec::with_capacity(roi.w as usize * roi.h as usize * bytes_per_pixel);
+    let row_bytes = full_width * bytes_per_pixel;
+    let roi_row_bytes = roi.w as usize * bytes_per_pixel;
+    for y in roi.y as usize..(roi.y + roi.h) as usize {
+        let start = y * row_bytes + roi.x as usize * bytes_per_pixel;
+        out.extend_from_slice(&full[start..start + roi_row_bytes]);
+    }
+    out
+}
+
+fn scaled_rect_covering(rect: Rect, scale: Downscale) -> Rect {
+    let denom = scale.denominator();
+    let x_end = rect.x + rect.w;
+    let y_end = rect.y + rect.h;
+    let x0 = rect.x / denom;
+    let y0 = rect.y / denom;
+    let x1 = x_end.div_ceil(denom);
+    let y1 = y_end.div_ceil(denom);
+    Rect {
+        x: x0,
+        y: y0,
+        w: x1.saturating_sub(x0),
+        h: y1.saturating_sub(y0),
+    }
+}
+
 #[derive(Default)]
 struct CollectRowsU8 {
     rows: Vec<u8>,
@@ -386,6 +413,258 @@ fn decode_region_into_matches_cropping_full_decode() {
 }
 
 #[test]
+fn decode_region_scaled_into_matches_cropping_scaled_decode_for_supported_formats() {
+    let roi = Rect {
+        x: 1,
+        y: 0,
+        w: 2,
+        h: 3,
+    };
+    let scale = Downscale::Half;
+    let scaled_roi = scaled_rect_covering(roi, scale);
+
+    let rgb8_pixels: Vec<u8> = (0_u8..48).collect();
+    let rgb8_codestream = encode_codestream(&rgb8_pixels, 4, 4, 3, 8, true);
+    for fmt in [PixelFormat::Rgb8, PixelFormat::Rgba8] {
+        let mut scaled_decoder = J2kDecoder::new(&rgb8_codestream).expect("scaled decoder");
+        let scaled_stride = 2 * fmt.bytes_per_pixel();
+        let mut scaled = vec![0_u8; scaled_stride * 2];
+        scaled_decoder
+            .decode_scaled_into(
+                &mut ashlar_j2k::J2kScratchPool::new(),
+                &mut scaled,
+                scaled_stride,
+                fmt,
+                scale,
+            )
+            .expect("scaled decode");
+        let expected = crop_bytes(&scaled, 2, fmt.bytes_per_pixel(), scaled_roi);
+
+        let mut decoder = J2kDecoder::new(&rgb8_codestream).expect("decoder");
+        let stride = scaled_roi.w as usize * fmt.bytes_per_pixel();
+        let mut out = vec![0_u8; stride * scaled_roi.h as usize];
+        let outcome = decoder
+            .decode_region_scaled_into(
+                &mut ashlar_j2k::J2kScratchPool::new(),
+                &mut out,
+                stride,
+                fmt,
+                roi,
+                scale,
+            )
+            .expect("region scaled decode");
+        assert_eq!(outcome.decoded, scaled_roi);
+        assert_eq!(out, expected, "format {fmt:?}");
+    }
+
+    let gray8_pixels: Vec<u8> = (0_u8..16).collect();
+    let gray8_codestream = encode_codestream(&gray8_pixels, 4, 4, 1, 8, true);
+    let mut gray8_scaled_decoder =
+        J2kDecoder::new(&gray8_codestream).expect("gray8 scaled decoder");
+    let mut gray8_scaled = vec![0_u8; 2 * 2];
+    gray8_scaled_decoder
+        .decode_scaled_into(
+            &mut ashlar_j2k::J2kScratchPool::new(),
+            &mut gray8_scaled,
+            2,
+            PixelFormat::Gray8,
+            scale,
+        )
+        .expect("gray8 scaled decode");
+    let expected_gray8 = crop_bytes(
+        &gray8_scaled,
+        2,
+        PixelFormat::Gray8.bytes_per_pixel(),
+        scaled_roi,
+    );
+    let mut gray8_decoder = J2kDecoder::new(&gray8_codestream).expect("gray8 decoder");
+    let mut gray8_out = vec![0_u8; scaled_roi.w as usize * scaled_roi.h as usize];
+    let gray8_stride = scaled_roi.w as usize * PixelFormat::Gray8.bytes_per_pixel();
+    let outcome = gray8_decoder
+        .decode_region_scaled_into(
+            &mut ashlar_j2k::J2kScratchPool::new(),
+            &mut gray8_out,
+            gray8_stride,
+            PixelFormat::Gray8,
+            roi,
+            scale,
+        )
+        .expect("gray8 region scaled decode");
+    assert_eq!(outcome.decoded, scaled_roi);
+    assert_eq!(gray8_out, expected_gray8);
+
+    let gray16_samples = [
+        0_u16, 64, 128, 192, 256, 512, 768, 1024, 1280, 1536, 1792, 2048, 2304, 2560, 3072, 4095,
+    ];
+    let gray16_pixels: Vec<u8> = gray16_samples
+        .into_iter()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    let gray16_codestream = encode_codestream(&gray16_pixels, 4, 4, 1, 12, true);
+    let mut gray16_scaled_decoder =
+        J2kDecoder::new(&gray16_codestream).expect("gray16 scaled decoder");
+    let mut gray16_scaled = vec![0_u8; 2 * 2 * 2];
+    gray16_scaled_decoder
+        .decode_scaled_into(
+            &mut ashlar_j2k::J2kScratchPool::new(),
+            &mut gray16_scaled,
+            2 * 2,
+            PixelFormat::Gray16,
+            scale,
+        )
+        .expect("gray16 scaled decode");
+    let expected_gray16 = crop_bytes(
+        &gray16_scaled,
+        2,
+        PixelFormat::Gray16.bytes_per_pixel(),
+        scaled_roi,
+    );
+    let mut gray16_decoder = J2kDecoder::new(&gray16_codestream).expect("gray16 decoder");
+    let mut gray16_out = vec![0_u8; scaled_roi.w as usize * scaled_roi.h as usize * 2];
+    let gray16_stride = scaled_roi.w as usize * PixelFormat::Gray16.bytes_per_pixel();
+    let outcome = gray16_decoder
+        .decode_region_scaled_into(
+            &mut ashlar_j2k::J2kScratchPool::new(),
+            &mut gray16_out,
+            gray16_stride,
+            PixelFormat::Gray16,
+            roi,
+            scale,
+        )
+        .expect("gray16 region scaled decode");
+    assert_eq!(outcome.decoded, scaled_roi);
+    assert_eq!(gray16_out, expected_gray16);
+
+    let rgb16_samples = [
+        0_u16, 1, 2, 64, 65, 66, 128, 129, 130, 192, 193, 194, 256, 257, 258, 512, 513, 514, 768,
+        769, 770, 1024, 1025, 1026, 1280, 1281, 1282, 1536, 1537, 1538, 1792, 1793, 1794, 2048,
+        2049, 2050, 2304, 2305, 2306, 2560, 2561, 2562, 3072, 3073, 3074, 4093, 4094, 4095,
+    ];
+    let rgb16_pixels: Vec<u8> = rgb16_samples
+        .into_iter()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    let rgb16_codestream = encode_codestream(&rgb16_pixels, 4, 4, 3, 12, true);
+    let mut rgb16_scaled_decoder =
+        J2kDecoder::new(&rgb16_codestream).expect("rgb16 scaled decoder");
+    let mut rgb16_scaled = vec![0_u8; 2 * 2 * 3 * 2];
+    rgb16_scaled_decoder
+        .decode_scaled_into(
+            &mut ashlar_j2k::J2kScratchPool::new(),
+            &mut rgb16_scaled,
+            2 * 3 * 2,
+            PixelFormat::Rgb16,
+            scale,
+        )
+        .expect("rgb16 scaled decode");
+    let expected_rgb16 = crop_bytes(
+        &rgb16_scaled,
+        2,
+        PixelFormat::Rgb16.bytes_per_pixel(),
+        scaled_roi,
+    );
+    let mut rgb16_decoder = J2kDecoder::new(&rgb16_codestream).expect("rgb16 decoder");
+    let mut rgb16_out = vec![0_u8; scaled_roi.w as usize * scaled_roi.h as usize * 3 * 2];
+    let rgb16_stride = scaled_roi.w as usize * PixelFormat::Rgb16.bytes_per_pixel();
+    let outcome = rgb16_decoder
+        .decode_region_scaled_into(
+            &mut ashlar_j2k::J2kScratchPool::new(),
+            &mut rgb16_out,
+            rgb16_stride,
+            PixelFormat::Rgb16,
+            roi,
+            scale,
+        )
+        .expect("rgb16 region scaled decode");
+    assert_eq!(outcome.decoded, scaled_roi);
+    assert_eq!(rgb16_out, expected_rgb16);
+}
+
+#[test]
+fn decode_region_scaled_htj2k_gray8_matches_cropping_scaled_decode() {
+    let pixels: Vec<u8> = (0_u8..16).collect();
+    let codestream = encode_ht_codestream(&pixels, 4, 4, 1, 8);
+    let roi = Rect {
+        x: 1,
+        y: 0,
+        w: 2,
+        h: 3,
+    };
+    let scale = Downscale::Half;
+    let scaled_roi = scaled_rect_covering(roi, scale);
+
+    let mut scaled_decoder = J2kDecoder::new(&codestream).expect("scaled decoder");
+    let mut scaled = vec![0_u8; 2 * 2];
+    scaled_decoder
+        .decode_scaled_into(
+            &mut ashlar_j2k::J2kScratchPool::new(),
+            &mut scaled,
+            2,
+            PixelFormat::Gray8,
+            scale,
+        )
+        .expect("scaled decode");
+    let expected = crop_bytes(&scaled, 2, PixelFormat::Gray8.bytes_per_pixel(), scaled_roi);
+
+    let mut decoder = J2kDecoder::new(&codestream).expect("decoder");
+    let stride = scaled_roi.w as usize * PixelFormat::Gray8.bytes_per_pixel();
+    let mut out = vec![0_u8; stride * scaled_roi.h as usize];
+    let outcome = decoder
+        .decode_region_scaled_into(
+            &mut ashlar_j2k::J2kScratchPool::new(),
+            &mut out,
+            stride,
+            PixelFormat::Gray8,
+            roi,
+            scale,
+        )
+        .expect("region scaled decode");
+
+    assert_eq!(outcome.decoded, scaled_roi);
+    assert_eq!(out, expected);
+}
+
+#[test]
+fn decode_region_scaled_none_matches_region_decode() {
+    let pixels = [0_u8, 1, 2, 3, 4, 5, 6, 7, 8];
+    let codestream = encode_codestream(&pixels, 3, 3, 1, 8, true);
+    let roi = Rect {
+        x: 1,
+        y: 1,
+        w: 2,
+        h: 2,
+    };
+
+    let mut expected_decoder = J2kDecoder::new(&codestream).expect("expected decoder");
+    let mut expected = [0_u8; 4];
+    expected_decoder
+        .decode_region_into(
+            &mut ashlar_j2k::J2kScratchPool::new(),
+            &mut expected,
+            2,
+            PixelFormat::Gray8,
+            roi,
+        )
+        .expect("region decode");
+
+    let mut decoder = J2kDecoder::new(&codestream).expect("decoder");
+    let mut out = [0_u8; 4];
+    let outcome = decoder
+        .decode_region_scaled_into(
+            &mut ashlar_j2k::J2kScratchPool::new(),
+            &mut out,
+            2,
+            PixelFormat::Gray8,
+            roi,
+            Downscale::None,
+        )
+        .expect("region scaled none decode");
+
+    assert_eq!(outcome.decoded, roi);
+    assert_eq!(out, expected);
+}
+
+#[test]
 fn native_backend_region_decode_matches_cropping_full_decode() {
     let pixels = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120];
     let codestream = encode_codestream(&pixels, 2, 2, 3, 8, true);
@@ -522,6 +801,51 @@ fn tile_batch_scaled_decode_matches_decoder_scaled_decode() {
         Downscale::Half,
     )
     .expect("tile scaled");
+    assert_eq!(out, expected);
+}
+
+#[test]
+fn tile_batch_region_scaled_decode_matches_decoder_region_scaled_decode() {
+    let pixels: Vec<u8> = (0_u8..48).collect();
+    let codestream = encode_codestream(&pixels, 4, 4, 3, 8, true);
+    let roi = Rect {
+        x: 1,
+        y: 0,
+        w: 2,
+        h: 3,
+    };
+    let scale = Downscale::Half;
+    let scaled_roi = scaled_rect_covering(roi, scale);
+    let stride = scaled_roi.w as usize * PixelFormat::Rgb8.bytes_per_pixel();
+
+    let mut decoder = J2kDecoder::new(&codestream).expect("decoder");
+    let mut pool = ashlar_j2k::J2kScratchPool::new();
+    let mut expected = vec![0_u8; stride * scaled_roi.h as usize];
+    decoder
+        .decode_region_scaled_into(
+            &mut pool,
+            &mut expected,
+            stride,
+            PixelFormat::Rgb8,
+            roi,
+            scale,
+        )
+        .expect("decoder region scaled");
+
+    let mut ctx = DecoderContext::<J2kContext>::new();
+    let mut out = vec![0_u8; stride * scaled_roi.h as usize];
+    let outcome = <J2kCodec as TileBatchDecode>::decode_tile_region_scaled(
+        &mut ctx,
+        &mut pool,
+        &codestream,
+        &mut out,
+        stride,
+        PixelFormat::Rgb8,
+        roi,
+        scale,
+    )
+    .expect("tile region scaled");
+    assert_eq!(outcome.decoded, scaled_roi);
     assert_eq!(out, expected);
 }
 

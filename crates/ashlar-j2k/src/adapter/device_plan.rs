@@ -46,7 +46,7 @@ impl DeviceDecodePlan {
             source_dims,
             source_rect,
             scale,
-            output_rect: scaled_rect_covering(source_rect, scale),
+            output_rect: source_rect.scaled_covering(scale),
         })
     }
 
@@ -76,21 +76,5 @@ impl DeviceDecodePlan {
 
     pub fn is_full_frame(self) -> bool {
         self.source_rect == Rect::full(self.source_dims) && self.scale == Downscale::None
-    }
-}
-
-fn scaled_rect_covering(rect: Rect, scale: Downscale) -> Rect {
-    let denom = scale.denominator();
-    let x_end = rect.x + rect.w;
-    let y_end = rect.y + rect.h;
-    let x0 = rect.x / denom;
-    let y0 = rect.y / denom;
-    let x1 = x_end.div_ceil(denom);
-    let y1 = y_end.div_ceil(denom);
-    Rect {
-        x: x0,
-        y: y0,
-        w: x1.saturating_sub(x0),
-        h: y1.saturating_sub(y0),
     }
 }

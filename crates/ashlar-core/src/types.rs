@@ -2,6 +2,8 @@
 
 use alloc::vec::Vec;
 
+use crate::scale::Downscale;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Colorspace {
@@ -61,6 +63,23 @@ impl Rect {
         let (w, h) = dims;
         self.x.checked_add(self.w).is_some_and(|r| r <= w)
             && self.y.checked_add(self.h).is_some_and(|b| b <= h)
+    }
+
+    #[must_use]
+    pub fn scaled_covering(&self, scale: Downscale) -> Self {
+        let denom = scale.denominator();
+        let x_end = self.x.saturating_add(self.w);
+        let y_end = self.y.saturating_add(self.h);
+        let x0 = self.x / denom;
+        let y0 = self.y / denom;
+        let x1 = x_end.div_ceil(denom);
+        let y1 = y_end.div_ceil(denom);
+        Self {
+            x: x0,
+            y: y0,
+            w: x1.saturating_sub(x0),
+            h: y1.saturating_sub(y0),
+        }
     }
 }
 

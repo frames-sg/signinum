@@ -30,6 +30,44 @@ pub(crate) fn decode_scaled_from_info(
     decode_with_settings(bytes, settings, out, stride, fmt)
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn decode_region_scaled_from_info(
+    bytes: &[u8],
+    full_dims: (u32, u32),
+    pool: &mut J2kScratchPool,
+    out: &mut [u8],
+    stride: usize,
+    fmt: PixelFormat,
+    roi: Rect,
+    scale: Downscale,
+) -> Result<J2kDecodeOutcome, J2kError> {
+    validate_supported_format(fmt)?;
+    validate_region(roi, full_dims)?;
+    if scale == Downscale::None {
+        return decode_region(bytes, pool, out, stride, fmt, roi);
+    }
+
+    let target_dims = (
+        full_dims.0.div_ceil(scale.denominator()),
+        full_dims.1.div_ceil(scale.denominator()),
+    );
+    let scaled_roi = roi.scaled_covering(scale);
+    validate_buffer((scaled_roi.w, scaled_roi.h), out.len(), stride, fmt)?;
+    let settings = DecodeSettings {
+        target_resolution: Some(target_dims),
+        ..DecodeSettings::default()
+    };
+    let image = backend::image(bytes, settings)?;
+    let image_dims = (image.width(), image.height());
+    validate_region(scaled_roi, image_dims)?;
+    decode_image_region_into(&image, out, stride, fmt, scaled_roi)?;
+
+    Ok(DecodeOutcome {
+        decoded: scaled_roi,
+        warnings: Vec::new(),
+    })
+}
+
 #[allow(dead_code)]
 pub(crate) fn decode_region(
     bytes: &[u8],

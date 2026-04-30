@@ -401,6 +401,27 @@ impl<'a> ImageDecode<'a> for Decoder<'a> {
                 .decode_scaled_into_with_scratch(pool, out, stride, fmt, scale)?,
         ))
     }
+
+    fn decode_region_scaled_into(
+        &mut self,
+        pool: &mut Self::Pool,
+        out: &mut [u8],
+        stride: usize,
+        fmt: PixelFormat,
+        roi: Rect,
+        scale: Downscale,
+    ) -> Result<DecodeOutcome<Self::Warning>, Self::Error> {
+        Ok(convert_outcome(
+            self.inner.decode_region_scaled_into_with_scratch(
+                pool,
+                out,
+                stride,
+                fmt,
+                to_jpeg_rect(roi),
+                scale,
+            )?,
+        ))
+    }
 }
 
 impl<'a> ImageDecodeDevice<'a> for Decoder<'a> {
@@ -447,6 +468,16 @@ impl<'a> ImageDecodeDevice<'a> for Decoder<'a> {
             backend,
         )?
         .wait()
+    }
+
+    fn decode_region_scaled_to_device(
+        &mut self,
+        fmt: PixelFormat,
+        roi: Rect,
+        scale: Downscale,
+        backend: BackendRequest,
+    ) -> Result<Self::DeviceSurface, Self::Error> {
+        Decoder::decode_region_scaled_to_device(self, fmt, roi, scale, backend)
     }
 }
 
@@ -646,6 +677,49 @@ impl<'a> ImageDecodeSubmit<'a> for Decoder<'a> {
             slot,
         })
     }
+
+    fn submit_region_scaled_to_device(
+        &mut self,
+        session: &mut Self::Session,
+        fmt: PixelFormat,
+        roi: Rect,
+        scale: Downscale,
+        backend: BackendRequest,
+    ) -> Result<Self::SubmittedSurface, Self::Error> {
+        let fast444_packet = if matches!(backend, BackendRequest::Auto | BackendRequest::Metal) {
+            self.fast444_packet.clone()
+        } else {
+            None
+        };
+        let fast422_packet = if matches!(backend, BackendRequest::Auto | BackendRequest::Metal) {
+            self.fast422_packet.clone()
+        } else {
+            None
+        };
+        let fast420_packet = if matches!(backend, BackendRequest::Auto | BackendRequest::Metal) {
+            self.fast420_packet.clone()
+        } else {
+            None
+        };
+        let slot = session
+            .shared
+            .0
+            .lock()
+            .expect("metal session")
+            .queue_request(batch::QueuedRequest::new_shared(
+                Arc::clone(&self.source),
+                fmt,
+                backend,
+                batch::BatchOp::RegionScaled { roi, scale },
+                fast444_packet,
+                fast422_packet,
+                fast420_packet,
+            ));
+        Ok(batch::MetalSubmission {
+            session: session.shared.clone(),
+            slot,
+        })
+    }
 }
 
 impl TileBatchDecodeSubmit for Codec {
@@ -745,6 +819,21 @@ impl TileBatchDecodeSubmit for Codec {
             slot,
         })
     }
+
+    fn submit_tile_region_scaled_to_device(
+        ctx: &mut ashlar_core::DecoderContext<Self::Context>,
+        session: &mut Self::Session,
+        pool: &mut Self::Pool,
+        input: &[u8],
+        fmt: PixelFormat,
+        roi: Rect,
+        scale: Downscale,
+        backend: BackendRequest,
+    ) -> Result<Self::SubmittedSurface, Self::Error> {
+        Codec::submit_tile_region_scaled_to_device(
+            ctx, session, pool, input, fmt, roi, scale, backend,
+        )
+    }
 }
 
 impl TileBatchDecodeDevice for Codec {
@@ -810,6 +899,18 @@ impl TileBatchDecodeDevice for Codec {
             backend,
         )?
         .wait()
+    }
+
+    fn decode_tile_region_scaled_to_device(
+        ctx: &mut ashlar_core::DecoderContext<Self::Context>,
+        pool: &mut Self::Pool,
+        input: &[u8],
+        fmt: PixelFormat,
+        roi: Rect,
+        scale: Downscale,
+        backend: BackendRequest,
+    ) -> Result<Self::DeviceSurface, Self::Error> {
+        Codec::decode_tile_region_scaled_to_device(ctx, pool, input, fmt, roi, scale, backend)
     }
 }
 

@@ -3,8 +3,8 @@
 ## Current State
 
 The workspace is versioned as `0.1.0` for the first public-source checkpoint.
-It remains pre-1.0 while JPEG 2000 / HTJ2K ROI behavior and GPU adapter APIs
-settle.
+It remains pre-1.0 while JPEG 2000 / HTJ2K ROI+reduced-resolution performance
+thresholds and GPU adapter APIs settle.
 
 The repository is ready for source publication once a real Git remote is
 configured. Do not add placeholder `repository` or `homepage` metadata to

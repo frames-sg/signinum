@@ -192,6 +192,35 @@ fn region_scaled_metal_bytes_match_cpu_decode() {
 }
 
 #[test]
+fn region_scaled_submit_trait_returns_metal_surface() {
+    let roi = Rect {
+        x: 4,
+        y: 4,
+        w: 10,
+        h: 10,
+    };
+    let scale = Downscale::Quarter;
+    let mut decoder = Decoder::new(BASELINE_420).expect("decoder");
+    let mut session = MetalSession::default();
+
+    let surface = <Decoder<'_> as ImageDecodeSubmit<'_>>::submit_region_scaled_to_device(
+        &mut decoder,
+        &mut session,
+        PixelFormat::Rgb8,
+        roi,
+        scale,
+        BackendRequest::Metal,
+    )
+    .expect("submission")
+    .wait()
+    .expect("surface");
+
+    assert_eq!(surface.backend_kind(), BackendKind::Metal);
+    assert_eq!(surface.dimensions(), (3, 3));
+    assert!(session.submissions() >= 1);
+}
+
+#[test]
 fn submit_to_device_returns_surface_and_updates_session() {
     let mut decoder = Decoder::new(BASELINE_420).expect("decoder");
     let mut session = MetalSession::default();

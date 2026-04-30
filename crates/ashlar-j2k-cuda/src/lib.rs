@@ -177,6 +177,32 @@ impl<'a> J2kDecoder<'a> {
             .decode_scaled_into(&mut self.pool, &mut out, stride, fmt, scale)?;
         wrap_surface(out, dims, fmt, backend)
     }
+
+    fn decode_region_scaled_to_surface_impl(
+        &mut self,
+        fmt: PixelFormat,
+        roi: Rect,
+        scale: Downscale,
+        backend: BackendRequest,
+    ) -> Result<Surface, Error> {
+        validate_host_surface_request(backend)?;
+        let plan = DeviceDecodePlan::for_image(
+            self.inner.info().dimensions,
+            DeviceDecodeRequest::RegionScaled { roi, scale },
+        )?;
+        let dims = plan.output_dims();
+        let stride = dims.0 as usize * fmt.bytes_per_pixel();
+        let mut out = vec![0u8; stride * dims.1 as usize];
+        self.inner.decode_region_scaled_into(
+            &mut self.pool,
+            &mut out,
+            stride,
+            fmt,
+            plan.source_rect(),
+            scale,
+        )?;
+        wrap_surface(out, dims, fmt, backend)
+    }
 }
 
 impl ImageCodec for J2kDecoder<'_> {
@@ -247,6 +273,20 @@ impl<'a> ImageDecode<'a> for J2kDecoder<'a> {
             .inner
             .decode_scaled_into(pool, out, stride, fmt, scale)?)
     }
+
+    fn decode_region_scaled_into(
+        &mut self,
+        pool: &mut Self::Pool,
+        out: &mut [u8],
+        stride: usize,
+        fmt: PixelFormat,
+        roi: Rect,
+        scale: Downscale,
+    ) -> Result<DecodeOutcome<Self::Warning>, Self::Error> {
+        Ok(self
+            .inner
+            .decode_region_scaled_into(pool, out, stride, fmt, roi, scale)?)
+    }
 }
 
 impl<'a> ImageDecodeDevice<'a> for J2kDecoder<'a> {
@@ -289,6 +329,25 @@ impl<'a> ImageDecodeDevice<'a> for J2kDecoder<'a> {
             self,
             &mut session,
             fmt,
+            scale,
+            backend,
+        )?
+        .wait()
+    }
+
+    fn decode_region_scaled_to_device(
+        &mut self,
+        fmt: PixelFormat,
+        roi: Rect,
+        scale: Downscale,
+        backend: BackendRequest,
+    ) -> Result<Self::DeviceSurface, Self::Error> {
+        let mut session = CudaSession::default();
+        <Self as ImageDecodeSubmit<'a>>::submit_region_scaled_to_device(
+            self,
+            &mut session,
+            fmt,
+            roi,
             scale,
             backend,
         )?
@@ -360,6 +419,27 @@ impl Codec {
         CpuCodec::decode_tile_scaled(ctx, pool, input, &mut out, stride, fmt, scale)?;
         wrap_surface(out, dims, fmt, backend)
     }
+
+    fn decode_tile_region_scaled_to_surface_impl(
+        ctx: &mut ashlar_core::DecoderContext<CpuJ2kContext>,
+        pool: &mut CpuJ2kScratchPool,
+        input: &[u8],
+        fmt: PixelFormat,
+        roi: Rect,
+        scale: Downscale,
+        backend: BackendRequest,
+    ) -> Result<Surface, Error> {
+        validate_host_surface_request(backend)?;
+        let dims = DeviceDecodePlan::for_image(
+            CpuDecoder::inspect(input)?.dimensions,
+            DeviceDecodeRequest::RegionScaled { roi, scale },
+        )?
+        .output_dims();
+        let stride = dims.0 as usize * fmt.bytes_per_pixel();
+        let mut out = vec![0u8; stride * dims.1 as usize];
+        CpuCodec::decode_tile_region_scaled(ctx, pool, input, &mut out, stride, fmt, roi, scale)?;
+        wrap_surface(out, dims, fmt, backend)
+    }
 }
 
 impl<'a> ImageDecodeSubmit<'a> for J2kDecoder<'a> {
@@ -405,6 +485,21 @@ impl<'a> ImageDecodeSubmit<'a> for J2kDecoder<'a> {
         session.record_submit();
         Ok(ReadySubmission::from_result(
             self.decode_scaled_to_surface_impl(fmt, scale, backend),
+        ))
+    }
+
+    fn submit_region_scaled_to_device(
+        &mut self,
+        session: &mut Self::Session,
+        fmt: PixelFormat,
+        roi: Rect,
+        scale: Downscale,
+        backend: BackendRequest,
+    ) -> Result<Self::SubmittedSurface, Self::Error> {
+        validate_host_surface_request(backend)?;
+        session.record_submit();
+        Ok(ReadySubmission::from_result(
+            self.decode_region_scaled_to_surface_impl(fmt, roi, scale, backend),
         ))
     }
 }
@@ -459,6 +554,25 @@ impl TileBatchDecodeSubmit for Codec {
         session.record_submit();
         Ok(ReadySubmission::from_result(
             Self::decode_tile_scaled_to_surface_impl(ctx, pool, input, fmt, scale, backend),
+        ))
+    }
+
+    fn submit_tile_region_scaled_to_device(
+        ctx: &mut ashlar_core::DecoderContext<Self::Context>,
+        session: &mut Self::Session,
+        pool: &mut Self::Pool,
+        input: &[u8],
+        fmt: PixelFormat,
+        roi: Rect,
+        scale: Downscale,
+        backend: BackendRequest,
+    ) -> Result<Self::SubmittedSurface, Self::Error> {
+        validate_host_surface_request(backend)?;
+        session.record_submit();
+        Ok(ReadySubmission::from_result(
+            Self::decode_tile_region_scaled_to_surface_impl(
+                ctx, pool, input, fmt, roi, scale, backend,
+            ),
         ))
     }
 }
@@ -522,6 +636,29 @@ impl TileBatchDecodeDevice for Codec {
             pool,
             input,
             fmt,
+            scale,
+            backend,
+        )?
+        .wait()
+    }
+
+    fn decode_tile_region_scaled_to_device(
+        ctx: &mut ashlar_core::DecoderContext<Self::Context>,
+        pool: &mut Self::Pool,
+        input: &[u8],
+        fmt: PixelFormat,
+        roi: Rect,
+        scale: Downscale,
+        backend: BackendRequest,
+    ) -> Result<Self::DeviceSurface, Self::Error> {
+        let mut session = CudaSession::default();
+        <Self as TileBatchDecodeSubmit>::submit_tile_region_scaled_to_device(
+            ctx,
+            &mut session,
+            pool,
+            input,
+            fmt,
+            roi,
             scale,
             backend,
         )?

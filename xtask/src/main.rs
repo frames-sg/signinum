@@ -86,7 +86,28 @@ fn clippy() -> Result<(), String> {
 }
 
 fn test() -> Result<(), String> {
-    run_cargo(&["test", "--workspace", "--all-targets", "--all-features"])
+    if env::consts::OS != "macos" {
+        return run_cargo(&["test", "--workspace", "--all-targets", "--all-features"]);
+    }
+
+    run_cargo(&[
+        "test",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--exclude",
+        "ashlar-j2k-metal",
+    ])?;
+    run_cargo_with_env(
+        &[
+            "test",
+            "-p",
+            "ashlar-j2k-metal",
+            "--all-targets",
+            "--all-features",
+        ],
+        &[("RUST_TEST_THREADS", "1")],
+    )
 }
 
 fn doc() -> Result<(), String> {

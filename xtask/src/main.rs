@@ -208,10 +208,33 @@ fn coverage() -> Result<(), String> {
 }
 
 fn package() -> Result<(), String> {
+    ensure_clean_worktree()?;
     for package in PUBLISHABLE_PACKAGES {
         run_cargo(&["package", "-p", package, "--no-verify"])?;
     }
     Ok(())
+}
+
+fn ensure_clean_worktree() -> Result<(), String> {
+    let output = Command::new("git")
+        .args(["status", "--porcelain"])
+        .output()
+        .map_err(|err| format!("failed to start `git status --porcelain`: {err}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "`git status --porcelain` exited with {}",
+            output.status
+        ));
+    }
+
+    let status = String::from_utf8_lossy(&output.stdout);
+    if status.trim().is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "working tree must be clean before packaging:\n{status}"
+        ))
+    }
 }
 
 fn run_cargo(args: &[&str]) -> Result<(), String> {
@@ -261,6 +284,6 @@ fn print_help() {
            release-cpu   run release-mode CPU codec tests\n\
            release-metal run release-mode Metal tests on macOS\n\
            coverage      generate lcov.info with cargo-llvm-cov\n\
-           package       package publishable crates without verification"
+           package       package publishable crates from a clean worktree without verification"
     );
 }

@@ -19,6 +19,27 @@ fn downscale_reports_expected_denominators() {
 }
 
 #[test]
+fn rect_scaled_covering_uses_floor_start_and_ceil_end() {
+    let roi = Rect {
+        x: 3,
+        y: 5,
+        w: 10,
+        h: 11,
+    };
+
+    assert_eq!(
+        roi.scaled_covering(Downscale::Quarter),
+        Rect {
+            x: 0,
+            y: 1,
+            w: 4,
+            h: 3,
+        }
+    );
+    assert_eq!(roi.scaled_covering(Downscale::None), roi);
+}
+
+#[test]
 fn rect_full_and_is_within_match_existing_jpeg_behavior() {
     let full = Rect::full((640, 480));
     assert_eq!(

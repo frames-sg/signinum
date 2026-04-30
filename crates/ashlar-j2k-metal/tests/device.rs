@@ -643,6 +643,38 @@ fn metal_tile_batch_supports_region_and_scaled_requests() {
 }
 
 #[test]
+fn metal_tile_batch_supports_region_scaled_requests() {
+    let bytes = fixture_gray8();
+    let roi = Rect {
+        x: 1,
+        y: 0,
+        w: 2,
+        h: 3,
+    };
+    let scale = Downscale::Half;
+    let scaled = roi.scaled_covering(scale);
+    let mut batch = MetalTileBatch::with_capacity(1);
+
+    assert_eq!(
+        batch
+            .push_tile_region_scaled(
+                &bytes,
+                PixelFormat::Gray8,
+                roi,
+                scale,
+                BackendRequest::Metal
+            )
+            .expect("push region scaled tile"),
+        0
+    );
+
+    let surfaces = batch.decode_all().expect("batch decode");
+    assert_eq!(surfaces.len(), 1);
+    assert_eq!(surfaces[0].dimensions(), (scaled.w, scaled.h));
+    assert_eq!(surfaces[0].backend_kind(), BackendKind::Metal);
+}
+
+#[test]
 fn repeated_classic_grayscale_direct_decode_matches_host_decode() {
     let bytes = fixture_gray8();
     let mut decoder = J2kDecoder::new(&bytes).expect("decoder");
@@ -851,6 +883,74 @@ fn explicit_metal_region_and_scaled_htj2k_grayscale_match_host_decode() {
     assert_eq!(scaled_surface.backend_kind(), BackendKind::Metal);
     assert_eq!(scaled_surface.dimensions(), (2, 2));
     assert_eq!(scaled_surface.as_bytes(), host_scaled.as_slice());
+}
+
+#[test]
+fn explicit_metal_region_scaled_grayscale_matches_host_decode() {
+    let bytes = fixture_gray8();
+    let roi = Rect {
+        x: 1,
+        y: 0,
+        w: 2,
+        h: 3,
+    };
+    let scale = Downscale::Half;
+    let scaled = roi.scaled_covering(scale);
+
+    let mut host_decoder = J2kDecoder::new(&bytes).expect("host decoder");
+    let mut host = vec![0u8; scaled.w as usize * scaled.h as usize];
+    host_decoder
+        .decode_region_scaled_into(
+            &mut J2kScratchPool::new(),
+            &mut host,
+            scaled.w as usize,
+            PixelFormat::Gray8,
+            roi,
+            scale,
+        )
+        .expect("host region scaled decode");
+
+    let mut decoder = J2kDecoder::new(&bytes).expect("decoder");
+    let surface = decoder
+        .decode_region_scaled_to_device(PixelFormat::Gray8, roi, scale, BackendRequest::Metal)
+        .expect("explicit Metal region scaled decode");
+    assert_eq!(surface.backend_kind(), BackendKind::Metal);
+    assert_eq!(surface.dimensions(), (scaled.w, scaled.h));
+    assert_eq!(surface.as_bytes(), host.as_slice());
+}
+
+#[test]
+fn explicit_metal_region_scaled_htj2k_grayscale_matches_host_decode() {
+    let bytes = fixture_ht_gray8();
+    let roi = Rect {
+        x: 1,
+        y: 0,
+        w: 2,
+        h: 3,
+    };
+    let scale = Downscale::Half;
+    let scaled = roi.scaled_covering(scale);
+
+    let mut host_decoder = J2kDecoder::new(&bytes).expect("host decoder");
+    let mut host = vec![0u8; scaled.w as usize * scaled.h as usize];
+    host_decoder
+        .decode_region_scaled_into(
+            &mut J2kScratchPool::new(),
+            &mut host,
+            scaled.w as usize,
+            PixelFormat::Gray8,
+            roi,
+            scale,
+        )
+        .expect("host region scaled decode");
+
+    let mut decoder = J2kDecoder::new(&bytes).expect("decoder");
+    let surface = decoder
+        .decode_region_scaled_to_device(PixelFormat::Gray8, roi, scale, BackendRequest::Metal)
+        .expect("explicit Metal region scaled decode");
+    assert_eq!(surface.backend_kind(), BackendKind::Metal);
+    assert_eq!(surface.dimensions(), (scaled.w, scaled.h));
+    assert_eq!(surface.as_bytes(), host.as_slice());
 }
 
 #[test]

@@ -127,6 +127,17 @@ pub trait ImageDecode<'a>: ImageCodec + Sized + 'a {
         fmt: PixelFormat,
         scale: Downscale,
     ) -> Result<DecodeOutcome<Self::Warning>, Self::Error>;
+
+    /// Decode a source-coordinate region at reduced resolution into caller-owned output.
+    fn decode_region_scaled_into(
+        &mut self,
+        pool: &mut Self::Pool,
+        out: &mut [u8],
+        stride: usize,
+        fmt: PixelFormat,
+        roi: Rect,
+        scale: Downscale,
+    ) -> Result<DecodeOutcome<Self::Warning>, Self::Error>;
 }
 
 /// Decode API for implementations that can submit work to a device backend.
@@ -163,6 +174,16 @@ pub trait ImageDecodeSubmit<'a>: ImageDecode<'a> {
         scale: Downscale,
         backend: BackendRequest,
     ) -> Result<Self::SubmittedSurface, Self::Error>;
+
+    /// Submit region decode at reduced resolution to the requested backend.
+    fn submit_region_scaled_to_device(
+        &mut self,
+        session: &mut Self::Session,
+        fmt: PixelFormat,
+        roi: Rect,
+        scale: Downscale,
+        backend: BackendRequest,
+    ) -> Result<Self::SubmittedSurface, Self::Error>;
 }
 
 /// Synchronous device-output decode API.
@@ -189,6 +210,15 @@ pub trait ImageDecodeDevice<'a>: ImageDecode<'a> {
     fn decode_scaled_to_device(
         &mut self,
         fmt: PixelFormat,
+        scale: Downscale,
+        backend: BackendRequest,
+    ) -> Result<Self::DeviceSurface, Self::Error>;
+
+    /// Decode a source-coordinate region at reduced resolution to the requested backend.
+    fn decode_region_scaled_to_device(
+        &mut self,
+        fmt: PixelFormat,
+        roi: Rect,
         scale: Downscale,
         backend: BackendRequest,
     ) -> Result<Self::DeviceSurface, Self::Error>;
@@ -239,6 +269,19 @@ pub trait TileBatchDecode: ImageCodec {
         fmt: PixelFormat,
         scale: Downscale,
     ) -> Result<DecodeOutcome<Self::Warning>, Self::Error>;
+
+    /// Decode one tile region at reduced resolution into caller-owned output.
+    #[allow(clippy::too_many_arguments)]
+    fn decode_tile_region_scaled<'a>(
+        ctx: &mut DecoderContext<Self::Context>,
+        pool: &mut Self::Pool,
+        input: &'a [u8],
+        out: &mut [u8],
+        stride: usize,
+        fmt: PixelFormat,
+        roi: Rect,
+        scale: Downscale,
+    ) -> Result<DecodeOutcome<Self::Warning>, Self::Error>;
 }
 
 /// Tile-batch helpers that return synchronous device surfaces.
@@ -273,6 +316,17 @@ pub trait TileBatchDecodeDevice: ImageCodec {
         pool: &mut Self::Pool,
         input: &'a [u8],
         fmt: PixelFormat,
+        scale: Downscale,
+        backend: BackendRequest,
+    ) -> Result<Self::DeviceSurface, Self::Error>;
+
+    /// Decode one tile region at reduced resolution to the requested backend.
+    fn decode_tile_region_scaled_to_device<'a>(
+        ctx: &mut DecoderContext<Self::Context>,
+        pool: &mut Self::Pool,
+        input: &'a [u8],
+        fmt: PixelFormat,
+        roi: Rect,
         scale: Downscale,
         backend: BackendRequest,
     ) -> Result<Self::DeviceSurface, Self::Error>;
@@ -317,6 +371,19 @@ pub trait TileBatchDecodeSubmit: ImageCodec {
         pool: &mut Self::Pool,
         input: &'a [u8],
         fmt: PixelFormat,
+        scale: Downscale,
+        backend: BackendRequest,
+    ) -> Result<Self::SubmittedSurface, Self::Error>;
+
+    /// Submit one tile region at reduced resolution to the requested backend.
+    #[allow(clippy::too_many_arguments)]
+    fn submit_tile_region_scaled_to_device<'a>(
+        ctx: &mut DecoderContext<Self::Context>,
+        session: &mut Self::Session,
+        pool: &mut Self::Pool,
+        input: &'a [u8],
+        fmt: PixelFormat,
+        roi: Rect,
         scale: Downscale,
         backend: BackendRequest,
     ) -> Result<Self::SubmittedSurface, Self::Error>;

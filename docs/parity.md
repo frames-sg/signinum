@@ -16,10 +16,12 @@ on a single visual smoke test.
 
 - CPU parity tests compare generated codestreams against the in-repo native
   engine and, where available, OpenJPEG/Grok comparator paths.
-- ROI, scaled, row, and tile-batch surfaces are tested as API behavior, not
-  only as full-frame decode.
+- ROI, scaled, combined ROI+scaled, row, and tile-batch surfaces are tested as
+  API behavior, not only as full-frame decode.
 - Metal and CUDA-named adapter crates must preserve CPU parity for fallback
-  host surfaces. CUDA crates do not claim runtime CUDA execution in `0.1.0`.
+  host surfaces. Metal crates must preserve decoded bytes for explicit
+  Metal-backed ROI+scaled surfaces. CUDA crates do not claim runtime CUDA
+  execution in `0.1.0`.
 
 ## Maintenance Rules
 

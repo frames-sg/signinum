@@ -17,8 +17,8 @@ The core stack in this repository is:
   validates explicit CUDA-unavailable behavior and CPU-backed `Auto`/`Cpu`
   surfaces
 - `ashlar-j2k` — native in-repo JPEG 2000 / HTJ2K inspect and decode;
-  WSI-native ROI/context optimization milestones are still in progress, so the
-  workspace remains pre-1.0
+  includes WSI-native ROI, reduced-resolution, and combined ROI+reduced-
+  resolution decode surfaces
 - `ashlar-j2k-metal` — Apple Metal device-output adapter for JPEG 2000 /
   HTJ2K tiles
 - `ashlar-j2k-cuda` — CUDA-facing JPEG 2000 / HTJ2K device-output API
@@ -40,7 +40,7 @@ for `0.1.0`.
 
 Before 1.0, the project is focused on:
 
-- completing JPEG 2000 / HTJ2K ROI and reduced-resolution performance work
+- validating JPEG 2000 / HTJ2K ROI+reduced-resolution performance thresholds
 - tightening public API documentation for the WSI decode surfaces
 - promoting the GPU adapter APIs from compatibility surfaces to validated
   multi-host implementations
@@ -80,15 +80,16 @@ primitives instead of paying for a monolithic runtime.
 ### `ashlar-j2k`
 
 - JP2 / raw codestream inspect
-- full-frame, region, scaled, row-bounded, and tile-batch decode
+- full-frame, region, scaled, combined region+scaled, row-bounded, and
+  tile-batch decode
 - repo-local pure-Rust JPEG 2000 / HTJ2K decode engine
-- native ROI/context/performance rewrite still in progress
+- ROI+reduced-resolution performance coverage in the CPU and Metal benchmark
+  harnesses
 - parity and benchmark coverage against Grok and OpenJPEG on CPU
 - Metal and CUDA adapter crates expose device-output surfaces without moving
-  the core decoder crate onto GPU-specific dependencies; the Metal path now
-  runs compute kernels for component-plane interleave/clamp/pack after CPU
-  decode, with ROI staging still performed on CPU today, while the CUDA crate
-  is fallback-only in this checkpoint
+  the core decoder crate onto GPU-specific dependencies; explicit Metal
+  requests return Metal-backed full, ROI, scaled, and ROI+scaled surfaces on
+  macOS, while the CUDA crate is fallback-only in this checkpoint
 
 ### `ashlar-tilecodec`
 

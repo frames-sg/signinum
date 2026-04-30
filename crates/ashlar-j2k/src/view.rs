@@ -7,8 +7,8 @@ use crate::{
     context::J2kContext,
     decode::{
         decode_image_into_with_native_context, decode_image_region_into_with_native_context,
-        decode_scaled_from_info, validate_buffer, validate_region, validate_supported_format,
-        J2kDecodeOutcome,
+        decode_region_scaled_from_info, decode_scaled_from_info, validate_buffer, validate_region,
+        validate_supported_format, J2kDecodeOutcome,
     },
     parse::parse_info,
     scratch::J2kScratchPool,
@@ -249,6 +249,30 @@ impl<'a> J2kDecoder<'a> {
         )
     }
 
+    pub fn decode_region_scaled_into(
+        &mut self,
+        pool: &mut J2kScratchPool,
+        out: &mut [u8],
+        stride: usize,
+        fmt: PixelFormat,
+        roi: Rect,
+        scale: Downscale,
+    ) -> Result<J2kDecodeOutcome, J2kError> {
+        if scale == Downscale::None {
+            return self.decode_region_into(pool, out, stride, fmt, roi);
+        }
+        decode_region_scaled_from_info(
+            self.bytes,
+            self.info.dimensions,
+            pool,
+            out,
+            stride,
+            fmt,
+            roi,
+            scale,
+        )
+    }
+
     fn ensure_image(&mut self) -> Result<(), J2kError> {
         if self.image.is_none() {
             self.image = Some(backend_image(self.bytes, DecodeSettings::default())?);
@@ -326,6 +350,18 @@ impl<'a> ImageDecode<'a> for J2kDecoder<'a> {
         scale: Downscale,
     ) -> Result<ashlar_core::DecodeOutcome<Self::Warning>, Self::Error> {
         J2kDecoder::decode_scaled_into(self, pool, out, stride, fmt, scale)
+    }
+
+    fn decode_region_scaled_into(
+        &mut self,
+        pool: &mut Self::Pool,
+        out: &mut [u8],
+        stride: usize,
+        fmt: PixelFormat,
+        roi: Rect,
+        scale: Downscale,
+    ) -> Result<ashlar_core::DecodeOutcome<Self::Warning>, Self::Error> {
+        J2kDecoder::decode_region_scaled_into(self, pool, out, stride, fmt, roi, scale)
     }
 }
 
@@ -445,6 +481,21 @@ impl TileBatchDecode for J2kCodec {
         ctx.codec_mut().record_tile_decode();
         let mut decoder = J2kDecoder::new(input)?;
         decoder.decode_scaled_into(pool, out, stride, fmt, scale)
+    }
+
+    fn decode_tile_region_scaled(
+        ctx: &mut DecoderContext<Self::Context>,
+        pool: &mut Self::Pool,
+        input: &[u8],
+        out: &mut [u8],
+        stride: usize,
+        fmt: PixelFormat,
+        roi: Rect,
+        scale: Downscale,
+    ) -> Result<ashlar_core::DecodeOutcome<Self::Warning>, Self::Error> {
+        ctx.codec_mut().record_tile_decode();
+        let mut decoder = J2kDecoder::new(input)?;
+        decoder.decode_region_scaled_into(pool, out, stride, fmt, roi, scale)
     }
 }
 

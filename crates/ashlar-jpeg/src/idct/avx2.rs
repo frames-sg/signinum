@@ -111,6 +111,7 @@ pub(crate) unsafe fn idct_islow(input: &[i16; 64], output: &mut [u8; 64]) {
 }
 
 #[target_feature(enable = "avx2")]
+#[allow(dead_code)]
 pub(crate) unsafe fn idct_islow_bottom_half_zero(input: &[i16; 64], output: &mut [u8; 64]) {
     unsafe { idct_islow(input, output) };
 }

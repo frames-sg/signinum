@@ -162,14 +162,17 @@ fn release_metal() -> Result<(), String> {
         eprintln!("skipping Metal release tests on {}", env::consts::OS);
         return Ok(());
     }
-    run_cargo(&[
-        "test",
-        "--release",
-        "-p",
-        "ashlar-jpeg-metal",
-        "-p",
-        "ashlar-j2k-metal",
-    ])
+    run_cargo_with_env(
+        &[
+            "test",
+            "--release",
+            "-p",
+            "ashlar-jpeg-metal",
+            "-p",
+            "ashlar-j2k-metal",
+        ],
+        &[("RUST_TEST_THREADS", "1")],
+    )
 }
 
 fn coverage() -> Result<(), String> {

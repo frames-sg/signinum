@@ -1,7 +1,4 @@
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(have_grok)");
@@ -50,6 +47,10 @@ fn stage_grok_runtime(lib_dir: &Path) -> Result<PathBuf, String> {
             "libgrokj2k.dylib",
         )?;
     }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = lib_dir;
+    }
     Ok(out_dir)
 }
 
@@ -66,7 +67,7 @@ fn stage_family(
         return Err(format!("missing {real_name} in {}", lib_dir.display()));
     }
     let real_dst = out_dir.join(real_name);
-    fs::copy(&real_src, &real_dst).map_err(|err| format!("copy {real_name}: {err}"))?;
+    std::fs::copy(&real_src, &real_dst).map_err(|err| format!("copy {real_name}: {err}"))?;
     symlink_in_dir(real_name, &out_dir.join(compat_name))?;
     symlink_in_dir(compat_name, &out_dir.join(link_name))?;
     Ok(())
@@ -75,7 +76,7 @@ fn stage_family(
 #[cfg(target_os = "macos")]
 fn symlink_in_dir(target_name: &str, dst: &PathBuf) -> Result<(), String> {
     if dst.exists() {
-        fs::remove_file(dst).map_err(|err| format!("remove {}: {err}", dst.display()))?;
+        std::fs::remove_file(dst).map_err(|err| format!("remove {}: {err}", dst.display()))?;
     }
     std::os::unix::fs::symlink(target_name, dst)
         .map_err(|err| format!("symlink {} -> {target_name}: {err}", dst.display()))

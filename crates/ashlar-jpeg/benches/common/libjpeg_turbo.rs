@@ -346,14 +346,17 @@ mod imp {
         }
 
         pub(crate) fn inspect(&mut self, _bytes: &[u8]) -> Result<InspectInfo, String> {
+            let _ = self;
             Err("libjpeg-turbo not available".to_string())
         }
 
         pub(crate) fn decode_rgb(&mut self, _bytes: &[u8]) -> Result<Vec<u8>, String> {
+            let _ = self;
             Err("libjpeg-turbo not available".to_string())
         }
 
         pub(crate) fn decode_gray(&mut self, _bytes: &[u8]) -> Result<Vec<u8>, String> {
+            let _ = self;
             Err("libjpeg-turbo not available".to_string())
         }
 
@@ -362,6 +365,7 @@ mod imp {
             _bytes: &[u8],
             _factor: Downscale,
         ) -> Result<Vec<u8>, String> {
+            let _ = self;
             Err("libjpeg-turbo not available".to_string())
         }
 
@@ -370,6 +374,7 @@ mod imp {
             _bytes: &[u8],
             _roi: Rect,
         ) -> Result<Vec<u8>, String> {
+            let _ = self;
             Err("libjpeg-turbo not available".to_string())
         }
 
@@ -379,6 +384,7 @@ mod imp {
             _roi: Rect,
             _factor: Downscale,
         ) -> Result<Vec<u8>, String> {
+            let _ = self;
             Err("libjpeg-turbo not available".to_string())
         }
     }

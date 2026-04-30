@@ -18,6 +18,7 @@ design notes that an agent can reach without leaving the repo.
 - [`docs/bench.md`](bench.md) — benchmark methodology and comparator policy.
 - [`docs/parity.md`](parity.md) — parity expectations against reference decoders.
 - [`docs/release.md`](release.md) — release staging notes.
+- [`docs/wsi-decode-api.md`](wsi-decode-api.md) — public WSI decode API guide.
 - [`docs/superpowers/HANDOFF-2026-04-23-adaptive-codec-runtime.md`](superpowers/HANDOFF-2026-04-23-adaptive-codec-runtime.md)
   — most recent in-flight design handoff (adaptive backend routing).
 - Crate-level `README.md` files where present — crate-scoped contracts and
@@ -315,8 +316,8 @@ provisional and check the most recent commits before relying on it.
   and pushing more of the J2K full-tile path onto the GPU.
 - Adaptive backend routing: deciding when `BackendRequest::Auto` should
   upgrade a batch to Metal vs. stay on CPU.
-- Tightening the public WSI decode API documentation toward 1.0.
-- Broadening release CI and adding x86_64 GPU benchmark coverage.
+- Keeping the public WSI decode API guide aligned with the core trait surface.
+- Broadening release CI and adding self-hosted x86_64 GPU benchmark coverage.
 
 ## Stability posture
 

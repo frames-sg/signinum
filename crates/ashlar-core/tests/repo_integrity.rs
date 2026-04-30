@@ -67,6 +67,92 @@ fn adapter_crates_do_not_import_codec_private_modules() {
     }
 }
 
+#[test]
+fn wsi_decode_api_guide_covers_public_surfaces() {
+    let root = repo_root();
+    let readme = fs::read_to_string(root.join("README.md")).expect("read README");
+    let architecture =
+        fs::read_to_string(root.join("docs/architecture.md")).expect("read architecture docs");
+    let guide_path = root.join("docs/wsi-decode-api.md");
+    let guide = fs::read_to_string(&guide_path).expect("read WSI decode API guide");
+
+    assert!(
+        readme.contains("docs/wsi-decode-api.md"),
+        "README must link the WSI decode API guide"
+    );
+    assert!(
+        architecture.contains("wsi-decode-api.md"),
+        "architecture docs must link the WSI decode API guide"
+    );
+
+    for required in [
+        "decode_region_scaled_into",
+        "decode_rows",
+        "TileBatchDecode",
+        "BackendRequest::Auto",
+        "BackendRequest::Metal",
+        "BackendRequest::Cuda",
+        "DeviceSurface",
+        "ScratchPool",
+        "DecoderContext",
+    ] {
+        assert!(
+            guide.contains(required),
+            "{} must document {required}",
+            guide_path
+                .strip_prefix(root)
+                .unwrap_or(&guide_path)
+                .display()
+        );
+    }
+}
+
+#[test]
+fn ci_workflow_keeps_docs_and_benchmark_compile_gates() {
+    let workflow =
+        fs::read_to_string(repo_root().join(".github/workflows/ci.yml")).expect("read CI workflow");
+
+    for required in [
+        "cargo doc --workspace --all-features --no-deps",
+        "cargo bench -p ashlar-jpeg-metal --no-run",
+        "cargo bench -p ashlar-j2k-metal --no-run",
+        "macos-13",
+    ] {
+        assert!(
+            workflow.contains(required),
+            "CI workflow must contain `{required}`"
+        );
+    }
+}
+
+#[test]
+fn gpu_validation_workflow_is_self_hosted_and_explicit() {
+    let root = repo_root();
+    let workflow_path = root.join(".github/workflows/gpu-validation.yml");
+    let workflow = fs::read_to_string(&workflow_path).expect("read GPU validation workflow");
+
+    for required in [
+        "workflow_dispatch",
+        "run-timed-benchmarks",
+        "self-hosted",
+        "metal",
+        "cuda",
+        "cargo test -p ashlar-jpeg-metal",
+        "cargo test -p ashlar-j2k-metal",
+        "cargo test -p ashlar-jpeg-cuda",
+        "cargo test -p ashlar-j2k-cuda",
+    ] {
+        assert!(
+            workflow.contains(required),
+            "{} must contain `{required}`",
+            workflow_path
+                .strip_prefix(root)
+                .unwrap_or(&workflow_path)
+                .display()
+        );
+    }
+}
+
 fn rust_sources(dir: &Path) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
     collect_rust_sources(dir, &mut out);

@@ -175,6 +175,31 @@ fn full_htj2k_decode_to_metal_matches_host_decode() {
 }
 
 #[test]
+fn htj2k_direct_decode_clears_reused_classic_scratch_buffers() {
+    let classic_bytes = fixture_gray8();
+    let mut classic_decoder = J2kDecoder::new(&classic_bytes).expect("classic decoder");
+    let classic_surface = classic_decoder
+        .decode_to_device(PixelFormat::Gray8, BackendRequest::Metal)
+        .expect("classic device decode");
+    assert_eq!(classic_surface.backend_kind(), BackendKind::Metal);
+
+    let bytes = fixture_ht_gray8();
+    let mut decoder = J2kDecoder::new(&bytes).expect("decoder");
+    let mut host_decoder = J2kDecoder::new(&bytes).expect("host decoder");
+    let mut host = [0u8; 16];
+    host_decoder
+        .decode_into(&mut host, 4, PixelFormat::Gray8)
+        .expect("host decode");
+
+    let surface = decoder
+        .decode_to_device(PixelFormat::Gray8, BackendRequest::Metal)
+        .expect("device decode");
+    assert_eq!(surface.backend_kind(), BackendKind::Metal);
+    assert_eq!(surface.dimensions(), (4, 4));
+    assert_eq!(surface.as_bytes(), host.as_slice());
+}
+
+#[test]
 fn full_irreversible_j2k_decode_to_metal_matches_host_decode() {
     let bytes = fixture_gray8_irreversible();
     let mut decoder = J2kDecoder::new(&bytes).expect("decoder");

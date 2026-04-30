@@ -322,6 +322,21 @@ ASHLAR_GROK_ROOT=/tmp/grok-ashlar/build/bin \
   cargo bench -p ashlar-j2k-metal --bench compare
 ```
 
+## GPU Benchmark Signoff
+
+Hosted CI compiles benchmark targets but does not provide GPU hardware for
+runtime performance claims. Use `.github/workflows/gpu-validation.yml` on
+self-hosted runners for GPU signoff:
+
+- Apple Silicon Metal runners validate Metal adapter tests and can run timed
+  `ashlar-jpeg-metal` and `ashlar-j2k-metal` Criterion benches.
+- x86_64 CUDA runners validate CUDA adapter API compatibility. They do not
+  establish CUDA decode timing until the CUDA crates grow runtime CUDA decode
+  implementations.
+
+Set the manual workflow input `run-timed-benchmarks=true` when collecting
+release benchmark evidence. Leave it false for faster device/API validation.
+
 ## Device-output adapters
 
 `ashlar-jpeg-metal` and `ashlar-j2k-metal` carry Apple-host device

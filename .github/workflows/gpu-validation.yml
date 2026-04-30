@@ -1,0 +1,44 @@
+name: GPU validation
+
+on:
+  workflow_dispatch:
+    inputs:
+      run-timed-benchmarks:
+        description: "Run Criterion timing benches on the GPU runners"
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  metal-apple-silicon:
+    name: Metal validation on Apple Silicon
+    runs-on: [self-hosted, macOS, ARM64, metal]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test -p ashlar-jpeg-metal --all-targets
+      - run: cargo test -p ashlar-j2k-metal --all-targets
+      - run: cargo bench -p ashlar-jpeg-metal --no-run
+      - run: cargo bench -p ashlar-j2k-metal --no-run
+      - if: ${{ inputs.run-timed-benchmarks }}
+        run: cargo bench -p ashlar-jpeg-metal --bench compare
+      - if: ${{ inputs.run-timed-benchmarks }}
+        run: cargo bench -p ashlar-j2k-metal --bench compare
+
+  cuda-x86_64-compatibility:
+    name: CUDA API compatibility on x86_64
+    runs-on: [self-hosted, Linux, X64, cuda]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test -p ashlar-jpeg-cuda --all-targets --features cuda-runtime
+      - run: cargo test -p ashlar-j2k-cuda --all-targets --features cuda-runtime
+      - run: cargo bench -p ashlar-jpeg --no-run
+      - run: cargo bench -p ashlar-j2k-metal --bench compare --no-run

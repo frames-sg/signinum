@@ -59,6 +59,9 @@ consumer-image decode:
 - additive device-output adapters for Metal and CUDA consumers
 - explicit separation between image codecs and tile decompression codecs
 
+The public WSI decode surface is documented in
+[docs/wsi-decode-api.md](docs/wsi-decode-api.md).
+
 The project is structured so WSI readers can compose their own threading,
 vendor/container parsing, pyramid policy, caching, and prefetch around codec
 primitives instead of paying for a monolithic runtime.

@@ -106,6 +106,18 @@ const SHADER_SOURCE: &str = concat!(
 #include <metal_stdlib>
 using namespace metal;
 
+kernel void j2k_zero_u32_buffer(
+    device uint *buffer [[buffer(0)]],
+    constant uint &word_count [[buffer(1)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= word_count) {
+        return;
+    }
+
+    buffer[gid] = 0u;
+}
+
 struct J2kPackParams {
     uint width;
     uint height;
@@ -861,6 +873,7 @@ thread_local! {
 struct MetalRuntime {
     device: Device,
     queue: CommandQueue,
+    zero_u32_buffer: ComputePipelineState,
     pack_gray8: ComputePipelineState,
     pack_rgb8: ComputePipelineState,
     pack_mct_rgb8: ComputePipelineState,
@@ -1026,6 +1039,7 @@ impl MetalRuntime {
         Ok(Self {
             device: device.clone(),
             queue,
+            zero_u32_buffer: pipeline("j2k_zero_u32_buffer")?,
             pack_gray8: pipeline("j2k_pack_gray8")?,
             pack_rgb8: pipeline("j2k_pack_rgb8")?,
             pack_mct_rgb8: pipeline("j2k_pack_mct_rgb8")?,
@@ -2388,7 +2402,7 @@ fn encode_prepared_direct_grayscale_plan_in_command_buffer(
                         encoder,
                         group,
                         &output.buffer,
-                    );
+                    )?;
                 retained_buffers.extend(buffers);
                 status_checks.push(status_check);
                 for member in &group.members {
@@ -2437,7 +2451,7 @@ fn encode_prepared_direct_grayscale_plan_in_command_buffer(
                         encoder,
                         sub_band,
                         &output.buffer,
-                    );
+                    )?;
                     retained_buffers.extend(buffers);
                     status_checks.push(status_check);
                     bands.push(DirectBandSlice {
@@ -2644,7 +2658,7 @@ fn encode_prepared_direct_component_plane_in_command_buffer(
                         encoder,
                         group,
                         &output.buffer,
-                    );
+                    )?;
                 retained_buffers.extend(buffers);
                 status_checks.push(status_check);
                 for member in &group.members {
@@ -2692,7 +2706,7 @@ fn encode_prepared_direct_component_plane_in_command_buffer(
                         encoder,
                         sub_band,
                         &output.buffer,
-                    );
+                    )?;
                     retained_buffers.extend(buffers);
                     status_checks.push(status_check);
                     bands.push(DirectBandSlice {
@@ -7444,7 +7458,8 @@ fn encode_ht_sub_band_to_buffer_in_command_buffer(
         &jobs_buffer,
         jobs.len(),
         output,
-    );
+        ht_batch_output_word_count(&jobs)?,
+    )?;
     Ok((
         vec![
             DirectHostRetention::Bytes(coded_data),
@@ -7495,7 +7510,7 @@ fn encode_repeated_ht_sub_band_to_buffer_in_command_buffer(
         total_jobs,
         job.width as usize * job.height as usize,
         output,
-    );
+    )?;
     Ok((Vec::new(), vec![coded_buffer, jobs_buffer], status_check))
 }
 
@@ -7539,7 +7554,7 @@ fn encode_repeated_ht_sub_band_group_to_buffer_in_command_buffer(
         total_jobs,
         group.total_coefficients,
         output,
-    );
+    )?;
     Ok((Vec::new(), vec![coded_buffer, jobs_buffer], status_check))
 }
 
@@ -7550,7 +7565,7 @@ fn encode_prepared_ht_sub_band_to_buffer_in_command_buffer(
     command_buffer: &CommandBufferRef,
     job: &PreparedHtSubBand,
     output: &Buffer,
-) -> (Vec<Buffer>, DirectStatusCheck) {
+) -> Result<(Vec<Buffer>, DirectStatusCheck), Error> {
     let encoder = command_buffer.new_compute_command_encoder();
     let result = encode_prepared_ht_sub_band_to_buffer_in_encoder(runtime, encoder, job, output);
     encoder.end_encoding();
@@ -7563,18 +7578,18 @@ fn encode_prepared_ht_sub_band_to_buffer_in_encoder(
     encoder: &ComputeCommandEncoderRef,
     job: &PreparedHtSubBand,
     output: &Buffer,
-) -> (Vec<Buffer>, DirectStatusCheck) {
+) -> Result<(Vec<Buffer>, DirectStatusCheck), Error> {
     if job.jobs.is_empty() {
         let empty = runtime
             .device
             .new_buffer(1, MTLResourceOptions::StorageModeShared);
-        return (
+        return Ok((
             vec![empty.clone()],
             DirectStatusCheck::Ht {
                 buffer: empty,
                 len: 0,
             },
-        );
+        ));
     }
 
     let coded_buffer = job.coded_buffer.clone();
@@ -7586,8 +7601,9 @@ fn encode_prepared_ht_sub_band_to_buffer_in_encoder(
         &jobs_buffer,
         job.jobs.len(),
         output,
-    );
-    (vec![coded_buffer, jobs_buffer], status_check)
+        job.width as usize * job.height as usize,
+    )?;
+    Ok((vec![coded_buffer, jobs_buffer], status_check))
 }
 
 #[cfg(target_os = "macos")]
@@ -7597,7 +7613,7 @@ fn encode_prepared_ht_sub_band_group_to_buffer_in_command_buffer(
     command_buffer: &CommandBufferRef,
     group: &PreparedHtSubBandGroup,
     output: &Buffer,
-) -> (Vec<Buffer>, DirectStatusCheck) {
+) -> Result<(Vec<Buffer>, DirectStatusCheck), Error> {
     let encoder = command_buffer.new_compute_command_encoder();
     let result =
         encode_prepared_ht_sub_band_group_to_buffer_in_encoder(runtime, encoder, group, output);
@@ -7611,18 +7627,18 @@ fn encode_prepared_ht_sub_band_group_to_buffer_in_encoder(
     encoder: &ComputeCommandEncoderRef,
     group: &PreparedHtSubBandGroup,
     output: &Buffer,
-) -> (Vec<Buffer>, DirectStatusCheck) {
+) -> Result<(Vec<Buffer>, DirectStatusCheck), Error> {
     if group.jobs.is_empty() {
         let empty = runtime
             .device
             .new_buffer(1, MTLResourceOptions::StorageModeShared);
-        return (
+        return Ok((
             vec![empty.clone()],
             DirectStatusCheck::Ht {
                 buffer: empty,
                 len: 0,
             },
-        );
+        ));
     }
 
     let coded_buffer = group.coded_buffer.clone();
@@ -7634,8 +7650,9 @@ fn encode_prepared_ht_sub_band_group_to_buffer_in_encoder(
         &jobs_buffer,
         group.jobs.len(),
         output,
-    );
-    (vec![coded_buffer, jobs_buffer], status_check)
+        group.total_coefficients,
+    )?;
+    Ok((vec![coded_buffer, jobs_buffer], status_check))
 }
 
 #[cfg(target_os = "macos")]
@@ -7648,6 +7665,72 @@ fn decode_ht_status_error(status: J2kHtStatus) -> Error {
     Error::MetalKernel {
         message: format!("HTJ2K Metal kernel {kind} (detail={})", status.detail),
     }
+}
+
+#[cfg(target_os = "macos")]
+fn ht_output_word_count(
+    output_offset: u32,
+    output_stride: u32,
+    width: u32,
+    height: u32,
+) -> Result<usize, Error> {
+    let end = if width == 0 || height == 0 {
+        u64::from(output_offset)
+    } else {
+        u64::from(output_offset)
+            .checked_add(u64::from(height - 1) * u64::from(output_stride))
+            .and_then(|offset| offset.checked_add(u64::from(width)))
+            .ok_or_else(|| Error::MetalKernel {
+                message: "HTJ2K Metal output span overflow".to_string(),
+            })?
+    };
+    usize::try_from(end).map_err(|_| Error::MetalKernel {
+        message: "HTJ2K Metal output span exceeds usize".to_string(),
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn ht_batch_output_word_count(jobs: &[J2kHtCleanupBatchJob]) -> Result<usize, Error> {
+    let mut word_count = 0usize;
+    for job in jobs {
+        let job_word_count =
+            ht_output_word_count(job.output_offset, job.output_stride, job.width, job.height)?;
+        word_count = word_count.max(job_word_count);
+    }
+    Ok(word_count)
+}
+
+#[cfg(target_os = "macos")]
+fn dispatch_zero_u32_buffer_in_encoder(
+    runtime: &MetalRuntime,
+    encoder: &ComputeCommandEncoderRef,
+    buffer: &Buffer,
+    word_count: usize,
+) -> Result<(), Error> {
+    let word_count = u32::try_from(word_count).map_err(|_| Error::MetalKernel {
+        message: "HTJ2K Metal zero-fill word count exceeds u32".to_string(),
+    })?;
+    if word_count == 0 {
+        return Ok(());
+    }
+
+    encoder.set_compute_pipeline_state(&runtime.zero_u32_buffer);
+    encoder.set_buffer(0, Some(buffer), 0);
+    encoder.set_bytes(1, size_of::<u32>() as u64, (&raw const word_count).cast());
+    let width = runtime.zero_u32_buffer.thread_execution_width().max(1);
+    encoder.dispatch_threads(
+        MTLSize {
+            width: u64::from(word_count),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -7665,6 +7748,17 @@ fn dispatch_ht_cleanup(
 
     let command_buffer = runtime.queue.new_command_buffer();
     let encoder = command_buffer.new_compute_command_encoder();
+    dispatch_zero_u32_buffer_in_encoder(
+        runtime,
+        encoder,
+        decoded,
+        ht_output_word_count(
+            params.output_offset,
+            params.output_stride,
+            params.width,
+            params.height,
+        )?,
+    )?;
     encoder.set_compute_pipeline_state(&runtime.ht_cleanup);
     encoder.set_buffer(0, Some(&input), 0);
     encoder.set_buffer(1, Some(decoded), 0);
@@ -7718,6 +7812,12 @@ fn dispatch_ht_cleanup_batched(
 
     let command_buffer = runtime.queue.new_command_buffer();
     let encoder = command_buffer.new_compute_command_encoder();
+    dispatch_zero_u32_buffer_in_encoder(
+        runtime,
+        encoder,
+        decoded,
+        ht_batch_output_word_count(jobs)?,
+    )?;
     encoder.set_compute_pipeline_state(&runtime.ht_cleanup_batched);
     encoder.set_buffer(0, Some(&input), 0);
     encoder.set_buffer(1, Some(decoded), 0);
@@ -7770,13 +7870,15 @@ fn dispatch_ht_cleanup_batched_in_command_buffer(
     jobs: &Buffer,
     job_count: usize,
     decoded: &Buffer,
-) -> DirectStatusCheck {
+    decoded_word_count: usize,
+) -> Result<DirectStatusCheck, Error> {
     let status_buffer = runtime.device.new_buffer(
         (job_count.max(1) * size_of::<J2kHtStatus>()) as u64,
         MTLResourceOptions::StorageModeShared,
     );
 
     let encoder = command_buffer.new_compute_command_encoder();
+    dispatch_zero_u32_buffer_in_encoder(runtime, encoder, decoded, decoded_word_count)?;
     dispatch_ht_cleanup_batched_in_encoder_with_status(
         runtime,
         encoder,
@@ -7788,10 +7890,10 @@ fn dispatch_ht_cleanup_batched_in_command_buffer(
     );
     encoder.end_encoding();
 
-    DirectStatusCheck::Ht {
+    Ok(DirectStatusCheck::Ht {
         buffer: status_buffer,
         len: job_count,
-    }
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -7802,11 +7904,13 @@ fn dispatch_ht_cleanup_batched_in_encoder(
     jobs: &Buffer,
     job_count: usize,
     decoded: &Buffer,
-) -> DirectStatusCheck {
+    decoded_word_count: usize,
+) -> Result<DirectStatusCheck, Error> {
     let status_buffer = runtime.device.new_buffer(
         (job_count.max(1) * size_of::<J2kHtStatus>()) as u64,
         MTLResourceOptions::StorageModeShared,
     );
+    dispatch_zero_u32_buffer_in_encoder(runtime, encoder, decoded, decoded_word_count)?;
     dispatch_ht_cleanup_batched_in_encoder_with_status(
         runtime,
         encoder,
@@ -7817,10 +7921,10 @@ fn dispatch_ht_cleanup_batched_in_encoder(
         &status_buffer,
     );
 
-    DirectStatusCheck::Ht {
+    Ok(DirectStatusCheck::Ht {
         buffer: status_buffer,
         len: job_count,
-    }
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -7872,20 +7976,37 @@ fn dispatch_ht_cleanup_repeated_batched_in_command_buffer(
     total_job_count: usize,
     output_plane_len: usize,
     decoded: &Buffer,
-) -> DirectStatusCheck {
+) -> Result<DirectStatusCheck, Error> {
     let status_buffer = runtime.device.new_buffer(
         (total_job_count.max(1) * size_of::<J2kHtStatus>()) as u64,
         MTLResourceOptions::StorageModeShared,
     );
+    let batch_count =
+        total_job_count
+            .checked_div(base_job_count)
+            .ok_or_else(|| Error::MetalKernel {
+                message: "HTJ2K MetalDirect repeated base job count is zero".to_string(),
+            })?;
+    let decoded_word_count =
+        output_plane_len
+            .checked_mul(batch_count)
+            .ok_or_else(|| Error::MetalKernel {
+                message: "HTJ2K MetalDirect repeated output span overflow".to_string(),
+            })?;
     let repeated = J2kHtRepeatedBatchParams {
-        job_count: u32::try_from(base_job_count).expect("HT repeated base job count fits in u32"),
-        output_plane_len: u32::try_from(output_plane_len)
-            .expect("HT repeated output plane len fits in u32"),
-        batch_count: u32::try_from(total_job_count / base_job_count.max(1))
-            .expect("HT repeated batch count fits in u32"),
+        job_count: u32::try_from(base_job_count).map_err(|_| Error::MetalKernel {
+            message: "HTJ2K MetalDirect repeated base job count exceeds u32".to_string(),
+        })?,
+        output_plane_len: u32::try_from(output_plane_len).map_err(|_| Error::MetalKernel {
+            message: "HTJ2K MetalDirect repeated output plane length exceeds u32".to_string(),
+        })?,
+        batch_count: u32::try_from(batch_count).map_err(|_| Error::MetalKernel {
+            message: "HTJ2K MetalDirect repeated batch count exceeds u32".to_string(),
+        })?,
     };
 
     let encoder = command_buffer.new_compute_command_encoder();
+    dispatch_zero_u32_buffer_in_encoder(runtime, encoder, decoded, decoded_word_count)?;
     encoder.set_compute_pipeline_state(&runtime.ht_cleanup_repeated_batched);
     encoder.set_buffer(0, Some(coded_data), 0);
     encoder.set_buffer(1, Some(decoded), 0);
@@ -7919,10 +8040,10 @@ fn dispatch_ht_cleanup_repeated_batched_in_command_buffer(
     );
     encoder.end_encoding();
 
-    DirectStatusCheck::Ht {
+    Ok(DirectStatusCheck::Ht {
         buffer: status_buffer,
         len: total_job_count,
-    }
+    })
 }
 
 #[cfg(target_os = "macos")]

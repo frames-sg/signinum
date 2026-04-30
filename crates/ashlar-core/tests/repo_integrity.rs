@@ -111,17 +111,25 @@ fn wsi_decode_api_guide_covers_public_surfaces() {
 fn ci_workflow_keeps_docs_and_benchmark_compile_gates() {
     let workflow =
         fs::read_to_string(repo_root().join(".github/workflows/ci.yml")).expect("read CI workflow");
+    let xtask = fs::read_to_string(repo_root().join("xtask/src/main.rs")).expect("read xtask");
 
-    for required in [
-        "cargo doc --workspace --all-features --no-deps",
-        "cargo bench -p ashlar-jpeg-metal --no-run",
-        "cargo bench -p ashlar-j2k-metal --no-run",
-        "macos-13",
-    ] {
+    for required in ["cargo xtask doc", "cargo xtask bench-build", "macos-13"] {
         assert!(
             workflow.contains(required),
             "CI workflow must contain `{required}`"
         );
+    }
+
+    for required in [
+        "\"doc\"",
+        "\"--workspace\"",
+        "\"--all-features\"",
+        "\"--no-deps\"",
+        "\"ashlar-jpeg-metal\"",
+        "\"ashlar-j2k-metal\"",
+        "\"--no-run\"",
+    ] {
+        assert!(xtask.contains(required), "xtask must contain `{required}`");
     }
 }
 

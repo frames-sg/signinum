@@ -1,0 +1,19 @@
+[files]
+extend-exclude = [
+    ".git",
+    "target",
+    "corpus/conformance",
+]
+
+[default.extend-words]
+APPn = "APPn"
+flate = "flate"
+ois = "ois"
+Pn = "Pn"
+Psot = "Psot"
+SIZ = "SIZ"
+Siz = "Siz"
+TPsot = "TPsot"
+YTO = "YTO"
+siz = "siz"
+yto = "yto"

@@ -487,6 +487,66 @@ pub(crate) fn round_f32(x: f32) -> f32 {
 }
 
 #[inline(always)]
+pub(crate) fn log2_f32(x: f32) -> f32 {
+    #[cfg(feature = "std")]
+    {
+        x.log2()
+    }
+    #[cfg(not(feature = "std"))]
+    {
+        libm::log2f(x)
+    }
+}
+
+#[inline(always)]
+pub(crate) fn floor_f64(x: f64) -> f64 {
+    #[cfg(feature = "std")]
+    {
+        x.floor()
+    }
+    #[cfg(not(feature = "std"))]
+    {
+        libm::floor(x)
+    }
+}
+
+#[inline(always)]
+pub(crate) fn round_f64(x: f64) -> f64 {
+    #[cfg(feature = "std")]
+    {
+        x.round()
+    }
+    #[cfg(not(feature = "std"))]
+    {
+        libm::round(x)
+    }
+}
+
+#[inline(always)]
+pub(crate) fn log2_f64(x: f64) -> f64 {
+    #[cfg(feature = "std")]
+    {
+        x.log2()
+    }
+    #[cfg(not(feature = "std"))]
+    {
+        libm::log2(x)
+    }
+}
+
+#[inline(always)]
+pub(crate) fn powi_f64(x: f64, n: i32) -> f64 {
+    #[cfg(feature = "std")]
+    {
+        x.powi(n)
+    }
+    #[cfg(not(feature = "std"))]
+    {
+        libm::pow(x, f64::from(n))
+    }
+}
+
+#[inline(always)]
 pub(crate) fn pow2i(exp: i32) -> f32 {
     if exp >= 0 {
         (1_u32 << exp) as f32

@@ -1,5 +1,6 @@
 //! Scalar HTJ2K block decoding.
 
+use alloc::vec;
 use alloc::vec::Vec;
 
 use super::build::CodeBlock;

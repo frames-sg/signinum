@@ -232,6 +232,7 @@ pub struct Decoder<'a> {
     fast420_packet: Option<Arc<JpegMetalFast420PacketV1>>,
 }
 
+#[cfg(any(target_os = "macos", test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AutoDevicePath {
     CpuUpload,
@@ -967,6 +968,7 @@ pub(crate) fn decode_surface_from_bytes(
     )
 }
 
+#[allow(clippy::unnecessary_wraps)]
 pub(crate) fn decode_compatible_batch(
     requests: &[batch::QueuedRequest],
 ) -> Result<Option<Vec<Result<Surface, Error>>>, Error> {
@@ -996,6 +998,8 @@ fn decode_surface_from_decoder(
     if matches!(backend, BackendRequest::Metal) {
         return Err(Error::MetalUnavailable);
     }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (fast444_packet, fast422_packet, fast420_packet);
 
     match op {
         batch::BatchOp::Full => match backend {
@@ -1237,6 +1241,9 @@ fn decode_region_scaled_surface_from_decoder(
     fast422_packet: Option<&JpegMetalFast422PacketV1>,
     fast420_packet: Option<&JpegMetalFast420PacketV1>,
 ) -> Result<Surface, Error> {
+    #[cfg(not(target_os = "macos"))]
+    let _ = (fast444_packet, fast422_packet, fast420_packet);
+
     match backend {
         BackendRequest::Cpu => {
             decode_region_scaled_cpu_upload(decoder, pool, fmt, roi, scale, backend)
@@ -1317,6 +1324,7 @@ fn decode_region_scaled_cpu_upload(
     upload_surface(out, dims, fmt, backend)
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn choose_auto_device_path(
     decoder: &CpuDecoder<'_>,
     op: batch::BatchOp,

@@ -63,7 +63,7 @@ pub(crate) struct QueuedRequest {
 }
 
 impl QueuedRequest {
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     pub(crate) fn new(
         input: Arc<[u8]>,
         fmt: PixelFormat,

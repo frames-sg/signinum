@@ -54,18 +54,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo bench -p slidecodec-jpeg --no-run
-      - run: cargo bench -p slidecodec-jpeg-metal --bench compare --no-run
-      - run: cargo bench -p slidecodec-j2k --bench compare --no-run
-      - run: cargo bench -p slidecodec-tilecodec --bench compare --no-run
+      - run: cargo bench -p ashlar-jpeg --no-run
+      - run: cargo bench -p ashlar-jpeg-metal --bench compare --no-run
+      - run: cargo bench -p ashlar-j2k-metal --bench compare --no-run
+      - run: cargo bench -p ashlar-tilecodec --bench compare --no-run
 
   fuzz-build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo check --manifest-path crates/slidecodec-j2k/fuzz/Cargo.toml
-      - run: cargo check --manifest-path crates/slidecodec-tilecodec/fuzz/Cargo.toml
+      - run: cargo check --manifest-path crates/ashlar-j2k/fuzz/Cargo.toml
+      - run: cargo check --manifest-path crates/ashlar-tilecodec/fuzz/Cargo.toml
 
   deny:
     runs-on: ubuntu-latest

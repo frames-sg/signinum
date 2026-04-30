@@ -1,0 +1,20 @@
+[package]
+name        = "ashlar-cli"
+description = "Command-line tool for ashlar: inspect"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace = true
+
+[[bin]]
+name = "ashlar"
+path = "src/main.rs"
+
+[dependencies]
+ashlar-j2k  = { path = "../ashlar-j2k", version = "=0.1.0" }
+ashlar-jpeg = { path = "../ashlar-jpeg", version = "=0.1.0" }
+
+# NOTE: `[profile.*]` blocks in package-level manifests are silently ignored
+# inside a workspace (see https://doc.rust-lang.org/cargo/reference/profiles.html#overrides).
+# Any codegen tweaks for the CLI must go in the root workspace `Cargo.toml`.

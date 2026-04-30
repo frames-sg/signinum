@@ -36,6 +36,118 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
+name = "ashlar-cli"
+version = "0.1.0"
+dependencies = [
+ "ashlar-j2k",
+ "ashlar-jpeg",
+]
+
+[[package]]
+name = "ashlar-core"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
+name = "ashlar-j2k"
+version = "0.1.0"
+dependencies = [
+ "ashlar-core",
+ "ashlar-j2k-compare",
+ "ashlar-j2k-native",
+ "criterion",
+ "proptest",
+ "thiserror",
+]
+
+[[package]]
+name = "ashlar-j2k-compare"
+version = "0.1.0"
+dependencies = [
+ "ashlar-core",
+ "cc",
+ "openjpeg-sys",
+]
+
+[[package]]
+name = "ashlar-j2k-cuda"
+version = "0.1.0"
+dependencies = [
+ "ashlar-core",
+ "ashlar-j2k",
+ "ashlar-j2k-native",
+ "thiserror",
+]
+
+[[package]]
+name = "ashlar-j2k-metal"
+version = "0.1.0"
+dependencies = [
+ "ashlar-core",
+ "ashlar-j2k",
+ "ashlar-j2k-native",
+ "criterion",
+ "metal",
+ "thiserror",
+]
+
+[[package]]
+name = "ashlar-j2k-native"
+version = "0.1.0"
+dependencies = [
+ "fearless_simd",
+ "log",
+]
+
+[[package]]
+name = "ashlar-jpeg"
+version = "0.1.0"
+dependencies = [
+ "ashlar-core",
+ "criterion",
+ "jpeg-decoder",
+ "memchr",
+ "proptest",
+ "thiserror",
+ "zune-core",
+ "zune-jpeg",
+]
+
+[[package]]
+name = "ashlar-jpeg-cuda"
+version = "0.1.0"
+dependencies = [
+ "ashlar-core",
+ "ashlar-jpeg",
+ "thiserror",
+]
+
+[[package]]
+name = "ashlar-jpeg-metal"
+version = "0.1.0"
+dependencies = [
+ "ashlar-core",
+ "ashlar-jpeg",
+ "criterion",
+ "metal",
+ "thiserror",
+]
+
+[[package]]
+name = "ashlar-tilecodec"
+version = "0.1.0"
+dependencies = [
+ "ashlar-core",
+ "criterion",
+ "flate2",
+ "thiserror",
+ "weezl",
+ "zstd",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -810,119 +922,6 @@ name = "simd-adler32"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "703d5c7ef118737c72f1af64ad2f6f8c5e1921f818cdcb97b8fe6fc69bf66214"
-
-[[package]]
-name = "slidecodec-cli"
-version = "0.1.0"
-dependencies = [
- "slidecodec-j2k",
- "slidecodec-jpeg",
-]
-
-[[package]]
-name = "slidecodec-core"
-version = "0.1.0"
-dependencies = [
- "thiserror",
-]
-
-[[package]]
-name = "slidecodec-j2k"
-version = "0.1.0"
-dependencies = [
- "criterion",
- "proptest",
- "slidecodec-core",
- "slidecodec-j2k-compare",
- "slidecodec-j2k-metal",
- "slidecodec-j2k-native",
- "thiserror",
-]
-
-[[package]]
-name = "slidecodec-j2k-compare"
-version = "0.1.0"
-dependencies = [
- "cc",
- "openjpeg-sys",
- "slidecodec-core",
-]
-
-[[package]]
-name = "slidecodec-j2k-cuda"
-version = "0.1.0"
-dependencies = [
- "slidecodec-core",
- "slidecodec-j2k",
- "slidecodec-j2k-native",
- "thiserror",
-]
-
-[[package]]
-name = "slidecodec-j2k-metal"
-version = "0.1.0"
-dependencies = [
- "criterion",
- "metal",
- "slidecodec-core",
- "slidecodec-j2k",
- "slidecodec-j2k-native",
- "thiserror",
-]
-
-[[package]]
-name = "slidecodec-j2k-native"
-version = "0.1.0"
-dependencies = [
- "fearless_simd",
- "log",
-]
-
-[[package]]
-name = "slidecodec-jpeg"
-version = "0.1.0"
-dependencies = [
- "criterion",
- "jpeg-decoder",
- "memchr",
- "proptest",
- "slidecodec-core",
- "thiserror",
- "zune-core",
- "zune-jpeg",
-]
-
-[[package]]
-name = "slidecodec-jpeg-cuda"
-version = "0.1.0"
-dependencies = [
- "slidecodec-core",
- "slidecodec-jpeg",
- "thiserror",
-]
-
-[[package]]
-name = "slidecodec-jpeg-metal"
-version = "0.1.0"
-dependencies = [
- "criterion",
- "metal",
- "slidecodec-core",
- "slidecodec-jpeg",
- "thiserror",
-]
-
-[[package]]
-name = "slidecodec-tilecodec"
-version = "0.1.0"
-dependencies = [
- "criterion",
- "flate2",
- "slidecodec-core",
- "thiserror",
- "weezl",
- "zstd",
-]
 
 [[package]]
 name = "syn"

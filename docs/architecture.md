@@ -1,6 +1,6 @@
 # Architecture
 
-This document is the system map for `slidecodec`. It is the first thing a new
+This document is the system map for `ashlar`. It is the first thing a new
 contributor or coding agent should read before changing code, and it is the
 single source of truth for how the workspace is shaped, where each
 responsibility lives, and which dependency directions are legal. Anything that
@@ -31,17 +31,17 @@ and `rust-version = 1.94`.
 
 | Crate | Layer | Role |
 |-------|-------|------|
-| `slidecodec-core` | foundation | Shared traits, pixel/sample types, backend capability metadata, device-surface contracts, scratch/context contracts. No image-format logic. |
-| `slidecodec-tilecodec` | codec | Tile decompression primitives: Deflate, Zstd, LZW, Uncompressed. Implements `TileDecompress` from `core`. |
-| `slidecodec-jpeg` | codec | Native pure-Rust JPEG decode for WSI tiles. CPU-first. Owns SIMD backends and fused entropy/IDCT/upsample paths. |
-| `slidecodec-j2k-native` | codec engine | Internal, unpublished pure-Rust JPEG 2000 / HTJ2K engine. Lives under `#![forbid(unsafe_code)]` and uses `fearless_simd`. |
-| `slidecodec-j2k` | codec | Public JPEG 2000 / HTJ2K crate. Wraps `j2k-native` with the slidecodec-core trait surface (inspect, decode, ROI, scaled, row-bounded, tile-batch). |
-| `slidecodec-j2k-compare` | dev-only | OpenJPEG FFI bindings used as a reference decoder for conformance and parity testing. Unpublished. |
-| `slidecodec-jpeg-metal` | adapter | Apple Metal device-output adapter for `slidecodec-jpeg`. Hosts compute kernels for color conversion, interleave/pack, and `MTLBuffer` production. |
-| `slidecodec-j2k-metal` | adapter | Apple Metal device-output adapter for `slidecodec-j2k`. Same shape as the JPEG adapter. |
-| `slidecodec-jpeg-cuda` | adapter | CUDA-facing API adapter for JPEG. In `0.1.0` it validates fallback / unavailability behavior and exposes the device-output API surface; no runtime CUDA execution is shipped. |
-| `slidecodec-j2k-cuda` | adapter | CUDA-facing API adapter for J2K. Same shape and same `0.1.0` constraints as `jpeg-cuda`. |
-| `slidecodec-cli` | binary | `slidecodec inspect <file>` entry point. Header parsing only, no decode. |
+| `ashlar-core` | foundation | Shared traits, pixel/sample types, backend capability metadata, device-surface contracts, scratch/context contracts. No image-format logic. |
+| `ashlar-tilecodec` | codec | Tile decompression primitives: Deflate, Zstd, LZW, Uncompressed. Implements `TileDecompress` from `core`. |
+| `ashlar-jpeg` | codec | Native pure-Rust JPEG decode for WSI tiles. CPU-first. Owns SIMD backends and fused entropy/IDCT/upsample paths. |
+| `ashlar-j2k-native` | codec engine | Internal, unpublished pure-Rust JPEG 2000 / HTJ2K engine. Lives under `#![forbid(unsafe_code)]` and uses `fearless_simd`. |
+| `ashlar-j2k` | codec | Public JPEG 2000 / HTJ2K crate. Wraps `j2k-native` with the ashlar-core trait surface (inspect, decode, ROI, scaled, row-bounded, tile-batch). |
+| `ashlar-j2k-compare` | dev-only | OpenJPEG FFI bindings used as a reference decoder for conformance and parity testing. Unpublished. |
+| `ashlar-jpeg-metal` | adapter | Apple Metal device-output adapter for `ashlar-jpeg`. Hosts compute kernels for color conversion, interleave/pack, and `MTLBuffer` production. |
+| `ashlar-j2k-metal` | adapter | Apple Metal device-output adapter for `ashlar-j2k`. Same shape as the JPEG adapter. |
+| `ashlar-jpeg-cuda` | adapter | CUDA-facing API adapter for JPEG. In `0.1.0` it validates fallback / unavailability behavior and exposes the device-output API surface; no runtime CUDA execution is shipped. |
+| `ashlar-j2k-cuda` | adapter | CUDA-facing API adapter for J2K. Same shape and same `0.1.0` constraints as `jpeg-cuda`. |
+| `ashlar-cli` | binary | `ashlar inspect <file>` entry point. Header parsing only, no decode. |
 
 Out-of-tree but in-repo:
 
@@ -52,7 +52,7 @@ Out-of-tree but in-repo:
 
 ## Layered architecture and dependency rules
 
-slidecodec is organized as four concentric layers. Dependencies must flow
+ashlar is organized as four concentric layers. Dependencies must flow
 inward only. An agent adding a dependency edge that points outward is changing
 the architecture and should stop and update this document first.
 
@@ -62,17 +62,17 @@ foundation  →  codec engines  →  codecs  →  adapters  →  binary
 
 | Layer | Members | May depend on |
 |-------|---------|---------------|
-| foundation | `slidecodec-core` | `thiserror` only. No other workspace crate. `no_std + alloc` posture. Contains only the x86 CPUID/XGETBV unsafe required for CPU feature detection. |
-| codec engines | `slidecodec-j2k-native` | foundation. Internal only. Not re-exported. |
-| codecs | `slidecodec-jpeg`, `slidecodec-j2k`, `slidecodec-tilecodec` | foundation, codec engines. Must not depend on each other. Must not depend on adapters or `cli`. |
-| adapters | `slidecodec-jpeg-metal`, `slidecodec-j2k-metal`, `slidecodec-jpeg-cuda`, `slidecodec-j2k-cuda` | foundation, exactly one matching codec, optional engine for the matching codec. Adapters in different format families must not depend on each other. |
-| binary | `slidecodec-cli` | foundation, codecs. Must not depend on adapters (kept host-neutral). |
-| dev-only | `slidecodec-j2k-compare` | foundation. Used as a reference comparator in tests/benches; never a runtime dependency. |
+| foundation | `ashlar-core` | `thiserror` only. No other workspace crate. `no_std + alloc` posture. Contains only the x86 CPUID/XGETBV unsafe required for CPU feature detection. |
+| codec engines | `ashlar-j2k-native` | foundation. Internal only. Not re-exported. |
+| codecs | `ashlar-jpeg`, `ashlar-j2k`, `ashlar-tilecodec` | foundation, codec engines. Must not depend on each other. Must not depend on adapters or `cli`. |
+| adapters | `ashlar-jpeg-metal`, `ashlar-j2k-metal`, `ashlar-jpeg-cuda`, `ashlar-j2k-cuda` | foundation, exactly one matching codec, optional engine for the matching codec. Adapters in different format families must not depend on each other. |
+| binary | `ashlar-cli` | foundation, codecs. Must not depend on adapters (kept host-neutral). |
+| dev-only | `ashlar-j2k-compare` | foundation. Used as a reference comparator in tests/benches; never a runtime dependency. |
 
 Hard rules enforced today (the goal is to mechanize these as the workspace
 matures, mirroring harness-engineering structural tests):
 
-1. `slidecodec-core` is a leaf in the import graph. It does not import any
+1. `ashlar-core` is a leaf in the import graph. It does not import any
    other workspace crate.
 2. Codec crates do not import each other. Cross-format work goes through
    `core` types or through caller code.
@@ -83,8 +83,8 @@ matures, mirroring harness-engineering structural tests):
    public API but reports unavailability.
 5. CUDA sources expose the same device-output surface but make no runtime
    performance claim in `0.1.0`.
-6. `slidecodec-jpeg` keeps its NEON and x86 intrinsics scoped per-backend
-   in `crates/slidecodec-jpeg/src/backend/`. `slidecodec-j2k-native` keeps
+6. `ashlar-jpeg` keeps its NEON and x86 intrinsics scoped per-backend
+   in `crates/ashlar-jpeg/src/backend/`. `ashlar-j2k-native` keeps
    its SIMD behind `fearless_simd` so the engine can stay
    `#![forbid(unsafe_code)]`.
 7. Adapter crates consume codec planning hooks through public `adapter`
@@ -95,27 +95,27 @@ matures, mirroring harness-engineering structural tests):
 Workspace edges (excluding external crates and `dev-dependencies`):
 
 ```
-slidecodec-core         (leaf)
+ashlar-core         (leaf)
 
-slidecodec-tilecodec    -> slidecodec-core
+ashlar-tilecodec    -> ashlar-core
 
-slidecodec-jpeg         -> slidecodec-core
-slidecodec-jpeg-metal   -> slidecodec-jpeg, slidecodec-core
-slidecodec-jpeg-cuda    -> slidecodec-jpeg, slidecodec-core
+ashlar-jpeg         -> ashlar-core
+ashlar-jpeg-metal   -> ashlar-jpeg, ashlar-core
+ashlar-jpeg-cuda    -> ashlar-jpeg, ashlar-core
 
-slidecodec-j2k-native   -> slidecodec-core
-slidecodec-j2k          -> slidecodec-j2k-native, slidecodec-core
-slidecodec-j2k-metal    -> slidecodec-j2k, slidecodec-j2k-native, slidecodec-core
-slidecodec-j2k-cuda     -> slidecodec-j2k, slidecodec-core
+ashlar-j2k-native   -> ashlar-core
+ashlar-j2k          -> ashlar-j2k-native, ashlar-core
+ashlar-j2k-metal    -> ashlar-j2k, ashlar-j2k-native, ashlar-core
+ashlar-j2k-cuda     -> ashlar-j2k, ashlar-core
 
-slidecodec-cli          -> slidecodec-jpeg, slidecodec-j2k, slidecodec-core
+ashlar-cli          -> ashlar-jpeg, ashlar-j2k, ashlar-core
 
-slidecodec-j2k-compare  -> slidecodec-core (test/bench reference only)
+ashlar-j2k-compare  -> ashlar-core (test/bench reference only)
 ```
 
 ## Core abstractions
 
-These live in `slidecodec-core` and are the contract every codec and adapter
+These live in `ashlar-core` and are the contract every codec and adapter
 implements. New extension points belong here.
 
 ### Codec entry traits
@@ -211,12 +211,12 @@ decoder = Decoder::from_view(view)
 
 JPEG is fully fused on CPU: entropy decode, IDCT scheduling, upsampling, ROI,
 and the fast 4:2:0 path live together in
-`crates/slidecodec-jpeg/src/entropy/sequential.rs` because splitting them
+`crates/ashlar-jpeg/src/entropy/sequential.rs` because splitting them
 regresses WSI tile-batch performance. Splitting that module is planned but
 gated on stable benchmark and parity coverage.
 
 J2K parses boxes (COD, QCD, etc.) and the codestream, then drives
-`slidecodec-j2k-native` (DWT, context modeling, arithmetic decode) before
+`ashlar-j2k-native` (DWT, context modeling, arithmetic decode) before
 filling the caller-owned output buffer.
 
 The Metal v1 path keeps parse and entropy decode on CPU and hands decoded
@@ -246,7 +246,7 @@ device backend. The adaptive routing policy is iterating in
 
 ## Lifecycle and ownership
 
-slidecodec deliberately externalizes anything that resembles a runtime.
+ashlar deliberately externalizes anything that resembles a runtime.
 
 - **Buffers** are caller-owned. Every `decode_*_into` writes into a slice the
   caller provides.
@@ -264,17 +264,17 @@ slidecodec deliberately externalizes anything that resembles a runtime.
 
 | Change | Crate |
 |--------|-------|
-| New shared trait, pixel format, or backend kind | `slidecodec-core` |
-| New JPEG decode shape, marker, or CPU optimization | `slidecodec-jpeg` |
-| New JPEG GPU shape | `slidecodec-jpeg-metal` (or `-cuda`) |
-| New J2K codestream feature, ROI/scaled support | `slidecodec-j2k-native`, surfaced through `slidecodec-j2k` |
-| New tile decompression codec (e.g. LZ4) | `slidecodec-tilecodec` |
-| New CLI subcommand | `slidecodec-cli` |
+| New shared trait, pixel format, or backend kind | `ashlar-core` |
+| New JPEG decode shape, marker, or CPU optimization | `ashlar-jpeg` |
+| New JPEG GPU shape | `ashlar-jpeg-metal` (or `-cuda`) |
+| New J2K codestream feature, ROI/scaled support | `ashlar-j2k-native`, surfaced through `ashlar-j2k` |
+| New tile decompression codec (e.g. LZ4) | `ashlar-tilecodec` |
+| New CLI subcommand | `ashlar-cli` |
 | New conformance fixture | `corpus/conformance/` plus its manifest |
 | New regression repro | `corpus/regressions/issue-NNN.<ext>` |
 
 When in doubt, prefer adding to the lowest layer that the new behavior
-genuinely requires, and never bypass `slidecodec-core` to share types
+genuinely requires, and never bypass `ashlar-core` to share types
 between codec crates.
 
 ## Build and platform
@@ -290,10 +290,10 @@ between codec crates.
 - Release profile: `lto = "fat"`, `codegen-units = 1`, `strip = "symbols"`,
   `opt-level = 3`. `release-bench` inherits `release` but keeps debug info.
 - Notable feature flags:
-  - `slidecodec-j2k-native`: `std` (default), `simd` (default, requires
+  - `ashlar-j2k-native`: `std` (default), `simd` (default, requires
     `std`), `logging`.
-  - `slidecodec-jpeg`: `scalar-only` retained for fuzzing and reference.
-  - `slidecodec-jpeg-cuda`, `slidecodec-j2k-cuda`: `cuda-runtime` is
+  - `ashlar-jpeg`: `scalar-only` retained for fuzzing and reference.
+  - `ashlar-jpeg-cuda`, `ashlar-j2k-cuda`: `cuda-runtime` is
     declared but unused in `0.1.0`.
 
 ## Active areas
@@ -302,7 +302,7 @@ These are the surfaces under active change. Treat anything here as
 provisional and check the most recent commits before relying on it.
 
 - JPEG 2000 / HTJ2K ROI and reduced-resolution performance work in
-  `slidecodec-j2k` and `slidecodec-j2k-native`.
+  `ashlar-j2k` and `ashlar-j2k-native`.
 - Metal adapter hardening: aligning the adapter session model with the
   wgpu-hal style, exposing the underlying `MTLBuffer` from `DeviceSurface`,
   and pushing more of the J2K full-tile path onto the GPU.
@@ -314,7 +314,7 @@ provisional and check the most recent commits before relying on it.
 ## Stability posture
 
 `0.1.0` is a pre-1.0 source release. The CPU WSI decode surfaces in
-`slidecodec-jpeg`, `slidecodec-j2k`, and `slidecodec-tilecodec` are the
+`ashlar-jpeg`, `ashlar-j2k`, and `ashlar-tilecodec` are the
 primary supported APIs. The Metal adapter APIs are hardening. The CUDA
 adapter APIs are compatibility surfaces only. Breaking changes to any of
 these surfaces should be reflected here and in [`CHANGELOG.md`](../CHANGELOG.md).

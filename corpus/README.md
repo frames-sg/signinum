@@ -1,4 +1,4 @@
-# slidecodec corpus
+# ashlar corpus
 
 Test data committed to this repo. Size budget: ~30 MB total.
 

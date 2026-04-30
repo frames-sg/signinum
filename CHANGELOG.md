@@ -11,28 +11,28 @@ JPEG 2000 / HTJ2K ROI and GPU adapter APIs settle.
 
 ### Added
 
-- `slidecodec-core` shared trait/type crate:
+- `ashlar-core` shared trait/type crate:
   - `ImageDecode`, `ImageDecodeRows`, `TileBatchDecode`, `TileDecompress`
   - `PixelFormat`, `Downscale`, `Info`, `Rect`, `DecodeOutcome`
   - `ScratchPool` and `DecoderContext` contracts
-- `slidecodec-jpeg` as the WSI-oriented JPEG implementation with:
+- `ashlar-jpeg` as the WSI-oriented JPEG implementation with:
   - borrowed parse/decode surfaces
   - row-streaming decode
   - region and scaled decode
   - tile-batch/context/scratch reuse
   - external-corpus and parity coverage
-- `slidecodec-j2k` with:
+- `ashlar-j2k` with:
   - JP2 / raw codestream inspect
   - full-frame, region, scaled, row-streaming, and tile-batch decode
   - HTJ2K coverage
   - OpenJPEG differential tests and compare bench
-- `slidecodec-tilecodec` with:
+- `ashlar-tilecodec` with:
   - `DeflateCodec`
   - `ZstdCodec`
   - `LzwCodec`
   - `UncompressedCodec`
   - typed scratch pools and compare bench coverage
-- `slidecodec-cli` inspect dispatch for JPEG and JPEG 2000 inputs
+- `ashlar-cli` inspect dispatch for JPEG and JPEG 2000 inputs
 - workspace-level CI coverage for tests, clippy, bench build, fuzz-target
   build, and `cargo deny`
 

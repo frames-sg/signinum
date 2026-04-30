@@ -15,18 +15,18 @@ configured. Do not add placeholder `repository` or `homepage` metadata to
 Crates.io publication is staged because workspace crates depend on each other.
 The first publishable crate is:
 
-1. `slidecodec-core`
+1. `ashlar-core`
 
-After `slidecodec-core` is available in the registry, crates that depend only
+After `ashlar-core` is available in the registry, crates that depend only
 on it can be published or dry-run verified:
 
-1. `slidecodec-jpeg`
-2. `slidecodec-tilecodec`
+1. `ashlar-jpeg`
+2. `ashlar-tilecodec`
 
 The JPEG Metal/CUDA adapter crates should be published only after
-`slidecodec-jpeg` is available.
+`ashlar-jpeg` is available.
 
 The JPEG 2000 crates still need an explicit registry plan before publishing:
-`slidecodec-j2k` uses the repo-local native engine and its comparison benches
+`ashlar-j2k` uses the repo-local native engine and its comparison benches
 also exercise the Metal adapter. Keep those crates source-published until the
 crate split and publish order are made acyclic for crates.io.

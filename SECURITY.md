@@ -3,7 +3,7 @@
 ## Reporting a Vulnerability
 
 JPEG decoders ingest adversarial byte streams from the wild. If you find a
-crash, memory-safety violation, or undefined behavior in `slidecodec`, please
+crash, memory-safety violation, or undefined behavior in `ashlar`, please
 report it privately rather than opening a public issue.
 
 Use GitHub's private vulnerability reporting for the repository, or contact the

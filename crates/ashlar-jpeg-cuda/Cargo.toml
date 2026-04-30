@@ -1,0 +1,35 @@
+[package]
+name = "ashlar-jpeg-cuda"
+description = "CUDA device-output adapter for ashlar-jpeg"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lib]
+name = "ashlar_jpeg_cuda"
+path = "src/lib.rs"
+
+[features]
+default = []
+cuda-runtime = []
+
+[dependencies]
+ashlar-core = { path = "../ashlar-core", version = "=0.1.0" }
+ashlar-jpeg = { path = "../ashlar-jpeg", version = "=0.1.0" }
+thiserror = { workspace = true }
+
+[lints.rust]
+unsafe_code = "forbid"
+unreachable_pub = "warn"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+too_many_lines = "allow"

@@ -4650,6 +4650,19 @@ fn borrow_slice_buffer<T>(device: &Device, data: &[T]) -> Buffer {
 }
 
 #[cfg(target_os = "macos")]
+fn copied_slice_buffer<T>(device: &Device, data: &[T]) -> Buffer {
+    if data.is_empty() {
+        device.new_buffer(1, MTLResourceOptions::StorageModeShared)
+    } else {
+        device.new_buffer_with_data(
+            data.as_ptr().cast(),
+            size_of_val(data) as u64,
+            MTLResourceOptions::StorageModeShared,
+        )
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn classic_coefficients_scratch_bytes(job_count: usize) -> Result<usize, Error> {
     job_count
         .max(1)
@@ -4730,9 +4743,9 @@ pub(crate) fn decode_inverse_mct(job: J2kInverseMctJob<'_>) -> Result<Vec<Buffer
             addend1,
             addend2,
         };
-        let plane0_buffer = borrow_slice_buffer(&runtime.device, plane0);
-        let plane1_buffer = borrow_slice_buffer(&runtime.device, plane1);
-        let plane2_buffer = borrow_slice_buffer(&runtime.device, plane2);
+        let plane0_buffer = copied_slice_buffer(&runtime.device, plane0);
+        let plane1_buffer = copied_slice_buffer(&runtime.device, plane1);
+        let plane2_buffer = copied_slice_buffer(&runtime.device, plane2);
         let status = J2kMctStatus::default();
         let status_buffer = runtime.device.new_buffer_with_data(
             (&raw const status).cast(),

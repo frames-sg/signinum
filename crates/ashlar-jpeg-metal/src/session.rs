@@ -233,6 +233,7 @@ fn digest_bytes(bytes: &[u8]) -> u64 {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn batch_shape_cache_hits_for_repeated_input() {
         let mut session = SessionState::default();

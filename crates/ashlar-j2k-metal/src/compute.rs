@@ -4752,7 +4752,11 @@ pub(crate) fn decode_inverse_mct(job: J2kInverseMctJob<'_>) -> Result<Vec<Buffer
             (&raw const params).cast(),
         );
         encoder.set_buffer(4, Some(&status_buffer), 0);
-        let width = runtime.inverse_mct.thread_execution_width().max(1);
+        let width = runtime
+            .inverse_mct
+            .thread_execution_width()
+            .max(1)
+            .min(len as u64);
         encoder.dispatch_threads(
             MTLSize {
                 width: len as u64,
@@ -4839,7 +4843,11 @@ fn dispatch_inverse_mct_buffers_in_command_buffer(
         (&raw const params).cast(),
     );
     encoder.set_buffer(4, Some(&status_buffer), 0);
-    let width = runtime.inverse_mct.thread_execution_width().max(1);
+    let width = runtime
+        .inverse_mct
+        .thread_execution_width()
+        .max(1)
+        .min(len as u64);
     encoder.dispatch_threads(
         MTLSize {
             width: len as u64,

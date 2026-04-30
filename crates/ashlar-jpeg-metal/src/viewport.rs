@@ -1,13 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use ashlar_core::{BackendRequest, Downscale, PixelFormat, Rect};
-use ashlar_jpeg::{
-    adapter::{
-        build_metal_fast420_packet_for_decoder, build_metal_fast422_packet_for_decoder,
-        build_metal_fast444_packet_for_decoder,
-    },
-    Decoder as CpuDecoder, Rect as JpegRect, ScratchPool,
+#[cfg(target_os = "macos")]
+use ashlar_jpeg::adapter::{
+    build_metal_fast420_packet_for_decoder, build_metal_fast422_packet_for_decoder,
+    build_metal_fast444_packet_for_decoder,
 };
+use ashlar_jpeg::{Decoder as CpuDecoder, Rect as JpegRect, ScratchPool};
 
 use crate::{Error, Surface};
 
@@ -151,6 +150,9 @@ fn choose_viewport_surface_strategy_for_decoder(
     if !matches!(backend, BackendRequest::Auto) {
         return choose_viewport_surface_strategy(workload, backend);
     }
+
+    #[cfg(not(target_os = "macos"))]
+    let _ = decoder;
 
     #[cfg(target_os = "macos")]
     {

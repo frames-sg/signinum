@@ -1,3 +1,5 @@
+#![cfg(target_os = "macos")]
+
 use ashlar_core::{
     BackendKind, BackendRequest, DeviceSubmission, DeviceSurface, Downscale, ImageDecode,
     ImageDecodeDevice, ImageDecodeSubmit, PixelFormat, Rect,

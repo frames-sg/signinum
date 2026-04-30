@@ -3,11 +3,12 @@
 use ashlar_core::{BackendRequest, Downscale, PixelFormat, Rect};
 use ashlar_jpeg::{Decoder, ScratchPool};
 use ashlar_jpeg_metal::viewport::{
-    choose_viewport_surface_strategy, compose_viewport_cpu, compose_viewport_hybrid,
-    decode_viewport_region_cpu, decode_viewport_region_hybrid, decode_viewport_to_surface,
-    is_contiguous_viewport_workload, suggest_viewport_workload, viewport_source_bounds,
-    ViewportSurfaceStrategy, ViewportTile,
+    choose_viewport_surface_strategy, compose_viewport_cpu, decode_viewport_region_cpu,
+    decode_viewport_to_surface, is_contiguous_viewport_workload, suggest_viewport_workload,
+    viewport_source_bounds, ViewportSurfaceStrategy, ViewportTile,
 };
+#[cfg(target_os = "macos")]
+use ashlar_jpeg_metal::viewport::{compose_viewport_hybrid, decode_viewport_region_hybrid};
 
 const BASELINE_420: &[u8] = include_bytes!("../../../corpus/conformance/baseline_420_16x16.jpg");
 
@@ -410,8 +411,9 @@ fn non_macos_explicit_metal_viewport_surface_is_unavailable() {
         tiles: quadrant_tiles().to_vec(),
     };
 
-    let err = decode_viewport_to_surface(&decoder, &mut pool, &workload, BackendRequest::Metal)
-        .expect_err("explicit Metal should be unavailable");
-
-    assert!(matches!(err, ashlar_jpeg_metal::Error::MetalUnavailable));
+    let result = decode_viewport_to_surface(&decoder, &mut pool, &workload, BackendRequest::Metal);
+    assert!(matches!(
+        result,
+        Err(ashlar_jpeg_metal::Error::MetalUnavailable)
+    ));
 }

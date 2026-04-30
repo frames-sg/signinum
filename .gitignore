@@ -1,6 +1,8 @@
-/target
+target/
 **/*.rs.bk
 Cargo.lock.bak
 .vscode/
 .idea/
 *.swp
+__pycache__/
+*.py[cod]

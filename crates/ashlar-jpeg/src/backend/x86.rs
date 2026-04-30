@@ -174,8 +174,14 @@ pub(crate) fn fill_rgb_row_pair_from_420_cropped(
     ROW_PAIR_SCRATCH.with(|scratch| {
         let mut scratch = scratch.borrow_mut();
         scratch.ensure_width(crop_width);
-        let cb_top = &mut scratch.cb_top[..crop_width];
-        let cr_top = &mut scratch.cr_top[..crop_width];
+        let RowPairScratch {
+            cb_top,
+            cb_bottom,
+            cr_top,
+            cr_bottom,
+        } = &mut *scratch;
+        let cb_top = &mut cb_top[..crop_width];
+        let cr_top = &mut cr_top[..crop_width];
         fill_cropped_h2v2_row(prev_cb, curr_cb, crop_start, cb_top);
         fill_cropped_h2v2_row(prev_cr, curr_cr, crop_start, cr_top);
         unsafe {
@@ -183,8 +189,8 @@ pub(crate) fn fill_rgb_row_pair_from_420_cropped(
         }
 
         if let (Some(y_bottom), Some(dst_bottom)) = (y_bottom, dst_bottom) {
-            let cb_bottom = &mut scratch.cb_bottom[..crop_width];
-            let cr_bottom = &mut scratch.cr_bottom[..crop_width];
+            let cb_bottom = &mut cb_bottom[..crop_width];
+            let cr_bottom = &mut cr_bottom[..crop_width];
             fill_cropped_h2v2_row(next_cb, curr_cb, crop_start, cb_bottom);
             fill_cropped_h2v2_row(next_cr, curr_cr, crop_start, cr_bottom);
             unsafe {
@@ -248,11 +254,17 @@ unsafe fn fill_rgb_row_pair_from_420_avx2(
     scratch: &mut RowPairScratch,
 ) {
     let width = y_top.len();
-    let cb_top = &mut scratch.cb_top[..width];
-    let cr_top = &mut scratch.cr_top[..width];
+    let RowPairScratch {
+        cb_top,
+        cb_bottom,
+        cr_top,
+        cr_bottom,
+    } = scratch;
+    let cb_top = &mut cb_top[..width];
+    let cr_top = &mut cr_top[..width];
     if let (Some(y_bottom), Some(dst_bottom)) = (y_bottom, dst_bottom) {
-        let cb_bottom = &mut scratch.cb_bottom[..width];
-        let cr_bottom = &mut scratch.cr_bottom[..width];
+        let cb_bottom = &mut cb_bottom[..width];
+        let cr_bottom = &mut cr_bottom[..width];
         upsample_h2v2_fancy_rows(prev_cb, curr_cb, next_cb, width, cb_top, cb_bottom);
         upsample_h2v2_fancy_rows(prev_cr, curr_cr, next_cr, width, cr_top, cr_bottom);
         unsafe {

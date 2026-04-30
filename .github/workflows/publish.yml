@@ -18,6 +18,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   CRATES_IO_API_TOKEN: ${{ secrets.CRATES_IO_API_TOKEN }}
+  CRATES_IO_INDEX_SETTLE_SECONDS: "130"
   DRY_RUN_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.dry-run-only }}
 
 jobs:
@@ -29,6 +30,8 @@ jobs:
       - run: scripts/publish-crate.sh ashlar-core
 
   publish-ashlar-j2k-native:
+    needs:
+      - publish-ashlar-core
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -37,7 +40,7 @@ jobs:
 
   publish-ashlar-j2k-compare:
     needs:
-      - publish-ashlar-core
+      - publish-ashlar-j2k-native
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -46,7 +49,7 @@ jobs:
 
   publish-ashlar-tilecodec:
     needs:
-      - publish-ashlar-core
+      - publish-ashlar-j2k-compare
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -55,7 +58,7 @@ jobs:
 
   publish-ashlar-jpeg:
     needs:
-      - publish-ashlar-core
+      - publish-ashlar-tilecodec
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -64,7 +67,6 @@ jobs:
 
   publish-ashlar-jpeg-metal:
     needs:
-      - publish-ashlar-core
       - publish-ashlar-jpeg
     runs-on: ubuntu-latest
     steps:
@@ -74,8 +76,7 @@ jobs:
 
   publish-ashlar-jpeg-cuda:
     needs:
-      - publish-ashlar-core
-      - publish-ashlar-jpeg
+      - publish-ashlar-jpeg-metal
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -84,9 +85,7 @@ jobs:
 
   publish-ashlar-j2k:
     needs:
-      - publish-ashlar-core
-      - publish-ashlar-j2k-native
-      - publish-ashlar-j2k-compare
+      - publish-ashlar-jpeg-cuda
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -95,8 +94,6 @@ jobs:
 
   publish-ashlar-j2k-metal:
     needs:
-      - publish-ashlar-core
-      - publish-ashlar-j2k-native
       - publish-ashlar-j2k
     runs-on: ubuntu-latest
     steps:
@@ -106,9 +103,7 @@ jobs:
 
   publish-ashlar-j2k-cuda:
     needs:
-      - publish-ashlar-core
-      - publish-ashlar-j2k-native
-      - publish-ashlar-j2k
+      - publish-ashlar-j2k-metal
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -117,8 +112,7 @@ jobs:
 
   publish-ashlar-cli:
     needs:
-      - publish-ashlar-jpeg
-      - publish-ashlar-j2k
+      - publish-ashlar-j2k-cuda
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

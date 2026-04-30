@@ -12,6 +12,7 @@ members = [
     "crates/ashlar-jpeg-metal",
     "crates/ashlar-tilecodec",
     "crates/ashlar-cli",
+    "xtask",
 ]
 
 [workspace.package]

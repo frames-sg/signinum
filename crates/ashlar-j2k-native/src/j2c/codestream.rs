@@ -162,7 +162,7 @@ pub(crate) fn read_header<'a>(
         .min(min_num_resolution_levels - 1);
 
     // If the user defined a maximum resolution level that is lower than the
-    // maximum available one, the final image needs to be shrinked further.
+    // maximum available one, the final image needs to be shrunk further.
     size_data.x_resolution_shrink_factor *= 1 << skipped_resolution_levels;
     size_data.y_resolution_shrink_factor *= 1 << skipped_resolution_levels;
 

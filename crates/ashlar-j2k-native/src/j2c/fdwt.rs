@@ -9,6 +9,8 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
+use crate::math::floor_f32;
+
 /// 9-7 filter lifting coefficients (Table F.4 in ITU-T T.800).
 const ALPHA: f32 = -1.586_134_3;
 const BETA: f32 = -0.052_980_117;
@@ -206,7 +208,7 @@ fn forward_lift_53(data: &mut [f32]) {
         } else {
             data[last_even]
         };
-        data[i] -= ((left + right) * 0.5).floor();
+        data[i] -= floor_f32((left + right) * 0.5);
     }
 
     // Step 2: Update (low-pass) — update even samples
@@ -214,7 +216,7 @@ fn forward_lift_53(data: &mut [f32]) {
     for i in (0..n).step_by(2) {
         let left = if i > 0 { data[i - 1] } else { data[1] };
         let right = if i + 1 < n { data[i + 1] } else { left };
-        data[i] += ((left + right) * 0.25 + 0.5).floor();
+        data[i] += floor_f32((left + right) * 0.25 + 0.5);
     }
 }
 

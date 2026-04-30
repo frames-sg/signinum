@@ -3,6 +3,7 @@
 //! This is the encoding counterpart of `arithmetic_decoder.rs`.
 //! It uses the same QE probability table and context state machine.
 
+use alloc::vec;
 use alloc::vec::Vec;
 
 /// MQ arithmetic encoder context (identical layout to decoder context).

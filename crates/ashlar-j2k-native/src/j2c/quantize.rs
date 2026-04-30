@@ -7,6 +7,8 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
+use crate::math::{floor_f32, floor_f64, log2_f64, powi_f64, round_f32, round_f64};
+
 /// Quantization parameters for a single subband.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct QuantStepSize {
@@ -145,14 +147,14 @@ fn step_from_gain(step: f64, guard_bits: u8, bit_depth: u8) -> QuantStepSize {
         };
     }
 
-    let log2_step = step.log2();
-    let exponent = -(log2_step.floor() as i32) + guard_bits as i32;
+    let log2_step = log2_f64(step);
+    let exponent = -(floor_f64(log2_step) as i32) + guard_bits as i32;
     let exponent = exponent.clamp(0, 31) as u16;
 
     // mantissa = (step / 2^(-exponent+guard_bits) - 1) * 2048
-    let reconstructed_base = 2.0f64.powi(-(exponent as i32) + guard_bits as i32);
+    let reconstructed_base = powi_f64(2.0, -(exponent as i32) + guard_bits as i32);
     let mantissa = if reconstructed_base > 0.0 {
-        ((step / reconstructed_base - 1.0) * 2048.0).round() as u16
+        round_f64((step / reconstructed_base - 1.0) * 2048.0) as u16
     } else {
         0
     };
@@ -177,7 +179,7 @@ pub(crate) fn quantize_subband(
 ) -> Vec<i32> {
     if reversible {
         // No quantization: round to nearest integer
-        coefficients.iter().map(|&c| c.round() as i32).collect()
+        coefficients.iter().map(|&c| round_f32(c) as i32).collect()
     } else {
         let delta = step_size.delta(guard_bits);
         if delta <= 0.0 {
@@ -190,7 +192,7 @@ pub(crate) fn quantize_subband(
             .map(|&c| {
                 // Deadzone quantization: q = sign(c) * floor(|c| / Δ)
                 let sign = if c < 0.0 { -1 } else { 1 };
-                let magnitude = (c.abs() * inv_delta).floor() as i32;
+                let magnitude = floor_f32(c.abs() * inv_delta) as i32;
                 sign * magnitude
             })
             .collect()

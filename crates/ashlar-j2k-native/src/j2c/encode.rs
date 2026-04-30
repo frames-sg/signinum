@@ -16,6 +16,7 @@ use super::forward_mct;
 use super::ht_block_encode;
 use super::packet_encode::{self, CodeBlockPacketData, ResolutionPacket, SubbandPrecinct};
 use super::quantize::{self, QuantStepSize};
+use crate::math::{floor_f32, log2_f32};
 use crate::{DecodeSettings, Image};
 
 /// Encoding options for JPEG 2000.
@@ -496,7 +497,7 @@ fn max_decomposition_levels(width: u32, height: u32) -> u8 {
     if min_dim <= 1 {
         return 0;
     }
-    (min_dim as f32).log2().floor() as u8
+    floor_f32(log2_f32(min_dim as f32)) as u8
 }
 
 #[cfg(test)]

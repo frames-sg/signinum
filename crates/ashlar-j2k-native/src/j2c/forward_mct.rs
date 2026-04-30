@@ -4,6 +4,10 @@
 //! - Forward RCT (Reversible Color Transform) for lossless mode
 //! - Forward ICT (Irreversible Color Transform) for lossy mode
 
+use alloc::vec::Vec;
+
+use crate::math::floor_f32;
+
 /// Apply the forward Reversible Color Transform (RCT) in-place.
 ///
 /// Converts (R, G, B) to (Y, Cb, Cr) using integer arithmetic:
@@ -29,7 +33,7 @@ pub(crate) fn forward_rct(components: &mut [Vec<f32>]) {
         let g0 = *g;
         let b0 = *b;
 
-        let y = ((r0 + 2.0 * g0 + b0) * 0.25).floor();
+        let y = floor_f32((r0 + 2.0 * g0 + b0) * 0.25);
         let cb = b0 - g0;
         let cr = r0 - g0;
 

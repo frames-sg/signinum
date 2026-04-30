@@ -252,8 +252,8 @@ ASHLAR_BENCH_INPUTS=/Users/user/Bench/SlideViewer/downloads/openslide-testdata-e
 
 ## `ashlar-j2k`
 
-`ashlar-j2k` carries a dedicated Criterion comparator bench at
-`crates/ashlar-j2k/benches/compare.rs`.
+`ashlar-j2k` and `ashlar-j2k-metal` carry a dedicated Criterion comparator
+bench at `crates/ashlar-j2k-metal/benches/compare.rs`.
 
 It uses deterministic runtime-generated codestreams so the bench is always
 available without a checked-in J2K corpus:
@@ -269,7 +269,9 @@ Bench groups:
 - `decode_rgb`
 - `wsi_region_gray`
 - `wsi_scaled_gray_q4`
+- `wsi_region_scaled_gray_q4`
 - `wsi_tile_batch_gray`
+- `wsi_tile_batch_region_scaled_gray_q4`
 
 Comparator policy:
 
@@ -294,19 +296,21 @@ Region and scale mapping:
 - region decode uses the native OpenJPEG decode-area API and Grok region fields
 - scaled decode uses native OpenJPEG reduction-factor decode and Grok reduction
   decode
+- region+scaled decode projects the source-coordinate ROI onto the
+  reduced-resolution grid with floor-start/ceil-end coverage
 - tile-batch decode is modeled as repeated decode invocations on the same tile
 
 Compile the J2K compare bench:
 
 ```sh
-cargo bench -p ashlar-j2k --bench compare --no-run
+cargo bench -p ashlar-j2k-metal --bench compare --no-run
 ```
 
 Run it locally against in-process OpenJPEG:
 
 ```sh
 ASHLAR_OPENJPEG_COMPRESS_BIN=/opt/homebrew/bin/opj_compress \
-  cargo bench -p ashlar-j2k --bench compare
+  cargo bench -p ashlar-j2k-metal --bench compare
 ```
 
 Run it locally against OpenJPEG and Grok:
@@ -315,7 +319,7 @@ Run it locally against OpenJPEG and Grok:
 ASHLAR_OPENJPEG_COMPRESS_BIN=/opt/homebrew/bin/opj_compress \
 ASHLAR_GROK_SOURCE=/tmp/grok-ashlar \
 ASHLAR_GROK_ROOT=/tmp/grok-ashlar/build/bin \
-  cargo bench -p ashlar-j2k --bench compare
+  cargo bench -p ashlar-j2k-metal --bench compare
 ```
 
 ## Device-output adapters

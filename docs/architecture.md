@@ -123,7 +123,7 @@ implements. New extension points belong here.
 - `ImageCodec` — base trait. Associated types: `Error`, `Warning`, `Pool`.
 - `ImageDecode<'a>` — CPU decode surface. Methods include `inspect`, `parse`,
   `decode_into`, `decode_into_with_scratch`, `decode_region_into`,
-  `decode_scaled_into`.
+  `decode_scaled_into`, and `decode_region_scaled_into`.
 - `ImageDecodeRows<'a, S: RowSink<_>>` — row-bounded decode for large tiles.
 - `ImageDecodeDevice<'a>` — synchronous device decode; returns a
   `DeviceSurface`.
@@ -189,7 +189,8 @@ decoder = Decoder::from_view(view)
     │
     ├─ CPU path ───────────────────────────────────────────────┐
     │   decode_into / decode_into_with_scratch                 │
-    │   decode_region_into / decode_scaled_into / decode_rows  │
+    │   decode_region_into / decode_scaled_into /              │
+    │   decode_region_scaled_into / decode_rows                │
     │     entropy → IDCT or DWT → color conv → output buffer   │
     │     SIMD: AVX2 / SSE4.1 / NEON (jpeg)                    │
     │           fearless_simd (j2k-native)                     │
@@ -217,11 +218,17 @@ gated on stable benchmark and parity coverage.
 
 J2K parses boxes (COD, QCD, etc.) and the codestream, then drives
 `ashlar-j2k-native` (DWT, context modeling, arithmetic decode) before
-filling the caller-owned output buffer.
+filling the caller-owned output buffer. ROI and reduced-resolution requests
+share the same core contract: the ROI is expressed in source coordinates, and
+the returned decoded rectangle covers the floor-start/ceil-end projection onto
+the requested reduced-resolution grid.
 
 The Metal v1 path keeps parse and entropy decode on CPU and hands decoded
 component rows or planes to compute kernels for color conversion, interleave,
-clamp, and pack. ROI staging is currently CPU-side for J2K Metal.
+clamp, and pack where a kernel path exists. J2K Metal exposes full, ROI,
+scaled, and combined ROI+scaled device surfaces; explicit Metal requests return
+Metal-backed surfaces on macOS, while unsupported host or platform shapes fail
+through the adapter error path.
 
 ## Backend story
 

@@ -1366,6 +1366,27 @@ impl<'a> ImageDecode<'a> for Decoder<'a> {
         Decoder::decode_scaled_into_with_scratch(self, pool, out, stride, fmt, scale)
             .map(core_outcome)
     }
+
+    fn decode_region_scaled_into(
+        &mut self,
+        pool: &mut Self::Pool,
+        out: &mut [u8],
+        stride: usize,
+        fmt: PixelFormat,
+        roi: ashlar_core::Rect,
+        scale: Downscale,
+    ) -> Result<CoreDecodeOutcome<Self::Warning>, Self::Error> {
+        Decoder::decode_region_scaled_into_with_scratch(
+            self,
+            pool,
+            out,
+            stride,
+            fmt,
+            jpeg_rect(roi),
+            scale,
+        )
+        .map(core_outcome)
+    }
 }
 
 struct CoreRowSinkAdapter<'a, R: RowSink<u8>> {
@@ -1449,6 +1470,21 @@ impl TileBatchDecode for JpegCodec {
     ) -> Result<CoreDecodeOutcome<Self::Warning>, Self::Error> {
         let dec = Decoder::from_view_in_context(JpegView::parse(input)?, ctx.codec_mut())?;
         dec.decode_scaled_into_with_scratch(pool, out, stride, fmt, scale)
+            .map(core_outcome)
+    }
+
+    fn decode_tile_region_scaled(
+        ctx: &mut CoreDecoderContext<Self::Context>,
+        pool: &mut Self::Pool,
+        input: &[u8],
+        out: &mut [u8],
+        stride: usize,
+        fmt: PixelFormat,
+        roi: ashlar_core::Rect,
+        scale: Downscale,
+    ) -> Result<CoreDecodeOutcome<Self::Warning>, Self::Error> {
+        let dec = Decoder::from_view_in_context(JpegView::parse(input)?, ctx.codec_mut())?;
+        dec.decode_region_scaled_into_with_scratch(pool, out, stride, fmt, jpeg_rect(roi), scale)
             .map(core_outcome)
     }
 }

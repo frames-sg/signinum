@@ -4,14 +4,19 @@ mod common;
 
 use ashlar_j2k::Downscale;
 use common::{
-    ashlar_adaptive_decode, ashlar_adaptive_decode_region, ashlar_adaptive_decode_scaled,
-    ashlar_adaptive_decode_tile_batch, ashlar_decode, ashlar_decode_region, ashlar_decode_scaled,
-    ashlar_decode_tile_batch, ashlar_decode_tile_batch_distinct, ashlar_inspect,
-    ashlar_metal_decode, ashlar_metal_decode_region, ashlar_metal_decode_scaled,
-    ashlar_metal_decode_tile_batch, ashlar_metal_decode_tile_batch_distinct,
-    ashlar_metal_supports_decode, ashlar_metal_supports_region, ashlar_metal_supports_scaled,
-    ashlar_metal_supports_tile_batch, ashlar_metal_supports_tile_batch_distinct, bench_inputs,
-    distinct_rgb_tile_batch_inputs, metal_available, DecodeMode,
+    ashlar_adaptive_decode, ashlar_adaptive_decode_region, ashlar_adaptive_decode_region_scaled,
+    ashlar_adaptive_decode_scaled, ashlar_adaptive_decode_tile_batch,
+    ashlar_adaptive_decode_tile_batch_region_scaled, ashlar_decode, ashlar_decode_region,
+    ashlar_decode_region_scaled, ashlar_decode_scaled, ashlar_decode_tile_batch,
+    ashlar_decode_tile_batch_distinct, ashlar_decode_tile_batch_region_scaled, ashlar_inspect,
+    ashlar_metal_decode, ashlar_metal_decode_region, ashlar_metal_decode_region_scaled,
+    ashlar_metal_decode_scaled, ashlar_metal_decode_tile_batch,
+    ashlar_metal_decode_tile_batch_distinct, ashlar_metal_decode_tile_batch_region_scaled,
+    ashlar_metal_supports_decode, ashlar_metal_supports_region,
+    ashlar_metal_supports_region_scaled, ashlar_metal_supports_scaled,
+    ashlar_metal_supports_tile_batch, ashlar_metal_supports_tile_batch_distinct,
+    ashlar_metal_supports_tile_batch_region_scaled, bench_inputs, distinct_rgb_tile_batch_inputs,
+    metal_available, DecodeMode,
 };
 use criterion::{criterion_group, criterion_main, Criterion};
 
@@ -102,6 +107,48 @@ fn bench_compare(c: &mut Criterion) {
     }
     wsi_scaled.finish();
 
+    let mut wsi_region_scaled = c.benchmark_group("wsi_region_scaled_gray_q4");
+    for input in inputs
+        .iter()
+        .filter(|input| input.mode == DecodeMode::Gray8)
+    {
+        wsi_region_scaled.bench_function(format!("ashlar/{}", input.name), |b| {
+            b.iter(|| {
+                ashlar_decode_region_scaled(&input.bytes, input.mode, 256, Downscale::Quarter);
+            });
+        });
+        wsi_region_scaled.bench_function(format!("ashlar-adaptive/{}", input.name), |b| {
+            b.iter(|| {
+                ashlar_adaptive_decode_region_scaled(
+                    &input.bytes,
+                    input.mode,
+                    256,
+                    Downscale::Quarter,
+                );
+            });
+        });
+        if metal_available()
+            && ashlar_metal_supports_region_scaled(
+                &input.bytes,
+                input.mode,
+                256,
+                Downscale::Quarter,
+            )
+        {
+            wsi_region_scaled.bench_function(format!("ashlar-metal/{}", input.name), |b| {
+                b.iter(|| {
+                    ashlar_metal_decode_region_scaled(
+                        &input.bytes,
+                        input.mode,
+                        256,
+                        Downscale::Quarter,
+                    );
+                });
+            });
+        }
+    }
+    wsi_region_scaled.finish();
+
     let mut wsi_tile_batch = c.benchmark_group("wsi_tile_batch_gray");
     for input in inputs
         .iter()
@@ -120,6 +167,62 @@ fn bench_compare(c: &mut Criterion) {
         }
     }
     wsi_tile_batch.finish();
+
+    let mut wsi_tile_batch_region_scaled =
+        c.benchmark_group("wsi_tile_batch_region_scaled_gray_q4");
+    for input in inputs
+        .iter()
+        .filter(|input| input.mode == DecodeMode::Gray8)
+    {
+        wsi_tile_batch_region_scaled.bench_function(format!("ashlar/{}", input.name), |b| {
+            b.iter(|| {
+                ashlar_decode_tile_batch_region_scaled(
+                    &input.bytes,
+                    input.mode,
+                    256,
+                    Downscale::Quarter,
+                    16,
+                );
+            });
+        });
+        wsi_tile_batch_region_scaled.bench_function(
+            format!("ashlar-adaptive/{}", input.name),
+            |b| {
+                b.iter(|| {
+                    ashlar_adaptive_decode_tile_batch_region_scaled(
+                        input,
+                        256,
+                        Downscale::Quarter,
+                        16,
+                    );
+                });
+            },
+        );
+        if metal_available()
+            && ashlar_metal_supports_tile_batch_region_scaled(
+                &input.bytes,
+                input.mode,
+                256,
+                Downscale::Quarter,
+            )
+        {
+            wsi_tile_batch_region_scaled.bench_function(
+                format!("ashlar-metal/{}", input.name),
+                |b| {
+                    b.iter(|| {
+                        ashlar_metal_decode_tile_batch_region_scaled(
+                            &input.bytes,
+                            input.mode,
+                            256,
+                            Downscale::Quarter,
+                            16,
+                        );
+                    });
+                },
+            );
+        }
+    }
+    wsi_tile_batch_region_scaled.finish();
 
     let mut wsi_tile_batch_32 = c.benchmark_group("wsi_tile_batch_gray_32");
     for input in inputs

@@ -417,6 +417,39 @@ impl MetalTileBatch {
         Ok(slot)
     }
 
+    /// Queue a region decode at reduced resolution, copying the compressed tile bytes.
+    pub fn push_tile_region_scaled(
+        &mut self,
+        input: &[u8],
+        fmt: PixelFormat,
+        roi: Rect,
+        scale: Downscale,
+        backend: BackendRequest,
+    ) -> Result<usize, Error> {
+        self.push_shared_tile_region_scaled(Arc::<[u8]>::from(input), fmt, roi, scale, backend)
+    }
+
+    /// Queue a region decode at reduced resolution backed by shared compressed tile bytes.
+    pub fn push_shared_tile_region_scaled(
+        &mut self,
+        input: Arc<[u8]>,
+        fmt: PixelFormat,
+        roi: Rect,
+        scale: Downscale,
+        backend: BackendRequest,
+    ) -> Result<usize, Error> {
+        let slot = self.submissions.len();
+        let submission = batch::queue_tile_request_shared(
+            &mut self.session,
+            input,
+            fmt,
+            backend,
+            batch::BatchOp::RegionScaled { roi, scale },
+        );
+        self.submissions.push(submission);
+        Ok(slot)
+    }
+
     /// Decode all queued tile requests and return surfaces in submission order.
     pub fn decode_all(self) -> Result<Vec<Surface>, Error> {
         let mut surfaces = Vec::with_capacity(self.submissions.len());
@@ -869,6 +902,21 @@ impl<'a> J2kDecoder<'a> {
         upload_surface(out, dims, fmt, BackendRequest::Cpu)
     }
 
+    fn decode_region_scaled_to_cpu_surface(
+        &mut self,
+        fmt: PixelFormat,
+        roi: Rect,
+        scale: Downscale,
+        plan: DeviceDecodePlan,
+    ) -> Result<Surface, Error> {
+        let dims = plan.output_dims();
+        let stride = dims.0 as usize * fmt.bytes_per_pixel();
+        let mut out = vec![0u8; stride * dims.1 as usize];
+        self.inner
+            .decode_region_scaled_into(&mut self.pool, &mut out, stride, fmt, roi, scale)?;
+        upload_surface(out, dims, fmt, BackendRequest::Cpu)
+    }
+
     #[cfg(target_os = "macos")]
     fn decode_region_to_metal_surface(
         &mut self,
@@ -898,6 +946,23 @@ impl<'a> J2kDecoder<'a> {
         plan: DeviceDecodePlan,
     ) -> Result<Surface, Error> {
         crate::compute::decode_scaled_to_surface(self.inner.bytes(), plan.source_dims(), fmt, scale)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn decode_region_scaled_to_metal_surface(
+        &mut self,
+        fmt: PixelFormat,
+        roi: Rect,
+        scale: Downscale,
+        plan: DeviceDecodePlan,
+    ) -> Result<Surface, Error> {
+        crate::compute::decode_region_scaled_to_surface(
+            self.inner.bytes(),
+            plan.source_dims(),
+            fmt,
+            roi,
+            scale,
+        )
     }
 
     #[cfg(target_os = "macos")]
@@ -935,6 +1000,25 @@ impl<'a> J2kDecoder<'a> {
             self.inner.bytes(),
             plan.source_dims(),
             fmt,
+            scale,
+            device,
+        )
+    }
+
+    #[cfg(target_os = "macos")]
+    fn decode_region_scaled_to_metal_surface_with_device(
+        &mut self,
+        fmt: PixelFormat,
+        roi: Rect,
+        scale: Downscale,
+        plan: DeviceDecodePlan,
+        device: &Device,
+    ) -> Result<Surface, Error> {
+        crate::compute::decode_region_scaled_to_surface_with_device(
+            self.inner.bytes(),
+            plan.source_dims(),
+            fmt,
+            roi,
             scale,
             device,
         )
@@ -1076,6 +1160,45 @@ impl<'a> J2kDecoder<'a> {
         }
     }
 
+    pub(crate) fn decode_region_scaled_to_surface_impl(
+        &mut self,
+        fmt: PixelFormat,
+        roi: Rect,
+        scale: Downscale,
+        backend: BackendRequest,
+    ) -> Result<Surface, Error> {
+        let plan = DeviceDecodePlan::for_image(
+            self.inner.info().dimensions,
+            DeviceDecodeRequest::RegionScaled { roi, scale },
+        )?;
+        #[cfg(not(target_os = "macos"))]
+        if matches!(backend, BackendRequest::Metal) {
+            return Err(Error::MetalUnavailable);
+        }
+        match backend {
+            BackendRequest::Cpu => self.decode_region_scaled_to_cpu_surface(fmt, roi, scale, plan),
+            BackendRequest::Auto => {
+                #[cfg(target_os = "macos")]
+                {
+                    self.decode_region_scaled_to_cpu_surface(fmt, roi, scale, plan)
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    self.decode_region_scaled_to_cpu_surface(fmt, roi, scale, plan)
+                }
+            }
+            BackendRequest::Metal => {
+                #[cfg(target_os = "macos")]
+                {
+                    self.decode_region_scaled_to_metal_surface(fmt, roi, scale, plan)
+                }
+                #[cfg(not(target_os = "macos"))]
+                unreachable!("Metal region-scaled path is gated above");
+            }
+            BackendRequest::Cuda => Err(Error::UnsupportedBackend { request: backend }),
+        }
+    }
+
     pub fn decode_scaled_to_device_with_session(
         &mut self,
         fmt: PixelFormat,
@@ -1093,6 +1216,34 @@ impl<'a> J2kDecoder<'a> {
         #[cfg(not(target_os = "macos"))]
         {
             let _ = (fmt, scale, session);
+            Err(Error::MetalUnavailable)
+        }
+    }
+
+    pub fn decode_region_scaled_to_device_with_session(
+        &mut self,
+        fmt: PixelFormat,
+        roi: Rect,
+        scale: Downscale,
+        session: &MetalBackendSession,
+    ) -> Result<Surface, Error> {
+        #[cfg(target_os = "macos")]
+        {
+            let plan = DeviceDecodePlan::for_image(
+                self.inner.info().dimensions,
+                DeviceDecodeRequest::RegionScaled { roi, scale },
+            )?;
+            self.decode_region_scaled_to_metal_surface_with_device(
+                fmt,
+                roi,
+                scale,
+                plan,
+                &session.device,
+            )
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (fmt, roi, scale, session);
             Err(Error::MetalUnavailable)
         }
     }
@@ -1422,6 +1573,20 @@ impl<'a> ImageDecode<'a> for J2kDecoder<'a> {
             .inner
             .decode_scaled_into(pool, out, stride, fmt, scale)?)
     }
+
+    fn decode_region_scaled_into(
+        &mut self,
+        pool: &mut Self::Pool,
+        out: &mut [u8],
+        stride: usize,
+        fmt: PixelFormat,
+        roi: Rect,
+        scale: Downscale,
+    ) -> Result<DecodeOutcome<Self::Warning>, Self::Error> {
+        Ok(self
+            .inner
+            .decode_region_scaled_into(pool, out, stride, fmt, roi, scale)?)
+    }
 }
 
 impl<'a> ImageDecodeDevice<'a> for J2kDecoder<'a> {
@@ -1464,6 +1629,25 @@ impl<'a> ImageDecodeDevice<'a> for J2kDecoder<'a> {
             self,
             &mut session,
             fmt,
+            scale,
+            backend,
+        )?
+        .wait()
+    }
+
+    fn decode_region_scaled_to_device(
+        &mut self,
+        fmt: PixelFormat,
+        roi: Rect,
+        scale: Downscale,
+        backend: BackendRequest,
+    ) -> Result<Self::DeviceSurface, Self::Error> {
+        let mut session = MetalSession::default();
+        <Self as ImageDecodeSubmit<'a>>::submit_region_scaled_to_device(
+            self,
+            &mut session,
+            fmt,
+            roi,
             scale,
             backend,
         )?
@@ -1520,6 +1704,20 @@ impl<'a> ImageDecodeSubmit<'a> for J2kDecoder<'a> {
         session.record_submit();
         Ok(ReadySubmission::from_result(
             self.decode_scaled_to_surface_impl(fmt, scale, backend),
+        ))
+    }
+
+    fn submit_region_scaled_to_device(
+        &mut self,
+        session: &mut Self::Session,
+        fmt: PixelFormat,
+        roi: Rect,
+        scale: Downscale,
+        backend: BackendRequest,
+    ) -> Result<Self::SubmittedSurface, Self::Error> {
+        session.record_submit();
+        Ok(ReadySubmission::from_result(
+            self.decode_region_scaled_to_surface_impl(fmt, roi, scale, backend),
         ))
     }
 }
@@ -1585,6 +1783,26 @@ impl TileBatchDecodeSubmit for Codec {
             batch::BatchOp::Scaled(scale),
         ))
     }
+
+    fn submit_tile_region_scaled_to_device(
+        ctx: &mut ashlar_core::DecoderContext<Self::Context>,
+        session: &mut Self::Session,
+        pool: &mut Self::Pool,
+        input: &[u8],
+        fmt: PixelFormat,
+        roi: Rect,
+        scale: Downscale,
+        backend: BackendRequest,
+    ) -> Result<Self::SubmittedSurface, Self::Error> {
+        let _ = (ctx, pool);
+        Ok(batch::queue_tile_request(
+            session,
+            input,
+            fmt,
+            backend,
+            batch::BatchOp::RegionScaled { roi, scale },
+        ))
+    }
 }
 
 impl TileBatchDecodeDevice for Codec {
@@ -1646,6 +1864,29 @@ impl TileBatchDecodeDevice for Codec {
             pool,
             input,
             fmt,
+            scale,
+            backend,
+        )?
+        .wait()
+    }
+
+    fn decode_tile_region_scaled_to_device(
+        ctx: &mut ashlar_core::DecoderContext<Self::Context>,
+        pool: &mut Self::Pool,
+        input: &[u8],
+        fmt: PixelFormat,
+        roi: Rect,
+        scale: Downscale,
+        backend: BackendRequest,
+    ) -> Result<Self::DeviceSurface, Self::Error> {
+        let mut session = MetalSession::default();
+        <Self as TileBatchDecodeSubmit>::submit_tile_region_scaled_to_device(
+            ctx,
+            &mut session,
+            pool,
+            input,
+            fmt,
+            roi,
             scale,
             backend,
         )?

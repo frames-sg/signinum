@@ -16,8 +16,10 @@ use signinum_core::{
 };
 #[cfg(feature = "cuda-runtime")]
 use signinum_cuda_runtime::{CudaContext, CudaDeviceBuffer, CudaError};
+#[cfg(feature = "cuda-runtime")]
+use signinum_jpeg::adapter::decoder_bytes;
 use signinum_jpeg::{
-    adapter::decoder_bytes, decode_tile_into_in_context, decode_tile_region_into_in_context,
+    decode_tile_into_in_context, decode_tile_region_into_in_context,
     decode_tile_region_scaled_into_in_context, decode_tile_scaled_into_in_context,
     ColorSpace as JpegColorSpace, DecodeOutcome as JpegDecodeOutcome, Decoder as CpuDecoder,
     DecoderContext as CpuDecoderContext, JpegError, JpegView, Rect as JpegRect,

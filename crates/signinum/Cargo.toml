@@ -1,7 +1,7 @@
 [package]
 name = "signinum"
 description = "Facade crate for signinum pathology image codecs"
-version = "1.0.0"
+version = "1.0.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -28,7 +28,7 @@ signinum-j2k = { path = "../signinum-j2k", version = "=1.1.0" }
 signinum-tilecodec = { path = "../signinum-tilecodec", version = "=1.0.0" }
 signinum-jpeg-metal = { path = "../signinum-jpeg-metal", version = "=0.2.0", optional = true }
 signinum-j2k-metal = { path = "../signinum-j2k-metal", version = "=0.3.0", optional = true }
-signinum-jpeg-cuda = { path = "../signinum-jpeg-cuda", version = "=0.3.0", optional = true }
+signinum-jpeg-cuda = { path = "../signinum-jpeg-cuda", version = "=0.3.1", optional = true }
 signinum-j2k-cuda = { path = "../signinum-j2k-cuda", version = "=0.3.0", optional = true }
 
 [dev-dependencies]

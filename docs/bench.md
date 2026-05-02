@@ -414,10 +414,13 @@ cargo bench -p signinum-jpeg-cuda --bench device_decode --features cuda-runtime 
 Run it on an NVIDIA host:
 
 ```sh
-SIGNINUM_CUDA_BENCH_JPEG=/path/to/wsi_tile.jpg \
+SIGNINUM_GPU_BENCH_DIM=4096 \
   cargo bench -p signinum-jpeg-cuda --bench device_decode --features cuda-runtime -- --noplot
 ```
 
+Set `SIGNINUM_GPU_BENCH_JPEG=/path/to/wsi_tile.jpg` or
+`SIGNINUM_CUDA_BENCH_JPEG=/path/to/wsi_tile.jpg` to use a real tile instead of
+the generated RGB benchmark JPEG.
 Set `SIGNINUM_REQUIRE_CUDA_JPEG_HARDWARE_DECODE=1` when the run must fail
 instead of benchmarking the CPU-upload fallback. Small committed fixtures are
 useful for compile smoke tests, but realistic GPU comparisons need larger

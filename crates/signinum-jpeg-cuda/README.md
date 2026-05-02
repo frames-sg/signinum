@@ -18,7 +18,8 @@ device-memory upload.
 
 Use `cargo bench -p signinum-jpeg-cuda --bench device_decode --features
 cuda-runtime` on an NVIDIA host to compare CPU decode, nvJPEG surface
-production, and decode-plus-download timing. Set `SIGNINUM_CUDA_BENCH_JPEG` to
-a large WSI-shaped JPEG tile for meaningful GPU timing.
+production, and decode-plus-download timing. Set `SIGNINUM_GPU_BENCH_DIM=4096`
+for the generated large-tile benchmark, or set `SIGNINUM_CUDA_BENCH_JPEG` to a
+large WSI-shaped JPEG tile.
 
 The stable CPU decode API lives in `signinum-jpeg`.

@@ -207,7 +207,7 @@ fn cuda_gpu_validation_job_stays_cuda_focused() {
 }
 
 #[test]
-fn cpu_first_1_0_publish_policy_is_explicit() {
+fn crates_io_publish_policy_is_explicit() {
     let root = repo_root();
     let workspace = fs::read_to_string(root.join("Cargo.toml")).expect("read workspace manifest");
     let xtask = fs::read_to_string(root.join("xtask/src/main.rs")).expect("read xtask");
@@ -222,36 +222,35 @@ fn cpu_first_1_0_publish_policy_is_explicit() {
 
     for package in [
         "signinum-core",
+        "signinum-cuda-runtime",
         "signinum-j2k-native",
         "signinum-tilecodec",
         "signinum-jpeg",
         "signinum-j2k",
-        "signinum-cli",
-    ] {
-        assert!(
-            publishable.contains(&format!("\"{package}\"")),
-            "xtask package gate must include publishable CPU package {package}"
-        );
-        assert!(
-            publish_workflow.contains(&format!("publish-{package}:")),
-            "publish workflow must include CPU package {package}"
-        );
-    }
-
-    for package in [
-        "signinum-j2k-compare",
         "signinum-jpeg-metal",
         "signinum-jpeg-cuda",
         "signinum-j2k-metal",
         "signinum-j2k-cuda",
+        "signinum-cli",
     ] {
         assert!(
+            publishable.contains(&format!("\"{package}\"")),
+            "xtask package gate must include publishable package {package}"
+        );
+        assert!(
+            publish_workflow.contains(&format!("publish-{package}:")),
+            "publish workflow must include package {package}"
+        );
+    }
+
+    for package in ["signinum-j2k-compare"] {
+        assert!(
             !publishable.contains(&format!("\"{package}\"")),
-            "xtask package gate must not package pre-1.0 adapter/comparator package {package}"
+            "xtask package gate must not package local comparator package {package}"
         );
         assert!(
             !publish_workflow.contains(&format!("publish-{package}:")),
-            "publish workflow must not publish pre-1.0 adapter/comparator package {package}"
+            "publish workflow must not publish local comparator package {package}"
         );
     }
 }

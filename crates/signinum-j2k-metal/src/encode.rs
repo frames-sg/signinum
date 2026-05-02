@@ -120,7 +120,10 @@ impl J2kEncodeStageAccelerator for MetalEncodeStageAccelerator {
 #[cfg(test)]
 mod tests {
     use super::MetalEncodeStageAccelerator;
-    use signinum_j2k_native::{encode_with_accelerator, DecodeSettings, EncodeOptions, Image};
+    use signinum_j2k_native::{
+        encode_with_accelerator, DecodeSettings, EncodeOptions, Image, J2kEncodeStageAccelerator,
+        J2kForwardDwt53Job,
+    };
 
     #[test]
     fn metal_encode_stage_accelerator_preserves_cpu_codestream_validity() {
@@ -196,5 +199,37 @@ mod tests {
         assert_eq!(decoded.data, pixels);
         assert_eq!(accelerator.forward_dwt53_attempts(), 1);
         assert_eq!(accelerator.forward_dwt53_dispatches(), 1);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn metal_forward_dwt53_handles_single_sample_edge_dimensions() {
+        for (width, height) in [(1, 8), (8, 1)] {
+            let samples: Vec<f32> = (0..width * height)
+                .map(|i| {
+                    f32::from(
+                        u8::try_from((i * 11 + width * 3 + height * 5) & 0xFF)
+                            .expect("masked sample fits in u8"),
+                    ) - 128.0
+                })
+                .collect();
+            let mut accelerator = MetalEncodeStageAccelerator::default();
+
+            let output = accelerator
+                .encode_forward_dwt53(J2kForwardDwt53Job {
+                    samples: &samples,
+                    width,
+                    height,
+                    num_levels: 1,
+                })
+                .expect("metal DWT 5/3 stage")
+                .expect("metal DWT 5/3 dispatch");
+
+            assert_eq!(output.ll_width, width.div_ceil(2));
+            assert_eq!(output.ll_height, height.div_ceil(2));
+            assert_eq!(output.levels.len(), 1);
+            assert_eq!(accelerator.forward_dwt53_attempts(), 1);
+            assert_eq!(accelerator.forward_dwt53_dispatches(), 1);
+        }
     }
 }

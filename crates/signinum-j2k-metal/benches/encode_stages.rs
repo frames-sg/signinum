@@ -20,9 +20,9 @@ fn bench_encode_stages(c: &mut Criterion) {
 
         if metal_encode_available() {
             rct.bench_with_input(BenchmarkId::new("metal", dim), &pixels, |b, planes| {
+                let mut accelerator = MetalEncodeStageAccelerator::default();
                 b.iter(|| {
                     let (mut plane0, mut plane1, mut plane2) = clone_planes(planes);
-                    let mut accelerator = MetalEncodeStageAccelerator::default();
                     let dispatched = accelerator
                         .encode_forward_rct(J2kForwardRctJob {
                             plane0: &mut plane0,
@@ -47,8 +47,8 @@ fn bench_encode_stages(c: &mut Criterion) {
 
         if metal_encode_available() {
             dwt.bench_with_input(BenchmarkId::new("metal", dim), &samples, |b, samples| {
+                let mut accelerator = MetalEncodeStageAccelerator::default();
                 b.iter(|| {
-                    let mut accelerator = MetalEncodeStageAccelerator::default();
                     let output = accelerator
                         .encode_forward_dwt53(J2kForwardDwt53Job {
                             samples,

@@ -22,9 +22,9 @@ fn bench_encode_stages(c: &mut Criterion) {
 
         if cuda_available {
             rct.bench_with_input(BenchmarkId::new("cuda", dim), &pixels, |b, planes| {
+                let mut accelerator = CudaEncodeStageAccelerator::default();
                 b.iter(|| {
                     let (mut plane0, mut plane1, mut plane2) = clone_planes(planes);
-                    let mut accelerator = CudaEncodeStageAccelerator::default();
                     let dispatched = accelerator
                         .encode_forward_rct(J2kForwardRctJob {
                             plane0: &mut plane0,
@@ -49,8 +49,8 @@ fn bench_encode_stages(c: &mut Criterion) {
 
         if cuda_available {
             dwt.bench_with_input(BenchmarkId::new("cuda", dim), &samples, |b, samples| {
+                let mut accelerator = CudaEncodeStageAccelerator::default();
                 b.iter(|| {
-                    let mut accelerator = CudaEncodeStageAccelerator::default();
                     let output = accelerator
                         .encode_forward_dwt53(J2kForwardDwt53Job {
                             samples,

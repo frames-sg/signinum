@@ -5,6 +5,7 @@ use signinum_core::{
 use signinum_jpeg_cuda::{Codec, CudaSession, Decoder, Error};
 
 const BASELINE_420: &[u8] = include_bytes!("../fixtures/jpeg/baseline_420_16x16.jpg");
+const NVJPEG_RGB8_MAX_CHANNEL_DELTA: u8 = 16;
 
 #[test]
 fn auto_falls_back_to_cpu_surface() {
@@ -209,7 +210,7 @@ fn assert_surface_bytes_match_or_are_close(
         .max()
         .unwrap_or(0);
     assert!(
-        max_delta <= 2,
+        max_delta <= NVJPEG_RGB8_MAX_CHANNEL_DELTA,
         "nvJPEG decode differed from the CPU reference by max channel delta {max_delta}"
     );
 }

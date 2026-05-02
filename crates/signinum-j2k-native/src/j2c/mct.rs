@@ -86,10 +86,13 @@ fn apply_inner_impl<S: Simd>(
     match transform {
         // Irreversible MCT, specified in G.3.
         WaveletTransform::Irreversible97 => {
-            for ((y0, y1), y2) in s0
-                .chunks_exact_mut(8)
-                .zip(s1.chunks_exact_mut(8))
-                .zip(s2.chunks_exact_mut(8))
+            let mut s0_chunks = s0.chunks_exact_mut(8);
+            let mut s1_chunks = s1.chunks_exact_mut(8);
+            let mut s2_chunks = s2.chunks_exact_mut(8);
+            for ((y0, y1), y2) in s0_chunks
+                .by_ref()
+                .zip(s1_chunks.by_ref())
+                .zip(s2_chunks.by_ref())
             {
                 let y_0 = f32x8::from_slice(simd, y0);
                 let y_1 = f32x8::from_slice(simd, y1);
@@ -106,13 +109,29 @@ fn apply_inner_impl<S: Simd>(
                 i1.store(y1);
                 i2.store(y2);
             }
+            for ((y0, y1), y2) in s0_chunks
+                .into_remainder()
+                .iter_mut()
+                .zip(s1_chunks.into_remainder().iter_mut())
+                .zip(s2_chunks.into_remainder().iter_mut())
+            {
+                let src0 = *y0;
+                let src1 = *y1;
+                let src2 = *y2;
+                *y0 = src0 + 1.402 * src2;
+                *y1 = src0 - 0.34413 * src1 - 0.71414 * src2;
+                *y2 = src0 + 1.772 * src1;
+            }
         }
         // Reversible MCT, specified in G.2.
         WaveletTransform::Reversible53 => {
-            for ((y0, y1), y2) in s0
-                .chunks_exact_mut(8)
-                .zip(s1.chunks_exact_mut(8))
-                .zip(s2.chunks_exact_mut(8))
+            let mut s0_chunks = s0.chunks_exact_mut(8);
+            let mut s1_chunks = s1.chunks_exact_mut(8);
+            let mut s2_chunks = s2.chunks_exact_mut(8);
+            for ((y0, y1), y2) in s0_chunks
+                .by_ref()
+                .zip(s1_chunks.by_ref())
+                .zip(s2_chunks.by_ref())
             {
                 let y_0 = f32x8::from_slice(simd, y0);
                 let y_1 = f32x8::from_slice(simd, y1);
@@ -125,6 +144,20 @@ fn apply_inner_impl<S: Simd>(
                 i0.store(y0);
                 i1.store(y1);
                 i2.store(y2);
+            }
+            for ((y0, y1), y2) in s0_chunks
+                .into_remainder()
+                .iter_mut()
+                .zip(s1_chunks.into_remainder().iter_mut())
+                .zip(s2_chunks.into_remainder().iter_mut())
+            {
+                let src0 = *y0;
+                let src1 = *y1;
+                let src2 = *y2;
+                let i1 = src0 - ((src2 + src1) * 0.25).floor();
+                *y0 = src2 + i1;
+                *y1 = i1;
+                *y2 = src1 + i1;
             }
         }
     }

@@ -146,6 +146,7 @@ fn gpu_validation_workflow_is_self_hosted_and_explicit() {
     for required in [
         "workflow_dispatch",
         "run-timed-benchmarks",
+        "run-metal-validation",
         "self-hosted",
         "metal",
         "cuda",
@@ -176,6 +177,7 @@ fn cuda_gpu_validation_job_stays_cuda_focused() {
         "runs-on: [self-hosted, Linux, X64, cuda]",
         "SIGNINUM_REQUIRE_CUDA_RUNTIME",
         "SIGNINUM_REQUIRE_CUDA_JPEG_HARDWARE_DECODE",
+        "SIGNINUM_GPU_BENCH_DIM",
         "uname -a",
         "rustc -Vv",
         "cargo -V",

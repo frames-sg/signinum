@@ -37,7 +37,7 @@ and a CLI inspection entry point.
 
 The workspace separates codec work from slide-container work. `signinum`
 does not parse SVS, NDPI, DICOM, Mirax, Zeiss, or other WSI containers; that
-responsibility belongs to readers such as `ziggurat` [@wsirs]. Instead,
+responsibility belongs to readers such as `statumen` [@wsirs]. Instead,
 `signinum` turns compressed tile bytes into CPU pixels or device-resident
 surfaces and returns enough metadata for a reader to make correct tile and ROI
 decisions.
@@ -91,7 +91,7 @@ formats, backend requests, rectangles, row sinks, scratch/context contracts,
 and decode traits. Codec crates implement those traits for JPEG, JPEG 2000 /
 HTJ2K, and tile-compression primitives. Adapter crates add platform-specific
 device surfaces without forcing GPU dependencies into the CPU codecs. This
-keeps reader integrations stable: `ziggurat` can submit compressed tile bytes and
+keeps reader integrations stable: `statumen` can submit compressed tile bytes and
 choose CPU, automatic, or device-oriented output preferences without depending
 on vendor-container details inside the codec crates.
 
@@ -125,7 +125,7 @@ handling.
 
 # Research impact statement
 
-`signinum` is already integrated as the production codec layer for `ziggurat`,
+`signinum` is already integrated as the production codec layer for `statumen`,
 a Rust WSI reader used by SlideViewer. That integration exercises the API on
 real slide workloads: SVS, NDPI, DICOM WSI [@dicomwsi], Zeiss, Mirax,
 Hamamatsu VMS, Leica, Ventana, and Philips TIFF readers resolve compressed

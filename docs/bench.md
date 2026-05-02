@@ -418,6 +418,10 @@ SIGNINUM_GPU_BENCH_DIM=4096 \
   cargo bench -p signinum-jpeg-cuda --bench device_decode --features cuda-runtime -- --noplot
 ```
 
+The CUDA surface and download benchmark cases reuse one `CudaSession`, so they
+measure steady-state nvJPEG decode after CUDA context and nvJPEG state
+initialization.
+
 Set `SIGNINUM_GPU_BENCH_JPEG=/path/to/wsi_tile.jpg` or
 `SIGNINUM_CUDA_BENCH_JPEG=/path/to/wsi_tile.jpg` to use a real tile instead of
 the generated RGB benchmark JPEG.

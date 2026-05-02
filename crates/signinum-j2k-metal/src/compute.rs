@@ -4695,6 +4695,20 @@ fn borrow_slice_buffer<T>(device: &Device, data: &[T]) -> Buffer {
 }
 
 #[cfg(target_os = "macos")]
+fn borrow_mut_slice_buffer<T>(device: &Device, data: &mut [T]) -> Buffer {
+    if data.is_empty() {
+        device.new_buffer(1, MTLResourceOptions::StorageModeShared)
+    } else {
+        device.new_buffer_with_bytes_no_copy(
+            data.as_mut_ptr().cast(),
+            size_of_val(data) as u64,
+            MTLResourceOptions::StorageModeShared,
+            None,
+        )
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn copied_slice_buffer<T>(device: &Device, data: &[T]) -> Buffer {
     if data.is_empty() {
         device.new_buffer(1, MTLResourceOptions::StorageModeShared)
@@ -4788,6 +4802,7 @@ pub(crate) fn encode_forward_dwt53(
         let mut current_height = height;
         let mut shapes = Vec::new();
         let mut levels_run = 0u8;
+        let mut active_is_a = true;
 
         while levels_run < num_levels && (current_width >= 2 || current_height >= 2) {
             let low_width = current_width.div_ceil(2);
@@ -4800,20 +4815,30 @@ pub(crate) fn encode_forward_dwt53(
                 low_height,
             };
 
-            dispatch_forward_dwt53_pass(
-                &runtime.fdwt53_horizontal,
-                command_buffer,
-                &buffer_a,
-                &buffer_b,
-                params,
-            );
-            dispatch_forward_dwt53_pass(
-                &runtime.fdwt53_vertical,
-                command_buffer,
-                &buffer_b,
-                &buffer_a,
-                params,
-            );
+            if current_width >= 2 {
+                let (input, output) =
+                    active_forward_dwt53_buffers(&buffer_a, &buffer_b, active_is_a);
+                dispatch_forward_dwt53_pass(
+                    &runtime.fdwt53_horizontal,
+                    command_buffer,
+                    input,
+                    output,
+                    params,
+                );
+                active_is_a = !active_is_a;
+            }
+            if current_height >= 2 {
+                let (input, output) =
+                    active_forward_dwt53_buffers(&buffer_a, &buffer_b, active_is_a);
+                dispatch_forward_dwt53_pass(
+                    &runtime.fdwt53_vertical,
+                    command_buffer,
+                    input,
+                    output,
+                    params,
+                );
+                active_is_a = !active_is_a;
+            }
 
             shapes.push(J2kForwardDwt53Level {
                 hl: Vec::new(),
@@ -4834,8 +4859,9 @@ pub(crate) fn encode_forward_dwt53(
         command_buffer.commit();
         command_buffer.wait_until_completed();
 
+        let active_buffer = if active_is_a { &buffer_a } else { &buffer_b };
         let transformed = unsafe {
-            core::slice::from_raw_parts(buffer_a.contents().cast::<f32>(), samples.len())
+            core::slice::from_raw_parts(active_buffer.contents().cast::<f32>(), samples.len())
         };
         let output = extract_forward_dwt53_output(
             transformed,
@@ -4846,6 +4872,19 @@ pub(crate) fn encode_forward_dwt53(
         )?;
         Ok(output)
     })
+}
+
+#[cfg(target_os = "macos")]
+fn active_forward_dwt53_buffers<'a>(
+    buffer_a: &'a Buffer,
+    buffer_b: &'a Buffer,
+    active_is_a: bool,
+) -> (&'a Buffer, &'a Buffer) {
+    if active_is_a {
+        (buffer_a, buffer_b)
+    } else {
+        (buffer_b, buffer_a)
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -4987,9 +5026,9 @@ pub(crate) fn encode_forward_rct(
             reserved1: 0,
             reserved2: 0,
         };
-        let plane0_buffer = copied_slice_buffer(&runtime.device, plane0);
-        let plane1_buffer = copied_slice_buffer(&runtime.device, plane1);
-        let plane2_buffer = copied_slice_buffer(&runtime.device, plane2);
+        let plane0_buffer = borrow_mut_slice_buffer(&runtime.device, plane0);
+        let plane1_buffer = borrow_mut_slice_buffer(&runtime.device, plane1);
+        let plane2_buffer = borrow_mut_slice_buffer(&runtime.device, plane2);
         let status = J2kMctStatus::default();
         let status_buffer = runtime.device.new_buffer_with_data(
             (&raw const status).cast(),
@@ -5035,15 +5074,6 @@ pub(crate) fn encode_forward_rct(
             return Err(decode_mct_status_error(status));
         }
 
-        let plane0_host =
-            unsafe { core::slice::from_raw_parts(plane0_buffer.contents().cast::<f32>(), len) };
-        let plane1_host =
-            unsafe { core::slice::from_raw_parts(plane1_buffer.contents().cast::<f32>(), len) };
-        let plane2_host =
-            unsafe { core::slice::from_raw_parts(plane2_buffer.contents().cast::<f32>(), len) };
-        plane0.copy_from_slice(plane0_host);
-        plane1.copy_from_slice(plane1_host);
-        plane2.copy_from_slice(plane2_host);
         Ok(())
     })
 }

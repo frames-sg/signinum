@@ -875,6 +875,7 @@ dependencies = [
 name = "signinum-j2k-cuda"
 version = "0.2.0"
 dependencies = [
+ "criterion",
  "signinum-core",
  "signinum-cuda-runtime",
  "signinum-j2k",

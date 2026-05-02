@@ -34,6 +34,10 @@ harness = false
 name = "compare"
 harness = false
 
+[[bench]]
+name = "encode_stages"
+harness = false
+
 [lints.rust]
 unsafe_code = "allow"
 unreachable_pub = "warn"

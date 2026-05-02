@@ -6,6 +6,8 @@ use signinum_jpeg::{Decoder as CpuDecoder, DecoderContext as JpegDecoderContext}
 use signinum_jpeg_metal::{Codec, MetalSession, ScratchPool};
 
 const BASELINE_420: &[u8] = include_bytes!("../fixtures/jpeg/baseline_420_16x16.jpg");
+const BASELINE_420_RESTART: &[u8] =
+    include_bytes!("../fixtures/jpeg/baseline_420_restart_32x16.jpg");
 const GRAYSCALE: &[u8] = include_bytes!("../fixtures/jpeg/grayscale_8x8.jpg");
 
 #[test]
@@ -86,6 +88,73 @@ fn compatible_tile_submits_flush_once() {
                 BASELINE_420,
                 PixelFormat::Rgb8,
                 BackendRequest::Metal,
+            )
+            .expect("submit")
+        })
+        .collect::<Vec<_>>();
+
+    for submission in submissions {
+        let surface = submission.wait().expect("surface");
+        assert_eq!(surface.backend_kind(), BackendKind::Metal);
+        assert_eq!(surface.as_bytes(), expected.as_slice());
+    }
+
+    assert_eq!(session.submissions(), 1);
+}
+
+#[test]
+fn auto_small_restart_tile_batch_stays_cpu_surface() {
+    let mut ctx = DecoderContext::<JpegDecoderContext>::new();
+    let mut pool = ScratchPool::new();
+    let mut session = MetalSession::default();
+    let (expected, _) = CpuDecoder::new(BASELINE_420_RESTART)
+        .expect("cpu decoder")
+        .decode(PixelFormat::Rgb8)
+        .expect("cpu decode");
+
+    let submissions = (0..7)
+        .map(|_| {
+            <Codec as TileBatchDecodeSubmit>::submit_tile_to_device(
+                &mut ctx,
+                &mut session,
+                &mut pool,
+                BASELINE_420_RESTART,
+                PixelFormat::Rgb8,
+                BackendRequest::Auto,
+            )
+            .expect("submit")
+        })
+        .collect::<Vec<_>>();
+
+    for submission in submissions {
+        let surface = submission.wait().expect("surface");
+        assert_eq!(surface.backend_kind(), BackendKind::Cpu);
+        assert_eq!(surface.as_bytes(), expected.as_slice());
+    }
+
+    assert_eq!(session.submissions(), 1);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn auto_restart_wsi_tile_batch_uses_metal_at_threshold() {
+    let mut ctx = DecoderContext::<JpegDecoderContext>::new();
+    let mut pool = ScratchPool::new();
+    let mut session = MetalSession::default();
+    let (expected, _) = CpuDecoder::new(BASELINE_420_RESTART)
+        .expect("cpu decoder")
+        .decode(PixelFormat::Rgb8)
+        .expect("cpu decode");
+
+    let submissions = (0..8)
+        .map(|_| {
+            <Codec as TileBatchDecodeSubmit>::submit_tile_to_device(
+                &mut ctx,
+                &mut session,
+                &mut pool,
+                BASELINE_420_RESTART,
+                PixelFormat::Rgb8,
+                BackendRequest::Auto,
             )
             .expect("submit")
         })

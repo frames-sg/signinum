@@ -494,6 +494,14 @@ fn cpu_decode_distinct_tile_batch_region_scaled(
 }
 
 fn metal_decode_tile_batch(bytes: &[u8], batch_size: usize) {
+    device_decode_tile_batch(bytes, batch_size, BackendRequest::Metal);
+}
+
+fn auto_decode_tile_batch(bytes: &[u8], batch_size: usize) {
+    device_decode_tile_batch(bytes, batch_size, BackendRequest::Auto);
+}
+
+fn device_decode_tile_batch(bytes: &[u8], batch_size: usize, backend: BackendRequest) {
     let mut ctx = DecoderContext::<JpegDecoderContext>::new();
     let mut pool = ScratchPool::new();
     let mut session = MetalSession::default();
@@ -505,7 +513,7 @@ fn metal_decode_tile_batch(bytes: &[u8], batch_size: usize) {
                 &mut pool,
                 bytes,
                 PixelFormat::Rgb8,
-                BackendRequest::Metal,
+                backend,
             )
             .expect("submit")
         })
@@ -516,6 +524,19 @@ fn metal_decode_tile_batch(bytes: &[u8], batch_size: usize) {
 }
 
 fn metal_decode_tile_batch_scaled(bytes: &[u8], batch_size: usize, factor: Downscale) {
+    device_decode_tile_batch_scaled(bytes, batch_size, factor, BackendRequest::Metal);
+}
+
+fn auto_decode_tile_batch_scaled(bytes: &[u8], batch_size: usize, factor: Downscale) {
+    device_decode_tile_batch_scaled(bytes, batch_size, factor, BackendRequest::Auto);
+}
+
+fn device_decode_tile_batch_scaled(
+    bytes: &[u8],
+    batch_size: usize,
+    factor: Downscale,
+    backend: BackendRequest,
+) {
     let mut ctx = DecoderContext::<JpegDecoderContext>::new();
     let mut pool = ScratchPool::new();
     let mut session = MetalSession::default();
@@ -528,7 +549,7 @@ fn metal_decode_tile_batch_scaled(bytes: &[u8], batch_size: usize, factor: Downs
                 bytes,
                 PixelFormat::Rgb8,
                 factor,
-                BackendRequest::Metal,
+                backend,
             )
             .expect("scaled submit")
         })
@@ -775,6 +796,9 @@ fn bench_compare(c: &mut Criterion) {
         wsi_tile_batch_rgb.bench_function(format!("{}/metal", input.name), |b| {
             b.iter(|| metal_decode_tile_batch(&input.bytes, 64));
         });
+        wsi_tile_batch_rgb.bench_function(format!("{}/auto", input.name), |b| {
+            b.iter(|| auto_decode_tile_batch(&input.bytes, 64));
+        });
     }
     wsi_tile_batch_rgb.finish();
 
@@ -850,6 +874,9 @@ fn bench_compare(c: &mut Criterion) {
         });
         wsi_tile_batch_scaled_rgb_q4.bench_function(format!("{}/metal", input.name), |b| {
             b.iter(|| metal_decode_tile_batch_scaled(&input.bytes, 64, Downscale::Quarter));
+        });
+        wsi_tile_batch_scaled_rgb_q4.bench_function(format!("{}/auto", input.name), |b| {
+            b.iter(|| auto_decode_tile_batch_scaled(&input.bytes, 64, Downscale::Quarter));
         });
     }
     wsi_tile_batch_scaled_rgb_q4.finish();

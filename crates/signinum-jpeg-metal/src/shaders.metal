@@ -158,6 +158,8 @@ struct PreparedHuffman {
     int max_code[17];
     int val_offset[17];
     uchar values[256];
+    uchar fast_symbol[512];
+    uchar fast_len[512];
     ushort values_len;
 };
 
@@ -239,6 +241,33 @@ inline bool refill_one_byte(
     return true;
 }
 
+inline bool refill_four_bytes(
+    thread BitReader &br,
+    device const uchar *bytes,
+    uint len
+) {
+    if (br.bits > 32u || br.pos + 4u > len) {
+        return false;
+    }
+    const uint word = (uint(bytes[br.pos]) << 24)
+        | (uint(bytes[br.pos + 1u]) << 16)
+        | (uint(bytes[br.pos + 2u]) << 8)
+        | uint(bytes[br.pos + 3u]);
+    const uint shift = 64u - 32u - br.bits;
+    br.acc |= ulong(word) << shift;
+    br.pos += 4u;
+    br.bits += 32u;
+    return true;
+}
+
+inline bool refill_bits(
+    thread BitReader &br,
+    device const uchar *bytes,
+    uint len
+) {
+    return refill_four_bytes(br, bytes, len) || refill_one_byte(br, bytes, len);
+}
+
 inline bool ensure_bits(
     thread BitReader &br,
     device const uchar *bytes,
@@ -247,7 +276,7 @@ inline bool ensure_bits(
     device JpegDecodeStatus *status
 ) {
     while (br.bits < n) {
-        if (!refill_one_byte(br, bytes, len)) {
+        if (!refill_bits(br, bytes, len)) {
             status->code = FAST420_STATUS_TRUNCATED;
             status->position = br.pos;
             return false;
@@ -263,7 +292,7 @@ inline void ensure_bits_padded(
     uint n
 ) {
     while (br.bits < n) {
-        if (!refill_one_byte(br, bytes, len)) {
+        if (!refill_bits(br, bytes, len)) {
             br.acc |= ulong(1) << (63u - br.bits);
             br.bits += 1;
         }
@@ -309,6 +338,23 @@ inline bool receive_extend(
         return false;
     }
     value = huff_extend(int(peek_bits(br, uint(ssss))), ssss);
+    consume_bits(br, uint(ssss));
+    return true;
+}
+
+inline bool skip_receive_extend(
+    thread BitReader &br,
+    device const uchar *bytes,
+    uint len,
+    uchar ssss,
+    device JpegDecodeStatus *status
+) {
+    if (ssss == 0) {
+        return true;
+    }
+    if (!ensure_bits(br, bytes, len, uint(ssss), status)) {
+        return false;
+    }
     consume_bits(br, uint(ssss));
     return true;
 }
@@ -481,6 +527,10 @@ inline void prepare_huffman(
     for (uint i = 0; i < raw.values_len; ++i) {
         out.values[i] = raw.values[i];
     }
+    for (uint i = 0; i < 512; ++i) {
+        out.fast_symbol[i] = 0;
+        out.fast_len[i] = 0;
+    }
     out.values_len = raw.values_len;
     for (uint len_minus_1 = 0; len_minus_1 < 16; ++len_minus_1) {
         const uchar len = uchar(len_minus_1 + 1);
@@ -514,6 +564,19 @@ inline void prepare_huffman(
         out.val_offset[len] = int(k) - out.min_code[len];
         k += count;
     }
+
+    for (uint idx = 0; idx < huffsize_len; ++idx) {
+        const uint len = uint(huffsize[idx]);
+        if (len == 0u || len > 9u) {
+            continue;
+        }
+        const uint prefix = uint(huffcode[idx]) << (9u - len);
+        const uint fill = 1u << (9u - len);
+        for (uint suffix = 0; suffix < fill; ++suffix) {
+            out.fast_symbol[prefix | suffix] = raw.values[idx];
+            out.fast_len[prefix | suffix] = huffsize[idx];
+        }
+    }
 }
 
 inline bool decode_symbol(
@@ -524,6 +587,15 @@ inline bool decode_symbol(
     device JpegDecodeStatus *status,
     thread uchar &symbol
 ) {
+    ensure_bits_padded(br, bytes, len, 9);
+    const uint fast_index = peek_bits(br, 9);
+    const uchar len9 = table.fast_len[fast_index];
+    if (len9 != 0) {
+        consume_bits(br, uint(len9));
+        symbol = table.fast_symbol[fast_index];
+        return true;
+    }
+
     ensure_bits_padded(br, bytes, len, 16);
     const int code16 = int(peek_bits(br, 16));
     for (uint length = 1; length <= 16; ++length) {
@@ -608,7 +680,7 @@ inline bool decode_block(
         if (!receive_extend(br, bytes, len, ssss, status, value)) {
             return false;
         }
-        coeffs[ZIGZAG[k]] = clamp_i16(value * int(quant[k]));
+        coeffs[ZIGZAG[k]] = short(value * int(quant[k]));
         dc_only = false;
         k += 1;
     }
@@ -663,11 +735,9 @@ inline bool decode_block_skip(
             return false;
         }
 
-        int value = 0;
-        if (!receive_extend(br, bytes, len, ssss, status, value)) {
+        if (!skip_receive_extend(br, bytes, len, ssss, status)) {
             return false;
         }
-        (void)value;
         k += 1;
     }
     return true;
@@ -950,6 +1020,25 @@ inline void deposit_block(
     }
     const uint copy_width = min(8u, width - x);
     const uint copy_height = min(8u, height - y);
+    if (copy_width == 8u && copy_height == 8u && (stride & 3u) == 0u) {
+        for (uint by = 0; by < 8u; ++by) {
+            const uint src = by * 8u;
+            const uint dst = (y + by) * stride + x;
+            *(device uchar4 *)(plane + dst) = uchar4(
+                block[src],
+                block[src + 1u],
+                block[src + 2u],
+                block[src + 3u]
+            );
+            *(device uchar4 *)(plane + dst + 4u) = uchar4(
+                block[src + 4u],
+                block[src + 5u],
+                block[src + 6u],
+                block[src + 7u]
+            );
+        }
+        return;
+    }
     for (uint by = 0; by < copy_height; ++by) {
         const uint dst = (y + by) * stride + x;
         for (uint bx = 0; bx < copy_width; ++bx) {

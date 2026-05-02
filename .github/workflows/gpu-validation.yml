@@ -36,8 +36,12 @@ jobs:
       - run: cargo bench -p signinum-j2k-metal --bench encode_stages --no-run
       - if: ${{ inputs.run-timed-benchmarks }}
         env:
-          SIGNINUM_GPU_BENCH_DIM: "4096"
-        run: cargo bench -p signinum-jpeg-metal --bench compare
+          SIGNINUM_GPU_BENCH_DIM: "1024"
+          SIGNINUM_GPU_BENCH_BATCH: "64"
+          SIGNINUM_GPU_BENCH_BATCH_DIM: "1024"
+        run: cargo bench -p signinum-jpeg-metal --bench device_upload -- --noplot
+      - if: ${{ inputs.run-timed-benchmarks }}
+        run: cargo bench -p signinum-jpeg-metal --bench compare -- --noplot
       - if: ${{ inputs.run-timed-benchmarks }}
         run: cargo bench -p signinum-j2k-metal --bench compare
       - if: ${{ inputs.run-timed-benchmarks }}

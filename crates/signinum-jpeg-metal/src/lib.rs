@@ -1558,7 +1558,7 @@ mod tests {
     }
 
     #[test]
-    fn auto_route_prefers_metal_for_restart_packets() {
+    fn auto_route_keeps_small_single_restart_packets_on_cpu_host() {
         let decoder = CpuDecoder::new(BASELINE_420_RESTART).expect("restart decoder");
         let packet = build_metal_fast420_packet(BASELINE_420_RESTART).expect("restart packet");
 
@@ -1572,7 +1572,7 @@ mod tests {
                 None,
                 Some(&packet)
             ),
-            routing::RouteDecision::MetalKernel
+            routing::RouteDecision::CpuHost
         );
         assert_eq!(
             choose_route(
@@ -1589,7 +1589,7 @@ mod tests {
                 None,
                 Some(&packet),
             ),
-            routing::RouteDecision::MetalKernel
+            routing::RouteDecision::CpuHost
         );
     }
 

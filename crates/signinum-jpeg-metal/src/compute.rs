@@ -49,6 +49,10 @@ const FAST420_STATUS_TRUNCATED: u32 = 1;
 #[cfg(target_os = "macos")]
 const FAST420_STATUS_HUFFMAN: u32 = 2;
 #[cfg(target_os = "macos")]
+const AUTO_METAL_MIN_BATCH_REQUESTS: usize = 8;
+#[cfg(target_os = "macos")]
+const AUTO_METAL_MIN_BATCH_EDGE: u32 = 512;
+#[cfg(target_os = "macos")]
 const REGION_SCALED_BATCH_CHUNK: usize = 8;
 
 #[cfg(target_os = "macos")]
@@ -213,6 +217,8 @@ struct PreparedHuffmanHost {
     max_code: [i32; 17],
     val_offset: [i32; 17],
     values: [u8; 256],
+    fast_symbol: [u8; 512],
+    fast_len: [u8; 512],
     values_len: u16,
     reserved: u16,
 }
@@ -224,6 +230,8 @@ impl From<&PacketHuffmanTable> for PreparedHuffmanHost {
         let mut max_code = [-1i32; 17];
         let mut val_offset = [0i32; 17];
         let mut values = [0u8; 256];
+        let mut fast_symbol = [0u8; 512];
+        let mut fast_len = [0u8; 512];
         let values_len = usize::from(value.values_len);
         values[..values_len].copy_from_slice(&value.values[..values_len]);
 
@@ -263,11 +271,27 @@ impl From<&PacketHuffmanTable> for PreparedHuffmanHost {
             idx += count;
         }
 
+        for idx in 0..huffsize_len {
+            let len = usize::from(huffsize[idx]);
+            if len == 0 || len > 9 {
+                continue;
+            }
+            let code = usize::from(huffcode[idx]);
+            let prefix = code << (9 - len);
+            let fill = 1usize << (9 - len);
+            for suffix in 0..fill {
+                fast_symbol[prefix | suffix] = values[idx];
+                fast_len[prefix | suffix] = huffsize[idx];
+            }
+        }
+
         Self {
             min_code,
             max_code,
             val_offset,
             values,
+            fast_symbol,
+            fast_len,
             values_len: value.values_len,
             reserved: 0,
         }
@@ -1019,10 +1043,11 @@ fn dispatch_1d_pipeline(
     pipeline: &ComputePipelineState,
     threads: u32,
 ) {
-    let threadgroup_width = pipeline
-        .max_total_threads_per_threadgroup()
-        .max(pipeline.thread_execution_width())
-        .max(1);
+    let threadgroup_width = choose_1d_threadgroup_width(
+        pipeline.thread_execution_width(),
+        pipeline.max_total_threads_per_threadgroup(),
+        threads,
+    );
     encoder.dispatch_threads(
         MTLSize {
             width: u64::from(threads.max(1)),
@@ -1035,6 +1060,15 @@ fn dispatch_1d_pipeline(
             depth: 1,
         },
     );
+}
+
+#[cfg(target_os = "macos")]
+fn choose_1d_threadgroup_width(simd_width: u64, max_threads: u64, threads: u32) -> u64 {
+    let simd_width = simd_width.max(1);
+    let max_threads = max_threads.max(simd_width);
+    let requested = u64::from(threads.max(1));
+    let rounded = requested.div_ceil(simd_width) * simd_width;
+    rounded.clamp(simd_width, max_threads.min(256).max(simd_width))
 }
 
 #[cfg(target_os = "macos")]
@@ -1750,18 +1784,33 @@ impl BatchDeviceBufferCache {
 
 #[cfg(target_os = "macos")]
 fn request_allows_batched_packet(
-    _requests: &[batch::QueuedRequest],
+    requests: &[batch::QueuedRequest],
     request: &batch::QueuedRequest,
     restart_interval_mcus: u32,
+    dimensions: (u32, u32),
 ) -> bool {
     match request.backend {
         BackendRequest::Metal => true,
         BackendRequest::Auto => match request.op {
             batch::BatchOp::RegionScaled { .. } => false,
-            _ => restart_interval_mcus != 0,
+            _ => {
+                requests.len() >= AUTO_METAL_MIN_BATCH_REQUESTS
+                    && (restart_interval_mcus != 0
+                        || auto_batch_work_is_large_enough(request, dimensions))
+            }
         },
         BackendRequest::Cpu | BackendRequest::Cuda => false,
     }
+}
+
+#[cfg(target_os = "macos")]
+fn auto_batch_work_is_large_enough(request: &batch::QueuedRequest, dimensions: (u32, u32)) -> bool {
+    let dims = match request.op {
+        batch::BatchOp::Full | batch::BatchOp::Scaled(_) => dimensions,
+        batch::BatchOp::Region(roi) => (roi.w, roi.h),
+        batch::BatchOp::RegionScaled { .. } => return false,
+    };
+    dims.0 >= AUTO_METAL_MIN_BATCH_EDGE && dims.1 >= AUTO_METAL_MIN_BATCH_EDGE
 }
 
 #[cfg(target_os = "macos")]
@@ -1802,7 +1851,12 @@ fn batched_fast_packets(
         }
 
         if let Some(packet) = request.fast420_packet.as_deref() {
-            if !request_allows_batched_packet(requests, request, packet.restart_interval_mcus) {
+            if !request_allows_batched_packet(
+                requests,
+                request,
+                packet.restart_interval_mcus,
+                packet.dimensions,
+            ) {
                 return Ok(None);
             }
             packets.push(BatchedFastPacket::Fast420(packet));
@@ -1810,7 +1864,12 @@ fn batched_fast_packets(
         }
 
         if let Some(packet) = request.fast422_packet.as_deref() {
-            if !request_allows_batched_packet(requests, request, packet.restart_interval_mcus) {
+            if !request_allows_batched_packet(
+                requests,
+                request,
+                packet.restart_interval_mcus,
+                packet.dimensions,
+            ) {
                 return Ok(None);
             }
             packets.push(BatchedFastPacket::Fast422(packet));
@@ -1818,7 +1877,12 @@ fn batched_fast_packets(
         }
 
         if let Some(packet) = request.fast444_packet.as_deref() {
-            if !request_allows_batched_packet(requests, request, packet.restart_interval_mcus) {
+            if !request_allows_batched_packet(
+                requests,
+                request,
+                packet.restart_interval_mcus,
+                packet.dimensions,
+            ) {
                 return Ok(None);
             }
             let decoder = CpuDecoder::new(request.input.as_ref())?;
@@ -7928,6 +7992,14 @@ mod tests {
     }
 
     #[test]
+    fn one_dimensional_dispatch_width_tracks_work_without_full_threadgroup_waste() {
+        assert_eq!(choose_1d_threadgroup_width(32, 1024, 1), 32);
+        assert_eq!(choose_1d_threadgroup_width(32, 1024, 33), 64);
+        assert_eq!(choose_1d_threadgroup_width(32, 1024, 256), 256);
+        assert_eq!(choose_1d_threadgroup_width(32, 1024, 257), 256);
+    }
+
+    #[test]
     fn auto_batched_packets_skip_distinct_region_scaled_requests() {
         let packet = signinum_jpeg::adapter::build_metal_fast420_packet(BASELINE_420_RESTART)
             .expect("packet");
@@ -8000,6 +8072,105 @@ mod tests {
         assert!(batched_fast_packets(&requests)
             .expect("packet lookup")
             .is_none());
+    }
+
+    #[test]
+    fn auto_batched_packets_require_wsi_batch_threshold() {
+        let input = Arc::<[u8]>::from(BASELINE_420_RESTART);
+        let packet = signinum_jpeg::adapter::build_metal_fast420_packet(BASELINE_420_RESTART)
+            .expect("packet");
+        let requests = (0..7)
+            .map(|_| {
+                batch::QueuedRequest::new(
+                    Arc::clone(&input),
+                    PixelFormat::Rgb8,
+                    BackendRequest::Auto,
+                    batch::BatchOp::Full,
+                    None,
+                    None,
+                    Some(packet.clone()),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert!(batched_fast_packets(&requests)
+            .expect("packet lookup")
+            .is_none());
+    }
+
+    #[test]
+    fn auto_batched_packets_accept_restart_wsi_batch_at_threshold() {
+        let input = Arc::<[u8]>::from(BASELINE_420_RESTART);
+        let packet = signinum_jpeg::adapter::build_metal_fast420_packet(BASELINE_420_RESTART)
+            .expect("packet");
+        let requests = (0..8)
+            .map(|_| {
+                batch::QueuedRequest::new(
+                    Arc::clone(&input),
+                    PixelFormat::Rgb8,
+                    BackendRequest::Auto,
+                    batch::BatchOp::Full,
+                    None,
+                    None,
+                    Some(packet.clone()),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert!(batched_fast_packets(&requests)
+            .expect("packet lookup")
+            .is_some());
+    }
+
+    #[test]
+    fn auto_batched_packets_accept_large_nonrestart_wsi_batch_at_threshold() {
+        let input = Arc::<[u8]>::from(generated_rgb_jpeg(512));
+        let fast444_packet =
+            signinum_jpeg::adapter::build_metal_fast444_packet(input.as_ref()).ok();
+        let fast422_packet =
+            signinum_jpeg::adapter::build_metal_fast422_packet(input.as_ref()).ok();
+        let fast420_packet =
+            signinum_jpeg::adapter::build_metal_fast420_packet(input.as_ref()).ok();
+        assert!(
+            fast444_packet.is_some() || fast422_packet.is_some() || fast420_packet.is_some(),
+            "generated JPEG must be packet-decodable"
+        );
+        let requests = (0..8)
+            .map(|_| {
+                batch::QueuedRequest::new(
+                    Arc::clone(&input),
+                    PixelFormat::Rgb8,
+                    BackendRequest::Auto,
+                    batch::BatchOp::Full,
+                    fast444_packet.clone(),
+                    fast422_packet.clone(),
+                    fast420_packet.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert!(batched_fast_packets(&requests)
+            .expect("packet lookup")
+            .is_some());
+    }
+
+    fn generated_rgb_jpeg(dim: u16) -> Vec<u8> {
+        let mut rgb = Vec::with_capacity(dim as usize * dim as usize * 3);
+        for y in 0..dim {
+            for x in 0..dim {
+                let xf = u32::from(x);
+                let yf = u32::from(y);
+                rgb.push(((xf * 13 + yf * 3) & 0xff) as u8);
+                rgb.push(((xf * 5 + yf * 11 + (xf ^ yf)) & 0xff) as u8);
+                rgb.push(((xf * 7 + yf * 17 + (xf.wrapping_mul(yf) >> 5)) & 0xff) as u8);
+            }
+        }
+
+        let mut jpeg = Vec::new();
+        jpeg_encoder::Encoder::new(&mut jpeg, 90)
+            .encode(&rgb, dim, dim, jpeg_encoder::ColorType::Rgb)
+            .expect("encode generated JPEG");
+        jpeg
     }
 
     #[test]

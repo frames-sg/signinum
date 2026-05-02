@@ -2,10 +2,10 @@
 
 ## Repositories
 
-- Signinum local checkout: `/Users/user/Bench/ashlar`
+- Signinum local checkout: `/Users/user/Bench/signinum`
 - Signinum GitHub: `https://github.com/jcwal1516/signinum`
 - Signinum latest pushed commit: `a646f55`
-- Statumen local checkout: `/Users/user/Bench/ziggurat`
+- Statumen local checkout: `/Users/user/Bench/statumen`
 - Statumen GitHub: `https://github.com/jcwal1516/statumen`
 - Statumen latest pushed commit: `c3a39fa`
 
@@ -113,10 +113,9 @@ Statumen:
    Public APIs in `signinum-core`, `signinum-jpeg`, `signinum-j2k`, and
    `signinum-tilecodec` should be treated as stable.
 
-5. The local checkout directories still use the old folder names.
-   This is not a GitHub or registry issue, but future agents may see:
-   - `/Users/user/Bench/ashlar` for the `signinum` repo
-   - `/Users/user/Bench/ziggurat` for the `statumen` repo
+5. The local checkout directories have been renamed to match the GitHub repos:
+   - `/Users/user/Bench/signinum`
+   - `/Users/user/Bench/statumen`
 
 ## Recommended Next Work
 

@@ -1,0 +1,29 @@
+[package]
+name        = "signinum-core"
+description = "Shared decode contracts and types for signinum"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace = true
+keywords.workspace     = true
+categories.workspace   = true
+readme                 = "README.md"
+
+[lib]
+name = "signinum_core"
+path = "src/lib.rs"
+
+[dependencies]
+thiserror = { workspace = true }
+
+[lints.rust]
+unreachable_pub = "warn"
+
+[lints.clippy]
+pedantic                = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate      = "allow"
+missing_errors_doc      = "allow"
+type_complexity         = "allow"
+needless_lifetimes      = "allow"

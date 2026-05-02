@@ -1,5 +1,5 @@
 ---
-title: 'ashlar: WSI-shaped JPEG and JPEG 2000 codecs for digital pathology'
+title: 'signinum: WSI-shaped JPEG and JPEG 2000 codecs for digital pathology'
 tags:
   - Rust
   - whole-slide imaging
@@ -21,11 +21,11 @@ bibliography: paper.bib
 
 # Summary
 
-`ashlar` is a Rust codec workspace for whole-slide imaging (WSI), the
+`signinum` is a Rust codec workspace for whole-slide imaging (WSI), the
 high-resolution microscopy format used in digital pathology. WSI applications
 rarely decode one image once. Viewers, quality-control tools, and analysis
 pipelines repeatedly decode many small tiles, regions, or reduced-resolution
-views while users pan, zoom, and inspect tissue. `ashlar` provides codec
+views while users pan, zoom, and inspect tissue. `signinum` provides codec
 primitives shaped for those workloads: JPEG inspection and decode, JPEG 2000 /
 HTJ2K inspection and decode, restart-marker and coded-unit metadata, region of
 interest (ROI) decode, decode-time downscale, row streaming, tile-batch decode,
@@ -35,10 +35,10 @@ crates, Apple Metal adapters validated on Apple Silicon, fallback-only CUDA API
 adapters, Deflate/Zstd/LZW/Uncompressed tile decompression, a shared core crate,
 and a CLI inspection entry point.
 
-The workspace separates codec work from slide-container work. `ashlar`
+The workspace separates codec work from slide-container work. `signinum`
 does not parse SVS, NDPI, DICOM, Mirax, Zeiss, or other WSI containers; that
 responsibility belongs to readers such as `ziggurat` [@wsirs]. Instead,
-`ashlar` turns compressed tile bytes into CPU pixels or device-resident
+`signinum` turns compressed tile bytes into CPU pixels or device-resident
 surfaces and returns enough metadata for a reader to make correct tile and ROI
 decisions.
 
@@ -63,19 +63,19 @@ coordinate systems. JPEG 2000 and HTJ2K add a different constraint: OpenJPEG
 [@openjpeg], Grok [@grok], OpenHTJ2K [@openhtj2k], and Kakadu [@kakadu] cover
 important parts of the ecosystem, but their licensing, language/runtime
 assumptions, or API shapes are not always suitable for a permissively licensed
-Rust WSI stack. `ashlar` fills this gap by providing WSI-oriented codec
+Rust WSI stack. `signinum` fills this gap by providing WSI-oriented codec
 APIs with Apache-2.0 licensing and Rust-native integration.
 
 # State of the field
 
-`ashlar` is not a replacement for OpenSlide; it is a lower-level codec
+`signinum` is not a replacement for OpenSlide; it is a lower-level codec
 component that a reader can use to compete with or validate against OpenSlide.
 It is also not intended to replace libjpeg-turbo for general JPEG decoding,
 or Kakadu, Grok, OpenJPEG, and OpenHTJ2K for every JPEG 2000 deployment.
 Those projects remain important comparators and, in some settings, better
 choices.
 
-The reason to build `ashlar` rather than only contribute wrappers around
+The reason to build `signinum` rather than only contribute wrappers around
 existing libraries is the combination of requirements: WSI-shaped ROI and
 downscale APIs, restart-marker inspection, caller-owned state, Rust ownership
 semantics, optional device-output adapters, and a small integration surface
@@ -86,7 +86,7 @@ intermediate image abstractions that are not needed by the caller.
 
 # Software design
 
-The workspace is layered around `ashlar-core`, which defines shared pixel
+The workspace is layered around `signinum-core`, which defines shared pixel
 formats, backend requests, rectangles, row sinks, scratch/context contracts,
 and decode traits. Codec crates implement those traits for JPEG, JPEG 2000 /
 HTJ2K, and tile-compression primitives. Adapter crates add platform-specific
@@ -110,7 +110,7 @@ groups documented in `docs/bench.md` and `docs/parity.md`. As of 29 April
 2026, `cargo test --workspace --all-targets` passes across the CLI, core,
 JPEG, JPEG Metal, JPEG CUDA, JPEG 2000, JPEG 2000 Metal, JPEG 2000 CUDA, and
 tilecodec crates, including benchmark smoke targets. The same run includes
-165 `ashlar-jpeg` unit tests, 36 JPEG Metal tests, 75 native JPEG 2000 /
+165 `signinum-jpeg` unit tests, 36 JPEG Metal tests, 75 native JPEG 2000 /
 HTJ2K tests, 43 JPEG 2000 Metal tests, 10 tilecodec decompression tests, and
 focused parity/regression tests against libjpeg-turbo, OpenJPEG, and Grok
 where those comparator paths are available. The JPEG corpus report over the
@@ -125,18 +125,18 @@ handling.
 
 # Research impact statement
 
-`ashlar` is already integrated as the production codec layer for `ziggurat`,
+`signinum` is already integrated as the production codec layer for `ziggurat`,
 a Rust WSI reader used by SlideViewer. That integration exercises the API on
 real slide workloads: SVS, NDPI, DICOM WSI [@dicomwsi], Zeiss, Mirax,
 Hamamatsu VMS, Leica, Ventana, and Philips TIFF readers resolve compressed
-tile bytes and pass decode work to `ashlar`. The companion SlideViewer
+tile bytes and pass decode work to `signinum`. The companion SlideViewer
 parity harness compares reader output against compatibility oracles, including
-OpenSlide, while the `ashlar` benchmark harness compares codec tasks
+OpenSlide, while the `signinum` benchmark harness compares codec tasks
 against libjpeg-turbo, `zune-jpeg`, `jpeg-decoder`, OpenJPEG, and Grok.
 
 The current integration release gate passes on eight real local slides: two
 NDPI slides, four JPEG-compressed SVS slides, and two JPEG 2000 SVS slides
-from 94 MB to 2.5 GB. Representative ashlar-backed reader medians include
+from 94 MB to 2.5 GB. Representative signinum-backed reader medians include
 NDPI B4 2k-region extraction at 45.8 ms versus 53.1 ms for OpenSlide and a
 2.5 GB metastatic melanoma SVS 2k-region extraction at 20.3 ms versus 56.7 ms.
 These are whole-reader measurements, so they are reported as integration

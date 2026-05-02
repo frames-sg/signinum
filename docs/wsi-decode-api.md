@@ -6,7 +6,7 @@ JPEG 2000 / HTJ2K, tile decompression, and the device-output adapters.
 
 ## Ownership Model
 
-ashlar does not own a viewer runtime. Callers own I/O, threading, tile
+signinum does not own a viewer runtime. Callers own I/O, threading, tile
 coordinates, pyramid selection, cache policy, and prefetch. Codec APIs only
 parse compressed bytes and write decoded pixels into caller-provided storage.
 
@@ -39,8 +39,8 @@ the floor-start / ceil-end projection of the source ROI into the scaled grid.
 `Downscale::None` preserves the original ROI.
 
 ```rust
-use ashlar_core::{Downscale, ImageDecode, PixelFormat, Rect};
-use ashlar_j2k::{J2kDecoder, J2kScratchPool};
+use signinum_core::{Downscale, ImageDecode, PixelFormat, Rect};
+use signinum_j2k::{J2kDecoder, J2kScratchPool};
 
 let bytes = std::fs::read("tile.jp2")?;
 let mut decoder = J2kDecoder::new(&bytes)?;
@@ -69,7 +69,7 @@ decoder.decode_region_scaled_into(
 
 Use `decode_rows` through `ImageDecodeRows` when a tile or image is too large
 for one packed output buffer or when the caller wants to feed rows into a
-streaming consumer. The caller implements `RowSink`, and ashlar forwards sink
+streaming consumer. The caller implements `RowSink`, and signinum forwards sink
 errors without converting them into silent decode success.
 
 Row streaming is a host-memory API. Device adapters return surfaces instead of
@@ -82,10 +82,10 @@ payloads with the same codec. The caller keeps one `DecoderContext` and one
 `ScratchPool`, then calls the stateless tile helper repeatedly.
 
 ```rust
-use ashlar_core::{DecoderContext, PixelFormat, TileBatchDecode};
-use ashlar_jpeg::{JpegCodec, ScratchPool};
+use signinum_core::{DecoderContext, PixelFormat, TileBatchDecode};
+use signinum_jpeg::{JpegCodec, ScratchPool};
 
-let mut ctx = DecoderContext::<ashlar_jpeg::DecoderContext>::new();
+let mut ctx = DecoderContext::<signinum_jpeg::DecoderContext>::new();
 let mut pool = ScratchPool::new();
 
 for tile in visible_tiles {
@@ -123,9 +123,16 @@ Backend selection uses `BackendRequest`:
   support do not justify device execution.
 - `BackendRequest::Metal` requires Metal execution or a Metal-backed upload on
   macOS. Unsupported explicit Metal requests return an error.
-- `BackendRequest::Cuda` is a compatibility surface in `0.1.0`; explicit CUDA
-  requests return unavailable before decode validation, while `Cpu` and `Auto`
-  return CPU-backed host surfaces.
+- `BackendRequest::Cuda` requires CUDA device memory output. When an adapter is
+  built with `cuda-runtime` and a CUDA driver is available, explicit CUDA
+  requests upload decoded output into CUDA device memory. Hosts without CUDA
+  return unavailable. `Cpu` and `Auto` remain CPU-backed host surfaces.
+
+For Metal adapters, `BackendRequest::Auto` is a routing hint and may fall back
+to host-backed CPU output when the request shape is not on the Metal-supported
+path. `BackendRequest::Metal` is a strict request: supported shapes return
+Metal-backed surfaces, unsupported shapes fail as unsupported, and hosts
+without Metal fail as unavailable.
 
 Callers should use explicit device requests only when they need that backend.
 Use `Auto` for viewer paths where CPU fallback is acceptable.
@@ -146,5 +153,6 @@ benchmark compilation. Runtime GPU validation is available through the manual
 - Apple Silicon runners labeled `self-hosted`, `macOS`, `ARM64`, `metal`
   validate Metal tests and optionally timed Metal benchmarks.
 - x86_64 CUDA runners labeled `self-hosted`, `Linux`, `X64`, `cuda` validate
-  CUDA adapter compatibility. They do not imply runtime CUDA decode support
-  until the CUDA crates grow a real CUDA backend.
+  CUDA device-memory output with `cuda-runtime`. The current CUDA path uploads
+  CPU-decoded bytes; it makes no CUDA kernel decode or NVIDIA performance
+  claim.

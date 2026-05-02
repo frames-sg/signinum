@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file. The
 format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.0] - 2026-05-01
+
+CPU-first 1.0 release posture.
+
+### Changed
+
+- Promoted `signinum-core`, `signinum-jpeg`, `signinum-j2k`, `signinum-tilecodec`,
+  and `signinum-cli` to the stable CPU-first 1.0 release set.
+- Kept `signinum-j2k-native` as a published pre-1.0 implementation dependency
+  for `signinum-j2k`.
+- Excluded Metal, CUDA, and comparator crates from the 1.0 publish workflow.
+- Clarified that CUDA crates are compatibility-only with no runtime CUDA
+  decode or NVIDIA performance claim.
+
 ## [0.1.0] - 2026-04-25
 
 Initial public-source checkpoint. The workspace remains pre-1.0 while the
@@ -11,28 +25,28 @@ JPEG 2000 / HTJ2K ROI and GPU adapter APIs settle.
 
 ### Added
 
-- `ashlar-core` shared trait/type crate:
+- `signinum-core` shared trait/type crate:
   - `ImageDecode`, `ImageDecodeRows`, `TileBatchDecode`, `TileDecompress`
   - `PixelFormat`, `Downscale`, `Info`, `Rect`, `DecodeOutcome`
   - `ScratchPool` and `DecoderContext` contracts
-- `ashlar-jpeg` as the WSI-oriented JPEG implementation with:
+- `signinum-jpeg` as the WSI-oriented JPEG implementation with:
   - borrowed parse/decode surfaces
   - row-streaming decode
   - region and scaled decode
   - tile-batch/context/scratch reuse
   - external-corpus and parity coverage
-- `ashlar-j2k` with:
+- `signinum-j2k` with:
   - JP2 / raw codestream inspect
   - full-frame, region, scaled, row-streaming, and tile-batch decode
   - HTJ2K coverage
   - OpenJPEG differential tests and compare bench
-- `ashlar-tilecodec` with:
+- `signinum-tilecodec` with:
   - `DeflateCodec`
   - `ZstdCodec`
   - `LzwCodec`
   - `UncompressedCodec`
   - typed scratch pools and compare bench coverage
-- `ashlar-cli` inspect dispatch for JPEG and JPEG 2000 inputs
+- `signinum-cli` inspect dispatch for JPEG and JPEG 2000 inputs
 - workspace-level CI coverage for tests, clippy, bench build, fuzz-target
   build, and `cargo deny`
 

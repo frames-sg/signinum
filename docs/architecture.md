@@ -1,6 +1,6 @@
 # Architecture
 
-This document is the system map for `ashlar`. It is the first thing a new
+This document is the system map for `signinum`. It is the first thing a new
 contributor or coding agent should read before changing code, and it is the
 single source of truth for how the workspace is shaped, where each
 responsibility lives, and which dependency directions are legal. Anything that
@@ -27,22 +27,23 @@ design notes that an agent can reach without leaving the repo.
 ## System map
 
 The workspace is a single Cargo workspace defined in [`Cargo.toml`](../Cargo.toml).
-All crates live under `crates/` and share `version = 0.1.0`, `edition = 2021`,
-and `rust-version = 1.94`.
+All crates live under `crates/` and share `edition = 2021` and
+`rust-version = 1.94`. CPU-first 1.0 crates use the workspace package version;
+implementation and adapter crates stay on explicit pre-1.0 versions.
 
 | Crate | Layer | Role |
 |-------|-------|------|
-| `ashlar-core` | foundation | Shared traits, pixel/sample types, backend capability metadata, device-surface contracts, scratch/context contracts. No image-format logic. |
-| `ashlar-tilecodec` | codec | Tile decompression primitives: Deflate, Zstd, LZW, Uncompressed. Implements `TileDecompress` from `core`. |
-| `ashlar-jpeg` | codec | Native pure-Rust JPEG decode for WSI tiles. CPU-first. Owns SIMD backends and fused entropy/IDCT/upsample paths. |
-| `ashlar-j2k-native` | codec engine | Internal, unpublished pure-Rust JPEG 2000 / HTJ2K engine. Lives under `#![forbid(unsafe_code)]` and uses `fearless_simd`. |
-| `ashlar-j2k` | codec | Public JPEG 2000 / HTJ2K crate. Wraps `j2k-native` with the ashlar-core trait surface (inspect, decode, ROI, scaled, row-bounded, tile-batch). |
-| `ashlar-j2k-compare` | dev-only | OpenJPEG FFI bindings used as a reference decoder for conformance and parity testing. Unpublished. |
-| `ashlar-jpeg-metal` | adapter | Apple Metal device-output adapter for `ashlar-jpeg`. Hosts compute kernels for color conversion, interleave/pack, and `MTLBuffer` production. |
-| `ashlar-j2k-metal` | adapter | Apple Metal device-output adapter for `ashlar-j2k`. Same shape as the JPEG adapter. |
-| `ashlar-jpeg-cuda` | adapter | CUDA-facing API adapter for JPEG. In `0.1.0` it validates fallback / unavailability behavior and exposes the device-output API surface; no runtime CUDA execution is shipped. |
-| `ashlar-j2k-cuda` | adapter | CUDA-facing API adapter for J2K. Same shape and same `0.1.0` constraints as `jpeg-cuda`. |
-| `ashlar-cli` | binary | `ashlar inspect <file>` entry point. Header parsing only, no decode. |
+| `signinum-core` | foundation | Shared traits, pixel/sample types, backend capability metadata, device-surface contracts, scratch/context contracts. No image-format logic. |
+| `signinum-tilecodec` | codec | Tile decompression primitives: Deflate, Zstd, LZW, Uncompressed. Implements `TileDecompress` from `core`. |
+| `signinum-jpeg` | codec | Native pure-Rust JPEG decode for WSI tiles. CPU-first. Owns SIMD backends and fused entropy/IDCT/upsample paths. |
+| `signinum-j2k-native` | codec engine | Published implementation dependency for `signinum-j2k`; not the stable user-facing API. Lives under `#![forbid(unsafe_code)]` and uses `fearless_simd`. |
+| `signinum-j2k` | codec | Public JPEG 2000 / HTJ2K crate. Wraps `j2k-native` with the signinum-core trait surface (inspect, decode, ROI, scaled, row-bounded, tile-batch). |
+| `signinum-j2k-compare` | dev-only | OpenJPEG FFI bindings used as a reference decoder for conformance and parity testing. Unpublished. |
+| `signinum-jpeg-metal` | adapter | Apple Metal device-output adapter for `signinum-jpeg`. Hosts compute kernels for color conversion, interleave/pack, and `MTLBuffer` production. |
+| `signinum-j2k-metal` | adapter | Apple Metal device-output adapter for `signinum-j2k`. Same shape as the JPEG adapter. |
+| `signinum-jpeg-cuda` | adapter | CUDA-facing API adapter for JPEG. `Auto`/`Cpu` stay host-backed; explicit CUDA requests upload decoded output into CUDA device memory when `cuda-runtime` and a CUDA driver are available. No CUDA kernel decode or NVIDIA performance claim is made. |
+| `signinum-j2k-cuda` | adapter | CUDA-facing API adapter for J2K with the same explicit CUDA device-memory output contract as `jpeg-cuda`. |
+| `signinum-cli` | binary | `signinum inspect <file>` entry point. Header parsing only, no decode. |
 
 Out-of-tree but in-repo:
 
@@ -53,7 +54,7 @@ Out-of-tree but in-repo:
 
 ## Layered architecture and dependency rules
 
-ashlar is organized as four concentric layers. Dependencies must flow
+signinum is organized as four concentric layers. Dependencies must flow
 inward only. An agent adding a dependency edge that points outward is changing
 the architecture and should stop and update this document first.
 
@@ -63,17 +64,17 @@ foundation  →  codec engines  →  codecs  →  adapters  →  binary
 
 | Layer | Members | May depend on |
 |-------|---------|---------------|
-| foundation | `ashlar-core` | `thiserror` only. No other workspace crate. `no_std + alloc` posture. Contains only the x86 CPUID/XGETBV unsafe required for CPU feature detection. |
-| codec engines | `ashlar-j2k-native` | foundation. Internal only. Not re-exported. |
-| codecs | `ashlar-jpeg`, `ashlar-j2k`, `ashlar-tilecodec` | foundation, codec engines. Must not depend on each other. Must not depend on adapters or `cli`. |
-| adapters | `ashlar-jpeg-metal`, `ashlar-j2k-metal`, `ashlar-jpeg-cuda`, `ashlar-j2k-cuda` | foundation, exactly one matching codec, optional engine for the matching codec. Adapters in different format families must not depend on each other. |
-| binary | `ashlar-cli` | foundation, codecs. Must not depend on adapters (kept host-neutral). |
-| dev-only | `ashlar-j2k-compare` | foundation. Used as a reference comparator in tests/benches; never a runtime dependency. |
+| foundation | `signinum-core` | `thiserror` only. No other workspace crate. `no_std + alloc` posture. Contains only the x86 CPUID/XGETBV unsafe required for CPU feature detection. |
+| codec engines | `signinum-j2k-native` | foundation. Internal only. Not re-exported. |
+| codecs | `signinum-jpeg`, `signinum-j2k`, `signinum-tilecodec` | foundation, codec engines. Must not depend on each other. Must not depend on adapters or `cli`. |
+| adapters | `signinum-jpeg-metal`, `signinum-j2k-metal`, `signinum-jpeg-cuda`, `signinum-j2k-cuda` | foundation, exactly one matching codec, optional engine for the matching codec. Adapters in different format families must not depend on each other. |
+| binary | `signinum-cli` | foundation, codecs. Must not depend on adapters (kept host-neutral). |
+| dev-only | `signinum-j2k-compare` | foundation. Used as a reference comparator in tests/benches; never a runtime dependency. |
 
 Hard rules enforced today (the goal is to mechanize these as the workspace
 matures, mirroring harness-engineering structural tests):
 
-1. `ashlar-core` is a leaf in the import graph. It does not import any
+1. `signinum-core` is a leaf in the import graph. It does not import any
    other workspace crate.
 2. Codec crates do not import each other. Cross-format work goes through
    `core` types or through caller code.
@@ -82,10 +83,12 @@ matures, mirroring harness-engineering structural tests):
 4. Metal sources are gated by `cfg(target_os = "macos")`. Non-macOS hosts
    compile the adapter crate to a thin fallback that exercises the same
    public API but reports unavailability.
-5. CUDA sources expose the same device-output surface but make no runtime
-   performance claim in `0.1.0`.
-6. `ashlar-jpeg` keeps its NEON and x86 intrinsics scoped per-backend
-   in `crates/ashlar-jpeg/src/backend/`. `ashlar-j2k-native` keeps
+5. CUDA sources expose the same device-output surface. Explicit CUDA requests
+   produce CUDA device memory when `cuda-runtime` and a CUDA driver are
+   available, but decode is still CPU-produced and uploaded; no CUDA kernel
+   decode or performance claim is made.
+6. `signinum-jpeg` keeps its NEON and x86 intrinsics scoped per-backend
+   in `crates/signinum-jpeg/src/backend/`. `signinum-j2k-native` keeps
    its SIMD behind `fearless_simd` so the engine can stay
    `#![forbid(unsafe_code)]`.
 7. Adapter crates consume codec planning hooks through public `adapter`
@@ -96,27 +99,27 @@ matures, mirroring harness-engineering structural tests):
 Workspace edges (excluding external crates and `dev-dependencies`):
 
 ```
-ashlar-core         (leaf)
+signinum-core         (leaf)
 
-ashlar-tilecodec    -> ashlar-core
+signinum-tilecodec    -> signinum-core
 
-ashlar-jpeg         -> ashlar-core
-ashlar-jpeg-metal   -> ashlar-jpeg, ashlar-core
-ashlar-jpeg-cuda    -> ashlar-jpeg, ashlar-core
+signinum-jpeg         -> signinum-core
+signinum-jpeg-metal   -> signinum-jpeg, signinum-core
+signinum-jpeg-cuda    -> signinum-jpeg, signinum-core
 
-ashlar-j2k-native   -> ashlar-core
-ashlar-j2k          -> ashlar-j2k-native, ashlar-core
-ashlar-j2k-metal    -> ashlar-j2k, ashlar-j2k-native, ashlar-core
-ashlar-j2k-cuda     -> ashlar-j2k, ashlar-core
+signinum-j2k-native   -> signinum-core
+signinum-j2k          -> signinum-j2k-native, signinum-core
+signinum-j2k-metal    -> signinum-j2k, signinum-j2k-native, signinum-core
+signinum-j2k-cuda     -> signinum-j2k, signinum-core
 
-ashlar-cli          -> ashlar-jpeg, ashlar-j2k, ashlar-core
+signinum-cli          -> signinum-jpeg, signinum-j2k, signinum-core
 
-ashlar-j2k-compare  -> ashlar-core (test/bench reference only)
+signinum-j2k-compare  -> signinum-core (test/bench reference only)
 ```
 
 ## Core abstractions
 
-These live in `ashlar-core` and are the contract every codec and adapter
+These live in `signinum-core` and are the contract every codec and adapter
 implements. New extension points belong here.
 
 ### Codec entry traits
@@ -213,12 +216,12 @@ decoder = Decoder::from_view(view)
 
 JPEG is fully fused on CPU: entropy decode, IDCT scheduling, upsampling, ROI,
 and the fast 4:2:0 path live together in
-`crates/ashlar-jpeg/src/entropy/sequential.rs` because splitting them
+`crates/signinum-jpeg/src/entropy/sequential.rs` because splitting them
 regresses WSI tile-batch performance. Splitting that module is planned but
 gated on stable benchmark and parity coverage.
 
 J2K parses boxes (COD, QCD, etc.) and the codestream, then drives
-`ashlar-j2k-native` (DWT, context modeling, arithmetic decode) before
+`signinum-j2k-native` (DWT, context modeling, arithmetic decode) before
 filling the caller-owned output buffer. ROI and reduced-resolution requests
 share the same core contract: the ROI is expressed in source coordinates, and
 the returned decoded rectangle covers the floor-start/ceil-end projection onto
@@ -231,6 +234,13 @@ scaled, and combined ROI+scaled device surfaces; explicit Metal requests return
 Metal-backed surfaces on macOS, while unsupported host or platform shapes fail
 through the adapter error path.
 
+Metal adapter routing is explicit after the CPU-first 1.0 line.
+`BackendRequest::Cpu` returns host-backed CPU surfaces. `BackendRequest::Auto`
+may select Metal only for validated adapter-supported shapes; otherwise it
+falls back to a host-backed CPU surface. `BackendRequest::Metal` is strict: it
+returns a Metal-backed surface for supported shapes or a clear
+unsupported/unavailable error. It does not silently return CPU output.
+
 ## Backend story
 
 There are three target backends. Selection is explicit in the public API.
@@ -242,10 +252,11 @@ There are three target backends. Selection is explicit in the public API.
   crate. The adapter owns its `MTLDevice`/`MTLCommandQueue` session and
   produces `MTLBuffer`-backed `DeviceSurface`s so downstream GPU pipelines
   can consume the result without an extra download.
-- **CUDA** — API-only in `0.1.0`. The adapter validates that explicit
-  `BackendRequest::Cuda` returns the documented unavailable error before
-  decode work. `Auto` and `Cpu` return CPU-backed host surfaces. No CUDA
-  runtime or performance claim is made in this checkpoint.
+- **CUDA** — explicit device-memory output. `Auto` and `Cpu` return CPU-backed
+  host surfaces. `BackendRequest::Cuda` uploads decoded bytes into CUDA device
+  memory when the `cuda-runtime` feature and a CUDA driver are available, and
+  otherwise reports CUDA as unavailable. No CUDA kernel decode or NVIDIA
+  performance claim is made.
 
 `BackendRequest::Auto` stays conservative: small or low-yield decodes are
 served from CPU; larger batches with supported shapes can be routed to a
@@ -254,7 +265,7 @@ device backend. The adaptive routing policy is iterating in
 
 ## Lifecycle and ownership
 
-ashlar deliberately externalizes anything that resembles a runtime.
+signinum deliberately externalizes anything that resembles a runtime.
 
 - **Buffers** are caller-owned. Every `decode_*_into` writes into a slice the
   caller provides.
@@ -272,17 +283,17 @@ ashlar deliberately externalizes anything that resembles a runtime.
 
 | Change | Crate |
 |--------|-------|
-| New shared trait, pixel format, or backend kind | `ashlar-core` |
-| New JPEG decode shape, marker, or CPU optimization | `ashlar-jpeg` |
-| New JPEG GPU shape | `ashlar-jpeg-metal` (or `-cuda`) |
-| New J2K codestream feature, ROI/scaled support | `ashlar-j2k-native`, surfaced through `ashlar-j2k` |
-| New tile decompression codec (e.g. LZ4) | `ashlar-tilecodec` |
-| New CLI subcommand | `ashlar-cli` |
+| New shared trait, pixel format, or backend kind | `signinum-core` |
+| New JPEG decode shape, marker, or CPU optimization | `signinum-jpeg` |
+| New JPEG GPU shape | `signinum-jpeg-metal` (or `-cuda`) |
+| New J2K codestream feature, ROI/scaled support | `signinum-j2k-native`, surfaced through `signinum-j2k` |
+| New tile decompression codec (e.g. LZ4) | `signinum-tilecodec` |
+| New CLI subcommand | `signinum-cli` |
 | New conformance fixture | `corpus/conformance/` plus its manifest |
 | New regression repro | `corpus/regressions/issue-NNN.<ext>` |
 
 When in doubt, prefer adding to the lowest layer that the new behavior
-genuinely requires, and never bypass `ashlar-core` to share types
+genuinely requires, and never bypass `signinum-core` to share types
 between codec crates.
 
 ## Build and platform
@@ -292,25 +303,24 @@ between codec crates.
   to build by design.
 - Metal adapters compile and run on Apple Silicon macOS. On other hosts the
   adapter crate compiles to a fallback surface.
-- CUDA adapter crates currently expose the API surface only. No CUDA runtime
-  is required to build or test the workspace, and explicit CUDA requests fail
-  as unavailable before decode validation.
+- CUDA adapter crates expose runtime device-memory output for explicit CUDA
+  requests when built with `cuda-runtime` on hosts with a CUDA driver. Hosts
+  without CUDA return the documented unavailable error.
 - Release profile: `lto = "fat"`, `codegen-units = 1`, `strip = "symbols"`,
   `opt-level = 3`. `release-bench` inherits `release` but keeps debug info.
 - Notable feature flags:
-  - `ashlar-j2k-native`: `std` (default), `simd` (default, requires
+  - `signinum-j2k-native`: `std` (default), `simd` (default, requires
     `std`), `logging`.
-  - `ashlar-jpeg`: `scalar-only` retained for fuzzing and reference.
-  - `ashlar-jpeg-cuda`, `ashlar-j2k-cuda`: `cuda-runtime` is
-    declared but unused in `0.1.0`.
+  - `signinum-jpeg`: `scalar-only` retained for fuzzing and reference.
+  - `signinum-jpeg-cuda`, `signinum-j2k-cuda`: `cuda-runtime` enables CUDA Driver
+    API device allocation and host-to-device upload for explicit CUDA
+    requests.
 
 ## Active areas
 
 These are the surfaces under active change. Treat anything here as
 provisional and check the most recent commits before relying on it.
 
-- JPEG 2000 / HTJ2K ROI and reduced-resolution performance work in
-  `ashlar-j2k` and `ashlar-j2k-native`.
 - Metal adapter hardening: aligning the adapter session model with the
   wgpu-hal style, exposing the underlying `MTLBuffer` from `DeviceSurface`,
   and pushing more of the J2K full-tile path onto the GPU.
@@ -321,8 +331,10 @@ provisional and check the most recent commits before relying on it.
 
 ## Stability posture
 
-`0.1.0` is a pre-1.0 source release. The CPU WSI decode surfaces in
-`ashlar-jpeg`, `ashlar-j2k`, and `ashlar-tilecodec` are the
-primary supported APIs. The Metal adapter APIs are hardening. The CUDA
-adapter APIs are compatibility surfaces only. Breaking changes to any of
-these surfaces should be reflected here and in [`CHANGELOG.md`](../CHANGELOG.md).
+CPU-first 1.0 covers `signinum-core`, `signinum-jpeg`, `signinum-j2k`,
+`signinum-tilecodec`, and `signinum-cli`. `signinum-j2k-native` is published as an
+implementation dependency, not as the primary stable API. The Metal adapter
+APIs remain on the post-1.0 hardening track. The CUDA adapter APIs now expose
+runtime CUDA device-memory output but remain pre-1.0 while kernel decode and
+performance work harden. Breaking changes to any of these surfaces should be
+reflected here and in [`CHANGELOG.md`](../CHANGELOG.md).

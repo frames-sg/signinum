@@ -23,18 +23,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test -p ashlar-jpeg-metal --all-targets
-      - run: cargo test -p ashlar-j2k-metal --all-targets
-      - run: cargo bench -p ashlar-jpeg-metal --no-run
-      - run: cargo bench -p ashlar-j2k-metal --no-run
+      - run: cargo test -p signinum-jpeg-metal --all-targets
+      - run: cargo test -p signinum-j2k-metal --all-targets
+      - run: cargo bench -p signinum-jpeg-metal --no-run
+      - run: cargo bench -p signinum-j2k-metal --no-run
       - if: ${{ inputs.run-timed-benchmarks }}
-        run: cargo bench -p ashlar-jpeg-metal --bench compare
+        run: cargo bench -p signinum-jpeg-metal --bench compare
       - if: ${{ inputs.run-timed-benchmarks }}
-        run: cargo bench -p ashlar-j2k-metal --bench compare
+        run: cargo bench -p signinum-j2k-metal --bench compare
 
   cuda-x86_64-compatibility:
     name: CUDA API compatibility on x86_64
     runs-on: [self-hosted, Linux, X64, cuda]
+    env:
+      SIGNINUM_REQUIRE_CUDA_RUNTIME: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -46,8 +48,7 @@ jobs:
           if command -v nvidia-smi >/dev/null 2>&1; then
             nvidia-smi
           else
-            echo "nvidia-smi not found; CUDA adapter tests do not require runtime CUDA"
+            echo "nvidia-smi not found; CUDA runtime validation requires a working CUDA driver"
           fi
-      - run: cargo test -p ashlar-jpeg-cuda --all-targets --features cuda-runtime
-      - run: cargo test -p ashlar-j2k-cuda --all-targets --features cuda-runtime
-      - run: cargo bench -p ashlar-jpeg --no-run
+      - run: cargo test -p signinum-jpeg-cuda --all-targets --features cuda-runtime
+      - run: cargo test -p signinum-j2k-cuda --all-targets --features cuda-runtime

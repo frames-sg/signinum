@@ -22,99 +22,55 @@ env:
   DRY_RUN_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.dry-run-only }}
 
 jobs:
-  publish-ashlar-core:
+  publish-signinum-core:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: scripts/publish-crate.sh ashlar-core
+      - run: scripts/publish-crate.sh signinum-core
 
-  publish-ashlar-j2k-native:
+  publish-signinum-j2k-native:
     needs:
-      - publish-ashlar-core
+      - publish-signinum-core
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: scripts/publish-crate.sh ashlar-j2k-native
+      - run: scripts/publish-crate.sh signinum-j2k-native
 
-  publish-ashlar-j2k-compare:
+  publish-signinum-jpeg:
     needs:
-      - publish-ashlar-j2k-native
+      - publish-signinum-j2k-native
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: scripts/publish-crate.sh ashlar-j2k-compare
+      - run: scripts/publish-crate.sh signinum-jpeg
 
-  publish-ashlar-tilecodec:
+  publish-signinum-tilecodec:
     needs:
-      - publish-ashlar-j2k-compare
+      - publish-signinum-j2k-native
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: scripts/publish-crate.sh ashlar-tilecodec
+      - run: scripts/publish-crate.sh signinum-tilecodec
 
-  publish-ashlar-jpeg:
+  publish-signinum-j2k:
     needs:
-      - publish-ashlar-tilecodec
+      - publish-signinum-jpeg
+      - publish-signinum-tilecodec
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: scripts/publish-crate.sh ashlar-jpeg
+      - run: scripts/publish-crate.sh signinum-j2k
 
-  publish-ashlar-jpeg-metal:
+  publish-signinum-cli:
     needs:
-      - publish-ashlar-jpeg
+      - publish-signinum-j2k
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: scripts/publish-crate.sh ashlar-jpeg-metal
-
-  publish-ashlar-jpeg-cuda:
-    needs:
-      - publish-ashlar-jpeg-metal
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - run: scripts/publish-crate.sh ashlar-jpeg-cuda
-
-  publish-ashlar-j2k:
-    needs:
-      - publish-ashlar-jpeg-cuda
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - run: scripts/publish-crate.sh ashlar-j2k
-
-  publish-ashlar-j2k-metal:
-    needs:
-      - publish-ashlar-j2k
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - run: scripts/publish-crate.sh ashlar-j2k-metal
-
-  publish-ashlar-j2k-cuda:
-    needs:
-      - publish-ashlar-j2k-metal
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - run: scripts/publish-crate.sh ashlar-j2k-cuda
-
-  publish-ashlar-cli:
-    needs:
-      - publish-ashlar-j2k-cuda
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - run: scripts/publish-crate.sh ashlar-cli
+      - run: scripts/publish-crate.sh signinum-cli

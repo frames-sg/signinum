@@ -1,27 +1,28 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/ashlar-core",
-    "crates/ashlar-j2k-compare",
-    "crates/ashlar-j2k-native",
-    "crates/ashlar-j2k",
-    "crates/ashlar-j2k-cuda",
-    "crates/ashlar-j2k-metal",
-    "crates/ashlar-jpeg",
-    "crates/ashlar-jpeg-cuda",
-    "crates/ashlar-jpeg-metal",
-    "crates/ashlar-tilecodec",
-    "crates/ashlar-cli",
+    "crates/signinum-core",
+    "crates/signinum-cuda-runtime",
+    "crates/signinum-j2k-compare",
+    "crates/signinum-j2k-native",
+    "crates/signinum-j2k",
+    "crates/signinum-j2k-cuda",
+    "crates/signinum-j2k-metal",
+    "crates/signinum-jpeg",
+    "crates/signinum-jpeg-cuda",
+    "crates/signinum-jpeg-metal",
+    "crates/signinum-tilecodec",
+    "crates/signinum-cli",
     "xtask",
 ]
 
 [workspace.package]
-version      = "0.1.0"
+version      = "1.0.0"
 edition      = "2021"
 rust-version = "1.94"
 license      = "Apache-2.0"
-repository   = "https://github.com/jcwal1516/ashlar"
-homepage     = "https://github.com/jcwal1516/ashlar"
+repository   = "https://github.com/jcwal1516/signinum"
+homepage     = "https://github.com/jcwal1516/signinum"
 keywords     = ["pathology", "wsi", "jpeg", "jpeg2000", "tiff"]
 categories   = ["multimedia::images"]
 
@@ -32,6 +33,7 @@ criterion = { version = "0.5", default-features = false }
 flate2 = { version = "1.1", default-features = false, features = ["zlib"] }
 zstd = { version = "0.13" }
 weezl = { version = "0.1" }
+libloading = "0.8"
 
 [profile.release]
 lto           = "fat"

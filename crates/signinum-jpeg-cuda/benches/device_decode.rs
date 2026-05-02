@@ -2,9 +2,12 @@
 
 use criterion::{criterion_group, criterion_main, Criterion};
 use jpeg_encoder::{ColorType, Encoder};
-use signinum_core::{BackendRequest, DeviceSurface, ImageDecodeDevice, PixelFormat};
+use signinum_core::{
+    BackendRequest, DeviceSubmission, DeviceSurface, ImageDecodeDevice, ImageDecodeSubmit,
+    PixelFormat,
+};
 use signinum_jpeg::Decoder as CpuDecoder;
-use signinum_jpeg_cuda::Decoder as CudaDecoder;
+use signinum_jpeg_cuda::{CudaSession, Decoder as CudaDecoder};
 
 const DEFAULT_JPEG: &[u8] = include_bytes!("../fixtures/jpeg/baseline_420_16x16.jpg");
 const DEFAULT_GENERATED_DIM: u16 = 2048;
@@ -28,11 +31,18 @@ fn bench_device_decode(c: &mut Criterion) {
                 "cuda_upload_fallback_rgb8_surface"
             };
             group.bench_function(label, |b| {
+                let mut session = CudaSession::default();
                 b.iter(|| {
                     let mut decoder = CudaDecoder::new(&input).expect("cuda decoder");
-                    decoder
-                        .decode_to_device(PixelFormat::Rgb8, BackendRequest::Cuda)
-                        .expect("cuda decode")
+                    <CudaDecoder<'_> as ImageDecodeSubmit<'_>>::submit_to_device(
+                        &mut decoder,
+                        &mut session,
+                        PixelFormat::Rgb8,
+                        BackendRequest::Cuda,
+                    )
+                    .expect("cuda submit")
+                    .wait()
+                    .expect("cuda decode")
                 });
             });
 
@@ -42,11 +52,18 @@ fn bench_device_decode(c: &mut Criterion) {
                 "cuda_upload_fallback_rgb8_download"
             };
             group.bench_function(label, |b| {
+                let mut session = CudaSession::default();
                 b.iter(|| {
                     let mut decoder = CudaDecoder::new(&input).expect("cuda decoder");
-                    let surface = decoder
-                        .decode_to_device(PixelFormat::Rgb8, BackendRequest::Cuda)
-                        .expect("cuda decode");
+                    let surface = <CudaDecoder<'_> as ImageDecodeSubmit<'_>>::submit_to_device(
+                        &mut decoder,
+                        &mut session,
+                        PixelFormat::Rgb8,
+                        BackendRequest::Cuda,
+                    )
+                    .expect("cuda submit")
+                    .wait()
+                    .expect("cuda decode");
                     let mut out = vec![0u8; surface.byte_len()];
                     surface
                         .download_into(&mut out, surface.pitch_bytes())

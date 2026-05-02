@@ -4,19 +4,32 @@ use std::process::{Command, ExitCode};
 
 const PUBLISHABLE_PACKAGES: &[&str] = &[
     "signinum-core",
+    "signinum-cuda-runtime",
     "signinum-j2k-native",
     "signinum-jpeg",
     "signinum-tilecodec",
     "signinum-j2k",
+    "signinum-jpeg-metal",
+    "signinum-j2k-metal",
+    "signinum-jpeg-cuda",
+    "signinum-j2k-cuda",
     "signinum-cli",
 ];
 
-const REGISTRY_INDEPENDENT_PACKAGES: &[&str] = &["signinum-core", "signinum-j2k-native"];
+const REGISTRY_INDEPENDENT_PACKAGES: &[&str] = &[
+    "signinum-core",
+    "signinum-cuda-runtime",
+    "signinum-j2k-native",
+];
 
 const STAGED_DEPENDENCY_PACKAGES: &[&str] = &[
     "signinum-jpeg",
     "signinum-tilecodec",
     "signinum-j2k",
+    "signinum-jpeg-metal",
+    "signinum-j2k-metal",
+    "signinum-jpeg-cuda",
+    "signinum-j2k-cuda",
     "signinum-cli",
 ];
 

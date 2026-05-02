@@ -7,12 +7,12 @@ are `signinum-core`, `signinum-jpeg`, `signinum-j2k`, `signinum-tilecodec`, and
 `signinum-cli`. `signinum-j2k-native` is published as a `0.2.x` implementation
 dependency so `signinum-j2k` can be installed from crates.io.
 
-Metal and CUDA adapter crates remain pre-1.0 and are excluded from the
-CPU-first crates.io publish workflow. CUDA explicit requests can produce CUDA
-device-memory surfaces when built with `cuda-runtime` on a host with a CUDA
-driver, but decode is still CPU-produced and uploaded. CUDA device memory is
-validated separately from kernel work. There is no CUDA kernel decode and no
-NVIDIA performance claim.
+Metal and CUDA adapter crates are published as pre-1.0 `0.2.x` artifacts so the
+renamed crate family has direct replacements for the old `ashlar-*` adapters.
+CUDA explicit requests can produce CUDA device-memory surfaces when built with
+`cuda-runtime` on a host with a CUDA driver, but decode is still CPU-produced
+and uploaded. CUDA device memory is validated separately from kernel work.
+There is no CUDA kernel decode and no NVIDIA performance claim.
 
 ## Verification Gates
 
@@ -57,15 +57,19 @@ failure. The publish workflow's dry-run mode mirrors that limit: it uses
 `cargo package --list` for crates blocked only by unpublished workspace
 dependencies. Real publishes still run `cargo publish` in dependency order.
 
-The CPU-first 1.0 publish order is:
+The crates.io publish order is:
 
 1. `signinum-core` `1.0.0`
-2. `signinum-j2k-native` `0.2.x`
-3. `signinum-jpeg` `1.0.0`
-4. `signinum-tilecodec` `1.0.0`
-5. `signinum-j2k` `1.0.0`
-6. `signinum-cli` `1.0.0`
+2. `signinum-cuda-runtime` `0.2.x`
+3. `signinum-j2k-native` `0.2.x`
+4. `signinum-jpeg` `1.0.0`
+5. `signinum-tilecodec` `1.0.0`
+6. `signinum-j2k` `1.0.0`
+7. `signinum-jpeg-metal` `0.2.x`
+8. `signinum-j2k-metal` `0.2.x`
+9. `signinum-jpeg-cuda` `0.2.x`
+10. `signinum-j2k-cuda` `0.2.x`
+11. `signinum-cli` `1.0.0`
 
 `signinum-j2k-compare` remains `publish = false`; it is a local parity oracle
-helper, not a released runtime dependency. Metal and CUDA crates are held for
-the post-1.0 hardening track.
+helper, not a released runtime dependency.

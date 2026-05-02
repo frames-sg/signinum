@@ -2,7 +2,7 @@
 
 ## Context
 
-The repository already contains `ashlar-jpeg-cuda` and `ashlar-j2k-cuda`
+The repository already contains `signinum-jpeg-cuda` and `signinum-j2k-cuda`
 adapter crates. They are compatibility-only: `BackendRequest::Cpu` and
 `BackendRequest::Auto` return CPU-backed host surfaces, while explicit
 `BackendRequest::Cuda` returns an unavailable error before decode validation.
@@ -55,8 +55,8 @@ It should:
 4. Run:
 
 ```sh
-cargo test -p ashlar-jpeg-cuda --all-targets --features cuda-runtime
-cargo test -p ashlar-j2k-cuda --all-targets --features cuda-runtime
+cargo test -p signinum-jpeg-cuda --all-targets --features cuda-runtime
+cargo test -p signinum-j2k-cuda --all-targets --features cuda-runtime
 ```
 
 5. Compile benchmark targets that are relevant to CPU/J2K/JPEG validation
@@ -81,14 +81,14 @@ Passing it does not mean:
 
 ## Test Strategy
 
-Update `crates/ashlar-core/tests/repo_integrity.rs` to assert that the manual
+Update `crates/signinum-core/tests/repo_integrity.rs` to assert that the manual
 GPU workflow remains explicit:
 
 - it contains `workflow_dispatch`;
 - it has self-hosted Metal and CUDA labels;
 - the CUDA job runs both CUDA adapter test commands with
   `--features cuda-runtime`;
-- the CUDA job does not depend on `ashlar-j2k-metal --bench compare --no-run`
+- the CUDA job does not depend on `signinum-j2k-metal --bench compare --no-run`
   as its J2K validation path.
 
 Existing CUDA adapter behavior tests should remain in place. They are the

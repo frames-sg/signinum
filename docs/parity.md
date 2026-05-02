@@ -1,13 +1,13 @@
 # Parity Strategy
 
-`ashlar` keeps parity checks close to the codec surface instead of relying
+`signinum` keeps parity checks close to the codec surface instead of relying
 on a single visual smoke test.
 
 ## JPEG
 
 - Primary conformance fixtures live in `corpus/conformance/manifest.json` and
   compare decoded bytes against libjpeg-turbo-generated raw outputs.
-- WSI-shaped fixtures and policy checks live in the `ashlar-jpeg` test and
+- WSI-shaped fixtures and policy checks live in the `signinum-jpeg` test and
   bench suites.
 - Tolerance is bit-exact for the committed baseline fixtures. Any future lossy
   tolerance must be recorded per fixture in the manifest.
@@ -20,8 +20,9 @@ on a single visual smoke test.
   API behavior, not only as full-frame decode.
 - Metal and CUDA-named adapter crates must preserve CPU parity for fallback
   host surfaces. Metal crates must preserve decoded bytes for explicit
-  Metal-backed ROI+scaled surfaces. CUDA crates do not claim runtime CUDA
-  execution in `0.1.0`.
+  Metal-backed ROI+scaled surfaces. CUDA crates must preserve decoded bytes
+  after download from explicit CUDA-backed surfaces. CUDA currently uploads
+  CPU-decoded bytes into device memory and does not claim CUDA kernel decode.
 
 ## Maintenance Rules
 

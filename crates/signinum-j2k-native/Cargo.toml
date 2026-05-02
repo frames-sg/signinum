@@ -1,0 +1,32 @@
+[package]
+name = "signinum-j2k-native"
+description = "Pure-Rust JPEG 2000 codec engine for signinum"
+version = "0.2.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+
+[features]
+default = ["std", "simd"]
+logging = ["dep:log"]
+simd = ["fearless_simd", "std"]
+std = []
+
+[lib]
+name = "signinum_j2k_native"
+path = "src/lib.rs"
+
+[dependencies]
+fearless_simd = { version = "0.3.0", optional = true }
+libm = { version = "0.2", default-features = false }
+log = { version = "0.4", optional = true }
+
+[lints.rust]
+unsafe_code = "forbid"
+unreachable_pub = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = "allow"

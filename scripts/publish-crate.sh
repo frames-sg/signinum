@@ -5,7 +5,24 @@ crate="${1:?usage: publish-crate.sh <crate>}"
 dry_run="${DRY_RUN_ONLY:-false}"
 version="$(cargo pkgid -p "$crate" | sed 's/.*#//')"
 
+has_unpublished_workspace_dependency() {
+  case "$1" in
+    signinum-jpeg | signinum-tilecodec | signinum-j2k | signinum-cli)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 if [[ "$dry_run" == "true" ]]; then
+  if has_unpublished_workspace_dependency "$crate"; then
+    echo "${crate}: dry-run package list only; unpublished workspace dependencies make cargo publish --dry-run invalid before staged publication"
+    cargo package -p "$crate" --list
+    exit 0
+  fi
+
   cargo publish -p "$crate" --dry-run
   exit 0
 fi

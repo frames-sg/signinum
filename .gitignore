@@ -6,3 +6,14 @@ Cargo.lock.bak
 *.swp
 __pycache__/
 *.py[cod]
+
+# LaTeX build outputs
+paper/arxiv/build/
+paper/arxiv/*.aux
+paper/arxiv/*.bbl
+paper/arxiv/*.blg
+paper/arxiv/*.fdb_latexmk
+paper/arxiv/*.fls
+paper/arxiv/*.log
+paper/arxiv/*.out
+paper/arxiv/*.synctex.gz

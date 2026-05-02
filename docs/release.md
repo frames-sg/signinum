@@ -2,13 +2,17 @@
 
 ## Current State
 
-The workspace is versioned as `0.1.0` for the first public-source checkpoint.
-It remains pre-1.0 while JPEG 2000 / HTJ2K ROI+reduced-resolution performance
-thresholds and GPU adapter APIs settle.
+The repository is staged for CPU-first 1.0. The stable 1.0 release artifacts
+are `signinum-core`, `signinum-jpeg`, `signinum-j2k`, `signinum-tilecodec`, and
+`signinum-cli`. `signinum-j2k-native` is published as a `0.2.x` implementation
+dependency so `signinum-j2k` can be installed from crates.io.
 
-The repository is ready for source publication once a real Git remote is
-configured. Do not add placeholder `repository` or `homepage` metadata to
-`Cargo.toml`; use the final public URL when it exists.
+Metal and CUDA adapter crates remain pre-1.0 and are excluded from the
+CPU-first crates.io publish workflow. CUDA explicit requests can produce CUDA
+device-memory surfaces when built with `cuda-runtime` on a host with a CUDA
+driver, but decode is still CPU-produced and uploaded. CUDA device memory is
+validated separately from kernel work. There is no CUDA kernel decode and no
+NVIDIA performance claim.
 
 ## Verification Gates
 
@@ -24,7 +28,7 @@ Hosted CI must pass before release staging:
 
 Runtime GPU validation is intentionally separate because hosted GitHub runners
 do not provide the required devices. Run `.github/workflows/gpu-validation.yml`
-on self-hosted runners before claiming GPU runtime validation:
+on self-hosted runners before claiming Metal runtime validation:
 
 1. Apple Silicon Metal runner labels: `self-hosted`, `macOS`, `ARM64`,
    `metal`
@@ -32,27 +36,36 @@ on self-hosted runners before claiming GPU runtime validation:
 3. Use the `run-timed-benchmarks` workflow input when a release needs measured
    GPU benchmark timing rather than compile-only coverage
 
-The CUDA crates remain compatibility adapters until a real CUDA backend lands.
-Passing the CUDA self-hosted job validates API behavior and build compatibility;
-it is not a CUDA decode performance claim.
+Passing the CUDA self-hosted job validates `cuda-runtime` device-memory output
+on a CUDA runner. It is not a CUDA kernel decode or NVIDIA performance claim.
 
 ## Crates.io
 
 Crates.io publication is staged because workspace crates depend on each other.
-The first publishable crate is:
+Before publishing, run `cargo xtask package` from a clean worktree. The package
+preflight runs `cargo package --list` for every CPU-first publishable crate,
+then runs strict `cargo package --no-verify` only for crates that do not depend
+on unpublished workspace versions. Downstream crates such as `signinum-jpeg`,
+`signinum-tilecodec`, `signinum-j2k`, and `signinum-cli` cannot pass strict
+pre-publish packaging until the prior staged crates exist on crates.io, because
+Cargo resolves their versioned path dependencies against the registry during
+packaging.
 
-1. `ashlar-core`
+This is an unpublished workspace dependencies limit, not a package content
+failure. The publish workflow's dry-run mode mirrors that limit: it uses
+`cargo publish --dry-run` for registry-independent crates and
+`cargo package --list` for crates blocked only by unpublished workspace
+dependencies. Real publishes still run `cargo publish` in dependency order.
 
-After `ashlar-core` is available in the registry, crates that depend only
-on it can be published or dry-run verified:
+The CPU-first 1.0 publish order is:
 
-1. `ashlar-jpeg`
-2. `ashlar-tilecodec`
+1. `signinum-core` `1.0.0`
+2. `signinum-j2k-native` `0.2.x`
+3. `signinum-jpeg` `1.0.0`
+4. `signinum-tilecodec` `1.0.0`
+5. `signinum-j2k` `1.0.0`
+6. `signinum-cli` `1.0.0`
 
-The JPEG Metal/CUDA adapter crates should be published only after
-`ashlar-jpeg` is available.
-
-The JPEG 2000 crates still need an explicit registry plan before publishing:
-`ashlar-j2k` uses the repo-local native engine and its comparison benches
-also exercise the Metal adapter. Keep those crates source-published until the
-crate split and publish order are made acyclic for crates.io.
+`signinum-j2k-compare` remains `publish = false`; it is a local parity oracle
+helper, not a released runtime dependency. Metal and CUDA crates are held for
+the post-1.0 hardening track.

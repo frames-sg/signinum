@@ -5,7 +5,7 @@ Date: 2026-05-01
 ## Goal
 
 Harden the Metal adapter routing contract after the CPU-first 1.0 release
-staging. This slice covers `ashlar-jpeg-metal` and `ashlar-j2k-metal`; it does
+staging. This slice covers `signinum-jpeg-metal` and `signinum-j2k-metal`; it does
 not add CUDA runtime decode and does not promote Metal crates to 1.0.
 
 The output of this work is an explicit, tested policy for `BackendRequest::Cpu`,
@@ -17,7 +17,7 @@ entry points.
 - No new Metal kernels.
 - No performance tuning.
 - No CUDA behavior changes.
-- No public `ashlar-core` routing abstraction.
+- No public `signinum-core` routing abstraction.
 - No claim that Metal crates are stable 1.0 artifacts.
 
 ## Routing Contract
@@ -42,7 +42,7 @@ classified as unsupported through the existing codec error surface.
 
 Each Metal crate gets a small local routing-policy helper. The helper stays in
 the adapter crate because JPEG and J2K have different capability predicates and
-the shared `ashlar-core` traits should not learn backend-specific policy.
+the shared `signinum-core` traits should not learn backend-specific policy.
 
 The helper should normalize routing decisions into a small internal enum:
 
@@ -61,7 +61,7 @@ entry points, depending on which is clearer in each crate.
 
 ## JPEG Metal Scope
 
-Cover the user-facing `ashlar-jpeg-metal` entry points:
+Cover the user-facing `signinum-jpeg-metal` entry points:
 
 - full-frame device decode
 - ROI device decode
@@ -77,7 +77,7 @@ the right path.
 
 ## J2K Metal Scope
 
-Cover the user-facing `ashlar-j2k-metal` entry points:
+Cover the user-facing `signinum-j2k-metal` entry points:
 
 - full-frame device decode
 - ROI device decode
@@ -136,8 +136,8 @@ The implementation plan should include at least:
 
 - focused JPEG Metal routing tests
 - focused J2K Metal routing tests
-- `cargo test -p ashlar-jpeg-metal --all-targets`
-- `cargo test -p ashlar-j2k-metal --all-targets`
+- `cargo test -p signinum-jpeg-metal --all-targets`
+- `cargo test -p signinum-j2k-metal --all-targets`
 - `cargo xtask clippy`
 - `cargo xtask doc`
 

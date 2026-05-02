@@ -1,0 +1,21 @@
+[package]
+name        = "signinum-cli"
+description = "Command-line tool for signinum: inspect"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace = true
+readme               = "README.md"
+
+[[bin]]
+name = "signinum"
+path = "src/main.rs"
+
+[dependencies]
+signinum-j2k  = { path = "../signinum-j2k", version = "=1.0.0" }
+signinum-jpeg = { path = "../signinum-jpeg", version = "=1.0.0" }
+
+# NOTE: `[profile.*]` blocks in package-level manifests are silently ignored
+# inside a workspace (see https://doc.rust-lang.org/cargo/reference/profiles.html#overrides).
+# Any codegen tweaks for the CLI must go in the root workspace `Cargo.toml`.

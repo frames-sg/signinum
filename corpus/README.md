@@ -1,4 +1,4 @@
-# ashlar corpus
+# signinum corpus
 
 Test data committed to this repo. Size budget: ~30 MB total.
 

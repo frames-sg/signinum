@@ -3,26 +3,30 @@ use std::ffi::OsString;
 use std::process::{Command, ExitCode};
 
 const PUBLISHABLE_PACKAGES: &[&str] = &[
-    "ashlar-core",
-    "ashlar-j2k-native",
-    "ashlar-j2k-compare",
-    "ashlar-tilecodec",
-    "ashlar-jpeg",
-    "ashlar-jpeg-metal",
-    "ashlar-jpeg-cuda",
-    "ashlar-j2k",
-    "ashlar-j2k-metal",
-    "ashlar-j2k-cuda",
-    "ashlar-cli",
+    "signinum-core",
+    "signinum-j2k-native",
+    "signinum-jpeg",
+    "signinum-tilecodec",
+    "signinum-j2k",
+    "signinum-cli",
+];
+
+const REGISTRY_INDEPENDENT_PACKAGES: &[&str] = &["signinum-core", "signinum-j2k-native"];
+
+const STAGED_DEPENDENCY_PACKAGES: &[&str] = &[
+    "signinum-jpeg",
+    "signinum-tilecodec",
+    "signinum-j2k",
+    "signinum-cli",
 ];
 
 const CPU_RELEASE_PACKAGES: &[&str] = &[
-    "ashlar-core",
-    "ashlar-jpeg",
-    "ashlar-j2k-native",
-    "ashlar-j2k",
-    "ashlar-tilecodec",
-    "ashlar-cli",
+    "signinum-core",
+    "signinum-jpeg",
+    "signinum-j2k-native",
+    "signinum-j2k",
+    "signinum-tilecodec",
+    "signinum-cli",
 ];
 
 const NO_STD_TARGET: &str = "aarch64-unknown-none";
@@ -96,13 +100,13 @@ fn test() -> Result<(), String> {
         "--all-targets",
         "--all-features",
         "--exclude",
-        "ashlar-j2k-metal",
+        "signinum-j2k-metal",
     ])?;
     run_cargo_with_env(
         &[
             "test",
             "-p",
-            "ashlar-j2k-metal",
+            "signinum-j2k-metal",
             "--all-targets",
             "--all-features",
         ],
@@ -122,13 +126,13 @@ fn typos() -> Result<(), String> {
 }
 
 fn bench_build() -> Result<(), String> {
-    run_cargo(&["bench", "-p", "ashlar-jpeg", "--no-run"])?;
-    run_cargo(&["bench", "-p", "ashlar-jpeg-metal", "--no-run"])?;
-    run_cargo(&["bench", "-p", "ashlar-j2k-metal", "--no-run"])?;
+    run_cargo(&["bench", "-p", "signinum-jpeg", "--no-run"])?;
+    run_cargo(&["bench", "-p", "signinum-jpeg-metal", "--no-run"])?;
+    run_cargo(&["bench", "-p", "signinum-j2k-metal", "--no-run"])?;
     run_cargo(&[
         "bench",
         "-p",
-        "ashlar-tilecodec",
+        "signinum-tilecodec",
         "--bench",
         "compare",
         "--no-run",
@@ -139,12 +143,12 @@ fn fuzz_build() -> Result<(), String> {
     run_cargo(&[
         "check",
         "--manifest-path",
-        "crates/ashlar-j2k/fuzz/Cargo.toml",
+        "crates/signinum-j2k/fuzz/Cargo.toml",
     ])?;
     run_cargo(&[
         "check",
         "--manifest-path",
-        "crates/ashlar-tilecodec/fuzz/Cargo.toml",
+        "crates/signinum-tilecodec/fuzz/Cargo.toml",
     ])
 }
 
@@ -158,11 +162,11 @@ fn no_std() -> Result<(), String> {
         &["target", "add", NO_STD_TARGET],
         &[],
     )?;
-    run_cargo(&["check", "-p", "ashlar-core", "--target", NO_STD_TARGET])?;
+    run_cargo(&["check", "-p", "signinum-core", "--target", NO_STD_TARGET])?;
     run_cargo(&[
         "check",
         "-p",
-        "ashlar-j2k-native",
+        "signinum-j2k-native",
         "--no-default-features",
         "--target",
         NO_STD_TARGET,
@@ -188,9 +192,9 @@ fn release_metal() -> Result<(), String> {
             "test",
             "--release",
             "-p",
-            "ashlar-jpeg-metal",
+            "signinum-jpeg-metal",
             "-p",
-            "ashlar-j2k-metal",
+            "signinum-j2k-metal",
         ],
         &[("RUST_TEST_THREADS", "1")],
     )
@@ -210,7 +214,15 @@ fn coverage() -> Result<(), String> {
 fn package() -> Result<(), String> {
     ensure_clean_worktree()?;
     for package in PUBLISHABLE_PACKAGES {
+        run_cargo(&["package", "-p", package, "--list"])?;
+    }
+    for package in REGISTRY_INDEPENDENT_PACKAGES {
         run_cargo(&["package", "-p", package, "--no-verify"])?;
+    }
+    for package in STAGED_DEPENDENCY_PACKAGES {
+        eprintln!(
+            "skipping strict package verification for {package}: unpublished workspace dependencies are staged for publication; `cargo package --list` validated package contents"
+        );
     }
     Ok(())
 }
@@ -284,6 +296,6 @@ fn print_help() {
            release-cpu   run release-mode CPU codec tests\n\
            release-metal run release-mode Metal tests on macOS\n\
            coverage      generate lcov.info with cargo-llvm-cov\n\
-           package       package publishable crates from a clean worktree without verification"
+           package       preflight CPU-first 1.0 packaging from a clean worktree; strict for registry-independent crates and list-only for staged dependencies"
     );
 }

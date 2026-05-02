@@ -3,7 +3,7 @@
 ## Reporting a Vulnerability
 
 JPEG decoders ingest adversarial byte streams from the wild. If you find a
-crash, memory-safety violation, or undefined behavior in `ashlar`, please
+crash, memory-safety violation, or undefined behavior in `signinum`, please
 report it privately rather than opening a public issue.
 
 Use GitHub's private vulnerability reporting for the repository, or contact the
@@ -20,4 +20,6 @@ generally within 30 days for high-severity issues.
 
 ## Supported versions
 
-Until 1.0, only the most recent minor version receives security patches.
+The supported stable line is CPU-first 1.x. Pre-1.0 adapter crates receive
+security fixes in their latest minor line while they remain part of the
+repository.

@@ -36,119 +36,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
-name = "ashlar-cli"
-version = "0.1.0"
-dependencies = [
- "ashlar-j2k",
- "ashlar-jpeg",
-]
-
-[[package]]
-name = "ashlar-core"
-version = "0.1.0"
-dependencies = [
- "thiserror",
-]
-
-[[package]]
-name = "ashlar-j2k"
-version = "0.1.0"
-dependencies = [
- "ashlar-core",
- "ashlar-j2k-compare",
- "ashlar-j2k-native",
- "criterion",
- "proptest",
- "thiserror",
-]
-
-[[package]]
-name = "ashlar-j2k-compare"
-version = "0.1.0"
-dependencies = [
- "ashlar-core",
- "cc",
- "openjpeg-sys",
-]
-
-[[package]]
-name = "ashlar-j2k-cuda"
-version = "0.1.0"
-dependencies = [
- "ashlar-core",
- "ashlar-j2k",
- "ashlar-j2k-native",
- "thiserror",
-]
-
-[[package]]
-name = "ashlar-j2k-metal"
-version = "0.1.0"
-dependencies = [
- "ashlar-core",
- "ashlar-j2k",
- "ashlar-j2k-native",
- "criterion",
- "metal",
- "thiserror",
-]
-
-[[package]]
-name = "ashlar-j2k-native"
-version = "0.1.0"
-dependencies = [
- "fearless_simd",
- "libm",
- "log",
-]
-
-[[package]]
-name = "ashlar-jpeg"
-version = "0.1.0"
-dependencies = [
- "ashlar-core",
- "criterion",
- "jpeg-decoder",
- "memchr",
- "proptest",
- "thiserror",
- "zune-core",
- "zune-jpeg",
-]
-
-[[package]]
-name = "ashlar-jpeg-cuda"
-version = "0.1.0"
-dependencies = [
- "ashlar-core",
- "ashlar-jpeg",
- "thiserror",
-]
-
-[[package]]
-name = "ashlar-jpeg-metal"
-version = "0.1.0"
-dependencies = [
- "ashlar-core",
- "ashlar-jpeg",
- "criterion",
- "metal",
- "thiserror",
-]
-
-[[package]]
-name = "ashlar-tilecodec"
-version = "0.1.0"
-dependencies = [
- "ashlar-core",
- "criterion",
- "flate2",
- "thiserror",
- "weezl",
- "zstd",
-]
-
-[[package]]
 name = "autocfg"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -201,9 +88,9 @@ checksum = "37b2a672a2cb129a2e41c10b1224bb368f9f37a2b16b612598138befd7b37eb5"
 
 [[package]]
 name = "cc"
-version = "1.2.60"
+version = "1.2.61"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "43c5703da9466b66a946814e1adf53ea2c90f10063b86290cc9eb67ce3478a20"
+checksum = "d16d90359e986641506914ba71350897565610e87ce0ad9e6f28569db3dd5c6d"
 dependencies = [
  "find-msvc-tools",
  "jobserver",
@@ -569,9 +456,19 @@ checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 
 [[package]]
 name = "libc"
-version = "0.2.185"
+version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "52ff2c0fe9bc6cb6b14a0592c2ff4fa9ceb83eea9db979b0487cd054946a2b8f"
+checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
+
+[[package]]
+name = "libloading"
+version = "0.8.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
+dependencies = [
+ "cfg-if",
+ "windows-link",
+]
 
 [[package]]
 name = "libm"
@@ -925,6 +822,129 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
+name = "signinum-cli"
+version = "1.0.0"
+dependencies = [
+ "signinum-j2k",
+ "signinum-jpeg",
+]
+
+[[package]]
+name = "signinum-core"
+version = "1.0.0"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
+name = "signinum-cuda-runtime"
+version = "0.2.0"
+dependencies = [
+ "libloading",
+ "thiserror",
+]
+
+[[package]]
+name = "signinum-j2k"
+version = "1.0.0"
+dependencies = [
+ "criterion",
+ "proptest",
+ "signinum-core",
+ "signinum-j2k-native",
+ "thiserror",
+]
+
+[[package]]
+name = "signinum-j2k-compare"
+version = "0.2.0"
+dependencies = [
+ "cc",
+ "openjpeg-sys",
+ "signinum-core",
+ "signinum-j2k",
+]
+
+[[package]]
+name = "signinum-j2k-cuda"
+version = "0.2.0"
+dependencies = [
+ "signinum-core",
+ "signinum-cuda-runtime",
+ "signinum-j2k",
+ "signinum-j2k-native",
+ "thiserror",
+]
+
+[[package]]
+name = "signinum-j2k-metal"
+version = "0.2.0"
+dependencies = [
+ "criterion",
+ "metal",
+ "signinum-core",
+ "signinum-j2k",
+ "signinum-j2k-native",
+ "thiserror",
+]
+
+[[package]]
+name = "signinum-j2k-native"
+version = "0.2.0"
+dependencies = [
+ "fearless_simd",
+ "libm",
+ "log",
+]
+
+[[package]]
+name = "signinum-jpeg"
+version = "1.0.0"
+dependencies = [
+ "criterion",
+ "jpeg-decoder",
+ "memchr",
+ "proptest",
+ "signinum-core",
+ "thiserror",
+ "zune-core",
+ "zune-jpeg",
+]
+
+[[package]]
+name = "signinum-jpeg-cuda"
+version = "0.2.0"
+dependencies = [
+ "signinum-core",
+ "signinum-cuda-runtime",
+ "signinum-jpeg",
+ "thiserror",
+]
+
+[[package]]
+name = "signinum-jpeg-metal"
+version = "0.2.0"
+dependencies = [
+ "criterion",
+ "metal",
+ "signinum-core",
+ "signinum-jpeg",
+ "thiserror",
+]
+
+[[package]]
+name = "signinum-tilecodec"
+version = "1.0.0"
+dependencies = [
+ "criterion",
+ "flate2",
+ "signinum-core",
+ "thiserror",
+ "weezl",
+ "zstd",
+]
+
+[[package]]
 name = "simd-adler32"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1029,11 +1049,11 @@ dependencies = [
 
 [[package]]
 name = "wasip2"
-version = "1.0.2+wasi-0.2.9"
+version = "1.0.3+wasi-0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9517f9239f02c069db75e65f174b3da828fe5f5b945c4dd26bd25d89c03ebcf5"
+checksum = "20064672db26d7cdc89c7798c48a0fdfac8213434a1186e5ef29fd560ae223d6"
 dependencies = [
- "wit-bindgen",
+ "wit-bindgen 0.57.1",
 ]
 
 [[package]]
@@ -1042,7 +1062,7 @@ version = "0.4.0+wasi-0.3.0-rc-2026-01-06"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5428f8bf88ea5ddc08faddef2ac4a67e390b88186c703ce6dbd955e1c145aca5"
 dependencies = [
- "wit-bindgen",
+ "wit-bindgen 0.51.0",
 ]
 
 [[package]]
@@ -1117,6 +1137,12 @@ checksum = "d7249219f66ced02969388cf2bb044a09756a083d0fab1e566056b04d9fbcaa5"
 dependencies = [
  "wit-bindgen-rust-macro",
 ]
+
+[[package]]
+name = "wit-bindgen"
+version = "0.57.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "wit-bindgen-core"

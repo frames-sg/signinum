@@ -1,0 +1,76 @@
+[package]
+name        = "signinum-jpeg"
+description = "JPEG decoder optimized for whole-slide images (WSI)"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace = true
+keywords.workspace     = true
+categories.workspace   = true
+readme                 = "README.md"
+build                  = "build.rs"
+
+[lib]
+name = "signinum_jpeg"
+path = "src/lib.rs"
+
+[features]
+scalar-only  = []   # retained for fuzz/reference decode until native SIMD backends land
+
+[dependencies]
+signinum-core = { path = "../signinum-core", version = "=1.0.0" }
+thiserror = { workspace = true }
+memchr = { version = "2.7.6", default-features = false }
+
+[dev-dependencies]
+proptest = { workspace = true }
+criterion = { workspace = true }
+jpeg-decoder = { version = "0.3.2", default-features = false }
+zune-core = "0.5.1"
+zune-jpeg = "0.5.15"
+
+[[bench]]
+name = "compare"
+harness = false
+
+[[bench]]
+name = "micro"
+harness = false
+
+[[bench]]
+name = "corpus_report"
+harness = false
+
+[lints.rust]
+# SIMD backends use tightly-scoped intrinsics in `src/backend/`; keep unsafe
+# explicit there while the rest of the crate remains safe Rust.
+unsafe_code     = "allow"
+unreachable_pub = "warn"
+# `missing_docs` remains disabled for now because CI uses `-D warnings` and the
+# public surface is still being documented crate-by-crate after the 1.0
+# workspace integration.
+
+[lints.clippy]
+pedantic                     = { level = "warn", priority = -1 }
+module_name_repetitions      = "allow"
+must_use_candidate           = "allow"
+# Style-only lints that conflict with the plan's explicit-over-idiomatic
+# choices in the marker/header parser (individual SOF-code OR patterns,
+# mixed `as` casts with compile-time-safe ranges, doc strings referring
+# to bit-precision acronyms, etc.). Promote these back to `warn` as the
+# post-integration documentation pass closes out.
+match_same_arms              = "allow"
+manual_range_patterns        = "allow"
+cast_possible_truncation     = "allow"
+cast_lossless                = "allow"
+too_many_lines               = "allow"
+collapsible_if               = "allow"
+doc_markdown                 = "allow"
+no_effect_underscore_binding = "allow"
+cast_sign_loss               = "allow"
+cast_possible_wrap           = "allow"
+missing_errors_doc           = "allow"
+missing_panics_doc           = "allow"
+needless_pass_by_value       = "allow"
+similar_names                = "allow"

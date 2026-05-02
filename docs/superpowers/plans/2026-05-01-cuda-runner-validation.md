@@ -13,13 +13,13 @@
 ## File Structure
 
 - Modify `.github/workflows/gpu-validation.yml`: add CUDA runner diagnostics and remove the Metal bench compile command from the CUDA job.
-- Modify `crates/ashlar-core/tests/repo_integrity.rs`: add a CUDA job extraction helper and a regression test for CUDA job focus.
+- Modify `crates/signinum-core/tests/repo_integrity.rs`: add a CUDA job extraction helper and a regression test for CUDA job focus.
 - Read-only verification for `docs/wsi-decode-api.md`, `docs/release.md`, and `docs/bench.md`: confirm they still state compatibility-only CUDA validation and no runtime CUDA decode claim.
 
 ### Task 1: Add CUDA Workflow Contract Regression Test
 
 **Files:**
-- Modify: `crates/ashlar-core/tests/repo_integrity.rs`
+- Modify: `crates/signinum-core/tests/repo_integrity.rs`
 
 - [ ] **Step 1: Write the failing test**
 
@@ -40,9 +40,9 @@ fn cuda_gpu_validation_job_stays_cuda_focused() {
         "cargo -V",
         "nvidia-smi",
         "CUDA adapter tests do not require runtime CUDA",
-        "cargo test -p ashlar-jpeg-cuda --all-targets --features cuda-runtime",
-        "cargo test -p ashlar-j2k-cuda --all-targets --features cuda-runtime",
-        "cargo bench -p ashlar-jpeg --no-run",
+        "cargo test -p signinum-jpeg-cuda --all-targets --features cuda-runtime",
+        "cargo test -p signinum-j2k-cuda --all-targets --features cuda-runtime",
+        "cargo bench -p signinum-jpeg --no-run",
     ] {
         assert!(
             cuda_job.contains(required),
@@ -55,9 +55,9 @@ fn cuda_gpu_validation_job_stays_cuda_focused() {
     }
 
     for forbidden in [
-        "cargo bench -p ashlar-j2k-metal --bench compare --no-run",
-        "cargo test -p ashlar-jpeg-metal",
-        "cargo test -p ashlar-j2k-metal",
+        "cargo bench -p signinum-j2k-metal --bench compare --no-run",
+        "cargo test -p signinum-jpeg-metal",
+        "cargo test -p signinum-j2k-metal",
     ] {
         assert!(
             !cuda_job.contains(forbidden),
@@ -99,13 +99,13 @@ fn workflow_job<'a>(workflow: &'a str, job_name: &str) -> &'a str {
 Run:
 
 ```sh
-cargo test -p ashlar-core cuda_gpu_validation_job_stays_cuda_focused -- --exact
+cargo test -p signinum-core cuda_gpu_validation_job_stays_cuda_focused -- --exact
 ```
 
 Expected: FAIL because the CUDA job does not yet contain runner diagnostics and still contains:
 
 ```text
-cargo bench -p ashlar-j2k-metal --bench compare --no-run
+cargo bench -p signinum-j2k-metal --bench compare --no-run
 ```
 
 ### Task 2: Update CUDA GPU Validation Workflow
@@ -134,9 +134,9 @@ Update only the `cuda-x86_64-compatibility` job steps to this shape:
           else
             echo "nvidia-smi not found; CUDA adapter tests do not require runtime CUDA"
           fi
-      - run: cargo test -p ashlar-jpeg-cuda --all-targets --features cuda-runtime
-      - run: cargo test -p ashlar-j2k-cuda --all-targets --features cuda-runtime
-      - run: cargo bench -p ashlar-jpeg --no-run
+      - run: cargo test -p signinum-jpeg-cuda --all-targets --features cuda-runtime
+      - run: cargo test -p signinum-j2k-cuda --all-targets --features cuda-runtime
+      - run: cargo bench -p signinum-jpeg --no-run
 ```
 
 The Metal job stays unchanged.
@@ -146,7 +146,7 @@ The Metal job stays unchanged.
 Run:
 
 ```sh
-cargo test -p ashlar-core cuda_gpu_validation_job_stays_cuda_focused -- --exact
+cargo test -p signinum-core cuda_gpu_validation_job_stays_cuda_focused -- --exact
 ```
 
 Expected: PASS.
@@ -161,7 +161,7 @@ Expected: PASS.
 Run:
 
 ```sh
-cargo test -p ashlar-jpeg-cuda --all-targets --features cuda-runtime
+cargo test -p signinum-jpeg-cuda --all-targets --features cuda-runtime
 ```
 
 Expected: PASS. The tests should still prove `Auto`/`Cpu` host surfaces and explicit CUDA unavailability.
@@ -171,7 +171,7 @@ Expected: PASS. The tests should still prove `Auto`/`Cpu` host surfaces and expl
 Run:
 
 ```sh
-cargo test -p ashlar-j2k-cuda --all-targets --features cuda-runtime
+cargo test -p signinum-j2k-cuda --all-targets --features cuda-runtime
 ```
 
 Expected: PASS. The tests should still prove `Auto`/`Cpu` host surfaces and explicit CUDA unavailability.
@@ -181,7 +181,7 @@ Expected: PASS. The tests should still prove `Auto`/`Cpu` host surfaces and expl
 Run:
 
 ```sh
-cargo test -p ashlar-core gpu_validation
+cargo test -p signinum-core gpu_validation
 ```
 
 Expected: PASS for both workflow integrity tests.
@@ -218,7 +218,7 @@ If the check shows docs are already aligned, make no documentation edit.
 
 **Files:**
 - Modify: `.github/workflows/gpu-validation.yml`
-- Modify: `crates/ashlar-core/tests/repo_integrity.rs`
+- Modify: `crates/signinum-core/tests/repo_integrity.rs`
 - Optional modify only if needed: `docs/wsi-decode-api.md`, `docs/release.md`, `docs/bench.md`
 
 - [ ] **Step 1: Run format check**
@@ -236,9 +236,9 @@ Expected: PASS.
 Run:
 
 ```sh
-cargo test -p ashlar-core gpu_validation
-cargo test -p ashlar-jpeg-cuda --all-targets --features cuda-runtime
-cargo test -p ashlar-j2k-cuda --all-targets --features cuda-runtime
+cargo test -p signinum-core gpu_validation
+cargo test -p signinum-jpeg-cuda --all-targets --features cuda-runtime
+cargo test -p signinum-j2k-cuda --all-targets --features cuda-runtime
 ```
 
 Expected: all commands PASS.
@@ -248,7 +248,7 @@ Expected: all commands PASS.
 Run:
 
 ```sh
-git diff -- .github/workflows/gpu-validation.yml crates/ashlar-core/tests/repo_integrity.rs docs/wsi-decode-api.md docs/release.md docs/bench.md
+git diff -- .github/workflows/gpu-validation.yml crates/signinum-core/tests/repo_integrity.rs docs/wsi-decode-api.md docs/release.md docs/bench.md
 ```
 
 Expected: diff is limited to the CUDA runner validation workflow, repo-integrity test, and only necessary docs wording.
@@ -258,7 +258,7 @@ Expected: diff is limited to the CUDA runner validation workflow, repo-integrity
 Run:
 
 ```sh
-git add .github/workflows/gpu-validation.yml crates/ashlar-core/tests/repo_integrity.rs docs/wsi-decode-api.md docs/release.md docs/bench.md
+git add .github/workflows/gpu-validation.yml crates/signinum-core/tests/repo_integrity.rs docs/wsi-decode-api.md docs/release.md docs/bench.md
 git commit -m "ci: harden cuda runner validation"
 ```
 

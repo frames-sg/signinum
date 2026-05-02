@@ -1,0 +1,32 @@
+[package]
+name = "signinum-j2k-compare"
+description = "JPEG 2000 oracle comparison helpers for signinum"
+version = "0.2.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+signinum-core = { path = "../signinum-core", version = "=1.0.0" }
+openjpeg-sys = "1.0.12"
+
+[build-dependencies]
+cc = "1.2"
+
+[dev-dependencies]
+signinum-j2k = { path = "../signinum-j2k", version = "=1.0.0" }
+
+[lints.rust]
+unreachable_pub = "warn"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_possible_wrap = "allow"
+too_many_lines = "allow"

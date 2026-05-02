@@ -1,0 +1,426 @@
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry signinum_j2k_forward_rct(
+    .param .u64 plane0,
+    .param .u64 plane1,
+    .param .u64 plane2,
+    .param .u64 len
+)
+{
+    .reg .pred %p<2>;
+    .reg .b32 %r<5>;
+    .reg .b64 %rd<12>;
+    .reg .f32 %f<11>;
+    .reg .s32 %s<2>;
+
+    ld.param.u64 %rd1, [plane0];
+    ld.param.u64 %rd2, [plane1];
+    ld.param.u64 %rd3, [plane2];
+    ld.param.u64 %rd4, [len];
+
+    mov.u32 %r1, %tid.x;
+    mov.u32 %r2, %ctaid.x;
+    mov.u32 %r3, %ntid.x;
+    mad.lo.s32 %r4, %r2, %r3, %r1;
+    cvt.u64.u32 %rd5, %r4;
+    setp.ge.u64 %p1, %rd5, %rd4;
+    @%p1 bra RCT_DONE;
+
+    mul.lo.u64 %rd6, %rd5, 4;
+    add.u64 %rd7, %rd1, %rd6;
+    add.u64 %rd8, %rd2, %rd6;
+    add.u64 %rd9, %rd3, %rd6;
+
+    ld.global.f32 %f1, [%rd7];
+    ld.global.f32 %f2, [%rd8];
+    ld.global.f32 %f3, [%rd9];
+
+    add.f32 %f4, %f2, %f2;
+    add.f32 %f5, %f1, %f4;
+    add.f32 %f6, %f5, %f3;
+    mul.rn.f32 %f7, %f6, 0f3E800000;
+    cvt.rmi.s32.f32 %s1, %f7;
+    cvt.rn.f32.s32 %f8, %s1;
+    sub.f32 %f9, %f3, %f2;
+    sub.f32 %f10, %f1, %f2;
+
+    st.global.f32 [%rd7], %f8;
+    st.global.f32 [%rd8], %f9;
+    st.global.f32 [%rd9], %f10;
+
+RCT_DONE:
+    ret;
+}
+
+.visible .entry signinum_j2k_forward_dwt53_horizontal(
+    .param .u64 src,
+    .param .u64 dst,
+    .param .u32 full_width,
+    .param .u32 current_width,
+    .param .u32 current_height,
+    .param .u32 low_width
+)
+{
+    .reg .pred %p<20>;
+    .reg .b32 %r<80>;
+    .reg .b64 %rd<40>;
+    .reg .f32 %f<40>;
+    .reg .s32 %s<8>;
+
+    ld.param.u64 %rd1, [src];
+    ld.param.u64 %rd2, [dst];
+    ld.param.u32 %r1, [full_width];
+    ld.param.u32 %r2, [current_width];
+    ld.param.u32 %r3, [current_height];
+    ld.param.u32 %r4, [low_width];
+
+    mov.u32 %r5, %tid.x;
+    mov.u32 %r6, %ctaid.x;
+    mov.u32 %r7, %ntid.x;
+    mad.lo.s32 %r8, %r6, %r7, %r5;
+    mov.u32 %r9, %tid.y;
+    mov.u32 %r10, %ctaid.y;
+    mov.u32 %r11, %ntid.y;
+    mad.lo.s32 %r12, %r10, %r11, %r9;
+
+    setp.ge.u32 %p1, %r8, %r2;
+    @%p1 bra HDWT_DONE;
+    setp.ge.u32 %p2, %r12, %r3;
+    @%p2 bra HDWT_DONE;
+
+    mul.lo.u32 %r13, %r12, %r1;
+    and.b32 %r14, %r2, 1;
+    setp.eq.u32 %p3, %r14, 0;
+    @%p3 bra HDWT_WIDTH_EVEN;
+    sub.u32 %r15, %r2, 1;
+    bra HDWT_WIDTH_READY;
+HDWT_WIDTH_EVEN:
+    sub.u32 %r15, %r2, 2;
+HDWT_WIDTH_READY:
+    setp.lt.u32 %p4, %r8, %r4;
+    @%p4 bra HDWT_LOW_SAMPLE;
+
+    sub.u32 %r20, %r8, %r4;
+    shl.b32 %r21, %r20, 1;
+    add.u32 %r22, %r21, 1;
+    sub.u32 %r23, %r22, 1;
+    add.u32 %r24, %r22, 1;
+    setp.lt.u32 %p5, %r24, %r2;
+    @%p5 bra HDWT_HIGH_RIGHT_IN_RANGE;
+    mov.u32 %r24, %r15;
+HDWT_HIGH_RIGHT_IN_RANGE:
+    add.u32 %r25, %r13, %r23;
+    add.u32 %r26, %r13, %r24;
+    add.u32 %r27, %r13, %r22;
+    cvt.u64.u32 %rd10, %r25;
+    cvt.u64.u32 %rd11, %r26;
+    cvt.u64.u32 %rd12, %r27;
+    mul.lo.u64 %rd10, %rd10, 4;
+    mul.lo.u64 %rd11, %rd11, 4;
+    mul.lo.u64 %rd12, %rd12, 4;
+    add.u64 %rd13, %rd1, %rd10;
+    add.u64 %rd14, %rd1, %rd11;
+    add.u64 %rd15, %rd1, %rd12;
+    ld.global.f32 %f1, [%rd13];
+    ld.global.f32 %f2, [%rd14];
+    ld.global.f32 %f3, [%rd15];
+    add.f32 %f4, %f1, %f2;
+    mul.rn.f32 %f5, %f4, 0f3F000000;
+    cvt.rmi.s32.f32 %s1, %f5;
+    cvt.rn.f32.s32 %f6, %s1;
+    sub.f32 %f7, %f3, %f6;
+
+    add.u32 %r28, %r13, %r8;
+    cvt.u64.u32 %rd16, %r28;
+    mul.lo.u64 %rd16, %rd16, 4;
+    add.u64 %rd17, %rd2, %rd16;
+    st.global.f32 [%rd17], %f7;
+    bra HDWT_DONE;
+
+HDWT_LOW_SAMPLE:
+    setp.gt.u32 %p6, %r8, 0;
+    @%p6 bra HDWT_LEFT_X_MINUS_ONE;
+    mov.u32 %r30, 0;
+    bra HDWT_LEFT_INDEX_READY;
+HDWT_LEFT_X_MINUS_ONE:
+    sub.u32 %r30, %r8, 1;
+HDWT_LEFT_INDEX_READY:
+    shl.b32 %r31, %r30, 1;
+    add.u32 %r32, %r31, 1;
+    sub.u32 %r33, %r32, 1;
+    add.u32 %r34, %r32, 1;
+    setp.lt.u32 %p7, %r34, %r2;
+    @%p7 bra HDWT_LEFT_RIGHT_IN_RANGE;
+    mov.u32 %r34, %r15;
+HDWT_LEFT_RIGHT_IN_RANGE:
+    add.u32 %r35, %r13, %r33;
+    add.u32 %r36, %r13, %r34;
+    add.u32 %r37, %r13, %r32;
+    cvt.u64.u32 %rd20, %r35;
+    cvt.u64.u32 %rd21, %r36;
+    cvt.u64.u32 %rd22, %r37;
+    mul.lo.u64 %rd20, %rd20, 4;
+    mul.lo.u64 %rd21, %rd21, 4;
+    mul.lo.u64 %rd22, %rd22, 4;
+    add.u64 %rd23, %rd1, %rd20;
+    add.u64 %rd24, %rd1, %rd21;
+    add.u64 %rd25, %rd1, %rd22;
+    ld.global.f32 %f10, [%rd23];
+    ld.global.f32 %f11, [%rd24];
+    ld.global.f32 %f12, [%rd25];
+    add.f32 %f13, %f10, %f11;
+    mul.rn.f32 %f14, %f13, 0f3F000000;
+    cvt.rmi.s32.f32 %s2, %f14;
+    cvt.rn.f32.s32 %f15, %s2;
+    sub.f32 %f16, %f12, %f15;
+
+    shl.b32 %r40, %r8, 1;
+    add.u32 %r41, %r40, 1;
+    setp.lt.u32 %p8, %r41, %r2;
+    @%p8 bra HDWT_COMPUTE_RIGHT_PREDICT;
+    mov.f32 %f25, %f16;
+    bra HDWT_RIGHT_PREDICT_READY;
+HDWT_COMPUTE_RIGHT_PREDICT:
+    shl.b32 %r42, %r8, 1;
+    add.u32 %r43, %r42, 1;
+    sub.u32 %r44, %r43, 1;
+    add.u32 %r45, %r43, 1;
+    setp.lt.u32 %p9, %r45, %r2;
+    @%p9 bra HDWT_RIGHT_RIGHT_IN_RANGE;
+    mov.u32 %r45, %r15;
+HDWT_RIGHT_RIGHT_IN_RANGE:
+    add.u32 %r46, %r13, %r44;
+    add.u32 %r47, %r13, %r45;
+    add.u32 %r48, %r13, %r43;
+    cvt.u64.u32 %rd26, %r46;
+    cvt.u64.u32 %rd27, %r47;
+    cvt.u64.u32 %rd28, %r48;
+    mul.lo.u64 %rd26, %rd26, 4;
+    mul.lo.u64 %rd27, %rd27, 4;
+    mul.lo.u64 %rd28, %rd28, 4;
+    add.u64 %rd29, %rd1, %rd26;
+    add.u64 %rd30, %rd1, %rd27;
+    add.u64 %rd31, %rd1, %rd28;
+    ld.global.f32 %f20, [%rd29];
+    ld.global.f32 %f21, [%rd30];
+    ld.global.f32 %f22, [%rd31];
+    add.f32 %f23, %f20, %f21;
+    mul.rn.f32 %f24, %f23, 0f3F000000;
+    cvt.rmi.s32.f32 %s3, %f24;
+    cvt.rn.f32.s32 %f26, %s3;
+    sub.f32 %f25, %f22, %f26;
+HDWT_RIGHT_PREDICT_READY:
+    add.f32 %f27, %f16, %f25;
+    mul.rn.f32 %f28, %f27, 0f3E800000;
+    add.f32 %f29, %f28, 0f3F000000;
+    cvt.rmi.s32.f32 %s4, %f29;
+    cvt.rn.f32.s32 %f30, %s4;
+    add.u32 %r50, %r13, %r40;
+    cvt.u64.u32 %rd32, %r50;
+    mul.lo.u64 %rd32, %rd32, 4;
+    add.u64 %rd33, %rd1, %rd32;
+    ld.global.f32 %f31, [%rd33];
+    add.f32 %f32, %f31, %f30;
+
+    add.u32 %r51, %r13, %r8;
+    cvt.u64.u32 %rd34, %r51;
+    mul.lo.u64 %rd34, %rd34, 4;
+    add.u64 %rd35, %rd2, %rd34;
+    st.global.f32 [%rd35], %f32;
+
+HDWT_DONE:
+    ret;
+}
+
+.visible .entry signinum_j2k_forward_dwt53_vertical(
+    .param .u64 src,
+    .param .u64 dst,
+    .param .u32 full_width,
+    .param .u32 current_width,
+    .param .u32 current_height,
+    .param .u32 low_height
+)
+{
+    .reg .pred %p<20>;
+    .reg .b32 %r<90>;
+    .reg .b64 %rd<44>;
+    .reg .f32 %f<40>;
+    .reg .s32 %s<8>;
+
+    ld.param.u64 %rd1, [src];
+    ld.param.u64 %rd2, [dst];
+    ld.param.u32 %r1, [full_width];
+    ld.param.u32 %r2, [current_width];
+    ld.param.u32 %r3, [current_height];
+    ld.param.u32 %r4, [low_height];
+
+    mov.u32 %r5, %tid.x;
+    mov.u32 %r6, %ctaid.x;
+    mov.u32 %r7, %ntid.x;
+    mad.lo.s32 %r8, %r6, %r7, %r5;
+    mov.u32 %r9, %tid.y;
+    mov.u32 %r10, %ctaid.y;
+    mov.u32 %r11, %ntid.y;
+    mad.lo.s32 %r12, %r10, %r11, %r9;
+
+    setp.ge.u32 %p1, %r8, %r2;
+    @%p1 bra VDWT_DONE;
+    setp.ge.u32 %p2, %r12, %r3;
+    @%p2 bra VDWT_DONE;
+
+    and.b32 %r14, %r3, 1;
+    setp.eq.u32 %p3, %r14, 0;
+    @%p3 bra VDWT_HEIGHT_EVEN;
+    sub.u32 %r15, %r3, 1;
+    bra VDWT_HEIGHT_READY;
+VDWT_HEIGHT_EVEN:
+    sub.u32 %r15, %r3, 2;
+VDWT_HEIGHT_READY:
+    setp.lt.u32 %p4, %r12, %r4;
+    @%p4 bra VDWT_LOW_SAMPLE;
+
+    sub.u32 %r20, %r12, %r4;
+    shl.b32 %r21, %r20, 1;
+    add.u32 %r22, %r21, 1;
+    sub.u32 %r23, %r22, 1;
+    add.u32 %r24, %r22, 1;
+    setp.lt.u32 %p5, %r24, %r3;
+    @%p5 bra VDWT_HIGH_BOTTOM_IN_RANGE;
+    mov.u32 %r24, %r15;
+VDWT_HIGH_BOTTOM_IN_RANGE:
+    mul.lo.u32 %r25, %r23, %r1;
+    add.u32 %r25, %r25, %r8;
+    mul.lo.u32 %r26, %r24, %r1;
+    add.u32 %r26, %r26, %r8;
+    mul.lo.u32 %r27, %r22, %r1;
+    add.u32 %r27, %r27, %r8;
+    cvt.u64.u32 %rd10, %r25;
+    cvt.u64.u32 %rd11, %r26;
+    cvt.u64.u32 %rd12, %r27;
+    mul.lo.u64 %rd10, %rd10, 4;
+    mul.lo.u64 %rd11, %rd11, 4;
+    mul.lo.u64 %rd12, %rd12, 4;
+    add.u64 %rd13, %rd1, %rd10;
+    add.u64 %rd14, %rd1, %rd11;
+    add.u64 %rd15, %rd1, %rd12;
+    ld.global.f32 %f1, [%rd13];
+    ld.global.f32 %f2, [%rd14];
+    ld.global.f32 %f3, [%rd15];
+    add.f32 %f4, %f1, %f2;
+    mul.rn.f32 %f5, %f4, 0f3F000000;
+    cvt.rmi.s32.f32 %s1, %f5;
+    cvt.rn.f32.s32 %f6, %s1;
+    sub.f32 %f7, %f3, %f6;
+
+    mul.lo.u32 %r28, %r12, %r1;
+    add.u32 %r28, %r28, %r8;
+    cvt.u64.u32 %rd16, %r28;
+    mul.lo.u64 %rd16, %rd16, 4;
+    add.u64 %rd17, %rd2, %rd16;
+    st.global.f32 [%rd17], %f7;
+    bra VDWT_DONE;
+
+VDWT_LOW_SAMPLE:
+    setp.gt.u32 %p6, %r12, 0;
+    @%p6 bra VDWT_TOP_Y_MINUS_ONE;
+    mov.u32 %r30, 0;
+    bra VDWT_TOP_INDEX_READY;
+VDWT_TOP_Y_MINUS_ONE:
+    sub.u32 %r30, %r12, 1;
+VDWT_TOP_INDEX_READY:
+    shl.b32 %r31, %r30, 1;
+    add.u32 %r32, %r31, 1;
+    sub.u32 %r33, %r32, 1;
+    add.u32 %r34, %r32, 1;
+    setp.lt.u32 %p7, %r34, %r3;
+    @%p7 bra VDWT_TOP_BOTTOM_IN_RANGE;
+    mov.u32 %r34, %r15;
+VDWT_TOP_BOTTOM_IN_RANGE:
+    mul.lo.u32 %r35, %r33, %r1;
+    add.u32 %r35, %r35, %r8;
+    mul.lo.u32 %r36, %r34, %r1;
+    add.u32 %r36, %r36, %r8;
+    mul.lo.u32 %r37, %r32, %r1;
+    add.u32 %r37, %r37, %r8;
+    cvt.u64.u32 %rd20, %r35;
+    cvt.u64.u32 %rd21, %r36;
+    cvt.u64.u32 %rd22, %r37;
+    mul.lo.u64 %rd20, %rd20, 4;
+    mul.lo.u64 %rd21, %rd21, 4;
+    mul.lo.u64 %rd22, %rd22, 4;
+    add.u64 %rd23, %rd1, %rd20;
+    add.u64 %rd24, %rd1, %rd21;
+    add.u64 %rd25, %rd1, %rd22;
+    ld.global.f32 %f10, [%rd23];
+    ld.global.f32 %f11, [%rd24];
+    ld.global.f32 %f12, [%rd25];
+    add.f32 %f13, %f10, %f11;
+    mul.rn.f32 %f14, %f13, 0f3F000000;
+    cvt.rmi.s32.f32 %s2, %f14;
+    cvt.rn.f32.s32 %f15, %s2;
+    sub.f32 %f16, %f12, %f15;
+
+    shl.b32 %r40, %r12, 1;
+    add.u32 %r41, %r40, 1;
+    setp.lt.u32 %p8, %r41, %r3;
+    @%p8 bra VDWT_COMPUTE_BOTTOM_PREDICT;
+    mov.f32 %f25, %f16;
+    bra VDWT_BOTTOM_PREDICT_READY;
+VDWT_COMPUTE_BOTTOM_PREDICT:
+    shl.b32 %r42, %r12, 1;
+    add.u32 %r43, %r42, 1;
+    sub.u32 %r44, %r43, 1;
+    add.u32 %r45, %r43, 1;
+    setp.lt.u32 %p9, %r45, %r3;
+    @%p9 bra VDWT_BOTTOM_BOTTOM_IN_RANGE;
+    mov.u32 %r45, %r15;
+VDWT_BOTTOM_BOTTOM_IN_RANGE:
+    mul.lo.u32 %r46, %r44, %r1;
+    add.u32 %r46, %r46, %r8;
+    mul.lo.u32 %r47, %r45, %r1;
+    add.u32 %r47, %r47, %r8;
+    mul.lo.u32 %r48, %r43, %r1;
+    add.u32 %r48, %r48, %r8;
+    cvt.u64.u32 %rd26, %r46;
+    cvt.u64.u32 %rd27, %r47;
+    cvt.u64.u32 %rd28, %r48;
+    mul.lo.u64 %rd26, %rd26, 4;
+    mul.lo.u64 %rd27, %rd27, 4;
+    mul.lo.u64 %rd28, %rd28, 4;
+    add.u64 %rd29, %rd1, %rd26;
+    add.u64 %rd30, %rd1, %rd27;
+    add.u64 %rd31, %rd1, %rd28;
+    ld.global.f32 %f20, [%rd29];
+    ld.global.f32 %f21, [%rd30];
+    ld.global.f32 %f22, [%rd31];
+    add.f32 %f23, %f20, %f21;
+    mul.rn.f32 %f24, %f23, 0f3F000000;
+    cvt.rmi.s32.f32 %s3, %f24;
+    cvt.rn.f32.s32 %f26, %s3;
+    sub.f32 %f25, %f22, %f26;
+VDWT_BOTTOM_PREDICT_READY:
+    add.f32 %f27, %f16, %f25;
+    mul.rn.f32 %f28, %f27, 0f3E800000;
+    add.f32 %f29, %f28, 0f3F000000;
+    cvt.rmi.s32.f32 %s4, %f29;
+    cvt.rn.f32.s32 %f30, %s4;
+    mul.lo.u32 %r50, %r40, %r1;
+    add.u32 %r50, %r50, %r8;
+    cvt.u64.u32 %rd32, %r50;
+    mul.lo.u64 %rd32, %rd32, 4;
+    add.u64 %rd33, %rd1, %rd32;
+    ld.global.f32 %f31, [%rd33];
+    add.f32 %f32, %f31, %f30;
+
+    mul.lo.u32 %r51, %r12, %r1;
+    add.u32 %r51, %r51, %r8;
+    cvt.u64.u32 %rd34, %r51;
+    mul.lo.u64 %rd34, %rd34, 4;
+    add.u64 %rd35, %rd2, %rd34;
+    st.global.f32 [%rd35], %f32;
+
+VDWT_DONE:
+    ret;
+}

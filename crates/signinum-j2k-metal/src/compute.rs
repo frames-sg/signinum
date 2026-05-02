@@ -20,8 +20,9 @@ use signinum_j2k_native::{
     ht_uvlc_table0, ht_uvlc_table1, ht_vlc_table0, ht_vlc_table1, ColorSpace as NativeColorSpace,
     DecodedComponents as NativeDecodedComponents, HtCodeBlockDecodeJob, HtSubBandDecodeJob,
     J2kCodeBlockDecodeJob, J2kDirectBandId, J2kDirectColorPlan, J2kDirectGrayscalePlan,
-    J2kDirectGrayscaleStep, J2kDirectIdwtStep, J2kDirectStoreStep, J2kInverseMctJob,
-    J2kSingleDecompositionIdwtJob, J2kStoreComponentJob, J2kSubBandDecodeJob, J2kWaveletTransform,
+    J2kDirectGrayscaleStep, J2kDirectIdwtStep, J2kDirectStoreStep, J2kForwardDwt53Level,
+    J2kForwardDwt53Output, J2kInverseMctJob, J2kSingleDecompositionIdwtJob, J2kStoreComponentJob,
+    J2kSubBandDecodeJob, J2kWaveletTransform,
 };
 #[cfg(target_os = "macos")]
 use signinum_j2k_native::{
@@ -465,6 +466,8 @@ kernel void j2k_pack_u16_repeated_gray(
     "\n",
     include_str!("idwt.metal"),
     "\n",
+    include_str!("fdwt.metal"),
+    "\n",
     include_str!("mct.metal"),
     "\n",
     include_str!("store.metal"),
@@ -712,6 +715,28 @@ struct J2kInverseMctParams {
 
 #[cfg(target_os = "macos")]
 #[repr(C)]
+#[derive(Clone, Copy)]
+#[allow(dead_code)]
+struct J2kForwardRctParams {
+    len: u32,
+    reserved0: u32,
+    reserved1: u32,
+    reserved2: u32,
+}
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct J2kForwardDwt53Params {
+    full_width: u32,
+    current_width: u32,
+    current_height: u32,
+    low_width: u32,
+    low_height: u32,
+}
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
 #[derive(Clone, Copy, Default)]
 #[allow(dead_code)]
 struct J2kMctStatus {
@@ -900,8 +925,11 @@ struct MetalRuntime {
     idwt_reversible53_horizontal_batched: ComputePipelineState,
     idwt_reversible53_vertical_batched: ComputePipelineState,
     idwt_irreversible97_single_decomposition: ComputePipelineState,
+    fdwt53_horizontal: ComputePipelineState,
+    fdwt53_vertical: ComputePipelineState,
     #[allow(dead_code)]
     inverse_mct: ComputePipelineState,
+    forward_rct: ComputePipelineState,
     store_component: ComputePipelineState,
     store_component_repeated: ComputePipelineState,
     store_component_repeated_gray_u8: ComputePipelineState,
@@ -962,7 +990,10 @@ impl MetalRuntime {
             library.get_function("j2k_idwt_reversible53_vertical_pass_batched", None)?;
         let idwt_irreversible97_single_decomposition_fn =
             library.get_function("j2k_idwt_irreversible97_single_decomposition", None)?;
+        let fdwt53_horizontal_fn = library.get_function("j2k_forward_dwt53_horizontal", None)?;
+        let fdwt53_vertical_fn = library.get_function("j2k_forward_dwt53_vertical", None)?;
         let inverse_mct_fn = library.get_function("j2k_inverse_mct", None)?;
+        let forward_rct_fn = library.get_function("j2k_forward_rct", None)?;
         let store_component_fn = library.get_function("j2k_store_component", None)?;
         let store_component_repeated_fn =
             library.get_function("j2k_store_component_repeated", None)?;
@@ -1012,7 +1043,12 @@ impl MetalRuntime {
             .new_compute_pipeline_state_with_function(
                 &idwt_irreversible97_single_decomposition_fn,
             )?;
+        let fdwt53_horizontal =
+            device.new_compute_pipeline_state_with_function(&fdwt53_horizontal_fn)?;
+        let fdwt53_vertical =
+            device.new_compute_pipeline_state_with_function(&fdwt53_vertical_fn)?;
         let inverse_mct = device.new_compute_pipeline_state_with_function(&inverse_mct_fn)?;
+        let forward_rct = device.new_compute_pipeline_state_with_function(&forward_rct_fn)?;
         let store_component =
             device.new_compute_pipeline_state_with_function(&store_component_fn)?;
         let store_component_repeated =
@@ -1066,7 +1102,10 @@ impl MetalRuntime {
             idwt_reversible53_horizontal_batched,
             idwt_reversible53_vertical_batched,
             idwt_irreversible97_single_decomposition,
+            fdwt53_horizontal,
+            fdwt53_vertical,
             inverse_mct,
+            forward_rct,
             store_component,
             store_component_repeated,
             store_component_repeated_gray_u8,
@@ -4656,6 +4695,20 @@ fn borrow_slice_buffer<T>(device: &Device, data: &[T]) -> Buffer {
 }
 
 #[cfg(target_os = "macos")]
+fn borrow_mut_slice_buffer<T>(device: &Device, data: &mut [T]) -> Buffer {
+    if data.is_empty() {
+        device.new_buffer(1, MTLResourceOptions::StorageModeShared)
+    } else {
+        device.new_buffer_with_bytes_no_copy(
+            data.as_mut_ptr().cast(),
+            size_of_val(data) as u64,
+            MTLResourceOptions::StorageModeShared,
+            None,
+        )
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn copied_slice_buffer<T>(device: &Device, data: &[T]) -> Buffer {
     if data.is_empty() {
         device.new_buffer(1, MTLResourceOptions::StorageModeShared)
@@ -4710,6 +4763,318 @@ fn take_classic_states_scratch_buffer(
     Ok(DirectScratchBuffer {
         bytes,
         buffer: runtime.take_private_buffer(bytes),
+    })
+}
+
+#[cfg(target_os = "macos")]
+#[allow(dead_code)]
+pub(crate) fn encode_forward_dwt53(
+    samples: &[f32],
+    width: u32,
+    height: u32,
+    num_levels: u8,
+) -> Result<J2kForwardDwt53Output, Error> {
+    if width == 0 || height == 0 {
+        return Err(Error::MetalKernel {
+            message: "J2K Metal forward DWT dimensions must be non-zero".to_string(),
+        });
+    }
+    let expected_len = (width as usize)
+        .checked_mul(height as usize)
+        .ok_or_else(|| Error::MetalKernel {
+            message: "J2K Metal forward DWT dimensions overflow".to_string(),
+        })?;
+    if samples.len() != expected_len {
+        return Err(Error::MetalKernel {
+            message: "J2K Metal forward DWT sample length mismatch".to_string(),
+        });
+    }
+
+    with_runtime(|runtime| {
+        let bytes = size_of_val(samples);
+        let buffer_a = copied_slice_buffer(&runtime.device, samples);
+        let buffer_b = runtime
+            .device
+            .new_buffer(bytes as u64, MTLResourceOptions::StorageModeShared);
+        let command_buffer = runtime.queue.new_command_buffer();
+
+        let mut current_width = width;
+        let mut current_height = height;
+        let mut shapes = Vec::new();
+        let mut levels_run = 0u8;
+        let mut active_is_a = true;
+
+        while levels_run < num_levels && (current_width >= 2 || current_height >= 2) {
+            let low_width = current_width.div_ceil(2);
+            let low_height = current_height.div_ceil(2);
+            let params = J2kForwardDwt53Params {
+                full_width: width,
+                current_width,
+                current_height,
+                low_width,
+                low_height,
+            };
+
+            if current_width >= 2 {
+                let (input, output) =
+                    active_forward_dwt53_buffers(&buffer_a, &buffer_b, active_is_a);
+                dispatch_forward_dwt53_pass(
+                    &runtime.fdwt53_horizontal,
+                    command_buffer,
+                    input,
+                    output,
+                    params,
+                );
+                active_is_a = !active_is_a;
+            }
+            if current_height >= 2 {
+                let (input, output) =
+                    active_forward_dwt53_buffers(&buffer_a, &buffer_b, active_is_a);
+                dispatch_forward_dwt53_pass(
+                    &runtime.fdwt53_vertical,
+                    command_buffer,
+                    input,
+                    output,
+                    params,
+                );
+                active_is_a = !active_is_a;
+            }
+
+            shapes.push(J2kForwardDwt53Level {
+                hl: Vec::new(),
+                lh: Vec::new(),
+                hh: Vec::new(),
+                width: current_width,
+                height: current_height,
+                low_width,
+                low_height,
+                high_width: current_width / 2,
+                high_height: current_height / 2,
+            });
+            current_width = low_width;
+            current_height = low_height;
+            levels_run = levels_run.saturating_add(1);
+        }
+
+        command_buffer.commit();
+        command_buffer.wait_until_completed();
+
+        let active_buffer = if active_is_a { &buffer_a } else { &buffer_b };
+        let transformed = unsafe {
+            core::slice::from_raw_parts(active_buffer.contents().cast::<f32>(), samples.len())
+        };
+        let output = extract_forward_dwt53_output(
+            transformed,
+            width,
+            current_width,
+            current_height,
+            shapes,
+        )?;
+        Ok(output)
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn active_forward_dwt53_buffers<'a>(
+    buffer_a: &'a Buffer,
+    buffer_b: &'a Buffer,
+    active_is_a: bool,
+) -> (&'a Buffer, &'a Buffer) {
+    if active_is_a {
+        (buffer_a, buffer_b)
+    } else {
+        (buffer_b, buffer_a)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn dispatch_forward_dwt53_pass(
+    pipeline: &ComputePipelineState,
+    command_buffer: &CommandBufferRef,
+    input: &Buffer,
+    output: &Buffer,
+    params: J2kForwardDwt53Params,
+) {
+    let encoder = command_buffer.new_compute_command_encoder();
+    encoder.set_compute_pipeline_state(pipeline);
+    encoder.set_buffer(0, Some(input), 0);
+    encoder.set_buffer(1, Some(output), 0);
+    encoder.set_bytes(
+        2,
+        size_of::<J2kForwardDwt53Params>() as u64,
+        (&raw const params).cast(),
+    );
+    let width = pipeline.thread_execution_width().max(1);
+    let max_threads = pipeline.max_total_threads_per_threadgroup().max(width);
+    let height = (max_threads / width).max(1);
+    encoder.dispatch_threads(
+        MTLSize {
+            width: u64::from(params.current_width),
+            height: u64::from(params.current_height),
+            depth: 1,
+        },
+        MTLSize {
+            width,
+            height,
+            depth: 1,
+        },
+    );
+    encoder.end_encoding();
+}
+
+#[cfg(target_os = "macos")]
+fn extract_forward_dwt53_output(
+    transformed: &[f32],
+    full_width: u32,
+    ll_width: u32,
+    ll_height: u32,
+    mut shapes: Vec<J2kForwardDwt53Level>,
+) -> Result<J2kForwardDwt53Output, Error> {
+    let full_width_usize = full_width as usize;
+    let mut ll = Vec::with_capacity((ll_width as usize) * (ll_height as usize));
+    for y in 0..ll_height as usize {
+        let row_start = y
+            .checked_mul(full_width_usize)
+            .ok_or_else(|| Error::MetalKernel {
+                message: "J2K Metal forward DWT LL row offset overflow".to_string(),
+            })?;
+        ll.extend_from_slice(&transformed[row_start..row_start + ll_width as usize]);
+    }
+
+    for shape in &mut shapes {
+        shape.hl = extract_subband(
+            transformed,
+            full_width_usize,
+            shape.low_width,
+            0,
+            shape.high_width,
+            shape.low_height,
+        )?;
+        shape.lh = extract_subband(
+            transformed,
+            full_width_usize,
+            0,
+            shape.low_height,
+            shape.low_width,
+            shape.high_height,
+        )?;
+        shape.hh = extract_subband(
+            transformed,
+            full_width_usize,
+            shape.low_width,
+            shape.low_height,
+            shape.high_width,
+            shape.high_height,
+        )?;
+    }
+    shapes.reverse();
+
+    Ok(J2kForwardDwt53Output {
+        ll,
+        ll_width,
+        ll_height,
+        levels: shapes,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn extract_subband(
+    transformed: &[f32],
+    full_width: usize,
+    x0: u32,
+    y0: u32,
+    width: u32,
+    height: u32,
+) -> Result<Vec<f32>, Error> {
+    let mut out = Vec::with_capacity((width as usize) * (height as usize));
+    for y in 0..height as usize {
+        let row_start = (y0 as usize)
+            .checked_add(y)
+            .and_then(|row| row.checked_mul(full_width))
+            .and_then(|row| row.checked_add(x0 as usize))
+            .ok_or_else(|| Error::MetalKernel {
+                message: "J2K Metal forward DWT subband offset overflow".to_string(),
+            })?;
+        out.extend_from_slice(&transformed[row_start..row_start + width as usize]);
+    }
+    Ok(out)
+}
+
+#[cfg(target_os = "macos")]
+#[allow(dead_code)]
+pub(crate) fn encode_forward_rct(
+    plane0: &mut [f32],
+    plane1: &mut [f32],
+    plane2: &mut [f32],
+) -> Result<(), Error> {
+    with_runtime(|runtime| {
+        let len = plane0.len();
+        if len == 0 {
+            return Ok(());
+        }
+        if plane1.len() != len || plane2.len() != len {
+            return Err(Error::MetalKernel {
+                message: "J2K Metal forward RCT plane lengths must match".to_string(),
+            });
+        }
+
+        let params = J2kForwardRctParams {
+            len: u32::try_from(len).map_err(|_| Error::MetalKernel {
+                message: "J2K Metal forward RCT plane length exceeds u32".to_string(),
+            })?,
+            reserved0: 0,
+            reserved1: 0,
+            reserved2: 0,
+        };
+        let plane0_buffer = borrow_mut_slice_buffer(&runtime.device, plane0);
+        let plane1_buffer = borrow_mut_slice_buffer(&runtime.device, plane1);
+        let plane2_buffer = borrow_mut_slice_buffer(&runtime.device, plane2);
+        let status = J2kMctStatus::default();
+        let status_buffer = runtime.device.new_buffer_with_data(
+            (&raw const status).cast(),
+            size_of::<J2kMctStatus>() as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+
+        let command_buffer = runtime.queue.new_command_buffer();
+        let encoder = command_buffer.new_compute_command_encoder();
+        encoder.set_compute_pipeline_state(&runtime.forward_rct);
+        encoder.set_buffer(0, Some(&plane0_buffer), 0);
+        encoder.set_buffer(1, Some(&plane1_buffer), 0);
+        encoder.set_buffer(2, Some(&plane2_buffer), 0);
+        encoder.set_bytes(
+            3,
+            size_of::<J2kForwardRctParams>() as u64,
+            (&raw const params).cast(),
+        );
+        encoder.set_buffer(4, Some(&status_buffer), 0);
+        let width = runtime
+            .forward_rct
+            .thread_execution_width()
+            .max(1)
+            .min(len as u64);
+        encoder.dispatch_threads(
+            MTLSize {
+                width: len as u64,
+                height: 1,
+                depth: 1,
+            },
+            MTLSize {
+                width,
+                height: 1,
+                depth: 1,
+            },
+        );
+        encoder.end_encoding();
+        command_buffer.commit();
+        command_buffer.wait_until_completed();
+
+        let status = unsafe { status_buffer.contents().cast::<J2kMctStatus>().read() };
+        if status.code != J2K_MCT_STATUS_OK {
+            return Err(decode_mct_status_error(status));
+        }
+
+        Ok(())
     })
 }
 

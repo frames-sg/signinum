@@ -106,7 +106,7 @@ pub use error::{
     ColorError, DecodeError, DecodingError, FormatError, MarkerError, Result, TileError,
     ValidationError,
 };
-pub use j2c::encode::{encode, encode_htj2k, EncodeOptions};
+pub use j2c::encode::{encode, encode_htj2k, encode_with_accelerator, EncodeOptions};
 pub use j2c::DecoderContext;
 
 mod j2c;
@@ -256,6 +256,206 @@ pub struct EncodedJ2kCodeBlock {
     /// Missing most-significant bit planes for this code block.
     pub missing_bit_planes: u8,
 }
+
+/// Hidden forward RCT job for backend experimentation.
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct J2kForwardRctJob<'a> {
+    /// First component plane, updated in place.
+    pub plane0: &'a mut [f32],
+    /// Second component plane, updated in place.
+    pub plane1: &'a mut [f32],
+    /// Third component plane, updated in place.
+    pub plane2: &'a mut [f32],
+}
+
+/// Hidden forward 5/3 DWT job for backend experimentation.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy)]
+pub struct J2kForwardDwt53Job<'a> {
+    /// Source samples in row-major order.
+    pub samples: &'a [f32],
+    /// Source width in samples.
+    pub width: u32,
+    /// Source height in samples.
+    pub height: u32,
+    /// Number of decomposition levels requested.
+    pub num_levels: u8,
+}
+
+/// Hidden forward 5/3 DWT output for backend experimentation.
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct J2kForwardDwt53Output {
+    /// LL subband coefficients from the lowest decomposition level.
+    pub ll: Vec<f32>,
+    /// LL subband width.
+    pub ll_width: u32,
+    /// LL subband height.
+    pub ll_height: u32,
+    /// Higher resolution detail levels, ordered from lowest to highest.
+    pub levels: Vec<J2kForwardDwt53Level>,
+}
+
+/// Hidden forward 5/3 DWT detail level for backend experimentation.
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct J2kForwardDwt53Level {
+    /// HL subband coefficients.
+    pub hl: Vec<f32>,
+    /// LH subband coefficients.
+    pub lh: Vec<f32>,
+    /// HH subband coefficients.
+    pub hh: Vec<f32>,
+    /// Full-resolution width represented by this level.
+    pub width: u32,
+    /// Full-resolution height represented by this level.
+    pub height: u32,
+    /// Low-pass width at this level.
+    pub low_width: u32,
+    /// Low-pass height at this level.
+    pub low_height: u32,
+    /// High-pass width at this level.
+    pub high_width: u32,
+    /// High-pass height at this level.
+    pub high_height: u32,
+}
+
+/// Hidden Tier-1 classic J2K code-block encode job for backend experimentation.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy)]
+pub struct J2kTier1CodeBlockEncodeJob<'a> {
+    /// Quantized coefficients in row-major order.
+    pub coefficients: &'a [i32],
+    /// Code-block width in samples.
+    pub width: u32,
+    /// Code-block height in samples.
+    pub height: u32,
+    /// Subband kind containing this code-block.
+    pub sub_band_type: J2kSubBandType,
+    /// Total bitplanes for this subband/code-block.
+    pub total_bitplanes: u8,
+    /// Classic J2K code-block style flags.
+    pub style: J2kCodeBlockStyle,
+}
+
+/// Hidden LRCP packetization job for backend experimentation.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct J2kPacketizationEncodeJob {
+    /// Number of resolution packets prepared for packetization.
+    pub resolution_count: u32,
+    /// Number of layers to write.
+    pub num_layers: u8,
+    /// Number of image components.
+    pub num_components: u8,
+    /// Total number of code-block contributions.
+    pub code_block_count: u32,
+}
+
+/// Hidden encode-stage dispatch counters for backend experimentation.
+#[doc(hidden)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct J2kEncodeDispatchReport {
+    /// Forward RCT kernel dispatch count.
+    pub forward_rct: usize,
+    /// Forward reversible 5/3 DWT kernel dispatch count.
+    pub forward_dwt53: usize,
+    /// Tier-1 code-block encode dispatch count.
+    pub tier1_code_block: usize,
+    /// Packetization dispatch count.
+    pub packetization: usize,
+}
+
+impl J2kEncodeDispatchReport {
+    /// Return the saturating per-stage delta from `before` to `self`.
+    #[must_use]
+    pub fn saturating_delta(self, before: Self) -> Self {
+        Self {
+            forward_rct: self.forward_rct.saturating_sub(before.forward_rct),
+            forward_dwt53: self.forward_dwt53.saturating_sub(before.forward_dwt53),
+            tier1_code_block: self
+                .tier1_code_block
+                .saturating_sub(before.tier1_code_block),
+            packetization: self.packetization.saturating_sub(before.packetization),
+        }
+    }
+
+    /// Return total dispatches across all encode stages.
+    #[must_use]
+    pub fn total(self) -> usize {
+        self.forward_rct
+            .saturating_add(self.forward_dwt53)
+            .saturating_add(self.tier1_code_block)
+            .saturating_add(self.packetization)
+    }
+
+    /// Return whether at least one encode stage dispatched.
+    #[must_use]
+    pub fn any(self) -> bool {
+        self.total() > 0
+    }
+}
+
+/// Hidden JPEG 2000 encode-stage accelerator for backend experimentation.
+#[doc(hidden)]
+pub trait J2kEncodeStageAccelerator {
+    /// Report cumulative backend dispatches completed by this accelerator.
+    fn dispatch_report(&self) -> J2kEncodeDispatchReport {
+        J2kEncodeDispatchReport::default()
+    }
+
+    /// Optionally apply forward RCT in place.
+    ///
+    /// Return `Ok(true)` after writing transformed planes. Return `Ok(false)`
+    /// to use the CPU fallback.
+    fn encode_forward_rct(
+        &mut self,
+        _job: J2kForwardRctJob<'_>,
+    ) -> core::result::Result<bool, &'static str> {
+        Ok(false)
+    }
+
+    /// Optionally run a forward reversible 5/3 DWT.
+    ///
+    /// Return `Ok(Some(output))` with all subbands populated. Return
+    /// `Ok(None)` to use the CPU fallback.
+    fn encode_forward_dwt53(
+        &mut self,
+        _job: J2kForwardDwt53Job<'_>,
+    ) -> core::result::Result<Option<J2kForwardDwt53Output>, &'static str> {
+        Ok(None)
+    }
+
+    /// Optionally encode one classic Tier-1 code-block.
+    ///
+    /// Return `Ok(Some(output))` with encoded bytes and pass metadata. Return
+    /// `Ok(None)` to use the CPU fallback.
+    fn encode_tier1_code_block(
+        &mut self,
+        _job: J2kTier1CodeBlockEncodeJob<'_>,
+    ) -> core::result::Result<Option<EncodedJ2kCodeBlock>, &'static str> {
+        Ok(None)
+    }
+
+    /// Optionally packetize prepared LRCP packet contributions.
+    ///
+    /// Return `Ok(Some(bytes))` with the complete tile bitstream. Return
+    /// `Ok(None)` to use the CPU fallback.
+    fn encode_packetization(
+        &mut self,
+        _job: J2kPacketizationEncodeJob,
+    ) -> core::result::Result<Option<Vec<u8>>, &'static str> {
+        Ok(None)
+    }
+}
+
+/// Hidden CPU-only encode accelerator that always falls back to native stages.
+#[doc(hidden)]
+#[derive(Debug, Default, Clone, Copy)]
+pub struct CpuOnlyJ2kEncodeStageAccelerator;
+
+impl J2kEncodeStageAccelerator for CpuOnlyJ2kEncodeStageAccelerator {}
 
 /// Hidden classic J2K batched code-block decode job for one sub-band.
 #[doc(hidden)]

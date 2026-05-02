@@ -72,6 +72,39 @@ fn adapter_crates_do_not_import_codec_private_modules() {
 }
 
 #[test]
+fn workspace_contains_public_signinum_facade_crate() {
+    let root = repo_root();
+    let manifest_path = root.join("crates/signinum/Cargo.toml");
+    let manifest = fs::read_to_string(&manifest_path).unwrap_or_else(|err| {
+        panic!("read {}: {err}", manifest_path.display());
+    });
+
+    for required in [
+        "name = \"signinum\"",
+        "signinum-core",
+        "signinum-jpeg",
+        "signinum-j2k",
+        "signinum-tilecodec",
+    ] {
+        assert!(
+            manifest.contains(required),
+            "{} must contain `{required}`",
+            manifest_path
+                .strip_prefix(root)
+                .unwrap_or(&manifest_path)
+                .display()
+        );
+    }
+
+    let root_manifest =
+        fs::read_to_string(root.join("Cargo.toml")).expect("read workspace manifest");
+    assert!(
+        root_manifest.contains("\"crates/signinum\""),
+        "workspace members must include the public signinum facade crate"
+    );
+}
+
+#[test]
 fn wsi_decode_api_guide_covers_public_surfaces() {
     let root = repo_root();
     let readme = fs::read_to_string(root.join("README.md")).expect("read README");

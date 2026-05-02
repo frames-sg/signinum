@@ -18,6 +18,13 @@ struct J2kMctStatus {
     uint reserved1;
 };
 
+struct J2kForwardRctParams {
+    uint len;
+    uint reserved0;
+    uint reserved1;
+    uint reserved2;
+};
+
 constant uint J2K_MCT_TRANSFORM_REVERSIBLE53 = 0;
 constant uint J2K_MCT_TRANSFORM_IRREVERSIBLE97 = 1;
 constant uint J2K_MCT_STATUS_OK = 0;
@@ -57,5 +64,31 @@ kernel void j2k_inverse_mct(
     if (gid == 0) {
         status->code = J2K_MCT_STATUS_FAIL;
         status->detail = params.transform;
+    }
+}
+
+kernel void j2k_forward_rct(
+    device float *plane0 [[buffer(0)]],
+    device float *plane1 [[buffer(1)]],
+    device float *plane2 [[buffer(2)]],
+    constant J2kForwardRctParams &params [[buffer(3)]],
+    device J2kMctStatus *status [[buffer(4)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= params.len) {
+        return;
+    }
+
+    const float r = plane0[gid];
+    const float g = plane1[gid];
+    const float b = plane2[gid];
+
+    plane0[gid] = floor((r + 2.0f * g + b) * 0.25f);
+    plane1[gid] = b - g;
+    plane2[gid] = r - g;
+
+    if (gid == 0) {
+        status->code = J2K_MCT_STATUS_OK;
+        status->detail = 0;
     }
 }

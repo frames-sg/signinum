@@ -9,6 +9,7 @@ mod classic;
 mod compute;
 #[cfg(target_os = "macos")]
 mod direct;
+mod encode;
 mod ht;
 mod idwt;
 mod mct;
@@ -42,6 +43,8 @@ use signinum_j2k_native::{
 
 #[cfg(target_os = "macos")]
 use metal::{Buffer, Device, MTLResourceOptions};
+
+pub use encode::MetalEncodeStageAccelerator;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

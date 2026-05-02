@@ -193,25 +193,6 @@ impl<'a> ArithmeticDecoder<'a> {
 
         self.a -= qe_entry.qe;
 
-        // Old code:
-        // let d;
-        //
-        // if (self.c >> 16) < self.a {
-        //     if self.a & 0x8000 == 0 {
-        //         d = self.exchange_mps(context, qe_entry);
-        //         self.renormalize();
-        //     } else {
-        //         d = context.mps();
-        //     }
-        // } else {
-        //     self.c -= self.a << 16;
-        //
-        //     d = self.exchange_lps(context, qe_entry);
-        //     self.renormalize();
-        // }
-        //
-        // d
-
         // This is a faster version that reduces branching, which has shown
         // itself to be the main limiting factor for better performance.
         // We short-circuit the case where just the most probably symbol is

@@ -17,6 +17,11 @@ use super::ht_block_encode;
 use super::packet_encode::{self, CodeBlockPacketData, ResolutionPacket, SubbandPrecinct};
 use super::quantize::{self, QuantStepSize};
 use crate::math::{floor_f32, log2_f32};
+use crate::{
+    CpuOnlyJ2kEncodeStageAccelerator, EncodedJ2kCodeBlock, J2kEncodeStageAccelerator,
+    J2kForwardDwt53Job, J2kForwardDwt53Level, J2kForwardDwt53Output, J2kForwardRctJob,
+    J2kPacketizationEncodeJob, J2kSubBandType, J2kTier1CodeBlockEncodeJob,
+};
 use crate::{DecodeSettings, Image};
 
 /// Encoding options for JPEG 2000.
@@ -71,6 +76,34 @@ pub fn encode(
     signed: bool,
     options: &EncodeOptions,
 ) -> Result<Vec<u8>, &'static str> {
+    let mut accelerator = CpuOnlyJ2kEncodeStageAccelerator;
+    encode_with_accelerator(
+        pixels,
+        width,
+        height,
+        num_components,
+        bit_depth,
+        signed,
+        options,
+        &mut accelerator,
+    )
+}
+
+/// Encode pixel data into a JPEG 2000 codestream using optional encode-stage hooks.
+///
+/// Stage hooks may accelerate forward RCT, forward 5/3 DWT, Tier-1 code-block
+/// encode, and packetization. Returning fallback from a hook preserves the CPU
+/// baseline for that stage.
+pub fn encode_with_accelerator(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    num_components: u8,
+    bit_depth: u8,
+    signed: bool,
+    options: &EncodeOptions,
+    accelerator: &mut impl J2kEncodeStageAccelerator,
+) -> Result<Vec<u8>, &'static str> {
     let block_coding_mode = block_coding_mode(options);
     let codestream = encode_impl(
         pixels,
@@ -81,6 +114,7 @@ pub fn encode(
         signed,
         options,
         block_coding_mode,
+        accelerator,
     )?;
 
     if block_coding_mode == BlockCodingMode::HighThroughput {
@@ -205,6 +239,7 @@ fn encode_impl(
     signed: bool,
     options: &EncodeOptions,
     block_coding_mode: BlockCodingMode,
+    accelerator: &mut impl J2kEncodeStageAccelerator,
 ) -> Result<Vec<u8>, &'static str> {
     if width == 0 || height == 0 {
         return Err("invalid dimensions");
@@ -230,7 +265,9 @@ fn encode_impl(
     let use_mct = num_components >= 3;
     if use_mct {
         if options.reversible {
-            forward_mct::forward_rct(&mut components);
+            if !try_encode_forward_rct(&mut components, accelerator)? {
+                forward_mct::forward_rct(&mut components);
+            }
         } else {
             forward_mct::forward_ict(&mut components);
         }
@@ -244,8 +281,17 @@ fn encode_impl(
 
     let decompositions: Vec<DwtDecomposition> = components
         .iter()
-        .map(|comp| fdwt::forward_dwt(comp, width, height, num_levels, options.reversible))
-        .collect();
+        .map(|comp| {
+            encode_forward_dwt(
+                comp,
+                width,
+                height,
+                num_levels,
+                options.reversible,
+                accelerator,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
     // Step 4: Compute quantization step sizes
     let guard_bits = if options.reversible {
@@ -276,6 +322,7 @@ fn encode_impl(
             cb_width,
             cb_height,
             SubBandType::LowLow,
+            accelerator,
         )?;
         resolution_packets.push(ResolutionPacket {
             subbands: vec![ll_subband],
@@ -297,6 +344,7 @@ fn encode_impl(
                 cb_width,
                 cb_height,
                 SubBandType::HighLow,
+                accelerator,
             )?;
 
             // LH subband
@@ -311,6 +359,7 @@ fn encode_impl(
                 cb_width,
                 cb_height,
                 SubBandType::LowHigh,
+                accelerator,
             )?;
 
             // HH subband
@@ -325,6 +374,7 @@ fn encode_impl(
                 cb_width,
                 cb_height,
                 SubBandType::HighHigh,
+                accelerator,
             )?;
 
             resolution_packets.push(ResolutionPacket {
@@ -334,7 +384,17 @@ fn encode_impl(
     }
 
     // Step 6: Form tile bitstream (T2)
-    let tile_data = packet_encode::form_tile_bitstream(&mut resolution_packets, 1, num_components);
+    let packetization_job = J2kPacketizationEncodeJob {
+        resolution_count: resolution_packets.len() as u32,
+        num_layers: 1,
+        num_components,
+        code_block_count: count_code_blocks(&resolution_packets)?,
+    };
+    let tile_data = accelerator
+        .encode_packetization(packetization_job)?
+        .unwrap_or_else(|| {
+            packet_encode::form_tile_bitstream(&mut resolution_packets, 1, num_components)
+        });
 
     // Step 7: Write codestream
     let quant_params: Vec<(u16, u16)> = step_sizes
@@ -365,6 +425,99 @@ fn encode_impl(
     ))
 }
 
+fn try_encode_forward_rct(
+    components: &mut [Vec<f32>],
+    accelerator: &mut impl J2kEncodeStageAccelerator,
+) -> Result<bool, &'static str> {
+    debug_assert!(components.len() >= 3);
+    let (plane0, rest) = components.split_at_mut(1);
+    let (plane1, plane2) = rest.split_at_mut(1);
+    accelerator.encode_forward_rct(J2kForwardRctJob {
+        plane0: &mut plane0[0],
+        plane1: &mut plane1[0],
+        plane2: &mut plane2[0],
+    })
+}
+
+fn encode_forward_dwt(
+    component: &[f32],
+    width: u32,
+    height: u32,
+    num_levels: u8,
+    reversible: bool,
+    accelerator: &mut impl J2kEncodeStageAccelerator,
+) -> Result<DwtDecomposition, &'static str> {
+    if reversible {
+        if let Some(output) = accelerator.encode_forward_dwt53(J2kForwardDwt53Job {
+            samples: component,
+            width,
+            height,
+            num_levels,
+        })? {
+            return convert_forward_dwt53_output(output);
+        }
+    }
+
+    Ok(fdwt::forward_dwt(
+        component, width, height, num_levels, reversible,
+    ))
+}
+
+fn convert_forward_dwt53_output(
+    output: J2kForwardDwt53Output,
+) -> Result<DwtDecomposition, &'static str> {
+    validate_band_len(output.ll.len(), output.ll_width, output.ll_height)?;
+    let mut levels = Vec::with_capacity(output.levels.len());
+    for level in output.levels {
+        validate_dwt53_level(&level)?;
+        levels.push(fdwt::DwtLevel {
+            hl: level.hl,
+            lh: level.lh,
+            hh: level.hh,
+            width: level.width,
+            height: level.height,
+            low_width: level.low_width,
+            low_height: level.low_height,
+            high_width: level.high_width,
+            high_height: level.high_height,
+        });
+    }
+    Ok(DwtDecomposition {
+        ll: output.ll,
+        ll_width: output.ll_width,
+        ll_height: output.ll_height,
+        levels,
+    })
+}
+
+fn validate_dwt53_level(level: &J2kForwardDwt53Level) -> Result<(), &'static str> {
+    validate_band_len(level.hl.len(), level.high_width, level.low_height)?;
+    validate_band_len(level.lh.len(), level.low_width, level.high_height)?;
+    validate_band_len(level.hh.len(), level.high_width, level.high_height)?;
+    Ok(())
+}
+
+fn validate_band_len(actual: usize, width: u32, height: u32) -> Result<(), &'static str> {
+    let expected = (width as usize)
+        .checked_mul(height as usize)
+        .ok_or("accelerated DWT output dimensions overflow")?;
+    if actual != expected {
+        return Err("accelerated DWT output length mismatch");
+    }
+    Ok(())
+}
+
+fn count_code_blocks(resolution_packets: &[ResolutionPacket]) -> Result<u32, &'static str> {
+    let count = resolution_packets
+        .iter()
+        .flat_map(|resolution| resolution.subbands.iter())
+        .try_fold(0usize, |acc, subband| {
+            acc.checked_add(subband.code_blocks.len())
+                .ok_or("packetization code-block count overflow")
+        })?;
+    u32::try_from(count).map_err(|_| "packetization code-block count exceeds u32")
+}
+
 /// Encode a single subband into a SubbandPrecinct.
 fn encode_subband(
     coefficients: &[f32],
@@ -377,6 +530,7 @@ fn encode_subband(
     cb_width: u32,
     cb_height: u32,
     sub_band_type: SubBandType,
+    accelerator: &mut impl J2kEncodeStageAccelerator,
 ) -> Result<SubbandPrecinct, &'static str> {
     if width == 0 || height == 0 {
         return Ok(SubbandPrecinct {
@@ -419,13 +573,14 @@ fn encode_subband(
             let encoded = if block_coding_mode == BlockCodingMode::HighThroughput {
                 ht_block_encode::encode_code_block(&cb_coeffs, cbw, cbh, total_bitplanes)?
             } else {
-                bitplane_encode::encode_code_block(
+                encode_tier1_code_block(
                     &cb_coeffs,
                     cbw,
                     cbh,
                     sub_band_type,
                     total_bitplanes,
-                )
+                    accelerator,
+                )?
             };
 
             code_blocks.push(CodeBlockPacketData {
@@ -444,6 +599,63 @@ fn encode_subband(
         num_cbs_x,
         num_cbs_y,
     })
+}
+
+fn encode_tier1_code_block(
+    coefficients: &[i32],
+    width: u32,
+    height: u32,
+    sub_band_type: SubBandType,
+    total_bitplanes: u8,
+    accelerator: &mut impl J2kEncodeStageAccelerator,
+) -> Result<bitplane_encode::EncodedCodeBlock, &'static str> {
+    if let Some(encoded) = accelerator.encode_tier1_code_block(J2kTier1CodeBlockEncodeJob {
+        coefficients,
+        width,
+        height,
+        sub_band_type: public_sub_band_type(sub_band_type),
+        total_bitplanes,
+        style: default_public_code_block_style(),
+    })? {
+        return Ok(encoded_code_block_from_accelerator(encoded));
+    }
+
+    Ok(bitplane_encode::encode_code_block(
+        coefficients,
+        width,
+        height,
+        sub_band_type,
+        total_bitplanes,
+    ))
+}
+
+fn encoded_code_block_from_accelerator(
+    encoded: EncodedJ2kCodeBlock,
+) -> bitplane_encode::EncodedCodeBlock {
+    bitplane_encode::EncodedCodeBlock {
+        data: encoded.data,
+        num_coding_passes: encoded.number_of_coding_passes,
+        num_zero_bitplanes: encoded.missing_bit_planes,
+    }
+}
+
+fn public_sub_band_type(sub_band_type: SubBandType) -> J2kSubBandType {
+    match sub_band_type {
+        SubBandType::LowLow => J2kSubBandType::LowLow,
+        SubBandType::HighLow => J2kSubBandType::HighLow,
+        SubBandType::LowHigh => J2kSubBandType::LowHigh,
+        SubBandType::HighHigh => J2kSubBandType::HighHigh,
+    }
+}
+
+fn default_public_code_block_style() -> crate::J2kCodeBlockStyle {
+    crate::J2kCodeBlockStyle {
+        selective_arithmetic_coding_bypass: false,
+        reset_context_probabilities: false,
+        termination_on_each_pass: false,
+        vertically_causal_context: false,
+        segmentation_symbols: false,
+    }
 }
 
 /// Convert interleaved pixel bytes to per-component f32 arrays.
@@ -580,6 +792,71 @@ mod tests {
         );
 
         assert!(result.is_ok(), "RGB encode failed: {:?}", result.err());
+    }
+
+    #[test]
+    fn encode_with_accelerator_calls_lossless_stage_hooks() {
+        #[derive(Default)]
+        struct CountingAccelerator {
+            forward_rct: usize,
+            forward_dwt53: usize,
+            tier1_code_blocks: usize,
+            packetization: usize,
+        }
+
+        impl crate::J2kEncodeStageAccelerator for CountingAccelerator {
+            fn encode_forward_rct(
+                &mut self,
+                _job: crate::J2kForwardRctJob<'_>,
+            ) -> core::result::Result<bool, &'static str> {
+                self.forward_rct += 1;
+                Ok(false)
+            }
+
+            fn encode_forward_dwt53(
+                &mut self,
+                _job: crate::J2kForwardDwt53Job<'_>,
+            ) -> core::result::Result<Option<crate::J2kForwardDwt53Output>, &'static str>
+            {
+                self.forward_dwt53 += 1;
+                Ok(None)
+            }
+
+            fn encode_tier1_code_block(
+                &mut self,
+                _job: crate::J2kTier1CodeBlockEncodeJob<'_>,
+            ) -> core::result::Result<Option<crate::EncodedJ2kCodeBlock>, &'static str>
+            {
+                self.tier1_code_blocks += 1;
+                Ok(None)
+            }
+
+            fn encode_packetization(
+                &mut self,
+                _job: crate::J2kPacketizationEncodeJob,
+            ) -> core::result::Result<Option<Vec<u8>>, &'static str> {
+                self.packetization += 1;
+                Ok(None)
+            }
+        }
+
+        let pixels: Vec<u8> = (0..8 * 8 * 3).map(|i| (i & 0xFF) as u8).collect();
+        let options = EncodeOptions {
+            num_decomposition_levels: 1,
+            reversible: true,
+            ..EncodeOptions::default()
+        };
+        let mut accelerator = CountingAccelerator::default();
+
+        let codestream =
+            encode_with_accelerator(&pixels, 8, 8, 3, 8, false, &options, &mut accelerator)
+                .expect("encode with accelerator hooks");
+
+        assert!(codestream.starts_with(&[0xFF, 0x4F]));
+        assert_eq!(accelerator.forward_rct, 1);
+        assert_eq!(accelerator.forward_dwt53, 3);
+        assert!(accelerator.tier1_code_blocks > 0);
+        assert_eq!(accelerator.packetization, 1);
     }
 
     #[test]

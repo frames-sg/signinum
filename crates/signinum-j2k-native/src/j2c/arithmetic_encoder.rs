@@ -246,10 +246,6 @@ impl ArithmeticEncoder {
         self.byte_out();
         self.c <<= self.ct;
         self.byte_out();
-        // Include one extra byte for proper termination
-        if *self.data.last().unwrap() != 0xFF {
-            self.data.push(0);
-        }
     }
 
     /// Return the encoded data (excluding sentinel), consuming the encoder.
@@ -349,6 +345,40 @@ mod tests {
         for i in 0..8 {
             assert_eq!(decoder.decode(&mut dec_ctx_a), symbols_a[i]);
             assert_eq!(decoder.decode(&mut dec_ctx_b), symbols_b[i]);
+        }
+    }
+
+    #[test]
+    fn test_many_context_round_trip() {
+        let mut state = 0x1234_5678u32;
+        let mut symbols = Vec::new();
+        let mut labels = Vec::new();
+        let mut encoder = ArithmeticEncoder::new();
+        let mut enc_contexts = [ArithmeticEncoderContext::default(); 19];
+        enc_contexts[0].reset_with_index(4);
+        enc_contexts[17].reset_with_index(3);
+        enc_contexts[18].reset_with_index(46);
+
+        for _ in 0..100_000 {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let label = (state % 19) as usize;
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let bit = (state >> 31) & 1;
+            encoder.encode(bit, &mut enc_contexts[label]);
+            labels.push(label);
+            symbols.push(bit);
+        }
+
+        let encoded = encoder.finish();
+        let mut decoder = ArithmeticDecoder::new(&encoded);
+        let mut dec_contexts = [ArithmeticDecoderContext::default(); 19];
+        dec_contexts[0].reset_with_index(4);
+        dec_contexts[17].reset_with_index(3);
+        dec_contexts[18].reset_with_index(46);
+
+        for (index, (&label, &symbol)) in labels.iter().zip(symbols.iter()).enumerate() {
+            let decoded = decoder.decode(&mut dec_contexts[label]);
+            assert_eq!(decoded, symbol, "mismatch at symbol {index}");
         }
     }
 

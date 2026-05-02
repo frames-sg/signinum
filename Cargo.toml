@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/signinum",
     "crates/signinum-core",
     "crates/signinum-cuda-runtime",
     "crates/signinum-j2k-compare",

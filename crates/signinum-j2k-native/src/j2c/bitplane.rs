@@ -1114,3 +1114,85 @@ impl BitDecoder for BypassDecoder<'_> {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::bitplane_encode;
+    use super::*;
+
+    fn seed_130_cb_coefficients() -> Vec<i32> {
+        let mut coefficients = Vec::with_capacity(64 * 64);
+        let mut state = 130u32 ^ 0x9e37_79b9;
+        for _ in 0..64 * 64 {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let _r = (state >> 24) as u8;
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let g = (state >> 24) as u8;
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let b = (state >> 24) as u8;
+            coefficients.push(i32::from(b) - i32::from(g));
+        }
+        coefficients
+    }
+
+    #[test]
+    fn classic_bitplane_round_trips_seed_130_cb_block() {
+        let coefficients = seed_130_cb_coefficients();
+        let style = CodeBlockStyle::default();
+        let encoded = bitplane_encode::encode_code_block_segments_with_style(
+            &coefficients,
+            64,
+            64,
+            SubBandType::LowLow,
+            8,
+            &style,
+        );
+        let segments = encoded
+            .segments
+            .iter()
+            .map(|segment| J2kCodeBlockSegment {
+                data_offset: segment.data_offset,
+                data_length: segment.data_length,
+                start_coding_pass: segment.start_coding_pass,
+                end_coding_pass: segment.end_coding_pass,
+                use_arithmetic: segment.use_arithmetic,
+            })
+            .collect::<Vec<_>>();
+        let mut ctx = BitPlaneDecodeContext::default();
+
+        decode_code_block_segments_validated(
+            &encoded.data,
+            &segments,
+            64,
+            64,
+            encoded.num_zero_bitplanes,
+            encoded.num_coding_passes,
+            8,
+            SubBandType::LowLow,
+            &style,
+            true,
+            &mut ctx,
+        )
+        .expect("decode code block");
+
+        let decoded = ctx
+            .coefficient_rows()
+            .flat_map(|row| row.iter().map(Coefficient::get))
+            .collect::<Vec<_>>();
+        let mismatch_count = decoded
+            .iter()
+            .zip(coefficients.iter())
+            .filter(|(actual, expected)| actual != expected)
+            .count();
+        if let Some(index) = decoded
+            .iter()
+            .zip(coefficients.iter())
+            .position(|(actual, expected)| actual != expected)
+        {
+            panic!(
+                "{mismatch_count} coefficient mismatch(es); first at {index}: expected {}, got {}",
+                coefficients[index], decoded[index]
+            );
+        }
+    }
+}

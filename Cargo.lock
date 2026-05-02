@@ -829,7 +829,7 @@ checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
 name = "signinum"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "signinum-core",
  "signinum-j2k",
@@ -935,7 +935,7 @@ dependencies = [
 
 [[package]]
 name = "signinum-jpeg-cuda"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "criterion",
  "jpeg-encoder",

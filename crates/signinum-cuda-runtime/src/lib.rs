@@ -15,7 +15,9 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use kernels::{copy_u8_launch_geometry, CudaKernel};
+use kernels::{
+    copy_u8_launch_geometry, j2k_dwt53_launch_geometry, j2k_forward_rct_launch_geometry, CudaKernel,
+};
 use libloading::Library;
 
 type CuResult = c_int;
@@ -413,6 +415,219 @@ impl CudaContext {
         })
     }
 
+    pub fn j2k_forward_rct(
+        &self,
+        plane0: &mut [f32],
+        plane1: &mut [f32],
+        plane2: &mut [f32],
+    ) -> Result<CudaExecutionStats, CudaError> {
+        if plane0.len() != plane1.len() || plane0.len() != plane2.len() {
+            return Err(CudaError::ImageTooLarge {
+                width: u32::try_from(plane0.len()).unwrap_or(u32::MAX),
+                height: 1,
+                channels: 3,
+            });
+        }
+        if plane0.is_empty() {
+            return Ok(CudaExecutionStats::default());
+        }
+
+        self.inner.set_current()?;
+        let buffer0 = self.upload(f32_slice_as_bytes(plane0))?;
+        let buffer1 = self.upload(f32_slice_as_bytes(plane1))?;
+        let buffer2 = self.upload(f32_slice_as_bytes(plane2))?;
+        self.launch_j2k_forward_rct_buffers(&buffer0, &buffer1, &buffer2, plane0.len())?;
+        buffer0.copy_to_host(f32_slice_as_bytes_mut(plane0))?;
+        buffer1.copy_to_host(f32_slice_as_bytes_mut(plane1))?;
+        buffer2.copy_to_host(f32_slice_as_bytes_mut(plane2))?;
+
+        Ok(CudaExecutionStats {
+            kernel_dispatches: 1,
+            copy_kernel_dispatches: 0,
+            decode_kernel_dispatches: 0,
+            hardware_decode: false,
+        })
+    }
+
+    pub fn j2k_forward_dwt53(
+        &self,
+        samples: &[f32],
+        width: u32,
+        height: u32,
+        num_levels: u8,
+    ) -> Result<CudaDwt53Output, CudaError> {
+        let expected_len =
+            (width as usize)
+                .checked_mul(height as usize)
+                .ok_or(CudaError::ImageTooLarge {
+                    width,
+                    height,
+                    channels: 1,
+                })?;
+        if expected_len != samples.len() {
+            return Err(CudaError::ImageTooLarge {
+                width,
+                height,
+                channels: 1,
+            });
+        }
+        if samples.is_empty() || num_levels == 0 {
+            return Ok(CudaDwt53Output {
+                transformed: samples.to_vec(),
+                levels: Vec::new(),
+                ll_width: width,
+                ll_height: height,
+                execution: CudaExecutionStats::default(),
+            });
+        }
+
+        self.inner.set_current()?;
+        let buffer_a = self.upload(f32_slice_as_bytes(samples))?;
+        let buffer_b = self.allocate(std::mem::size_of_val(samples))?;
+        let mut current_width = width;
+        let mut current_height = height;
+        let mut levels = Vec::new();
+        let mut dispatches = 0usize;
+
+        for _ in 0..num_levels {
+            if current_width < 2 && current_height < 2 {
+                break;
+            }
+            let low_width = current_width.div_ceil(2);
+            let low_height = current_height.div_ceil(2);
+            self.launch_j2k_forward_dwt53_pass(
+                CudaKernel::J2kForwardDwt53Horizontal,
+                &buffer_a,
+                &buffer_b,
+                CudaDwt53Pass {
+                    full_width: width,
+                    current_width,
+                    current_height,
+                    low_extent: low_width,
+                },
+            )?;
+            self.launch_j2k_forward_dwt53_pass(
+                CudaKernel::J2kForwardDwt53Vertical,
+                &buffer_b,
+                &buffer_a,
+                CudaDwt53Pass {
+                    full_width: width,
+                    current_width,
+                    current_height,
+                    low_extent: low_height,
+                },
+            )?;
+            dispatches = dispatches.saturating_add(2);
+            levels.push(CudaDwt53LevelShape {
+                width: current_width,
+                height: current_height,
+                low_width,
+                low_height,
+                high_width: current_width / 2,
+                high_height: current_height / 2,
+            });
+            current_width = low_width;
+            current_height = low_height;
+        }
+
+        let mut transformed = vec![0f32; samples.len()];
+        buffer_a.copy_to_host(f32_slice_as_bytes_mut(&mut transformed))?;
+        Ok(CudaDwt53Output {
+            transformed,
+            levels,
+            ll_width: current_width,
+            ll_height: current_height,
+            execution: CudaExecutionStats {
+                kernel_dispatches: dispatches,
+                copy_kernel_dispatches: 0,
+                decode_kernel_dispatches: 0,
+                hardware_decode: false,
+            },
+        })
+    }
+
+    fn launch_j2k_forward_rct_buffers(
+        &self,
+        plane0: &CudaDeviceBuffer,
+        plane1: &CudaDeviceBuffer,
+        plane2: &CudaDeviceBuffer,
+        len: usize,
+    ) -> Result<(), CudaError> {
+        let function = self.inner.kernel_function(CudaKernel::J2kForwardRct)?;
+        let mut plane0_ptr = plane0.device_ptr();
+        let mut plane1_ptr = plane1.device_ptr();
+        let mut plane2_ptr = plane2.device_ptr();
+        let mut len_u64 = u64::try_from(len).map_err(|_| CudaError::LengthTooLarge { len })?;
+        let mut params = [
+            (&raw mut plane0_ptr).cast::<c_void>(),
+            (&raw mut plane1_ptr).cast::<c_void>(),
+            (&raw mut plane2_ptr).cast::<c_void>(),
+            (&raw mut len_u64).cast::<c_void>(),
+        ];
+        let geometry =
+            j2k_forward_rct_launch_geometry(len).ok_or(CudaError::LengthTooLarge { len })?;
+
+        self.launch_kernel(function, geometry, &mut params)
+    }
+
+    fn launch_j2k_forward_dwt53_pass(
+        &self,
+        kernel: CudaKernel,
+        input: &CudaDeviceBuffer,
+        output: &CudaDeviceBuffer,
+        pass: CudaDwt53Pass,
+    ) -> Result<(), CudaError> {
+        let function = self.inner.kernel_function(kernel)?;
+        let mut input_ptr = input.device_ptr();
+        let mut output_ptr = output.device_ptr();
+        let mut full_width = pass.full_width;
+        let mut current_width = pass.current_width;
+        let mut current_height = pass.current_height;
+        let mut low_extent = pass.low_extent;
+        let mut params = [
+            (&raw mut input_ptr).cast::<c_void>(),
+            (&raw mut output_ptr).cast::<c_void>(),
+            (&raw mut full_width).cast::<c_void>(),
+            (&raw mut current_width).cast::<c_void>(),
+            (&raw mut current_height).cast::<c_void>(),
+            (&raw mut low_extent).cast::<c_void>(),
+        ];
+        let geometry = j2k_dwt53_launch_geometry(current_width, current_height).ok_or(
+            CudaError::ImageTooLarge {
+                width: pass.current_width,
+                height: pass.current_height,
+                channels: 1,
+            },
+        )?;
+        self.launch_kernel(function, geometry, &mut params)
+    }
+
+    fn launch_kernel(
+        &self,
+        function: CuFunction,
+        geometry: kernels::CudaLaunchGeometry,
+        params: &mut [*mut c_void],
+    ) -> Result<(), CudaError> {
+        self.inner.driver.check("cuLaunchKernel", unsafe {
+            (self.inner.driver.cu_launch_kernel)(
+                function,
+                geometry.grid.0,
+                geometry.grid.1,
+                geometry.grid.2,
+                geometry.block.0,
+                geometry.block.1,
+                geometry.block.2,
+                0,
+                std::ptr::null_mut(),
+                params.as_mut_ptr(),
+                std::ptr::null_mut(),
+            )
+        })?;
+        self.inner.driver.check("cuCtxSynchronize", unsafe {
+            (self.inner.driver.cu_ctx_synchronize)()
+        })
+    }
+
     pub fn copy_device_to_device_with_kernel(
         &self,
         src: &CudaDeviceBuffer,
@@ -439,30 +654,7 @@ impl CudaContext {
                 len: src.byte_len(),
             })?;
 
-        // SAFETY: function is a live cached CUDA kernel for this context.
-        // Kernel arguments point to stack values that live through the
-        // synchronous launch. dst and src are live device buffers of at least
-        // len bytes.
-        self.inner.driver.check("cuLaunchKernel", unsafe {
-            (self.inner.driver.cu_launch_kernel)(
-                function,
-                geometry.grid.0,
-                geometry.grid.1,
-                geometry.grid.2,
-                geometry.block.0,
-                geometry.block.1,
-                geometry.block.2,
-                0,
-                std::ptr::null_mut(),
-                params.as_mut_ptr(),
-                std::ptr::null_mut(),
-            )
-        })?;
-        // SAFETY: synchronizes the current CUDA context so kernel errors are
-        // surfaced before returning the output buffer.
-        self.inner.driver.check("cuCtxSynchronize", unsafe {
-            (self.inner.driver.cu_ctx_synchronize)()
-        })?;
+        self.launch_kernel(function, geometry, &mut params)?;
 
         Ok(dst)
     }
@@ -501,6 +693,51 @@ pub struct CudaDeviceBuffer {
 pub struct CudaKernelOutput {
     buffer: CudaDeviceBuffer,
     execution: CudaExecutionStats,
+}
+
+#[derive(Debug)]
+pub struct CudaDwt53Output {
+    transformed: Vec<f32>,
+    levels: Vec<CudaDwt53LevelShape>,
+    ll_width: u32,
+    ll_height: u32,
+    execution: CudaExecutionStats,
+}
+
+impl CudaDwt53Output {
+    pub fn transformed(&self) -> &[f32] {
+        &self.transformed
+    }
+
+    pub fn levels(&self) -> &[CudaDwt53LevelShape] {
+        &self.levels
+    }
+
+    pub fn ll_dimensions(&self) -> (u32, u32) {
+        (self.ll_width, self.ll_height)
+    }
+
+    pub fn execution(&self) -> CudaExecutionStats {
+        self.execution
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CudaDwt53LevelShape {
+    pub width: u32,
+    pub height: u32,
+    pub low_width: u32,
+    pub low_height: u32,
+    pub high_width: u32,
+    pub high_height: u32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CudaDwt53Pass {
+    full_width: u32,
+    current_width: u32,
+    current_height: u32,
+    low_extent: u32,
 }
 
 impl CudaKernelOutput {
@@ -610,6 +847,28 @@ impl Drop for CudaDeviceBuffer {
             // surface errors, so failures are ignored during cleanup.
             let _ = unsafe { (self.context.inner.driver.cu_mem_free)(self.ptr) };
         }
+    }
+}
+
+fn f32_slice_as_bytes(samples: &[f32]) -> &[u8] {
+    // SAFETY: f32 has no invalid bit patterns, and the output byte slice is
+    // read-only with the same lifetime as the input samples.
+    unsafe {
+        std::slice::from_raw_parts(
+            samples.as_ptr().cast::<u8>(),
+            std::mem::size_of_val(samples),
+        )
+    }
+}
+
+fn f32_slice_as_bytes_mut(samples: &mut [f32]) -> &mut [u8] {
+    // SAFETY: the returned byte slice covers exactly the same initialized f32
+    // storage and is used only for CUDA copies into the existing allocation.
+    unsafe {
+        std::slice::from_raw_parts_mut(
+            samples.as_mut_ptr().cast::<u8>(),
+            std::mem::size_of_val(samples),
+        )
     }
 }
 

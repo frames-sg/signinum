@@ -3,6 +3,9 @@ use std::os::raw::c_uint;
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum CudaKernel {
     CopyU8,
+    J2kForwardRct,
+    J2kForwardDwt53Horizontal,
+    J2kForwardDwt53Vertical,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -15,12 +18,18 @@ impl CudaKernel {
     pub(crate) fn ptx(self) -> &'static [u8] {
         match self {
             Self::CopyU8 => COPY_U8_PTX,
+            Self::J2kForwardRct
+            | Self::J2kForwardDwt53Horizontal
+            | Self::J2kForwardDwt53Vertical => J2K_ENCODE_PTX,
         }
     }
 
     pub(crate) fn entrypoint(self) -> &'static [u8] {
         match self {
             Self::CopyU8 => b"signinum_copy_u8\0",
+            Self::J2kForwardRct => b"signinum_j2k_forward_rct\0",
+            Self::J2kForwardDwt53Horizontal => b"signinum_j2k_forward_dwt53_horizontal\0",
+            Self::J2kForwardDwt53Vertical => b"signinum_j2k_forward_dwt53_vertical\0",
         }
     }
 }
@@ -35,6 +44,27 @@ pub(crate) fn copy_u8_launch_geometry(len: usize) -> Option<CudaLaunchGeometry> 
 
 const COPY_U8_THREADS: usize = 256;
 const COPY_U8_THREADS_CUDA: c_uint = 256;
+const J2K_ENCODE_THREADS_X: c_uint = 16;
+const J2K_ENCODE_THREADS_Y: c_uint = 16;
+const J2K_ENCODE_PTX: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/j2k_encode_kernels.ptx"));
+
+pub(crate) fn j2k_forward_rct_launch_geometry(len: usize) -> Option<CudaLaunchGeometry> {
+    let blocks = c_uint::try_from(len.div_ceil(COPY_U8_THREADS)).ok()?;
+    Some(CudaLaunchGeometry {
+        grid: (blocks, 1, 1),
+        block: (COPY_U8_THREADS_CUDA, 1, 1),
+    })
+}
+
+pub(crate) fn j2k_dwt53_launch_geometry(width: u32, height: u32) -> Option<CudaLaunchGeometry> {
+    let grid_x = c_uint::try_from(width.div_ceil(J2K_ENCODE_THREADS_X)).ok()?;
+    let grid_y = c_uint::try_from(height.div_ceil(J2K_ENCODE_THREADS_Y)).ok()?;
+    Some(CudaLaunchGeometry {
+        grid: (grid_x, grid_y, 1),
+        block: (J2K_ENCODE_THREADS_X, J2K_ENCODE_THREADS_Y, 1),
+    })
+}
+
 const COPY_U8_PTX: &[u8] = concat!(
     r"
 .version 7.0
@@ -88,9 +118,33 @@ mod tests {
     }
 
     #[test]
+    fn j2k_encode_kernel_metadata_matches_generated_ptx() {
+        assert_eq!(J2K_ENCODE_PTX.last(), Some(&0));
+        assert_eq!(
+            CudaKernel::J2kForwardRct.entrypoint(),
+            b"signinum_j2k_forward_rct\0"
+        );
+        assert_eq!(
+            CudaKernel::J2kForwardDwt53Horizontal.entrypoint(),
+            b"signinum_j2k_forward_dwt53_horizontal\0"
+        );
+        assert_eq!(
+            CudaKernel::J2kForwardDwt53Vertical.entrypoint(),
+            b"signinum_j2k_forward_dwt53_vertical\0"
+        );
+    }
+
+    #[test]
     fn copy_u8_launch_geometry_rounds_up_to_256_thread_blocks() {
         assert_eq!(copy_u8_launch_geometry(1).unwrap().grid, (1, 1, 1));
         assert_eq!(copy_u8_launch_geometry(256).unwrap().grid, (1, 1, 1));
         assert_eq!(copy_u8_launch_geometry(257).unwrap().grid, (2, 1, 1));
+    }
+
+    #[test]
+    fn j2k_dwt53_launch_geometry_uses_16_by_16_thread_blocks() {
+        let geometry = j2k_dwt53_launch_geometry(17, 33).unwrap();
+        assert_eq!(geometry.grid, (2, 3, 1));
+        assert_eq!(geometry.block, (16, 16, 1));
     }
 }

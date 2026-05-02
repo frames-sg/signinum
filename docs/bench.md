@@ -330,9 +330,9 @@ self-hosted runners for GPU signoff:
 
 - Apple Silicon Metal runners validate Metal adapter tests and can run timed
   `signinum-jpeg-metal` and `signinum-j2k-metal` Criterion benches.
-- x86_64 CUDA runners validate CUDA device-memory output with `cuda-runtime`.
-  They do not establish CUDA kernel decode timing or an NVIDIA performance
-  claim.
+- x86_64 CUDA runners validate CUDA device-memory output with `cuda-runtime`
+  and can run the `signinum-jpeg-cuda` nvJPEG Criterion bench. NVIDIA
+  performance claims require recorded timed-benchmark output from those hosts.
 
 Set the manual workflow input `run-timed-benchmarks=true` when collecting
 release benchmark evidence. Leave it false for faster device/API validation.
@@ -394,15 +394,34 @@ cargo bench -p signinum-j2k-metal --bench device_upload -- --noplot
 
 `signinum-jpeg-cuda` and `signinum-j2k-cuda` expose the same device-output API
 surface. On hosts with a CUDA driver and the `cuda-runtime` feature, explicit
-CUDA requests upload decoded output into CUDA device memory:
+CUDA requests return CUDA-backed surfaces:
 
 - `BackendRequest::Cpu` returns a host-backed surface
 - `BackendRequest::Auto` falls back to the CPU surface
 - `BackendRequest::Cuda` returns a CUDA-backed surface or fails explicitly as
   unavailable on non-CUDA hosts
 
-No CUDA kernel decode or CUDA performance numbers are claimed from this
-machine.
+`signinum-jpeg-cuda` has a full-frame RGB8 nvJPEG path when `libnvjpeg` is
+available. Region, scaled, non-RGB8, nvJPEG-unsupported JPEG, and J2K CUDA
+requests use CPU decode plus CUDA device-memory upload.
+
+Compile the CUDA JPEG bench:
+
+```sh
+cargo bench -p signinum-jpeg-cuda --bench device_decode --features cuda-runtime --no-run
+```
+
+Run it on an NVIDIA host:
+
+```sh
+SIGNINUM_CUDA_BENCH_JPEG=/path/to/wsi_tile.jpg \
+  cargo bench -p signinum-jpeg-cuda --bench device_decode --features cuda-runtime -- --noplot
+```
+
+Set `SIGNINUM_REQUIRE_CUDA_JPEG_HARDWARE_DECODE=1` when the run must fail
+instead of benchmarking the CPU-upload fallback. Small committed fixtures are
+useful for compile smoke tests, but realistic GPU comparisons need larger
+WSI-shaped JPEG tiles.
 
 ## `signinum-tilecodec`
 

@@ -6,6 +6,7 @@
 #![warn(unreachable_pub)]
 
 mod kernels;
+mod nvjpeg;
 
 use std::{
     collections::HashMap,
@@ -70,6 +71,25 @@ pub enum CudaError {
     OutputTooSmall { required: usize, have: usize },
     #[error("CUDA byte length is too large for kernel launch: {len}")]
     LengthTooLarge { len: usize },
+    #[error("CUDA image allocation size overflow for {width}x{height}x{channels}")]
+    ImageTooLarge {
+        width: u32,
+        height: u32,
+        channels: usize,
+    },
+    #[error("nvJPEG is unavailable: {message}")]
+    NvjpegUnavailable { message: String },
+    #[error("nvJPEG call {operation} failed with nvjpegStatus_t {code}{name}")]
+    Nvjpeg {
+        operation: &'static str,
+        code: i32,
+        name: String,
+    },
+    #[error("nvJPEG decoded dimensions mismatch: expected {expected:?}, got {actual:?}")]
+    NvjpegDimensions {
+        expected: (u32, u32),
+        actual: (u32, u32),
+    },
     #[error("CUDA runtime state lock is poisoned: {message}")]
     StatePoisoned { message: String },
 }
@@ -191,6 +211,7 @@ struct ContextInner {
     driver: Driver,
     context: CuContext,
     modules: Mutex<HashMap<CudaKernel, CompiledKernel>>,
+    nvjpeg: Mutex<Option<nvjpeg::NvjpegState>>,
 }
 
 impl ContextInner {
@@ -225,6 +246,11 @@ impl Drop for ContextInner {
     fn drop(&mut self) {
         if !self.context.is_null() {
             let _ = self.set_current();
+            let nvjpeg = match self.nvjpeg.get_mut() {
+                Ok(nvjpeg) => nvjpeg,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            drop(nvjpeg.take());
             let modules = match self.modules.get_mut() {
                 Ok(modules) => modules,
                 Err(poisoned) => poisoned.into_inner(),
@@ -284,6 +310,7 @@ impl CudaContext {
                 driver,
                 context,
                 modules: Mutex::new(HashMap::new()),
+                nvjpeg: Mutex::new(None),
             }),
         })
     }
@@ -329,10 +356,59 @@ impl CudaContext {
     pub fn copy_with_kernel(&self, bytes: &[u8]) -> Result<CudaKernelOutput, CudaError> {
         let staging = self.upload(bytes)?;
         let output = self.copy_device_to_device_with_kernel(&staging)?;
+        let copy_dispatches = usize::from(!bytes.is_empty());
         Ok(CudaKernelOutput {
             buffer: output,
             execution: CudaExecutionStats {
-                kernel_dispatches: usize::from(!bytes.is_empty()),
+                kernel_dispatches: copy_dispatches,
+                copy_kernel_dispatches: copy_dispatches,
+                decode_kernel_dispatches: 0,
+                hardware_decode: false,
+            },
+        })
+    }
+
+    pub fn decode_jpeg_rgb8_with_nvjpeg(
+        &self,
+        bytes: &[u8],
+        dimensions: (u32, u32),
+    ) -> Result<CudaKernelOutput, CudaError> {
+        self.inner.set_current()?;
+        let (pitch_bytes, byte_len) = rgb8_layout(dimensions)?;
+        let output = self.allocate(byte_len)?;
+        if byte_len == 0 {
+            return Ok(CudaKernelOutput {
+                buffer: output,
+                execution: CudaExecutionStats::default(),
+            });
+        }
+
+        let mut state = self
+            .inner
+            .nvjpeg
+            .lock()
+            .map_err(|error| CudaError::StatePoisoned {
+                message: error.to_string(),
+            })?;
+        if state.is_none() {
+            *state = Some(nvjpeg::NvjpegState::new()?);
+        }
+        let state = state.as_mut().ok_or_else(|| CudaError::NvjpegUnavailable {
+            message: "nvJPEG state did not initialize".to_string(),
+        })?;
+        state.decode_rgb8(bytes, dimensions, output.device_ptr(), pitch_bytes)?;
+
+        self.inner.driver.check("cuCtxSynchronize", unsafe {
+            (self.inner.driver.cu_ctx_synchronize)()
+        })?;
+
+        Ok(CudaKernelOutput {
+            buffer: output,
+            execution: CudaExecutionStats {
+                kernel_dispatches: 1,
+                copy_kernel_dispatches: 0,
+                decode_kernel_dispatches: 1,
+                hardware_decode: true,
             },
         })
     }
@@ -436,11 +512,26 @@ impl CudaKernelOutput {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct CudaExecutionStats {
     kernel_dispatches: usize,
+    copy_kernel_dispatches: usize,
+    decode_kernel_dispatches: usize,
+    hardware_decode: bool,
 }
 
 impl CudaExecutionStats {
     pub fn kernel_dispatches(self) -> usize {
         self.kernel_dispatches
+    }
+
+    pub fn copy_kernel_dispatches(self) -> usize {
+        self.copy_kernel_dispatches
+    }
+
+    pub fn decode_kernel_dispatches(self) -> usize {
+        self.decode_kernel_dispatches
+    }
+
+    pub fn used_hardware_decode(self) -> bool {
+        self.hardware_decode
     }
 }
 
@@ -520,4 +611,26 @@ impl Drop for CudaDeviceBuffer {
             let _ = unsafe { (self.context.inner.driver.cu_mem_free)(self.ptr) };
         }
     }
+}
+
+fn rgb8_layout(dimensions: (u32, u32)) -> Result<(usize, usize), CudaError> {
+    let row_bytes = dimensions
+        .0
+        .try_into()
+        .ok()
+        .and_then(|width: usize| width.checked_mul(3))
+        .ok_or(CudaError::ImageTooLarge {
+            width: dimensions.0,
+            height: dimensions.1,
+            channels: 3,
+        })?;
+    let byte_len =
+        row_bytes
+            .checked_mul(dimensions.1 as usize)
+            .ok_or(CudaError::ImageTooLarge {
+                width: dimensions.0,
+                height: dimensions.1,
+                channels: 3,
+            })?;
+    Ok((row_bytes, byte_len))
 }

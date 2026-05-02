@@ -16,8 +16,9 @@ CPU-first 1.0 release posture.
   for `signinum-j2k`.
 - Excluded Metal, CUDA, and comparator crates from the 1.0 publish workflow.
 - Clarified that CUDA crates can use `cuda-runtime` to return CUDA device memory
-  surfaces by uploading CPU-decoded bytes, with no CUDA kernel decode or
-  NVIDIA performance claim.
+  surfaces, with `signinum-jpeg-cuda` using nvJPEG for full-frame RGB8 JPEG
+  decode when the CUDA driver and `libnvjpeg` are available. NVIDIA performance
+  claims require recorded self-hosted GPU benchmark evidence.
 
 ## [0.1.0] - 2026-04-25
 

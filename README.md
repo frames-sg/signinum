@@ -15,9 +15,9 @@ The core stack in this repository is:
 - `signinum-jpeg-metal` — Apple Metal JPEG tile decode and device-output
   adapter for batched WSI workloads; pre-1.0
 - `signinum-jpeg-cuda` — CUDA-facing JPEG device-output API adapter; explicit
-  CUDA requests upload decoded output into CUDA device memory when the
-  `cuda-runtime` feature and a CUDA driver are available; no CUDA kernel decode
-  or NVIDIA performance claim is made yet
+  full-frame RGB8 CUDA requests use NVIDIA nvJPEG when `cuda-runtime`, a CUDA
+  driver, and nvJPEG are available, with CPU decode plus CUDA upload fallback
+  for unsupported shapes; pre-1.0
 - `signinum-j2k` — native in-repo JPEG 2000 / HTJ2K inspect and decode;
   includes WSI-native ROI, reduced-resolution, and combined ROI+reduced-
   resolution decode surfaces
@@ -25,8 +25,8 @@ The core stack in this repository is:
   HTJ2K tiles; pre-1.0
 - `signinum-j2k-cuda` — CUDA-facing JPEG 2000 / HTJ2K device-output API
   adapter; explicit CUDA requests upload decoded output into CUDA device memory
-  when the `cuda-runtime` feature and a CUDA driver are available; no CUDA
-  kernel decode or NVIDIA performance claim is made yet
+  when the `cuda-runtime` feature and a CUDA driver are available; no JPEG
+  2000 / HTJ2K CUDA kernel decode or NVIDIA performance claim is made yet
 - `signinum-tilecodec` — tile decompression primitives for Deflate, Zstd,
   LZW, and Uncompressed payloads
 - `signinum-core` — shared traits, pixel/sample types, scratch/context
@@ -56,10 +56,11 @@ the codec API. If you are migrating from the retired package names, see
 Target decode hosts are native `x86_64` and `aarch64`.
 CPU decode surfaces are the 1.0 compatibility promise. Metal device-output
 adapters are validated on Apple Silicon macOS but stay on the post-1.0
-hardening track. CUDA crates now provide explicit device-memory output through
-the `cuda-runtime` feature when a CUDA driver is available, but decode bytes
-are still CPU-produced and uploaded. There is no CUDA kernel decode and no
-NVIDIA performance claim.
+hardening track. CUDA crates provide explicit device-memory output through the
+`cuda-runtime` feature when a CUDA driver is available. JPEG full-frame RGB8
+CUDA requests can decode with nvJPEG when the library is installed; other CUDA
+adapter shapes still use CPU decode plus CUDA upload. Benchmark results are
+hardware-specific and must be collected on self-hosted GPU runners.
 
 ## Post-1.0 roadmap
 
@@ -68,7 +69,8 @@ After CPU-first 1.0, the project is focused on:
 - hardening Metal adapter APIs and backend routing policies
 - validating and recording Metal runtime benchmark baselines
 - adding x86_64 GPU benchmark coverage
-- hardening CUDA runtime surfaces toward kernel decode and benchmark coverage
+- hardening CUDA nvJPEG decode coverage and benchmarking larger WSI-shaped
+  JPEG tiles on x86_64 CUDA hosts
 
 ## What this is
 
@@ -101,8 +103,9 @@ primitives instead of paying for a monolithic runtime.
 - Metal and CUDA adapter crates keep the core JPEG decoder pure-Rust CPU while
   exposing device-output surfaces for downstream GPU pipelines; the Metal path
   has optimized kernel paths for supported baseline JPEG tile shapes, including
-  batched 4:2:0 and 4:2:2 RGB WSI tile decode, while explicit CUDA requests
-  currently upload CPU-decoded bytes into CUDA device memory
+  batched 4:2:0 and 4:2:2 RGB WSI tile decode, while explicit full-frame RGB8
+  CUDA requests use nvJPEG when available and fall back to CPU decode plus
+  CUDA upload otherwise
 
 ### `signinum-j2k`
 

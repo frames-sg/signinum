@@ -125,8 +125,10 @@ Backend selection uses `BackendRequest`:
   macOS. Unsupported explicit Metal requests return an error.
 - `BackendRequest::Cuda` requires CUDA device memory output. When an adapter is
   built with `cuda-runtime` and a CUDA driver is available, explicit CUDA
-  requests upload decoded output into CUDA device memory. Hosts without CUDA
-  return unavailable. `Cpu` and `Auto` remain CPU-backed host surfaces.
+  requests return CUDA-backed surfaces. `signinum-jpeg-cuda` uses nvJPEG for
+  full-frame RGB8 JPEG decode when `libnvjpeg` is available; unsupported JPEG
+  shapes and J2K CUDA requests use CPU decode plus CUDA upload. Hosts without
+  CUDA return unavailable. `Cpu` and `Auto` remain CPU-backed host surfaces.
 
 For Metal adapters, `BackendRequest::Auto` is a routing hint and may fall back
 to host-backed CPU output when the request shape is not on the Metal-supported
@@ -153,6 +155,6 @@ benchmark compilation. Runtime GPU validation is available through the manual
 - Apple Silicon runners labeled `self-hosted`, `macOS`, `ARM64`, `metal`
   validate Metal tests and optionally timed Metal benchmarks.
 - x86_64 CUDA runners labeled `self-hosted`, `Linux`, `X64`, `cuda` validate
-  CUDA device-memory output with `cuda-runtime`. The current CUDA path uploads
-  CPU-decoded bytes; it makes no CUDA kernel decode or NVIDIA performance
-  claim.
+  CUDA device-memory output with `cuda-runtime` and the nvJPEG full-frame RGB8
+  JPEG path when `libnvjpeg` is installed. Timed NVIDIA performance claims
+  require the workflow's timed benchmark mode and recorded output.

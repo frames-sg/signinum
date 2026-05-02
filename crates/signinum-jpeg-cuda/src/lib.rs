@@ -17,7 +17,7 @@ use signinum_core::{
 #[cfg(feature = "cuda-runtime")]
 use signinum_cuda_runtime::{CudaContext, CudaDeviceBuffer, CudaError};
 use signinum_jpeg::{
-    decode_tile_into_in_context, decode_tile_region_into_in_context,
+    adapter::decoder_bytes, decode_tile_into_in_context, decode_tile_region_into_in_context,
     decode_tile_region_scaled_into_in_context, decode_tile_scaled_into_in_context,
     ColorSpace as JpegColorSpace, DecodeOutcome as JpegDecodeOutcome, Decoder as CpuDecoder,
     DecoderContext as CpuDecoderContext, JpegError, JpegView, Rect as JpegRect,
@@ -71,11 +71,26 @@ enum Storage {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct CudaSurfaceStats {
     kernel_dispatches: usize,
+    copy_kernel_dispatches: usize,
+    decode_kernel_dispatches: usize,
+    hardware_decode: bool,
 }
 
 impl CudaSurfaceStats {
     pub fn kernel_dispatches(self) -> usize {
         self.kernel_dispatches
+    }
+
+    pub fn copy_kernel_dispatches(self) -> usize {
+        self.copy_kernel_dispatches
+    }
+
+    pub fn decode_kernel_dispatches(self) -> usize {
+        self.decode_kernel_dispatches
+    }
+
+    pub fn used_hardware_decode(self) -> bool {
+        self.hardware_decode
     }
 }
 
@@ -233,8 +248,56 @@ impl<'a> Decoder<'a> {
         backend: BackendRequest,
     ) -> Result<Surface, Error> {
         validate_surface_request(backend)?;
+        if backend == BackendRequest::Cuda && fmt == PixelFormat::Rgb8 {
+            if let Some(surface) = self.try_decode_cuda_rgb8(session)? {
+                return Ok(surface);
+            }
+        }
         let (bytes, _outcome) = self.inner.decode(fmt)?;
         wrap_surface(bytes, self.inner.info().dimensions, fmt, backend, session)
+    }
+
+    #[cfg(feature = "cuda-runtime")]
+    fn try_decode_cuda_rgb8(
+        &mut self,
+        session: &mut CudaSession,
+    ) -> Result<Option<Surface>, Error> {
+        let dimensions = self.inner.info().dimensions;
+        let bytes = decoder_bytes(&self.inner);
+        let context = session.cuda_context()?;
+        match context.decode_jpeg_rgb8_with_nvjpeg(bytes, dimensions) {
+            Ok(output) => {
+                let pitch_bytes = dimensions.0 as usize * PixelFormat::Rgb8.bytes_per_pixel();
+                let (buffer, stats) = output.into_parts();
+                Ok(Some(Surface {
+                    backend: BackendKind::Cuda,
+                    dimensions,
+                    fmt: PixelFormat::Rgb8,
+                    pitch_bytes,
+                    stats: CudaSurfaceStats {
+                        kernel_dispatches: stats.kernel_dispatches(),
+                        copy_kernel_dispatches: stats.copy_kernel_dispatches(),
+                        decode_kernel_dispatches: stats.decode_kernel_dispatches(),
+                        hardware_decode: stats.used_hardware_decode(),
+                    },
+                    storage: Storage::Cuda(buffer),
+                }))
+            }
+            Err(
+                CudaError::NvjpegUnavailable { .. }
+                | CudaError::Nvjpeg { .. }
+                | CudaError::NvjpegDimensions { .. },
+            ) => Ok(None),
+            Err(error) => Err(cuda_error(error)),
+        }
+    }
+
+    #[cfg(not(feature = "cuda-runtime"))]
+    fn try_decode_cuda_rgb8(
+        &mut self,
+        _session: &mut CudaSession,
+    ) -> Result<Option<Surface>, Error> {
+        Ok(None)
     }
 
     fn decode_region_to_surface_impl(
@@ -901,6 +964,9 @@ fn wrap_cuda_surface(
         pitch_bytes,
         stats: CudaSurfaceStats {
             kernel_dispatches: stats.kernel_dispatches(),
+            copy_kernel_dispatches: stats.copy_kernel_dispatches(),
+            decode_kernel_dispatches: stats.decode_kernel_dispatches(),
+            hardware_decode: stats.used_hardware_decode(),
         },
         storage: Storage::Cuda(buffer),
     })

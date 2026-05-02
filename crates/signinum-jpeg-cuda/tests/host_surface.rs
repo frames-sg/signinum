@@ -68,7 +68,7 @@ fn explicit_cuda_request_returns_cuda_surface_when_runtime_required() {
         .expect("host decoder")
         .decode(PixelFormat::Rgb8)
         .expect("host decode");
-    assert_eq!(downloaded, expected);
+    assert_surface_bytes_match_or_are_close(&surface, &downloaded, &expected);
 }
 
 #[test]
@@ -140,19 +140,78 @@ fn explicit_cuda_download_respects_padded_stride_when_runtime_required() {
         .expect("host decode");
     for (row, expected_row) in expected.chunks(row_bytes).enumerate() {
         let start = row * stride;
-        assert_eq!(&downloaded[start..start + row_bytes], expected_row);
+        assert_surface_bytes_match_or_are_close(
+            &surface,
+            &downloaded[start..start + row_bytes],
+            expected_row,
+        );
         assert_eq!(&downloaded[start + row_bytes..start + stride], &[0xCD; 5]);
     }
+}
+
+#[test]
+fn explicit_cuda_full_frame_uses_hardware_decode_when_required() {
+    if !hardware_decode_required() {
+        return;
+    }
+
+    let mut decoder = Decoder::new(BASELINE_420).expect("decoder");
+    let surface = decoder
+        .decode_to_device(PixelFormat::Rgb8, BackendRequest::Cuda)
+        .expect("cuda surface");
+    let cuda = surface.cuda_surface().expect("cuda surface");
+    let stats = cuda.stats();
+    assert!(
+        stats.used_hardware_decode(),
+        "explicit full-frame RGB8 CUDA decode must use a CUDA JPEG decode path when required"
+    );
+    assert!(
+        stats.decode_kernel_dispatches() > 0,
+        "hardware decode path must report decode kernel dispatches"
+    );
+    assert_eq!(
+        stats.copy_kernel_dispatches(),
+        0,
+        "hardware decode path should not be reported as the CPU decode plus copy fallback"
+    );
 }
 
 fn runtime_required() -> bool {
     std::env::var_os("SIGNINUM_REQUIRE_CUDA_RUNTIME").is_some()
 }
 
+fn hardware_decode_required() -> bool {
+    std::env::var_os("SIGNINUM_REQUIRE_CUDA_JPEG_HARDWARE_DECODE").is_some()
+}
+
 fn assert_cuda_surface(surface: &signinum_jpeg_cuda::Surface) {
     let cuda = surface.cuda_surface().expect("cuda surface");
     assert_ne!(cuda.device_ptr(), 0);
     assert!(cuda.stats().kernel_dispatches() > 0);
+}
+
+fn assert_surface_bytes_match_or_are_close(
+    surface: &signinum_jpeg_cuda::Surface,
+    actual: &[u8],
+    expected: &[u8],
+) {
+    assert_eq!(actual.len(), expected.len());
+    let stats = surface.cuda_surface().expect("cuda surface").stats();
+    if !stats.used_hardware_decode() {
+        assert_eq!(actual, expected);
+        return;
+    }
+
+    let max_delta = actual
+        .iter()
+        .zip(expected)
+        .map(|(actual, expected)| actual.abs_diff(*expected))
+        .max()
+        .unwrap_or(0);
+    assert!(
+        max_delta <= 2,
+        "nvJPEG decode differed from the CPU reference by max channel delta {max_delta}"
+    );
 }
 
 #[test]

@@ -915,6 +915,7 @@ dependencies = [
 name = "signinum-jpeg-cuda"
 version = "0.2.0"
 dependencies = [
+ "criterion",
  "signinum-core",
  "signinum-cuda-runtime",
  "signinum-jpeg",

@@ -9,10 +9,12 @@ dependency so `signinum-j2k` can be installed from crates.io.
 
 Metal and CUDA adapter crates are published as pre-1.0 `0.2.x` artifacts so the
 renamed crate family has direct replacements for the previous adapter crates.
-CUDA explicit requests can produce CUDA device-memory surfaces when built with
-`cuda-runtime` on a host with a CUDA driver, but decode is still CPU-produced
-and uploaded. CUDA device memory is validated separately from kernel work.
-There is no CUDA kernel decode and no NVIDIA performance claim.
+CUDA explicit requests can produce CUDA device memory surfaces when built with
+`cuda-runtime` on a host with a CUDA driver. `signinum-jpeg-cuda` can use
+NVIDIA nvJPEG for full-frame RGB8 JPEG decode when `libnvjpeg` is installed;
+unsupported JPEG shapes and the J2K CUDA adapter still use CPU decode plus
+CUDA device memory upload. NVIDIA performance claims require self-hosted GPU
+benchmark evidence.
 
 ## Verification Gates
 
@@ -37,7 +39,9 @@ on self-hosted runners before claiming Metal runtime validation:
    GPU benchmark timing rather than compile-only coverage
 
 Passing the CUDA self-hosted job validates `cuda-runtime` device-memory output
-on a CUDA runner. It is not a CUDA kernel decode or NVIDIA performance claim.
+and the opt-in nvJPEG JPEG decode path on a CUDA runner. Timed NVIDIA
+performance claims require the `run-timed-benchmarks` workflow input and
+recorded benchmark output.
 
 ## Crates.io
 

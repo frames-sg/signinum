@@ -175,13 +175,17 @@ fn cuda_gpu_validation_job_stays_cuda_focused() {
     for required in [
         "runs-on: [self-hosted, Linux, X64, cuda]",
         "SIGNINUM_REQUIRE_CUDA_RUNTIME",
+        "SIGNINUM_REQUIRE_CUDA_JPEG_HARDWARE_DECODE",
         "uname -a",
         "rustc -Vv",
         "cargo -V",
         "nvidia-smi",
+        "ldconfig -p | grep -i nvjpeg",
         "CUDA runtime validation requires a working CUDA driver",
         "cargo test -p signinum-jpeg-cuda --all-targets --features cuda-runtime",
         "cargo test -p signinum-j2k-cuda --all-targets --features cuda-runtime",
+        "cargo bench -p signinum-jpeg-cuda --bench device_decode --features cuda-runtime --no-run",
+        "cargo bench -p signinum-jpeg-cuda --bench device_decode --features cuda-runtime -- --noplot",
     ] {
         assert!(
             cuda_job.contains(required),
@@ -348,9 +352,9 @@ fn public_docs_describe_cpu_first_1_0_and_cuda_runtime_surface_scope() {
         assert!(
             docs.contains("cuda-runtime")
                 && docs.contains("CUDA device memory")
-                && docs.contains("no CUDA kernel decode")
+                && docs.contains("nvJPEG")
                 && docs.contains("NVIDIA performance"),
-            "{name} must describe CUDA device-memory output without claiming CUDA kernel decode or NVIDIA performance"
+            "{name} must describe CUDA device-memory output and nvJPEG scope without overclaiming NVIDIA performance"
         );
         assert!(
             !docs.contains("compatibility-only with no runtime CUDA decode"),

@@ -24,6 +24,13 @@ signinum-cuda-runtime = { path = "../signinum-cuda-runtime", version = "=0.2.0",
 signinum-jpeg = { path = "../signinum-jpeg", version = "=1.0.0" }
 thiserror = { workspace = true }
 
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "device_decode"
+harness = false
+
 [lints.rust]
 unsafe_code = "allow"
 unsafe_op_in_unsafe_fn = "deny"

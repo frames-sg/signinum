@@ -20,9 +20,11 @@ on a single visual smoke test.
   API behavior, not only as full-frame decode.
 - Metal and CUDA-named adapter crates must preserve CPU parity for fallback
   host surfaces. Metal crates must preserve decoded bytes for explicit
-  Metal-backed ROI+scaled surfaces. CUDA crates must preserve decoded bytes
-  after download from explicit CUDA-backed surfaces. CUDA currently uploads
-  CPU-decoded bytes into device memory and does not claim CUDA kernel decode.
+  Metal-backed ROI+scaled surfaces. CUDA upload-fallback surfaces must preserve
+  decoded bytes after download. The nvJPEG full-frame RGB8 path in
+  `signinum-jpeg-cuda` is checked against the CPU reference with a small
+  vendor-IDCT tolerance and reports hardware decode separately from copy
+  fallback stats.
 
 ## Maintenance Rules
 

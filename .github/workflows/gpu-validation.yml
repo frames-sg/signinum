@@ -37,6 +37,7 @@ jobs:
     runs-on: [self-hosted, Linux, X64, cuda]
     env:
       SIGNINUM_REQUIRE_CUDA_RUNTIME: "1"
+      SIGNINUM_REQUIRE_CUDA_JPEG_HARDWARE_DECODE: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -50,5 +51,13 @@ jobs:
           else
             echo "nvidia-smi not found; CUDA runtime validation requires a working CUDA driver"
           fi
+          if command -v ldconfig >/dev/null 2>&1; then
+            ldconfig -p | grep -i nvjpeg || true
+          fi
       - run: cargo test -p signinum-jpeg-cuda --all-targets --features cuda-runtime
       - run: cargo test -p signinum-j2k-cuda --all-targets --features cuda-runtime
+      - run: cargo bench -p signinum-jpeg-cuda --bench device_decode --features cuda-runtime --no-run
+      - if: ${{ inputs.run-timed-benchmarks }}
+        env:
+          SIGNINUM_REQUIRE_CUDA_BENCH: "1"
+        run: cargo bench -p signinum-jpeg-cuda --bench device_decode --features cuda-runtime -- --noplot

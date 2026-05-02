@@ -41,8 +41,8 @@ implementation and adapter crates stay on explicit pre-1.0 versions.
 | `signinum-j2k-compare` | dev-only | OpenJPEG FFI bindings used as a reference decoder for conformance and parity testing. Unpublished. |
 | `signinum-jpeg-metal` | adapter | Apple Metal device-output adapter for `signinum-jpeg`. Hosts compute kernels for color conversion, interleave/pack, and `MTLBuffer` production. |
 | `signinum-j2k-metal` | adapter | Apple Metal device-output adapter for `signinum-j2k`. Same shape as the JPEG adapter. |
-| `signinum-jpeg-cuda` | adapter | CUDA-facing API adapter for JPEG. `Auto`/`Cpu` stay host-backed; explicit CUDA requests upload decoded output into CUDA device memory when `cuda-runtime` and a CUDA driver are available. No CUDA kernel decode or NVIDIA performance claim is made. |
-| `signinum-j2k-cuda` | adapter | CUDA-facing API adapter for J2K with the same explicit CUDA device-memory output contract as `jpeg-cuda`. |
+| `signinum-jpeg-cuda` | adapter | CUDA-facing API adapter for JPEG. `Auto`/`Cpu` stay host-backed; explicit full-frame RGB8 CUDA requests use nvJPEG when `cuda-runtime`, a CUDA driver, and `libnvjpeg` are available, with CPU decode plus CUDA upload fallback for unsupported shapes. |
+| `signinum-j2k-cuda` | adapter | CUDA-facing API adapter for J2K. Explicit CUDA requests upload CPU-decoded output into CUDA device memory when `cuda-runtime` and a CUDA driver are available. |
 | `signinum-cli` | binary | `signinum inspect <file>` entry point. Header parsing only, no decode. |
 
 Out-of-tree but in-repo:
@@ -85,8 +85,8 @@ matures, mirroring harness-engineering structural tests):
    public API but reports unavailability.
 5. CUDA sources expose the same device-output surface. Explicit CUDA requests
    produce CUDA device memory when `cuda-runtime` and a CUDA driver are
-   available, but decode is still CPU-produced and uploaded; no CUDA kernel
-   decode or performance claim is made.
+   available. JPEG full-frame RGB8 requests may use nvJPEG; unsupported JPEG
+   shapes and J2K CUDA requests use CPU decode plus CUDA upload.
 6. `signinum-jpeg` keeps its NEON and x86 intrinsics scoped per-backend
    in `crates/signinum-jpeg/src/backend/`. `signinum-j2k-native` keeps
    its SIMD behind `fearless_simd` so the engine can stay
@@ -253,10 +253,10 @@ There are three target backends. Selection is explicit in the public API.
   produces `MTLBuffer`-backed `DeviceSurface`s so downstream GPU pipelines
   can consume the result without an extra download.
 - **CUDA** — explicit device-memory output. `Auto` and `Cpu` return CPU-backed
-  host surfaces. `BackendRequest::Cuda` uploads decoded bytes into CUDA device
-  memory when the `cuda-runtime` feature and a CUDA driver are available, and
-  otherwise reports CUDA as unavailable. No CUDA kernel decode or NVIDIA
-  performance claim is made.
+  host surfaces. `BackendRequest::Cuda` returns CUDA device memory when the
+  `cuda-runtime` feature and a CUDA driver are available, and otherwise reports
+  CUDA as unavailable. JPEG full-frame RGB8 can decode through nvJPEG when
+  `libnvjpeg` is available; other CUDA shapes use CPU decode plus CUDA upload.
 
 `BackendRequest::Auto` stays conservative: small or low-yield decodes are
 served from CPU; larger batches with supported shapes can be routed to a
@@ -305,7 +305,8 @@ between codec crates.
   adapter crate compiles to a fallback surface.
 - CUDA adapter crates expose runtime device-memory output for explicit CUDA
   requests when built with `cuda-runtime` on hosts with a CUDA driver. Hosts
-  without CUDA return the documented unavailable error.
+  without CUDA return the documented unavailable error. JPEG full-frame RGB8
+  CUDA decode additionally uses `libnvjpeg` when available.
 - Release profile: `lto = "fat"`, `codegen-units = 1`, `strip = "symbols"`,
   `opt-level = 3`. `release-bench` inherits `release` but keeps debug info.
 - Notable feature flags:
@@ -313,8 +314,8 @@ between codec crates.
     `std`), `logging`.
   - `signinum-jpeg`: `scalar-only` retained for fuzzing and reference.
   - `signinum-jpeg-cuda`, `signinum-j2k-cuda`: `cuda-runtime` enables CUDA Driver
-    API device allocation and host-to-device upload for explicit CUDA
-    requests.
+    API device allocation and explicit CUDA requests. `signinum-jpeg-cuda`
+    also loads nvJPEG at runtime for full-frame RGB8 JPEG decode when present.
 
 ## Active areas
 
@@ -335,6 +336,6 @@ CPU-first 1.0 covers `signinum-core`, `signinum-jpeg`, `signinum-j2k`,
 `signinum-tilecodec`, and `signinum-cli`. `signinum-j2k-native` is published as an
 implementation dependency, not as the primary stable API. The Metal adapter
 APIs remain on the post-1.0 hardening track. The CUDA adapter APIs now expose
-runtime CUDA device-memory output but remain pre-1.0 while kernel decode and
-performance work harden. Breaking changes to any of these surfaces should be
+runtime CUDA device-memory output and nvJPEG JPEG decode, but remain pre-1.0
+while broader CUDA decode and performance work harden. Breaking changes to any of these surfaces should be
 reflected here and in [`CHANGELOG.md`](../CHANGELOG.md).

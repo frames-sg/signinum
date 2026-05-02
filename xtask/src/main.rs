@@ -141,6 +141,16 @@ fn typos() -> Result<(), String> {
 fn bench_build() -> Result<(), String> {
     run_cargo(&["bench", "-p", "signinum-jpeg", "--no-run"])?;
     run_cargo(&["bench", "-p", "signinum-jpeg-metal", "--no-run"])?;
+    run_cargo(&[
+        "bench",
+        "-p",
+        "signinum-jpeg-cuda",
+        "--bench",
+        "device_decode",
+        "--features",
+        "cuda-runtime",
+        "--no-run",
+    ])?;
     run_cargo(&["bench", "-p", "signinum-j2k-metal", "--no-run"])?;
     run_cargo(&[
         "bench",

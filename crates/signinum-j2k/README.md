@@ -2,6 +2,12 @@
 
 JPEG 2000 / HTJ2K inspect and CPU decode for whole-slide imaging workloads.
 
+Install:
+
+```sh
+cargo add signinum-j2k
+```
+
 The CPU-first 1.0 surface covers borrowed inspect/parse, full-frame decode,
 ROI decode, reduced-resolution decode, combined ROI+reduced-resolution decode,
 row-bounded decode, and tile-batch decode through the shared `signinum-core`

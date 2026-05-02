@@ -243,16 +243,15 @@ fn crates_io_publish_policy_is_explicit() {
         );
     }
 
-    for package in ["signinum-j2k-compare"] {
-        assert!(
-            !publishable.contains(&format!("\"{package}\"")),
-            "xtask package gate must not package local comparator package {package}"
-        );
-        assert!(
-            !publish_workflow.contains(&format!("publish-{package}:")),
-            "publish workflow must not publish local comparator package {package}"
-        );
-    }
+    let package = "signinum-j2k-compare";
+    assert!(
+        !publishable.contains(&format!("\"{package}\"")),
+        "xtask package gate must not package local comparator package {package}"
+    );
+    assert!(
+        !publish_workflow.contains(&format!("publish-{package}:")),
+        "publish workflow must not publish local comparator package {package}"
+    );
 }
 
 fn const_array_block<'a>(source: &'a str, name: &str) -> &'a str {
@@ -318,6 +317,7 @@ fn package_preflight_is_staged_dependency_aware() {
 fn public_docs_describe_cpu_first_1_0_and_cuda_runtime_surface_scope() {
     let root = repo_root();
     let readme = fs::read_to_string(root.join("README.md")).expect("read README");
+    let changelog = fs::read_to_string(root.join("CHANGELOG.md")).expect("read changelog");
     let architecture =
         fs::read_to_string(root.join("docs/architecture.md")).expect("read architecture docs");
     let release = fs::read_to_string(root.join("docs/release.md")).expect("read release docs");
@@ -337,6 +337,7 @@ fn public_docs_describe_cpu_first_1_0_and_cuda_runtime_surface_scope() {
 
     for (name, docs) in [
         ("README.md", readme.as_str()),
+        ("CHANGELOG.md", changelog.as_str()),
         ("docs/wsi-decode-api.md", wsi_api.as_str()),
         ("docs/release.md", release.as_str()),
     ] {
@@ -350,6 +351,93 @@ fn public_docs_describe_cpu_first_1_0_and_cuda_runtime_surface_scope() {
         assert!(
             !docs.contains("compatibility-only with no runtime CUDA decode"),
             "{name} must not describe CUDA as compatibility-only after runtime surface support exists"
+        );
+    }
+}
+
+#[test]
+fn public_docs_route_users_to_current_crates_after_rename() {
+    let root = repo_root();
+    let readme = fs::read_to_string(root.join("README.md")).expect("read README");
+    let migration = fs::read_to_string(root.join("private-notes.md")).expect("read migration docs");
+
+    for required in [
+        "Which crate should I use?",
+        "private-notes.md",
+        "statumen",
+        "signinum-jpeg",
+        "signinum-j2k",
+        "signinum-cli",
+    ] {
+        assert!(
+            readme.contains(required),
+            "README.md must route users to `{required}` after the rename"
+        );
+    }
+
+    for mapping in [
+        ("ashlar-core", "signinum-core"),
+        ("ashlar-jpeg", "signinum-jpeg"),
+        ("ashlar-j2k", "signinum-j2k"),
+        ("ashlar-tilecodec", "signinum-tilecodec"),
+        ("ashlar-cli", "signinum-cli"),
+        ("ashlar-j2k-native", "signinum-j2k-native"),
+        ("ashlar-jpeg-metal", "signinum-jpeg-metal"),
+        ("ashlar-j2k-metal", "signinum-j2k-metal"),
+        ("ashlar-jpeg-cuda", "signinum-jpeg-cuda"),
+        ("ashlar-j2k-cuda", "signinum-j2k-cuda"),
+    ] {
+        assert!(
+            migration.contains(mapping.0) && migration.contains(mapping.1),
+            "private-notes.md must map `{}` to `{}`",
+            mapping.0,
+            mapping.1
+        );
+    }
+
+    assert!(
+        migration.contains("ziggurat") && migration.contains("statumen"),
+        "private-notes.md must map the retired reader crate to statumen"
+    );
+}
+
+#[test]
+fn published_crates_have_crates_io_landing_readmes() {
+    let root = repo_root();
+
+    for crate_dir in [
+        "crates/signinum-core",
+        "crates/signinum-cuda-runtime",
+        "crates/signinum-j2k-native",
+        "crates/signinum-tilecodec",
+        "crates/signinum-jpeg",
+        "crates/signinum-j2k",
+        "crates/signinum-jpeg-metal",
+        "crates/signinum-jpeg-cuda",
+        "crates/signinum-j2k-metal",
+        "crates/signinum-j2k-cuda",
+        "crates/signinum-cli",
+    ] {
+        let manifest_path = root.join(crate_dir).join("Cargo.toml");
+        let manifest = fs::read_to_string(&manifest_path)
+            .unwrap_or_else(|err| panic!("read {}: {err}", manifest_path.display()));
+        let readme_path = root.join(crate_dir).join("README.md");
+
+        assert!(
+            manifest.contains("readme"),
+            "{} must declare a readme for crates.io landing pages",
+            manifest_path
+                .strip_prefix(root)
+                .unwrap_or(&manifest_path)
+                .display()
+        );
+        assert!(
+            readme_path.exists(),
+            "{} must exist for crates.io landing pages",
+            readme_path
+                .strip_prefix(root)
+                .unwrap_or(&readme_path)
+                .display()
         );
     }
 }

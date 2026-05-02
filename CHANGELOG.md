@@ -15,8 +15,9 @@ CPU-first 1.0 release posture.
 - Kept `signinum-j2k-native` as a published pre-1.0 implementation dependency
   for `signinum-j2k`.
 - Excluded Metal, CUDA, and comparator crates from the 1.0 publish workflow.
-- Clarified that CUDA crates are compatibility-only with no runtime CUDA
-  decode or NVIDIA performance claim.
+- Clarified that CUDA crates can use `cuda-runtime` to return CUDA device memory
+  surfaces by uploading CPU-decoded bytes, with no CUDA kernel decode or
+  NVIDIA performance claim.
 
 ## [0.1.0] - 2026-04-25
 

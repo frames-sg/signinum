@@ -33,6 +33,26 @@ The core stack in this repository is:
   contracts
 - `signinum-cli` — CLI inspection entry point
 
+## Which crate should I use?
+
+- Whole-slide reader/container workflows: use
+  [`statumen`](https://github.com/jcwal1516/statumen).
+- JPEG tile decode: `cargo add signinum-jpeg`.
+- JPEG 2000 / HTJ2K tile decode: `cargo add signinum-j2k`.
+- Tile decompression primitives: `cargo add signinum-tilecodec`.
+- Shared traits and pixel/backend types: `cargo add signinum-core`.
+- Command-line inspection: `cargo install signinum-cli`, then run
+  `signinum inspect <file>`.
+- Apple Metal device-output adapters: `signinum-jpeg-metal` or
+  `signinum-j2k-metal`.
+- CUDA device-memory output adapters: `signinum-jpeg-cuda` or
+  `signinum-j2k-cuda` with the `cuda-runtime` feature when a CUDA driver is
+  available.
+
+The bare `signinum` package on crates.io is a reserved landing package, not
+the codec API. If you are migrating from the retired package names, see
+[private-notes.md](private-notes.md).
+
 Target decode hosts are native `x86_64` and `aarch64`.
 CPU decode surfaces are the 1.0 compatibility promise. Metal device-output
 adapters are validated on Apple Silicon macOS but stay on the post-1.0

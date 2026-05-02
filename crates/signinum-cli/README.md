@@ -2,6 +2,12 @@
 
 Command-line inspection utility for `signinum`.
 
+Install:
+
+```sh
+cargo install signinum-cli
+```
+
 The CPU-first 1.0 CLI provides:
 
 ```sh

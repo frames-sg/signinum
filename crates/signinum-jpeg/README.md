@@ -1,7 +1,16 @@
 # signinum-jpeg
 
-Core library crate for `signinum`. See the top-level [README](../../README.md)
-for project positioning and MSRV.
+JPEG tile inspect and CPU decode for whole-slide imaging workloads.
+
+Install:
+
+```sh
+cargo add signinum-jpeg
+```
+
+Use this crate when you need codec primitives directly. Use
+[`statumen`](https://github.com/jcwal1516/statumen) when you need a whole-slide
+reader/container layer.
 
 ```rust
 use signinum_jpeg::{Decoder, JpegError, JpegView, RowSink};

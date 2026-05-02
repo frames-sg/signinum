@@ -2,6 +2,12 @@
 
 Shared CPU-first 1.0 decode contracts for the `signinum` workspace.
 
+Install:
+
+```sh
+cargo add signinum-core
+```
+
 This crate contains the stable value types and traits used by the CPU codec
 crates:
 

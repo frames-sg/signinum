@@ -18,7 +18,10 @@ type CudaStream = *mut c_void;
 const NVJPEG_STATUS_SUCCESS: NvjpegStatus = 0;
 const NVJPEG_OUTPUT_RGBI: c_int = 5;
 const NVJPEG_MAX_COMPONENT: usize = 4;
+const NVJPEG_BACKEND_GPU_HYBRID: c_int = 2;
 
+type NvjpegCreateEx =
+    unsafe extern "C" fn(c_int, *mut c_void, *mut c_void, u32, *mut NvjpegHandle) -> NvjpegStatus;
 type NvjpegCreateSimple = unsafe extern "C" fn(*mut NvjpegHandle) -> NvjpegStatus;
 type NvjpegDestroy = unsafe extern "C" fn(NvjpegHandle) -> NvjpegStatus;
 type NvjpegJpegStateCreate =
@@ -42,6 +45,16 @@ type NvjpegDecode = unsafe extern "C" fn(
     *mut NvjpegImage,
     CudaStream,
 ) -> NvjpegStatus;
+type NvjpegDecodeBatchedInitialize =
+    unsafe extern "C" fn(NvjpegHandle, NvjpegJpegState, c_int, c_int, c_int) -> NvjpegStatus;
+type NvjpegDecodeBatched = unsafe extern "C" fn(
+    NvjpegHandle,
+    NvjpegJpegState,
+    *const *const u8,
+    *const usize,
+    *mut NvjpegImage,
+    CudaStream,
+) -> NvjpegStatus;
 
 #[repr(C)]
 struct NvjpegImage {
@@ -51,12 +64,15 @@ struct NvjpegImage {
 
 pub(crate) struct NvjpegLibrary {
     _library: Library,
+    create_ex: Option<NvjpegCreateEx>,
     create_simple: NvjpegCreateSimple,
     destroy: NvjpegDestroy,
     jpeg_state_create: NvjpegJpegStateCreate,
     jpeg_state_destroy: NvjpegJpegStateDestroy,
     get_image_info: NvjpegGetImageInfo,
     decode: NvjpegDecode,
+    decode_batched_initialize: NvjpegDecodeBatchedInitialize,
+    decode_batched: NvjpegDecodeBatched,
 }
 
 impl NvjpegLibrary {
@@ -96,12 +112,18 @@ impl NvjpegLibrary {
 
     fn from_library(library: Library) -> Result<Self, CudaError> {
         Ok(Self {
+            create_ex: load_optional_nvjpeg_symbol(&library, b"nvjpegCreateEx\0"),
             create_simple: load_nvjpeg_symbol(&library, b"nvjpegCreateSimple\0")?,
             destroy: load_nvjpeg_symbol(&library, b"nvjpegDestroy\0")?,
             jpeg_state_create: load_nvjpeg_symbol(&library, b"nvjpegJpegStateCreate\0")?,
             jpeg_state_destroy: load_nvjpeg_symbol(&library, b"nvjpegJpegStateDestroy\0")?,
             get_image_info: load_nvjpeg_symbol(&library, b"nvjpegGetImageInfo\0")?,
             decode: load_nvjpeg_symbol(&library, b"nvjpegDecode\0")?,
+            decode_batched_initialize: load_nvjpeg_symbol(
+                &library,
+                b"nvjpegDecodeBatchedInitialize\0",
+            )?,
+            decode_batched: load_nvjpeg_symbol(&library, b"nvjpegDecodeBatched\0")?,
             _library: library,
         })
     }
@@ -130,14 +152,42 @@ pub(crate) struct NvjpegState {
 
 impl NvjpegState {
     pub(crate) fn new() -> Result<Self, CudaError> {
+        Self::new_with_backend(None)
+    }
+
+    pub(crate) fn new_batched() -> Result<Self, CudaError> {
+        Self::new_with_backend(Some(NVJPEG_BACKEND_GPU_HYBRID))
+    }
+
+    fn new_with_backend(backend: Option<c_int>) -> Result<Self, CudaError> {
         let library = shared_library()?;
         let mut handle = std::ptr::null_mut();
-        NvjpegLibrary::check("nvjpegCreateSimple", unsafe {
-            (library.create_simple)(&raw mut handle)
-        })?;
+        match backend {
+            Some(backend) => {
+                let Some(create_ex) = library.create_ex else {
+                    return Err(CudaError::NvjpegUnavailable {
+                        message: "nvJPEG library does not export nvjpegCreateEx".to_string(),
+                    });
+                };
+                NvjpegLibrary::check("nvjpegCreateEx", unsafe {
+                    (create_ex)(
+                        backend,
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                        0,
+                        &raw mut handle,
+                    )
+                })?;
+            }
+            None => {
+                NvjpegLibrary::check("nvjpegCreateSimple", unsafe {
+                    (library.create_simple)(&raw mut handle)
+                })?;
+            }
+        }
         if handle.is_null() {
             return Err(CudaError::NvjpegUnavailable {
-                message: "nvjpegCreateSimple returned a null handle".to_string(),
+                message: "nvJPEG handle creation returned a null handle".to_string(),
             });
         }
         let mut state = std::ptr::null_mut();
@@ -170,6 +220,78 @@ impl NvjpegState {
         device_ptr: u64,
         pitch_bytes: usize,
     ) -> Result<(), CudaError> {
+        self.validate_dimensions(bytes, dimensions)?;
+        let mut image = rgb8_destination(device_ptr, pitch_bytes)?;
+
+        NvjpegLibrary::check("nvjpegDecode", unsafe {
+            (self.library.decode)(
+                self.handle,
+                self.state,
+                bytes.as_ptr(),
+                bytes.len(),
+                NVJPEG_OUTPUT_RGBI,
+                &raw mut image,
+                std::ptr::null_mut(),
+            )
+        })
+    }
+
+    pub(crate) fn decode_rgb8_batch(
+        &mut self,
+        inputs: &[(&[u8], (u32, u32))],
+        outputs: &[u64],
+        pitches: &[usize],
+    ) -> Result<(), CudaError> {
+        if inputs.len() != outputs.len() || inputs.len() != pitches.len() {
+            return Err(CudaError::NvjpegUnavailable {
+                message: "nvJPEG batch inputs and outputs have different lengths".to_string(),
+            });
+        }
+        let batch_size =
+            c_int::try_from(inputs.len()).map_err(|_| CudaError::NvjpegUnavailable {
+                message: format!("nvJPEG batch size {} does not fit c_int", inputs.len()),
+            })?;
+        if batch_size == 0 {
+            return Ok(());
+        }
+
+        for (bytes, dimensions) in inputs {
+            self.validate_dimensions(bytes, *dimensions)?;
+        }
+
+        let mut data = Vec::with_capacity(inputs.len());
+        let mut lengths = Vec::with_capacity(inputs.len());
+        let mut destinations = Vec::with_capacity(inputs.len());
+        for ((bytes, _dimensions), (device_ptr, pitch_bytes)) in
+            inputs.iter().zip(outputs.iter().zip(pitches.iter()))
+        {
+            data.push(bytes.as_ptr());
+            lengths.push(bytes.len());
+            destinations.push(rgb8_destination(*device_ptr, *pitch_bytes)?);
+        }
+
+        NvjpegLibrary::check("nvjpegDecodeBatchedInitialize", unsafe {
+            (self.library.decode_batched_initialize)(
+                self.handle,
+                self.state,
+                batch_size,
+                1,
+                NVJPEG_OUTPUT_RGBI,
+            )
+        })?;
+        NvjpegLibrary::check("nvjpegDecodeBatched", unsafe {
+            (self.library.decode_batched)(
+                self.handle,
+                self.state,
+                data.as_ptr(),
+                lengths.as_ptr(),
+                destinations.as_mut_ptr(),
+                std::ptr::null_mut(),
+            )
+        })
+    }
+
+    fn validate_dimensions(&self, bytes: &[u8], dimensions: (u32, u32)) -> Result<(), CudaError> {
         let mut components = 0;
         let mut subsampling = 0;
         let mut widths = [0; NVJPEG_MAX_COMPONENT];
@@ -195,28 +317,7 @@ impl NvjpegState {
                 actual,
             });
         }
-
-        let mut image = NvjpegImage {
-            channel: [std::ptr::null_mut(); NVJPEG_MAX_COMPONENT],
-            pitch: [0; NVJPEG_MAX_COMPONENT],
-        };
-        image.channel[0] =
-            usize::try_from(device_ptr).map_err(|_| CudaError::NvjpegUnavailable {
-                message: "CUDA device pointer does not fit host pointer width".to_string(),
-            })? as *mut u8;
-        image.pitch[0] = pitch_bytes;
-
-        NvjpegLibrary::check("nvjpegDecode", unsafe {
-            (self.library.decode)(
-                self.handle,
-                self.state,
-                bytes.as_ptr(),
-                bytes.len(),
-                NVJPEG_OUTPUT_RGBI,
-                &raw mut image,
-                std::ptr::null_mut(),
-            )
-        })
+        Ok(())
     }
 }
 
@@ -228,8 +329,8 @@ impl Drop for NvjpegState {
             let _ = unsafe { (self.library.jpeg_state_destroy)(self.state) };
         }
         if !self.handle.is_null() {
-            // SAFETY: handle was created by nvjpegCreateSimple and outlives the
-            // JPEG state destroyed above.
+            // SAFETY: handle was created by nvJPEG and outlives the JPEG state
+            // destroyed above.
             let _ = unsafe { (self.library.destroy)(self.handle) };
         }
     }
@@ -248,6 +349,24 @@ fn load_nvjpeg_symbol<T: Copy>(library: &Library, name: &'static [u8]) -> Result
                 String::from_utf8_lossy(name)
             ),
         })
+}
+
+fn load_optional_nvjpeg_symbol<T: Copy>(library: &Library, name: &'static [u8]) -> Option<T> {
+    // SAFETY: Symbol names are NUL-terminated nvJPEG entry points. The symbol
+    // value is copied, and NvjpegLibrary keeps the Library alive.
+    unsafe { library.get::<T>(name) }.map(|symbol| *symbol).ok()
+}
+
+fn rgb8_destination(device_ptr: u64, pitch_bytes: usize) -> Result<NvjpegImage, CudaError> {
+    let mut image = NvjpegImage {
+        channel: [std::ptr::null_mut(); NVJPEG_MAX_COMPONENT],
+        pitch: [0; NVJPEG_MAX_COMPONENT],
+    };
+    image.channel[0] = usize::try_from(device_ptr).map_err(|_| CudaError::NvjpegUnavailable {
+        message: "CUDA device pointer does not fit host pointer width".to_string(),
+    })? as *mut u8;
+    image.pitch[0] = pitch_bytes;
+    Ok(image)
 }
 
 fn shared_library() -> Result<Arc<NvjpegLibrary>, CudaError> {

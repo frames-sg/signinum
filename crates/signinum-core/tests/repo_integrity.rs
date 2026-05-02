@@ -178,6 +178,8 @@ fn cuda_gpu_validation_job_stays_cuda_focused() {
         "SIGNINUM_REQUIRE_CUDA_RUNTIME",
         "SIGNINUM_REQUIRE_CUDA_JPEG_HARDWARE_DECODE",
         "SIGNINUM_GPU_BENCH_DIM",
+        "SIGNINUM_GPU_BENCH_BATCH",
+        "SIGNINUM_GPU_BENCH_BATCH_DIM",
         "uname -a",
         "rustc -Vv",
         "cargo -V",

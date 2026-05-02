@@ -6,11 +6,15 @@ use signinum_core::{
     BackendRequest, DeviceSubmission, DeviceSurface, ImageDecodeDevice, ImageDecodeSubmit,
     PixelFormat,
 };
+#[cfg(feature = "cuda-runtime")]
+use signinum_cuda_runtime::CudaContext;
 use signinum_jpeg::Decoder as CpuDecoder;
 use signinum_jpeg_cuda::{CudaSession, Decoder as CudaDecoder};
 
 const DEFAULT_JPEG: &[u8] = include_bytes!("../fixtures/jpeg/baseline_420_16x16.jpg");
 const DEFAULT_GENERATED_DIM: u16 = 2048;
+const DEFAULT_BATCH_DIM: u16 = 1024;
+const DEFAULT_BATCH_SIZE: usize = 64;
 
 fn bench_device_decode(c: &mut Criterion) {
     let input = bench_input();
@@ -81,6 +85,8 @@ fn bench_device_decode(c: &mut Criterion) {
     }
 
     group.finish();
+
+    bench_batch_decode(c);
 }
 
 fn bench_input() -> Vec<u8> {
@@ -96,12 +102,11 @@ fn bench_input() -> Vec<u8> {
         None if std::env::var_os("SIGNINUM_GPU_BENCH_SMALL_FIXTURE").is_some() => {
             DEFAULT_JPEG.to_vec()
         }
-        None => generated_jpeg(),
+        None => generated_jpeg(generated_dim()),
     }
 }
 
-fn generated_jpeg() -> Vec<u8> {
-    let dim = generated_dim();
+fn generated_jpeg(dim: u16) -> Vec<u8> {
     let mut rgb = Vec::with_capacity(dim as usize * dim as usize * 3);
     for y in 0..dim {
         for x in 0..dim {
@@ -131,6 +136,101 @@ fn generated_dim() -> u16 {
     assert!(
         (256..=8192).contains(&value),
         "SIGNINUM_GPU_BENCH_DIM must be between 256 and 8192"
+    );
+    value
+}
+
+#[cfg(feature = "cuda-runtime")]
+fn bench_batch_decode(c: &mut Criterion) {
+    let dim = batch_dim();
+    let input = generated_jpeg(dim);
+    let dimensions = (u32::from(dim), u32::from(dim));
+    let batch_size = batch_size();
+    let batch_inputs = vec![(input.as_slice(), dimensions); batch_size];
+
+    let mut group = c.benchmark_group("jpeg_cuda_batch_decode");
+    group.sample_size(10);
+
+    group.bench_function(format!("cpu_decode_rgb8_batch{batch_size}"), |b| {
+        b.iter(|| {
+            let mut total = 0usize;
+            for _ in 0..batch_size {
+                let decoder = CpuDecoder::new(&input).expect("cpu decoder");
+                let decoded_rgb = decoder.decode(PixelFormat::Rgb8).expect("cpu decode");
+                total = total.saturating_add(decoded_rgb.0.len());
+                std::hint::black_box(decoded_rgb);
+            }
+            total
+        });
+    });
+
+    let context = match CudaContext::system_default() {
+        Ok(context) => context,
+        Err(error) if std::env::var_os("SIGNINUM_REQUIRE_CUDA_BENCH").is_some() => {
+            panic!(
+                "SIGNINUM_REQUIRE_CUDA_BENCH is set but CUDA batch decode is unavailable: {error}"
+            )
+        }
+        Err(error) => {
+            eprintln!("skipping CUDA batch decode bench: {error}");
+            group.finish();
+            return;
+        }
+    };
+    if let Err(error) = context.decode_jpeg_rgb8_batch_with_nvjpeg(&batch_inputs) {
+        assert!(
+            std::env::var_os("SIGNINUM_REQUIRE_CUDA_BENCH").is_none(),
+            "SIGNINUM_REQUIRE_CUDA_BENCH is set but nvJPEG batch decode is unavailable: {error}"
+        );
+        eprintln!("skipping CUDA batch decode bench: {error}");
+        group.finish();
+        return;
+    }
+
+    group.bench_function(
+        format!("cuda_nvjpeg_rgb8_batch{batch_size}_surfaces"),
+        |b| {
+            b.iter(|| {
+                let outputs = context
+                    .decode_jpeg_rgb8_batch_with_nvjpeg(&batch_inputs)
+                    .expect("cuda batch decode");
+                std::hint::black_box(outputs)
+            });
+        },
+    );
+
+    group.finish();
+}
+
+#[cfg(not(feature = "cuda-runtime"))]
+fn bench_batch_decode(_c: &mut Criterion) {}
+
+fn batch_size() -> usize {
+    let Some(value) = std::env::var_os("SIGNINUM_GPU_BENCH_BATCH") else {
+        return DEFAULT_BATCH_SIZE;
+    };
+    let value = value
+        .to_string_lossy()
+        .parse::<usize>()
+        .expect("SIGNINUM_GPU_BENCH_BATCH must be a usize");
+    assert!(
+        (1..=256).contains(&value),
+        "SIGNINUM_GPU_BENCH_BATCH must be between 1 and 256"
+    );
+    value
+}
+
+fn batch_dim() -> u16 {
+    let Some(value) = std::env::var_os("SIGNINUM_GPU_BENCH_BATCH_DIM") else {
+        return DEFAULT_BATCH_DIM;
+    };
+    let value = value
+        .to_string_lossy()
+        .parse::<u16>()
+        .expect("SIGNINUM_GPU_BENCH_BATCH_DIM must be a u16");
+    assert!(
+        (128..=4096).contains(&value),
+        "SIGNINUM_GPU_BENCH_BATCH_DIM must be between 128 and 4096"
     );
     value
 }

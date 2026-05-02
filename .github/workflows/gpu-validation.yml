@@ -75,4 +75,6 @@ jobs:
         env:
           SIGNINUM_REQUIRE_CUDA_BENCH: "1"
           SIGNINUM_GPU_BENCH_DIM: "4096"
+          SIGNINUM_GPU_BENCH_BATCH: "64"
+          SIGNINUM_GPU_BENCH_BATCH_DIM: "1024"
         run: cargo bench -p signinum-jpeg-cuda --bench device_decode --features cuda-runtime -- --noplot

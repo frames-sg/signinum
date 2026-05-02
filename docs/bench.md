@@ -415,12 +415,15 @@ Run it on an NVIDIA host:
 
 ```sh
 SIGNINUM_GPU_BENCH_DIM=4096 \
+SIGNINUM_GPU_BENCH_BATCH=64 \
+SIGNINUM_GPU_BENCH_BATCH_DIM=1024 \
   cargo bench -p signinum-jpeg-cuda --bench device_decode --features cuda-runtime -- --noplot
 ```
 
 The CUDA surface and download benchmark cases reuse one `CudaSession`, so they
 measure steady-state nvJPEG decode after CUDA context and nvJPEG state
-initialization.
+initialization. The CUDA batch case uses nvJPEG batched RGB8 decode and is the
+throughput-oriented comparison for many same-sized WSI-style JPEG tiles.
 
 Set `SIGNINUM_GPU_BENCH_JPEG=/path/to/wsi_tile.jpg` or
 `SIGNINUM_CUDA_BENCH_JPEG=/path/to/wsi_tile.jpg` to use a real tile instead of

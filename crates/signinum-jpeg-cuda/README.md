@@ -20,6 +20,8 @@ Use `cargo bench -p signinum-jpeg-cuda --bench device_decode --features
 cuda-runtime` on an NVIDIA host to compare CPU decode, nvJPEG surface
 production through a reused `CudaSession`, and decode-plus-download timing.
 Set `SIGNINUM_GPU_BENCH_DIM=4096` for the generated large-tile benchmark, or
-set `SIGNINUM_CUDA_BENCH_JPEG` to a large WSI-shaped JPEG tile.
+set `SIGNINUM_CUDA_BENCH_JPEG` to a large WSI-shaped JPEG tile. The same bench
+also compares a CPU batch loop with nvJPEG batched RGB8 decode; tune it with
+`SIGNINUM_GPU_BENCH_BATCH` and `SIGNINUM_GPU_BENCH_BATCH_DIM`.
 
 The stable CPU decode API lives in `signinum-jpeg`.

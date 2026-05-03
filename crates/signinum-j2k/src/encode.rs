@@ -12,8 +12,7 @@ use crate::J2kError;
 /// Backend preference for JPEG 2000 lossless encoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum EncodeBackendPreference {
-    /// Pick the fastest safe backend. Currently resolves to CPU because no
-    /// device encoder is exposed by signinum yet.
+    /// Pick the fastest safe backend exposed by the caller, falling back to CPU.
     #[default]
     Auto,
     /// Require the pure Rust CPU encoder.
@@ -249,9 +248,15 @@ fn native_lossless_options(samples: J2kLosslessSamples<'_>) -> EncodeOptions {
     }
 }
 
+const MIN_LOSSLESS_DWT_DIMENSION: u32 = 64;
+
 /// Return the default lossless decomposition level policy used by the facade.
-pub fn j2k_lossless_decomposition_levels(_samples: J2kLosslessSamples<'_>) -> u8 {
-    0
+pub fn j2k_lossless_decomposition_levels(samples: J2kLosslessSamples<'_>) -> u8 {
+    if samples.width.min(samples.height) < MIN_LOSSLESS_DWT_DIMENSION {
+        return 0;
+    }
+
+    1
 }
 
 fn validate_lossless_roundtrip(

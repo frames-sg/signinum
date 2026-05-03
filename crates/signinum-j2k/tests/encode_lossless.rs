@@ -4,9 +4,10 @@ use std::path::PathBuf;
 
 use signinum_core::{BackendKind, CodecError};
 use signinum_j2k::{
-    encode_j2k_lossless, encode_j2k_lossless_with_accelerator, EncodeBackendPreference,
-    J2kEncodeDispatchReport, J2kEncodeStageAccelerator, J2kLosslessEncodeOptions,
-    J2kLosslessSamples, J2kPacketizationEncodeJob, J2kProgressionOrder, ReversibleTransform,
+    encode_j2k_lossless, encode_j2k_lossless_with_accelerator, j2k_lossless_decomposition_levels,
+    EncodeBackendPreference, J2kEncodeDispatchReport, J2kEncodeStageAccelerator,
+    J2kLosslessEncodeOptions, J2kLosslessSamples, J2kPacketizationEncodeJob, J2kProgressionOrder,
+    ReversibleTransform,
 };
 use signinum_j2k_native::{DecodeSettings, Image};
 
@@ -24,6 +25,25 @@ fn default_lossless_options_use_auto_cpu_safe_profile() {
     assert_eq!(options.backend, EncodeBackendPreference::Auto);
     assert_eq!(options.progression, J2kProgressionOrder::Lrcp);
     assert_eq!(options.reversible_transform, ReversibleTransform::Rct53);
+}
+
+#[test]
+fn default_lossless_policy_enables_one_reversible_dwt_level_for_wsi_tiles() {
+    let gray = vec![0; 64 * 64];
+    let gray_samples = J2kLosslessSamples::new(&gray, 64, 64, 1, 8, false).unwrap();
+    assert_eq!(j2k_lossless_decomposition_levels(gray_samples), 1);
+
+    let rgb = vec![0; 512 * 512 * 3];
+    let rgb_samples = J2kLosslessSamples::new(&rgb, 512, 512, 3, 8, false).unwrap();
+    assert_eq!(j2k_lossless_decomposition_levels(rgb_samples), 1);
+}
+
+#[test]
+fn default_lossless_policy_keeps_edge_tiles_undecomposed() {
+    let gray = vec![0; 63 * 512];
+    let samples = J2kLosslessSamples::new(&gray, 63, 512, 1, 8, false).unwrap();
+
+    assert_eq!(j2k_lossless_decomposition_levels(samples), 0);
 }
 
 #[test]
@@ -369,7 +389,7 @@ fn accelerator_facade_reports_requested_backend_after_stage_dispatch() {
 
         fn encode_packetization(
             &mut self,
-            _job: J2kPacketizationEncodeJob,
+            _job: J2kPacketizationEncodeJob<'_>,
         ) -> core::result::Result<Option<Vec<u8>>, &'static str> {
             self.packetization_dispatches = self.packetization_dispatches.saturating_add(1);
             Ok(None)

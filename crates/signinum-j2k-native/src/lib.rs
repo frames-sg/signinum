@@ -339,10 +339,58 @@ pub struct J2kTier1CodeBlockEncodeJob<'a> {
     pub style: J2kCodeBlockStyle,
 }
 
+/// Hidden LRCP packetization code-block contribution for backend experimentation.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct J2kPacketizationCodeBlock<'a> {
+    /// Encoded Tier-1 bitstream bytes for this packet contribution.
+    pub data: &'a [u8],
+    /// Number of coding passes in this contribution.
+    pub num_coding_passes: u8,
+    /// Number of zero most-significant bitplanes before first inclusion.
+    pub num_zero_bitplanes: u8,
+    /// Whether this code-block was included in a previous packet.
+    pub previously_included: bool,
+    /// L-block value used for segment length coding.
+    pub l_block: u32,
+    /// Block coder used for this contribution.
+    pub block_coding_mode: J2kPacketizationBlockCodingMode,
+}
+
+/// Hidden packetization block coding mode for backend experimentation.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum J2kPacketizationBlockCodingMode {
+    /// Classic JPEG 2000 Part 1 EBCOT block coding.
+    Classic,
+    /// High-throughput JPEG 2000 Part 15 block coding.
+    HighThroughput,
+}
+
+/// Hidden LRCP packetization subband precinct for backend experimentation.
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct J2kPacketizationSubband<'a> {
+    /// Code-block contributions in row-major order.
+    pub code_blocks: Vec<J2kPacketizationCodeBlock<'a>>,
+    /// Number of code-blocks in the x direction.
+    pub num_cbs_x: u32,
+    /// Number of code-blocks in the y direction.
+    pub num_cbs_y: u32,
+}
+
+/// Hidden LRCP packetization resolution packet for backend experimentation.
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct J2kPacketizationResolution<'a> {
+    /// Subbands in packet order: LL for resolution 0, then HL/LH/HH.
+    pub subbands: Vec<J2kPacketizationSubband<'a>>,
+}
+
 /// Hidden LRCP packetization job for backend experimentation.
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct J2kPacketizationEncodeJob {
+pub struct J2kPacketizationEncodeJob<'a> {
     /// Number of resolution packets prepared for packetization.
     pub resolution_count: u32,
     /// Number of layers to write.
@@ -351,6 +399,8 @@ pub struct J2kPacketizationEncodeJob {
     pub num_components: u8,
     /// Total number of code-block contributions.
     pub code_block_count: u32,
+    /// Packet payload prepared by Tier-1, in LRCP packet order.
+    pub resolutions: &'a [J2kPacketizationResolution<'a>],
 }
 
 /// Hidden encode-stage dispatch counters for backend experimentation.
@@ -444,7 +494,7 @@ pub trait J2kEncodeStageAccelerator {
     /// `Ok(None)` to use the CPU fallback.
     fn encode_packetization(
         &mut self,
-        _job: J2kPacketizationEncodeJob,
+        _job: J2kPacketizationEncodeJob<'_>,
     ) -> core::result::Result<Option<Vec<u8>>, &'static str> {
         Ok(None)
     }

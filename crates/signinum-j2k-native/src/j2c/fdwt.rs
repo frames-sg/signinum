@@ -73,32 +73,8 @@ pub(crate) fn forward_dwt(
             break;
         }
 
-        // Apply 1D horizontal transform to each row
-        if current_width >= 2 {
-            let mut row_buf = vec![0.0f32; current_width];
-            for y in 0..current_height {
-                let row_start = y * w;
-                row_buf[..current_width]
-                    .copy_from_slice(&buffer[row_start..row_start + current_width]);
-
-                if reversible {
-                    forward_lift_53(&mut row_buf[..current_width]);
-                } else {
-                    forward_lift_97(&mut row_buf[..current_width]);
-                }
-
-                // De-interleave: evens (low) then odds (high)
-                let num_low = current_width.div_ceil(2);
-                for i in 0..num_low {
-                    buffer[row_start + i] = row_buf[i * 2];
-                }
-                for i in 0..(current_width / 2) {
-                    buffer[row_start + num_low + i] = row_buf[i * 2 + 1];
-                }
-            }
-        }
-
-        // Apply 1D vertical transform to each column
+        // The decoder applies horizontal synthesis before vertical synthesis,
+        // so analysis must apply vertical first and horizontal second.
         if current_height >= 2 {
             let mut col_buf = vec![0.0f32; current_height];
             for x in 0..current_width {
@@ -119,6 +95,30 @@ pub(crate) fn forward_dwt(
                 }
                 for i in 0..(current_height / 2) {
                     buffer[(num_low + i) * w + x] = col_buf[i * 2 + 1];
+                }
+            }
+        }
+
+        if current_width >= 2 {
+            let mut row_buf = vec![0.0f32; current_width];
+            for y in 0..current_height {
+                let row_start = y * w;
+                row_buf[..current_width]
+                    .copy_from_slice(&buffer[row_start..row_start + current_width]);
+
+                if reversible {
+                    forward_lift_53(&mut row_buf[..current_width]);
+                } else {
+                    forward_lift_97(&mut row_buf[..current_width]);
+                }
+
+                // De-interleave: evens (low) then odds (high)
+                let num_low = current_width.div_ceil(2);
+                for i in 0..num_low {
+                    buffer[row_start + i] = row_buf[i * 2];
+                }
+                for i in 0..(current_width / 2) {
+                    buffer[row_start + num_low + i] = row_buf[i * 2 + 1];
                 }
             }
         }

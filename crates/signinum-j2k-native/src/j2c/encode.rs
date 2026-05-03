@@ -20,7 +20,9 @@ use crate::math::{floor_f32, log2_f32};
 use crate::{
     CpuOnlyJ2kEncodeStageAccelerator, EncodedJ2kCodeBlock, J2kEncodeStageAccelerator,
     J2kForwardDwt53Job, J2kForwardDwt53Level, J2kForwardDwt53Output, J2kForwardRctJob,
-    J2kPacketizationEncodeJob, J2kSubBandType, J2kTier1CodeBlockEncodeJob,
+    J2kPacketizationBlockCodingMode, J2kPacketizationCodeBlock, J2kPacketizationEncodeJob,
+    J2kPacketizationResolution, J2kPacketizationSubband, J2kSubBandType,
+    J2kTier1CodeBlockEncodeJob,
 };
 use crate::{DecodeSettings, Image};
 
@@ -295,7 +297,11 @@ fn encode_impl(
 
     // Step 4: Compute quantization step sizes
     let guard_bits = if options.reversible {
-        options.guard_bits
+        if use_mct {
+            options.guard_bits.max(2)
+        } else {
+            options.guard_bits
+        }
     } else {
         options.guard_bits.max(2)
     };
@@ -307,9 +313,12 @@ fn encode_impl(
     let cb_width = 1u32 << (options.code_block_width_exp + 2);
     let cb_height = 1u32 << (options.code_block_height_exp + 2);
 
-    let mut resolution_packets: Vec<ResolutionPacket> = Vec::new();
+    let mut component_resolution_packets: Vec<Vec<ResolutionPacket>> =
+        Vec::with_capacity(num_components as usize);
 
     for decomp in decompositions.iter().take(num_components as usize) {
+        let mut packets = Vec::with_capacity(num_levels as usize + 1);
+
         // LL subband (resolution 0)
         let ll_subband = encode_subband(
             &decomp.ll,
@@ -324,7 +333,7 @@ fn encode_impl(
             SubBandType::LowLow,
             accelerator,
         )?;
-        resolution_packets.push(ResolutionPacket {
+        packets.push(ResolutionPacket {
             subbands: vec![ll_subband],
         });
 
@@ -377,18 +386,25 @@ fn encode_impl(
                 accelerator,
             )?;
 
-            resolution_packets.push(ResolutionPacket {
+            packets.push(ResolutionPacket {
                 subbands: vec![hl_subband, lh_subband, hh_subband],
             });
         }
+
+        component_resolution_packets.push(packets);
     }
 
+    let resolution_packets = lrcp_ordered_resolution_packets(component_resolution_packets)?;
+
     // Step 6: Form tile bitstream (T2)
+    let mut resolution_packets = resolution_packets;
+    let packetization_resolutions = public_packetization_resolutions(&resolution_packets);
     let packetization_job = J2kPacketizationEncodeJob {
         resolution_count: resolution_packets.len() as u32,
         num_layers: 1,
         num_components,
         code_block_count: count_code_blocks(&resolution_packets)?,
+        resolutions: &packetization_resolutions,
     };
     let tile_data = accelerator
         .encode_packetization(packetization_job)?
@@ -516,6 +532,80 @@ fn count_code_blocks(resolution_packets: &[ResolutionPacket]) -> Result<u32, &'s
                 .ok_or("packetization code-block count overflow")
         })?;
     u32::try_from(count).map_err(|_| "packetization code-block count exceeds u32")
+}
+
+fn lrcp_ordered_resolution_packets(
+    component_resolution_packets: Vec<Vec<ResolutionPacket>>,
+) -> Result<Vec<ResolutionPacket>, &'static str> {
+    let resolution_count = component_resolution_packets
+        .first()
+        .map_or(0usize, alloc::vec::Vec::len);
+    let mut component_iters: Vec<_> = component_resolution_packets
+        .into_iter()
+        .map(alloc::vec::Vec::into_iter)
+        .collect();
+    let mut resolution_packets =
+        Vec::with_capacity(resolution_count.saturating_mul(component_iters.len()));
+
+    for _resolution in 0..resolution_count {
+        for component in &mut component_iters {
+            resolution_packets.push(
+                component
+                    .next()
+                    .ok_or("component packet resolution count mismatch")?,
+            );
+        }
+    }
+
+    if component_iters
+        .iter_mut()
+        .any(|component| component.next().is_some())
+    {
+        return Err("component packet resolution count mismatch");
+    }
+
+    Ok(resolution_packets)
+}
+
+fn public_packetization_resolutions(
+    resolution_packets: &[ResolutionPacket],
+) -> Vec<J2kPacketizationResolution<'_>> {
+    resolution_packets
+        .iter()
+        .map(|resolution| J2kPacketizationResolution {
+            subbands: resolution
+                .subbands
+                .iter()
+                .map(|subband| J2kPacketizationSubband {
+                    code_blocks: subband
+                        .code_blocks
+                        .iter()
+                        .map(|code_block| J2kPacketizationCodeBlock {
+                            data: &code_block.data,
+                            num_coding_passes: code_block.num_coding_passes,
+                            num_zero_bitplanes: code_block.num_zero_bitplanes,
+                            previously_included: code_block.previously_included,
+                            l_block: code_block.l_block,
+                            block_coding_mode: public_packetization_block_coding_mode(
+                                code_block.block_coding_mode,
+                            ),
+                        })
+                        .collect(),
+                    num_cbs_x: subband.num_cbs_x,
+                    num_cbs_y: subband.num_cbs_y,
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+fn public_packetization_block_coding_mode(
+    block_coding_mode: BlockCodingMode,
+) -> J2kPacketizationBlockCodingMode {
+    match block_coding_mode {
+        BlockCodingMode::Classic => J2kPacketizationBlockCodingMode::Classic,
+        BlockCodingMode::HighThroughput => J2kPacketizationBlockCodingMode::HighThroughput,
+    }
 }
 
 /// Encode a single subband into a SubbandPrecinct.
@@ -802,6 +892,9 @@ mod tests {
             forward_dwt53: usize,
             tier1_code_blocks: usize,
             packetization: usize,
+            packetization_resolution_count: u32,
+            packetization_code_block_count: u32,
+            packetization_saw_payload: bool,
         }
 
         impl crate::J2kEncodeStageAccelerator for CountingAccelerator {
@@ -833,9 +926,17 @@ mod tests {
 
             fn encode_packetization(
                 &mut self,
-                _job: crate::J2kPacketizationEncodeJob,
+                job: crate::J2kPacketizationEncodeJob<'_>,
             ) -> core::result::Result<Option<Vec<u8>>, &'static str> {
                 self.packetization += 1;
+                self.packetization_resolution_count = job.resolution_count;
+                self.packetization_code_block_count = job.code_block_count;
+                self.packetization_saw_payload = job
+                    .resolutions
+                    .iter()
+                    .flat_map(|resolution| resolution.subbands.iter())
+                    .flat_map(|subband| subband.code_blocks.iter())
+                    .any(|code_block| !code_block.data.is_empty());
                 Ok(None)
             }
         }
@@ -857,6 +958,12 @@ mod tests {
         assert_eq!(accelerator.forward_dwt53, 3);
         assert!(accelerator.tier1_code_blocks > 0);
         assert_eq!(accelerator.packetization, 1);
+        assert_eq!(accelerator.packetization_resolution_count, 6);
+        assert_eq!(
+            accelerator.packetization_code_block_count,
+            u32::try_from(accelerator.tier1_code_blocks).expect("test code-block count fits u32")
+        );
+        assert!(accelerator.packetization_saw_payload);
     }
 
     #[test]
@@ -1193,6 +1300,36 @@ mod tests {
 
         assert_eq!(decoded.width, 8);
         assert_eq!(decoded.height, 8);
+        assert_eq!(decoded.data, original, "round-trip mismatch");
+    }
+
+    #[test]
+    fn test_encode_decode_roundtrip_gray_8bit_single_dwt_level() {
+        use crate::{DecodeSettings, Image};
+
+        let original: Vec<u8> = (0..64 * 64)
+            .map(|value| ((value * 37 + value / 7) & 0xFF) as u8)
+            .collect();
+        let encoded = encode(
+            &original,
+            64,
+            64,
+            1,
+            8,
+            false,
+            &EncodeOptions {
+                num_decomposition_levels: 1,
+                reversible: true,
+                ..Default::default()
+            },
+        )
+        .expect("encode failed");
+
+        let image = Image::new(&encoded, &DecodeSettings::default()).expect("parse failed");
+        let decoded = image.decode_native().expect("decode failed");
+
+        assert_eq!(decoded.width, 64);
+        assert_eq!(decoded.height, 64);
         assert_eq!(decoded.data, original, "round-trip mismatch");
     }
 }

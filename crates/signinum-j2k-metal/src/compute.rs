@@ -4815,11 +4815,11 @@ pub(crate) fn encode_forward_dwt53(
                 low_height,
             };
 
-            if current_width >= 2 {
+            if current_height >= 2 {
                 let (input, output) =
                     active_forward_dwt53_buffers(&buffer_a, &buffer_b, active_is_a);
                 dispatch_forward_dwt53_pass(
-                    &runtime.fdwt53_horizontal,
+                    &runtime.fdwt53_vertical,
                     command_buffer,
                     input,
                     output,
@@ -4827,11 +4827,11 @@ pub(crate) fn encode_forward_dwt53(
                 );
                 active_is_a = !active_is_a;
             }
-            if current_height >= 2 {
+            if current_width >= 2 {
                 let (input, output) =
                     active_forward_dwt53_buffers(&buffer_a, &buffer_b, active_is_a);
                 dispatch_forward_dwt53_pass(
-                    &runtime.fdwt53_vertical,
+                    &runtime.fdwt53_horizontal,
                     command_buffer,
                     input,
                     output,

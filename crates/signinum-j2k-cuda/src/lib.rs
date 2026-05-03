@@ -170,7 +170,7 @@ impl J2kEncodeStageAccelerator for CudaEncodeStageAccelerator {
 
     fn encode_packetization(
         &mut self,
-        _job: J2kPacketizationEncodeJob,
+        _job: J2kPacketizationEncodeJob<'_>,
     ) -> core::result::Result<Option<Vec<u8>>, &'static str> {
         self.packetization_attempts = self.packetization_attempts.saturating_add(1);
         Ok(None)

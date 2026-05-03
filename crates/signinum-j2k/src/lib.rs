@@ -31,8 +31,9 @@ pub use encode::{
 #[doc(hidden)]
 pub use signinum_j2k_native::{
     EncodedJ2kCodeBlock, J2kEncodeDispatchReport, J2kEncodeStageAccelerator, J2kForwardDwt53Job,
-    J2kForwardDwt53Level, J2kForwardDwt53Output, J2kForwardRctJob, J2kPacketizationEncodeJob,
-    J2kTier1CodeBlockEncodeJob,
+    J2kForwardDwt53Level, J2kForwardDwt53Output, J2kForwardRctJob, J2kPacketizationBlockCodingMode,
+    J2kPacketizationCodeBlock, J2kPacketizationEncodeJob, J2kPacketizationResolution,
+    J2kPacketizationSubband, J2kTier1CodeBlockEncodeJob,
 };
 
 pub use signinum_core::{

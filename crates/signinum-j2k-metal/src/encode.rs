@@ -119,7 +119,7 @@ impl J2kEncodeStageAccelerator for MetalEncodeStageAccelerator {
 
     fn encode_packetization(
         &mut self,
-        _job: J2kPacketizationEncodeJob,
+        _job: J2kPacketizationEncodeJob<'_>,
     ) -> core::result::Result<Option<Vec<u8>>, &'static str> {
         self.packetization_attempts = self.packetization_attempts.saturating_add(1);
         Ok(None)
@@ -129,6 +129,11 @@ impl J2kEncodeStageAccelerator for MetalEncodeStageAccelerator {
 #[cfg(test)]
 mod tests {
     use super::MetalEncodeStageAccelerator;
+    use signinum_core::BackendKind;
+    use signinum_j2k::{
+        encode_j2k_lossless_with_accelerator, EncodeBackendPreference, J2kLosslessEncodeOptions,
+        J2kLosslessSamples,
+    };
     use signinum_j2k_native::{
         encode_with_accelerator, DecodeSettings, EncodeOptions, Image, J2kEncodeStageAccelerator,
         J2kForwardDwt53Job,
@@ -208,6 +213,41 @@ mod tests {
         assert_eq!(decoded.data, pixels);
         assert_eq!(accelerator.forward_dwt53_attempts(), 1);
         assert_eq!(accelerator.forward_dwt53_dispatches(), 1);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn metal_lossless_facade_dispatches_rct_and_dwt_for_wsi_sized_rgb_tile() {
+        let mut pixels = Vec::with_capacity(128 * 128 * 3);
+        for y in 0..128u32 {
+            for x in 0..128u32 {
+                pixels.push(((x * 3 + y * 5) & 0xFF) as u8);
+                pixels.push(((x * 7 + y * 11) & 0xFF) as u8);
+                pixels.push(((x * 13 + y * 17) & 0xFF) as u8);
+            }
+        }
+        let samples =
+            J2kLosslessSamples::new(&pixels, 128, 128, 3, 8, false).expect("valid RGB samples");
+        let mut accelerator = MetalEncodeStageAccelerator::default();
+
+        let encoded = encode_j2k_lossless_with_accelerator(
+            samples,
+            &J2kLosslessEncodeOptions {
+                backend: EncodeBackendPreference::PreferDevice,
+                ..J2kLosslessEncodeOptions::default()
+            },
+            BackendKind::Metal,
+            &mut accelerator,
+        )
+        .expect("Metal-accelerated lossless encode");
+
+        assert_eq!(encoded.backend, BackendKind::Metal);
+        assert_eq!(accelerator.forward_rct_dispatches(), 1);
+        assert_eq!(accelerator.forward_dwt53_dispatches(), 3);
+        assert!(accelerator.tier1_code_block_attempts() > 0);
+        assert_eq!(accelerator.packetization_attempts(), 1);
+        assert_eq!(accelerator.tier1_code_block_dispatches(), 0);
+        assert_eq!(accelerator.packetization_dispatches(), 0);
     }
 
     #[cfg(target_os = "macos")]

@@ -632,8 +632,9 @@ inline bool decode_block(
     thread short coeffs[64],
     thread bool &dc_only
 ) {
-    for (uint i = 0; i < 64; ++i) {
-        coeffs[i] = 0;
+    thread short4 *coeff_chunks = reinterpret_cast<thread short4 *>(coeffs);
+    for (uint i = 0; i < 16; ++i) {
+        coeff_chunks[i] = short4(0);
     }
     uchar ssss = 0;
     if (!decode_symbol(br, bytes, len, dc_table, status, ssss)) {
@@ -680,7 +681,7 @@ inline bool decode_block(
         if (!receive_extend(br, bytes, len, ssss, status, value)) {
             return false;
         }
-        coeffs[ZIGZAG[k]] = short(value * int(quant[k]));
+        coeffs[ZIGZAG[k]] = clamp_i16(value * int(quant[k]));
         dc_only = false;
         k += 1;
     }

@@ -1,14 +1,22 @@
 //! HTJ2K encoder lookup tables generated from OpenJPH source rows.
 #![allow(dead_code)]
 
+#[repr(C)]
+/// Hidden HTJ2K UVLC encoder table row for backend experimentation.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct HtUvlcTableEntry {
-    pub(crate) pre: u8,
-    pub(crate) pre_len: u8,
-    pub(crate) suf: u8,
-    pub(crate) suf_len: u8,
-    pub(crate) ext: u8,
-    pub(crate) ext_len: u8,
+pub struct HtUvlcTableEntry {
+    /// Prefix code bits.
+    pub pre: u8,
+    /// Prefix code bit length.
+    pub pre_len: u8,
+    /// Suffix code bits.
+    pub suf: u8,
+    /// Suffix code bit length.
+    pub suf_len: u8,
+    /// Extension code bits.
+    pub ext: u8,
+    /// Extension code bit length.
+    pub ext_len: u8,
 }
 
 pub(crate) const HT_VLC_ENCODE_TABLE0: [u16; 2048] = [

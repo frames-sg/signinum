@@ -15,6 +15,7 @@ use alloc::vec::Vec;
 use super::codestream_write::BlockCodingMode;
 use super::tag_tree_encode::TagTreeEncoder;
 use crate::writer::BitWriter;
+use crate::J2kPacketizationProgressionOrder;
 
 /// A code-block's contribution to a packet.
 #[derive(Debug)]
@@ -52,6 +53,34 @@ pub(crate) struct SubbandPrecinct {
 pub(crate) struct ResolutionPacket {
     /// Subbands in this resolution's precinct.
     pub(crate) subbands: Vec<SubbandPrecinct>,
+}
+
+/// Explicit packet output descriptor for progression-order packetization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PacketDescriptor {
+    pub(crate) packet_index: u32,
+    pub(crate) state_index: u32,
+    pub(crate) layer: u8,
+    pub(crate) resolution: u32,
+    pub(crate) component: u8,
+    pub(crate) precinct: u64,
+}
+
+struct PacketCodeBlockState {
+    previously_included: bool,
+    l_block: u32,
+}
+
+struct PacketSubbandState {
+    inclusion_tree: TagTreeEncoder,
+    zero_bitplane_tree: TagTreeEncoder,
+    code_blocks: Vec<PacketCodeBlockState>,
+    num_cbs_x: u32,
+    num_cbs_y: u32,
+}
+
+struct PacketState {
+    subbands: Vec<PacketSubbandState>,
 }
 
 /// Form a packet from a resolution-level packet (possibly multiple subbands).
@@ -157,6 +186,253 @@ pub(crate) fn form_packet(resolution: &mut ResolutionPacket) -> Vec<u8> {
     packet
 }
 
+fn packet_state_seed(packet: &ResolutionPacket) -> Result<PacketStateSeed, &'static str> {
+    let mut subbands = Vec::with_capacity(packet.subbands.len());
+    for subband in &packet.subbands {
+        if subband.num_cbs_x == 0
+            || subband.num_cbs_y == 0
+            || subband.num_cbs_x.saturating_mul(subband.num_cbs_y)
+                != subband.code_blocks.len() as u32
+        {
+            return Err("invalid packet subband code-block layout");
+        }
+        subbands.push(PacketSubbandStateSeed {
+            num_cbs_x: subband.num_cbs_x,
+            num_cbs_y: subband.num_cbs_y,
+            inclusion_values: vec![u32::MAX / 2; subband.code_blocks.len()],
+            zero_bitplane_values: vec![0; subband.code_blocks.len()],
+            l_blocks: subband
+                .code_blocks
+                .iter()
+                .map(|code_block| code_block.l_block)
+                .collect(),
+            previously_included: subband
+                .code_blocks
+                .iter()
+                .map(|code_block| code_block.previously_included)
+                .collect(),
+        });
+    }
+    Ok(PacketStateSeed { subbands })
+}
+
+struct PacketSubbandStateSeed {
+    num_cbs_x: u32,
+    num_cbs_y: u32,
+    inclusion_values: Vec<u32>,
+    zero_bitplane_values: Vec<u32>,
+    l_blocks: Vec<u32>,
+    previously_included: Vec<bool>,
+}
+
+struct PacketStateSeed {
+    subbands: Vec<PacketSubbandStateSeed>,
+}
+
+fn validate_packet_state_layout(
+    seed: &PacketStateSeed,
+    packet: &ResolutionPacket,
+) -> Result<(), &'static str> {
+    if seed.subbands.len() != packet.subbands.len() {
+        return Err("packet descriptor state layout mismatch");
+    }
+    for (seed_subband, packet_subband) in seed.subbands.iter().zip(&packet.subbands) {
+        if seed_subband.num_cbs_x != packet_subband.num_cbs_x
+            || seed_subband.num_cbs_y != packet_subband.num_cbs_y
+            || seed_subband.inclusion_values.len() != packet_subband.code_blocks.len()
+        {
+            return Err("packet descriptor state layout mismatch");
+        }
+    }
+    Ok(())
+}
+
+fn build_packet_states(
+    packets: &[ResolutionPacket],
+    descriptors: &[PacketDescriptor],
+) -> Result<Vec<PacketState>, &'static str> {
+    let state_count = descriptors
+        .iter()
+        .map(|descriptor| descriptor.state_index as usize)
+        .max()
+        .map_or(0usize, |max_state| max_state + 1);
+    let mut seeds: Vec<Option<PacketStateSeed>> =
+        core::iter::repeat_with(|| None).take(state_count).collect();
+
+    for descriptor in descriptors {
+        let packet = packets
+            .get(descriptor.packet_index as usize)
+            .ok_or("packet descriptor packet index out of range")?;
+        let seed = &mut seeds[descriptor.state_index as usize];
+        if let Some(existing) = seed {
+            validate_packet_state_layout(existing, packet)?;
+        } else {
+            *seed = Some(packet_state_seed(packet)?);
+        }
+
+        let seed = seed
+            .as_mut()
+            .ok_or("packet descriptor state initialization failed")?;
+        for (seed_subband, packet_subband) in seed.subbands.iter_mut().zip(&packet.subbands) {
+            for (idx, code_block) in packet_subband.code_blocks.iter().enumerate() {
+                if code_block.num_coding_passes == 0 {
+                    continue;
+                }
+                let layer = u32::from(descriptor.layer);
+                if layer < seed_subband.inclusion_values[idx] {
+                    seed_subband.inclusion_values[idx] = layer;
+                    seed_subband.zero_bitplane_values[idx] =
+                        u32::from(code_block.num_zero_bitplanes);
+                }
+            }
+        }
+    }
+
+    seeds
+        .into_iter()
+        .map(|seed| {
+            let Some(seed) = seed else {
+                return Ok(PacketState {
+                    subbands: Vec::new(),
+                });
+            };
+            let mut subbands = Vec::with_capacity(seed.subbands.len());
+            for seed_subband in seed.subbands {
+                let mut inclusion_tree =
+                    TagTreeEncoder::new(seed_subband.num_cbs_x, seed_subband.num_cbs_y);
+                let mut zero_bitplane_tree =
+                    TagTreeEncoder::new(seed_subband.num_cbs_x, seed_subband.num_cbs_y);
+                for idx in 0..seed_subband.inclusion_values.len() {
+                    let x = idx as u32 % seed_subband.num_cbs_x;
+                    let y = idx as u32 / seed_subband.num_cbs_x;
+                    inclusion_tree.set_value(x, y, seed_subband.inclusion_values[idx]);
+                    zero_bitplane_tree.set_value(x, y, seed_subband.zero_bitplane_values[idx]);
+                }
+                let code_blocks = seed_subband
+                    .l_blocks
+                    .into_iter()
+                    .zip(seed_subband.previously_included)
+                    .map(|(l_block, previously_included)| PacketCodeBlockState {
+                        previously_included,
+                        l_block,
+                    })
+                    .collect();
+                subbands.push(PacketSubbandState {
+                    inclusion_tree,
+                    zero_bitplane_tree,
+                    code_blocks,
+                    num_cbs_x: seed_subband.num_cbs_x,
+                    num_cbs_y: seed_subband.num_cbs_y,
+                });
+            }
+            Ok(PacketState { subbands })
+        })
+        .collect()
+}
+
+fn form_packet_with_state(
+    packet_data: &ResolutionPacket,
+    state: &mut PacketState,
+    layer: u8,
+) -> Result<Vec<u8>, &'static str> {
+    if state.subbands.len() != packet_data.subbands.len() {
+        return Err("packet descriptor state layout mismatch");
+    }
+
+    let mut header_writer = BitWriter::new();
+    let mut body = Vec::new();
+    let any_data = packet_data
+        .subbands
+        .iter()
+        .any(|sb| sb.code_blocks.iter().any(|cb| cb.num_coding_passes > 0));
+
+    if !any_data {
+        header_writer.write_bit(0);
+        return Ok(header_writer.finish());
+    }
+
+    header_writer.write_bit(1);
+    for (packet_subband, state_subband) in packet_data.subbands.iter().zip(&mut state.subbands) {
+        if packet_subband.num_cbs_x != state_subband.num_cbs_x
+            || packet_subband.num_cbs_y != state_subband.num_cbs_y
+            || packet_subband.code_blocks.len() != state_subband.code_blocks.len()
+        {
+            return Err("packet descriptor state layout mismatch");
+        }
+
+        for (idx, packet_block) in packet_subband.code_blocks.iter().enumerate() {
+            let x = idx as u32 % state_subband.num_cbs_x;
+            let y = idx as u32 / state_subband.num_cbs_x;
+            let state_block = &mut state_subband.code_blocks[idx];
+
+            if !state_block.previously_included {
+                state_subband
+                    .inclusion_tree
+                    .encode(x, y, u32::from(layer) + 1, &mut header_writer);
+                if packet_block.num_coding_passes == 0 {
+                    continue;
+                }
+                state_subband.zero_bitplane_tree.encode(
+                    x,
+                    y,
+                    u32::from(packet_block.num_zero_bitplanes) + 1,
+                    &mut header_writer,
+                );
+            } else if packet_block.num_coding_passes > 0 {
+                header_writer.write_bit(1);
+            } else {
+                header_writer.write_bit(0);
+                continue;
+            }
+
+            if packet_block.num_coding_passes == 0 {
+                continue;
+            }
+
+            let data_len = packet_block.data.len() as u32;
+            match packet_block.block_coding_mode {
+                BlockCodingMode::Classic => {
+                    let num_bits =
+                        bits_for_length(state_block.l_block, packet_block.num_coding_passes);
+                    encode_num_coding_passes(packet_block.num_coding_passes, &mut header_writer);
+                    encode_length(
+                        data_len,
+                        &mut state_block.l_block,
+                        num_bits,
+                        &mut header_writer,
+                    );
+                }
+                BlockCodingMode::HighThroughput => {
+                    debug_assert!(
+                        packet_block.num_coding_passes <= 1,
+                        "current HT packet writer only supports cleanup-only contributions"
+                    );
+                    let num_bits = bits_for_ht_cleanup_length(
+                        state_block.l_block,
+                        packet_block.num_coding_passes,
+                    );
+                    encode_num_ht_coding_passes(packet_block.num_coding_passes, &mut header_writer);
+                    encode_length(
+                        data_len,
+                        &mut state_block.l_block,
+                        num_bits,
+                        &mut header_writer,
+                    );
+                }
+            }
+            body.extend_from_slice(&packet_block.data);
+            state_block.previously_included = true;
+        }
+    }
+
+    let mut packet = header_writer.finish();
+    if packet.last().copied() == Some(0xff) {
+        packet.push(0x00);
+    }
+    packet.extend_from_slice(&body);
+    Ok(packet)
+}
+
 /// Encode the number of coding passes using the variable-length code from Table B.4.
 fn encode_num_coding_passes(num_passes: u8, writer: &mut BitWriter) {
     match num_passes {
@@ -250,6 +526,41 @@ pub(crate) fn form_tile_bitstream(
     }
 
     tile_data
+}
+
+pub(crate) fn form_tile_bitstream_with_descriptors(
+    resolution_packets: &mut [ResolutionPacket],
+    descriptors: &[PacketDescriptor],
+) -> Result<Vec<u8>, &'static str> {
+    if descriptors.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut states = build_packet_states(resolution_packets, descriptors)?;
+    let mut tile_data = Vec::new();
+    for descriptor in descriptors {
+        let packet = resolution_packets
+            .get(descriptor.packet_index as usize)
+            .ok_or("packet descriptor packet index out of range")?;
+        let state = states
+            .get_mut(descriptor.state_index as usize)
+            .ok_or("packet descriptor state index out of range")?;
+        tile_data.extend_from_slice(&form_packet_with_state(packet, state, descriptor.layer)?);
+    }
+    Ok(tile_data)
+}
+
+pub(crate) fn form_tile_bitstream_for_progression(
+    resolution_packets: &mut [ResolutionPacket],
+    num_layers: u8,
+    num_components: u8,
+    progression_order: J2kPacketizationProgressionOrder,
+) -> Vec<u8> {
+    match progression_order {
+        J2kPacketizationProgressionOrder::Lrcp | J2kPacketizationProgressionOrder::Rpcl => {
+            form_tile_bitstream(resolution_packets, num_layers, num_components)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -603,5 +914,98 @@ mod tests {
 
         let packet = form_packet(&mut resolution);
         assert!(packet.len() >= 3);
+    }
+
+    fn single_block_packet(data: Vec<u8>, previously_included: bool) -> ResolutionPacket {
+        ResolutionPacket {
+            subbands: vec![SubbandPrecinct {
+                code_blocks: vec![CodeBlockPacketData {
+                    data,
+                    num_coding_passes: 1,
+                    num_zero_bitplanes: 0,
+                    previously_included,
+                    l_block: 3,
+                    block_coding_mode: BlockCodingMode::Classic,
+                }],
+                num_cbs_x: 1,
+                num_cbs_y: 1,
+            }],
+        }
+    }
+
+    #[test]
+    fn explicit_packet_descriptors_control_packet_order() {
+        let first = single_block_packet(vec![0xA0], false);
+        let second = single_block_packet(vec![0xB0], false);
+        let mut expected_second = single_block_packet(vec![0xB0], false);
+        let mut expected_first = single_block_packet(vec![0xA0], false);
+        let expected = [
+            form_packet(&mut expected_second),
+            form_packet(&mut expected_first),
+        ]
+        .concat();
+
+        let actual = form_tile_bitstream_with_descriptors(
+            &mut [first, second],
+            &[
+                PacketDescriptor {
+                    packet_index: 1,
+                    state_index: 1,
+                    layer: 0,
+                    resolution: 0,
+                    component: 0,
+                    precinct: 0,
+                },
+                PacketDescriptor {
+                    packet_index: 0,
+                    state_index: 0,
+                    layer: 0,
+                    resolution: 1,
+                    component: 0,
+                    precinct: 0,
+                },
+            ],
+        )
+        .expect("descriptor packetization");
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn explicit_packet_descriptors_reuse_packet_state_across_layers() {
+        let first = single_block_packet(vec![0x11], false);
+        let second = single_block_packet(vec![0x22], false);
+
+        let mut expected_first = single_block_packet(vec![0x11], false);
+        let first_bytes = form_packet(&mut expected_first);
+        let l_block_after_first = expected_first.subbands[0].code_blocks[0].l_block;
+        let mut expected_second = single_block_packet(vec![0x22], true);
+        expected_second.subbands[0].code_blocks[0].l_block = l_block_after_first;
+        let expected = [first_bytes, form_packet(&mut expected_second)].concat();
+
+        let actual = form_tile_bitstream_with_descriptors(
+            &mut [first, second],
+            &[
+                PacketDescriptor {
+                    packet_index: 0,
+                    state_index: 0,
+                    layer: 0,
+                    resolution: 0,
+                    component: 0,
+                    precinct: 0,
+                },
+                PacketDescriptor {
+                    packet_index: 1,
+                    state_index: 0,
+                    layer: 1,
+                    resolution: 0,
+                    component: 0,
+                    precinct: 0,
+                },
+            ],
+        )
+        .expect("stateful descriptor packetization");
+
+        assert_eq!(actual, expected);
     }
 }

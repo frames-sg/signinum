@@ -44,7 +44,11 @@ use signinum_j2k_native::{
 #[cfg(target_os = "macos")]
 use metal::{Buffer, Device, MTLResourceOptions};
 
-pub use encode::MetalEncodeStageAccelerator;
+pub use encode::{
+    encode_lossless_from_metal_buffer, validate_lossless_roundtrip_on_metal,
+    validate_lossless_roundtrip_on_metal_with_session, MetalEncodeStageAccelerator,
+    MetalLosslessEncodeTile,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

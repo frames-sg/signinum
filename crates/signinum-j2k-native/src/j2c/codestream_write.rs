@@ -6,6 +6,7 @@
 use alloc::vec::Vec;
 
 use super::codestream::markers;
+use super::encode::EncodeProgressionOrder;
 
 /// Code-block coding mode for the codestream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,6 +33,8 @@ pub(crate) struct EncodeParams {
     pub(crate) use_mct: bool,
     pub(crate) guard_bits: u8,
     pub(crate) block_coding_mode: BlockCodingMode,
+    pub(crate) progression_order: EncodeProgressionOrder,
+    pub(crate) write_tlm: bool,
 }
 
 impl Default for EncodeParams {
@@ -50,6 +53,8 @@ impl Default for EncodeParams {
             use_mct: false,
             guard_bits: 1,
             block_coding_mode: BlockCodingMode::Classic,
+            progression_order: EncodeProgressionOrder::Lrcp,
+            write_tlm: false,
         }
     }
 }
@@ -78,9 +83,14 @@ pub(crate) fn write_codestream(
     // QCD (Quantization defaults)
     write_qcd_marker(&mut out, params, quantization_step_sizes);
 
+    // TLM (Tile-part lengths), required by DICOM HTJ2K RPCL.
+    let tile_part_len = 14 + tile_data.len() as u32; // SOT marker+segment(12) + SOD(2) + tile data
+    if params.write_tlm {
+        write_tlm_marker(&mut out, 0, tile_part_len);
+    }
+
     // SOT (Start of tile-part) — single tile covering entire image
-    let tile_part_len = 12 + tile_data.len() as u32; // SOT header(12) + tile data
-    write_sot_marker(&mut out, 0, tile_part_len);
+    write_sot_marker(&mut out, 0, tile_part_len - 2);
 
     // SOD (Start of data)
     write_marker(&mut out, markers::SOD);
@@ -177,8 +187,8 @@ fn write_cod_marker(out: &mut Vec<u8>, params: &EncodeParams) {
     // Scod (coding style flags) — no precincts, no SOP, no EPH
     out.push(0x00);
 
-    // SGcod: Progression order (LRCP = 0)
-    out.push(0x00);
+    // SGcod: Progression order
+    out.push(progression_order_byte(params.progression_order));
     // Number of layers
     out.extend_from_slice(&(params.num_layers as u16).to_be_bytes());
     // Multiple component transform
@@ -197,6 +207,23 @@ fn write_cod_marker(out: &mut Vec<u8>, params: &EncodeParams) {
     });
     // Wavelet transform: 0 = irreversible 9-7, 1 = reversible 5-3
     out.push(if params.reversible { 1 } else { 0 });
+}
+
+fn progression_order_byte(progression_order: EncodeProgressionOrder) -> u8 {
+    match progression_order {
+        EncodeProgressionOrder::Lrcp => 0x00,
+        EncodeProgressionOrder::Rpcl => 0x02,
+    }
+}
+
+/// Write TLM marker segment (A.7.1) for one tile-part.
+fn write_tlm_marker(out: &mut Vec<u8>, tile_index: u16, tile_part_length: u32) {
+    write_marker(out, markers::TLM);
+    out.extend_from_slice(&10u16.to_be_bytes());
+    out.push(0);
+    out.push(0x22);
+    out.extend_from_slice(&tile_index.to_be_bytes());
+    out.extend_from_slice(&tile_part_length.to_be_bytes());
 }
 
 /// Write QCD marker segment (A.6.4).

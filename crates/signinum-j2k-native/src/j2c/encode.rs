@@ -21,8 +21,8 @@ use crate::{
     CpuOnlyJ2kEncodeStageAccelerator, EncodedJ2kCodeBlock, J2kEncodeStageAccelerator,
     J2kForwardDwt53Job, J2kForwardDwt53Level, J2kForwardDwt53Output, J2kForwardRctJob,
     J2kPacketizationBlockCodingMode, J2kPacketizationCodeBlock, J2kPacketizationEncodeJob,
-    J2kPacketizationResolution, J2kPacketizationSubband, J2kSubBandType,
-    J2kTier1CodeBlockEncodeJob,
+    J2kPacketizationPacketDescriptor, J2kPacketizationResolution, J2kPacketizationSubband,
+    J2kSubBandType, J2kTier1CodeBlockEncodeJob,
 };
 use crate::{DecodeSettings, Image};
 
@@ -41,6 +41,10 @@ pub struct EncodeOptions {
     pub guard_bits: u8,
     /// Encode using HT block coding (HTJ2K / Part 15) instead of classic EBCOT.
     pub use_ht_block_coding: bool,
+    /// Packet progression order to write in COD and use for packetization.
+    pub progression_order: EncodeProgressionOrder,
+    /// Write a TLM marker segment for the single tile-part.
+    pub write_tlm: bool,
 }
 
 impl Default for EncodeOptions {
@@ -52,8 +56,20 @@ impl Default for EncodeOptions {
             code_block_height_exp: 4,
             guard_bits: 1,
             use_ht_block_coding: false,
+            progression_order: EncodeProgressionOrder::Lrcp,
+            write_tlm: false,
         }
     }
+}
+
+/// JPEG 2000 packet progression orders supported by the encoder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum EncodeProgressionOrder {
+    /// Layer-resolution-component-position progression.
+    #[default]
+    Lrcp,
+    /// Resolution-position-component-layer progression.
+    Rpcl,
 }
 
 /// Encode pixel data into a JPEG 2000 codestream.
@@ -313,14 +329,14 @@ fn encode_impl(
     let cb_width = 1u32 << (options.code_block_width_exp + 2);
     let cb_height = 1u32 << (options.code_block_height_exp + 2);
 
-    let mut component_resolution_packets: Vec<Vec<ResolutionPacket>> =
+    let mut component_resolution_packets: Vec<Vec<PreparedResolutionPacket>> =
         Vec::with_capacity(num_components as usize);
 
     for decomp in decompositions.iter().take(num_components as usize) {
         let mut packets = Vec::with_capacity(num_levels as usize + 1);
 
         // LL subband (resolution 0)
-        let ll_subband = encode_subband(
+        let ll_subband = prepare_subband(
             &decomp.ll,
             decomp.ll_width,
             decomp.ll_height,
@@ -331,9 +347,8 @@ fn encode_impl(
             cb_width,
             cb_height,
             SubBandType::LowLow,
-            accelerator,
         )?;
-        packets.push(ResolutionPacket {
+        packets.push(PreparedResolutionPacket {
             subbands: vec![ll_subband],
         });
 
@@ -342,7 +357,7 @@ fn encode_impl(
             let step_base = 1 + level_idx * 3;
 
             // HL subband
-            let hl_subband = encode_subband(
+            let hl_subband = prepare_subband(
                 &level.hl,
                 level.high_width,
                 level.low_height,
@@ -353,11 +368,10 @@ fn encode_impl(
                 cb_width,
                 cb_height,
                 SubBandType::HighLow,
-                accelerator,
             )?;
 
             // LH subband
-            let lh_subband = encode_subband(
+            let lh_subband = prepare_subband(
                 &level.lh,
                 level.low_width,
                 level.high_height,
@@ -368,11 +382,10 @@ fn encode_impl(
                 cb_width,
                 cb_height,
                 SubBandType::LowHigh,
-                accelerator,
             )?;
 
             // HH subband
-            let hh_subband = encode_subband(
+            let hh_subband = prepare_subband(
                 &level.hh,
                 level.high_width,
                 level.high_height,
@@ -383,10 +396,9 @@ fn encode_impl(
                 cb_width,
                 cb_height,
                 SubBandType::HighHigh,
-                accelerator,
             )?;
 
-            packets.push(ResolutionPacket {
+            packets.push(PreparedResolutionPacket {
                 subbands: vec![hl_subband, lh_subband, hh_subband],
             });
         }
@@ -394,16 +406,23 @@ fn encode_impl(
         component_resolution_packets.push(packets);
     }
 
-    let resolution_packets = lrcp_ordered_resolution_packets(component_resolution_packets)?;
+    let prepared_resolution_packets =
+        ordered_prepared_resolution_packets(component_resolution_packets, options)?;
+    let resolution_packets =
+        encode_prepared_resolution_packets(prepared_resolution_packets, accelerator)?;
 
     // Step 6: Form tile bitstream (T2)
     let mut resolution_packets = resolution_packets;
     let packetization_resolutions = public_packetization_resolutions(&resolution_packets);
+    let packet_descriptors =
+        packet_descriptors_for_order(resolution_packets.len(), 1, num_components)?;
     let packetization_job = J2kPacketizationEncodeJob {
         resolution_count: resolution_packets.len() as u32,
         num_layers: 1,
         num_components,
         code_block_count: count_code_blocks(&resolution_packets)?,
+        progression_order: public_packetization_progression_order(options.progression_order),
+        packet_descriptors: &packet_descriptors,
         resolutions: &packetization_resolutions,
     };
     let tile_data = accelerator
@@ -432,6 +451,8 @@ fn encode_impl(
         use_mct,
         guard_bits,
         block_coding_mode,
+        progression_order: options.progression_order,
+        write_tlm: options.write_tlm,
     };
 
     Ok(codestream_write::write_codestream(
@@ -534,9 +555,47 @@ fn count_code_blocks(resolution_packets: &[ResolutionPacket]) -> Result<u32, &'s
     u32::try_from(count).map_err(|_| "packetization code-block count exceeds u32")
 }
 
-fn lrcp_ordered_resolution_packets(
-    component_resolution_packets: Vec<Vec<ResolutionPacket>>,
-) -> Result<Vec<ResolutionPacket>, &'static str> {
+fn packet_descriptors_for_order(
+    packet_count: usize,
+    num_layers: u8,
+    num_components: u8,
+) -> Result<Vec<J2kPacketizationPacketDescriptor>, &'static str> {
+    if num_layers != 1 {
+        return Err("encode currently prepares one packet contribution layer");
+    }
+    let component_count = usize::from(num_components).max(1);
+    (0..packet_count)
+        .map(|packet_index| {
+            Ok(J2kPacketizationPacketDescriptor {
+                packet_index: u32::try_from(packet_index)
+                    .map_err(|_| "packet descriptor index exceeds u32")?,
+                state_index: u32::try_from(packet_index)
+                    .map_err(|_| "packet descriptor state index exceeds u32")?,
+                layer: 0,
+                resolution: u32::try_from(packet_index / component_count)
+                    .map_err(|_| "packet descriptor resolution exceeds u32")?,
+                component: u8::try_from(packet_index % component_count)
+                    .map_err(|_| "packet descriptor component exceeds u8")?,
+                precinct: 0,
+            })
+        })
+        .collect()
+}
+
+fn ordered_prepared_resolution_packets(
+    component_resolution_packets: Vec<Vec<PreparedResolutionPacket>>,
+    options: &EncodeOptions,
+) -> Result<Vec<PreparedResolutionPacket>, &'static str> {
+    match options.progression_order {
+        EncodeProgressionOrder::Lrcp | EncodeProgressionOrder::Rpcl => {
+            lrcp_ordered_prepared_resolution_packets(component_resolution_packets)
+        }
+    }
+}
+
+fn lrcp_ordered_prepared_resolution_packets(
+    component_resolution_packets: Vec<Vec<PreparedResolutionPacket>>,
+) -> Result<Vec<PreparedResolutionPacket>, &'static str> {
     let resolution_count = component_resolution_packets
         .first()
         .map_or(0usize, alloc::vec::Vec::len);
@@ -565,6 +624,15 @@ fn lrcp_ordered_resolution_packets(
     }
 
     Ok(resolution_packets)
+}
+
+fn public_packetization_progression_order(
+    progression_order: EncodeProgressionOrder,
+) -> crate::J2kPacketizationProgressionOrder {
+    match progression_order {
+        EncodeProgressionOrder::Lrcp => crate::J2kPacketizationProgressionOrder::Lrcp,
+        EncodeProgressionOrder::Rpcl => crate::J2kPacketizationProgressionOrder::Rpcl,
+    }
 }
 
 fn public_packetization_resolutions(
@@ -608,8 +676,26 @@ fn public_packetization_block_coding_mode(
     }
 }
 
-/// Encode a single subband into a SubbandPrecinct.
-fn encode_subband(
+struct PreparedEncodeCodeBlock {
+    coefficients: Vec<i32>,
+    width: u32,
+    height: u32,
+}
+
+struct PreparedEncodeSubband {
+    code_blocks: Vec<PreparedEncodeCodeBlock>,
+    num_cbs_x: u32,
+    num_cbs_y: u32,
+    sub_band_type: SubBandType,
+    total_bitplanes: u8,
+    block_coding_mode: BlockCodingMode,
+}
+
+struct PreparedResolutionPacket {
+    subbands: Vec<PreparedEncodeSubband>,
+}
+
+fn prepare_subband(
     coefficients: &[f32],
     width: u32,
     height: u32,
@@ -620,13 +706,15 @@ fn encode_subband(
     cb_width: u32,
     cb_height: u32,
     sub_band_type: SubBandType,
-    accelerator: &mut impl J2kEncodeStageAccelerator,
-) -> Result<SubbandPrecinct, &'static str> {
+) -> Result<PreparedEncodeSubband, &'static str> {
     if width == 0 || height == 0 {
-        return Ok(SubbandPrecinct {
+        return Ok(PreparedEncodeSubband {
             code_blocks: Vec::new(),
             num_cbs_x: 0,
             num_cbs_y: 0,
+            sub_band_type,
+            total_bitplanes: 0,
+            block_coding_mode,
         });
     }
 
@@ -660,35 +748,221 @@ fn encode_subband(
                 }
             }
 
-            let encoded = if block_coding_mode == BlockCodingMode::HighThroughput {
-                ht_block_encode::encode_code_block(&cb_coeffs, cbw, cbh, total_bitplanes)?
-            } else {
-                encode_tier1_code_block(
-                    &cb_coeffs,
-                    cbw,
-                    cbh,
-                    sub_band_type,
-                    total_bitplanes,
-                    accelerator,
-                )?
-            };
+            code_blocks.push(PreparedEncodeCodeBlock {
+                coefficients: cb_coeffs,
+                width: cbw,
+                height: cbh,
+            });
+        }
+    }
 
+    Ok(PreparedEncodeSubband {
+        code_blocks,
+        num_cbs_x,
+        num_cbs_y,
+        sub_band_type,
+        total_bitplanes,
+        block_coding_mode,
+    })
+}
+
+fn encode_prepared_resolution_packets(
+    prepared_packets: Vec<PreparedResolutionPacket>,
+    accelerator: &mut impl J2kEncodeStageAccelerator,
+) -> Result<Vec<ResolutionPacket>, &'static str> {
+    let subband_counts: Vec<_> = prepared_packets
+        .iter()
+        .map(|packet| packet.subbands.len())
+        .collect();
+    let prepared_subbands: Vec<_> = prepared_packets
+        .into_iter()
+        .flat_map(|packet| packet.subbands)
+        .collect();
+    let mut encoded_subbands =
+        encode_prepared_subbands(prepared_subbands, accelerator)?.into_iter();
+
+    subband_counts
+        .into_iter()
+        .map(|subband_count| {
+            let mut subbands = Vec::with_capacity(subband_count);
+            for _ in 0..subband_count {
+                subbands.push(
+                    encoded_subbands
+                        .next()
+                        .ok_or("encoded subband count mismatch")?,
+                );
+            }
+            Ok(ResolutionPacket { subbands })
+        })
+        .collect()
+}
+
+fn encode_prepared_subbands(
+    prepared_subbands: Vec<PreparedEncodeSubband>,
+    accelerator: &mut impl J2kEncodeStageAccelerator,
+) -> Result<Vec<SubbandPrecinct>, &'static str> {
+    let block_coding_mode = prepared_subbands
+        .iter()
+        .find(|subband| !subband.code_blocks.is_empty())
+        .map(|subband| subband.block_coding_mode);
+    let encoded_blocks = match block_coding_mode {
+        Some(BlockCodingMode::HighThroughput) => {
+            encode_all_ht_code_blocks(&prepared_subbands, accelerator)?
+        }
+        Some(BlockCodingMode::Classic) => {
+            encode_all_tier1_code_blocks(&prepared_subbands, accelerator)?
+        }
+        None => Vec::new(),
+    };
+
+    let mut encoded_iter = encoded_blocks.into_iter();
+    let mut precincts = Vec::with_capacity(prepared_subbands.len());
+    for subband in prepared_subbands {
+        let mut code_blocks = Vec::with_capacity(subband.code_blocks.len());
+        for _ in 0..subband.code_blocks.len() {
+            let encoded = encoded_iter
+                .next()
+                .ok_or("encoded code-block count mismatch")?;
             code_blocks.push(CodeBlockPacketData {
                 data: encoded.data,
                 num_coding_passes: encoded.num_coding_passes,
                 num_zero_bitplanes: encoded.num_zero_bitplanes,
                 previously_included: false,
                 l_block: 3,
-                block_coding_mode,
+                block_coding_mode: subband.block_coding_mode,
             });
         }
+        precincts.push(SubbandPrecinct {
+            code_blocks,
+            num_cbs_x: subband.num_cbs_x,
+            num_cbs_y: subband.num_cbs_y,
+        });
+    }
+    if encoded_iter.next().is_some() {
+        return Err("encoded code-block count mismatch");
     }
 
-    Ok(SubbandPrecinct {
-        code_blocks,
-        num_cbs_x,
-        num_cbs_y,
-    })
+    Ok(precincts)
+}
+
+fn encode_all_ht_code_blocks(
+    prepared_subbands: &[PreparedEncodeSubband],
+    accelerator: &mut impl J2kEncodeStageAccelerator,
+) -> Result<Vec<bitplane_encode::EncodedCodeBlock>, &'static str> {
+    let jobs: Vec<_> = prepared_subbands
+        .iter()
+        .flat_map(|subband| {
+            subband
+                .code_blocks
+                .iter()
+                .map(move |block| crate::J2kHtCodeBlockEncodeJob {
+                    coefficients: &block.coefficients,
+                    width: block.width,
+                    height: block.height,
+                    total_bitplanes: subband.total_bitplanes,
+                })
+        })
+        .collect();
+
+    if let Some(encoded) = accelerator.encode_ht_code_blocks(&jobs)? {
+        if encoded.len() != jobs.len() {
+            return Err("accelerated HT code-block batch length mismatch");
+        }
+        return Ok(encoded
+            .into_iter()
+            .map(ht_encoded_code_block_from_accelerator)
+            .collect());
+    }
+
+    jobs.iter()
+        .map(|job| {
+            encode_ht_code_block(
+                job.coefficients,
+                job.width,
+                job.height,
+                job.total_bitplanes,
+                accelerator,
+            )
+        })
+        .collect()
+}
+
+fn encode_all_tier1_code_blocks(
+    prepared_subbands: &[PreparedEncodeSubband],
+    accelerator: &mut impl J2kEncodeStageAccelerator,
+) -> Result<Vec<bitplane_encode::EncodedCodeBlock>, &'static str> {
+    let style = default_public_code_block_style();
+    let jobs: Vec<_> = prepared_subbands
+        .iter()
+        .flat_map(|subband| {
+            let public_sub_band_type = public_sub_band_type(subband.sub_band_type);
+            subband
+                .code_blocks
+                .iter()
+                .map(move |block| J2kTier1CodeBlockEncodeJob {
+                    coefficients: &block.coefficients,
+                    width: block.width,
+                    height: block.height,
+                    sub_band_type: public_sub_band_type,
+                    total_bitplanes: subband.total_bitplanes,
+                    style,
+                })
+        })
+        .collect();
+
+    if let Some(encoded) = accelerator.encode_tier1_code_blocks(&jobs)? {
+        if encoded.len() != jobs.len() {
+            return Err("accelerated classic code-block batch length mismatch");
+        }
+        return Ok(encoded
+            .into_iter()
+            .map(encoded_code_block_from_accelerator)
+            .collect());
+    }
+
+    let mut encoded = Vec::with_capacity(jobs.len());
+    for subband in prepared_subbands {
+        for block in &subband.code_blocks {
+            encoded.push(encode_tier1_code_block(
+                &block.coefficients,
+                block.width,
+                block.height,
+                subband.sub_band_type,
+                subband.total_bitplanes,
+                accelerator,
+            )?);
+        }
+    }
+    Ok(encoded)
+}
+
+fn encode_ht_code_block(
+    coefficients: &[i32],
+    width: u32,
+    height: u32,
+    total_bitplanes: u8,
+    accelerator: &mut impl J2kEncodeStageAccelerator,
+) -> Result<bitplane_encode::EncodedCodeBlock, &'static str> {
+    if let Some(encoded) = accelerator.encode_ht_code_block(crate::J2kHtCodeBlockEncodeJob {
+        coefficients,
+        width,
+        height,
+        total_bitplanes,
+    })? {
+        return Ok(ht_encoded_code_block_from_accelerator(encoded));
+    }
+
+    ht_block_encode::encode_code_block(coefficients, width, height, total_bitplanes)
+}
+
+fn ht_encoded_code_block_from_accelerator(
+    encoded: crate::EncodedHtJ2kCodeBlock,
+) -> bitplane_encode::EncodedCodeBlock {
+    bitplane_encode::EncodedCodeBlock {
+        data: encoded.data,
+        num_coding_passes: encoded.num_coding_passes,
+        num_zero_bitplanes: encoded.num_zero_bitplanes,
+    }
 }
 
 fn encode_tier1_code_block(
@@ -891,6 +1165,8 @@ mod tests {
             forward_rct: usize,
             forward_dwt53: usize,
             tier1_code_blocks: usize,
+            tier1_code_block_batches: usize,
+            tier1_batched_jobs: usize,
             packetization: usize,
             packetization_resolution_count: u32,
             packetization_code_block_count: u32,
@@ -921,6 +1197,16 @@ mod tests {
             ) -> core::result::Result<Option<crate::EncodedJ2kCodeBlock>, &'static str>
             {
                 self.tier1_code_blocks += 1;
+                Ok(None)
+            }
+
+            fn encode_tier1_code_blocks(
+                &mut self,
+                jobs: &[crate::J2kTier1CodeBlockEncodeJob<'_>],
+            ) -> core::result::Result<Option<Vec<crate::EncodedJ2kCodeBlock>>, &'static str>
+            {
+                self.tier1_code_block_batches += 1;
+                self.tier1_batched_jobs += jobs.len();
                 Ok(None)
             }
 
@@ -956,7 +1242,11 @@ mod tests {
         assert!(codestream.starts_with(&[0xFF, 0x4F]));
         assert_eq!(accelerator.forward_rct, 1);
         assert_eq!(accelerator.forward_dwt53, 3);
-        assert!(accelerator.tier1_code_blocks > 0);
+        assert!(accelerator.tier1_code_block_batches > 0);
+        assert_eq!(
+            accelerator.tier1_code_blocks,
+            accelerator.tier1_batched_jobs
+        );
         assert_eq!(accelerator.packetization, 1);
         assert_eq!(accelerator.packetization_resolution_count, 6);
         assert_eq!(

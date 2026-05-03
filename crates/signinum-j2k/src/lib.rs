@@ -24,15 +24,17 @@ pub use view::{J2kCodec, J2kDecoder, J2kView};
 
 pub use encode::{
     encode_j2k_lossless, encode_j2k_lossless_with_accelerator, j2k_lossless_decomposition_levels,
-    EncodeBackendPreference, EncodedJ2k, J2kLosslessEncodeOptions, J2kLosslessSamples,
+    j2k_lossless_decomposition_levels_for_progression, EncodeBackendPreference, EncodedJ2k,
+    J2kBlockCodingMode, J2kEncodeValidation, J2kLosslessEncodeOptions, J2kLosslessSamples,
     J2kProgressionOrder, ReversibleTransform,
 };
 
 #[doc(hidden)]
 pub use signinum_j2k_native::{
-    EncodedJ2kCodeBlock, J2kEncodeDispatchReport, J2kEncodeStageAccelerator, J2kForwardDwt53Job,
-    J2kForwardDwt53Level, J2kForwardDwt53Output, J2kForwardRctJob, J2kPacketizationBlockCodingMode,
-    J2kPacketizationCodeBlock, J2kPacketizationEncodeJob, J2kPacketizationResolution,
+    EncodedHtJ2kCodeBlock, EncodedJ2kCodeBlock, J2kEncodeDispatchReport, J2kEncodeStageAccelerator,
+    J2kForwardDwt53Job, J2kForwardDwt53Level, J2kForwardDwt53Output, J2kForwardRctJob,
+    J2kHtCodeBlockEncodeJob, J2kPacketizationBlockCodingMode, J2kPacketizationCodeBlock,
+    J2kPacketizationEncodeJob, J2kPacketizationProgressionOrder, J2kPacketizationResolution,
     J2kPacketizationSubband, J2kTier1CodeBlockEncodeJob,
 };
 

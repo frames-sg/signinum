@@ -370,6 +370,8 @@ struct MetalRuntime {
     pack_420_windowed_rgba_pipeline: ComputePipelineState,
     fast420_decode_pipeline: ComputePipelineState,
     fast420_batch_decode_pipeline: ComputePipelineState,
+    fast420_batch_coeffs_decode_pipeline: ComputePipelineState,
+    fast420_batch_idct_deposit_pipeline: ComputePipelineState,
     fast420_scaled_region_batch_decode_pipeline: ComputePipelineState,
     fast422_decode_pipeline: ComputePipelineState,
     fast422_batch_decode_pipeline: ComputePipelineState,
@@ -461,6 +463,14 @@ impl MetalRuntime {
             library.get_function("jpeg_decode_fast420_batch", None)?;
         let fast420_batch_decode_pipeline =
             device.new_compute_pipeline_state_with_function(&fast420_batch_decode_function)?;
+        let fast420_batch_coeffs_decode_function =
+            library.get_function("jpeg_decode_fast420_batch_coeffs", None)?;
+        let fast420_batch_coeffs_decode_pipeline = device
+            .new_compute_pipeline_state_with_function(&fast420_batch_coeffs_decode_function)?;
+        let fast420_batch_idct_deposit_function =
+            library.get_function("jpeg_idct_deposit_fast420_batch", None)?;
+        let fast420_batch_idct_deposit_pipeline = device
+            .new_compute_pipeline_state_with_function(&fast420_batch_idct_deposit_function)?;
         let fast420_scaled_region_batch_decode_function =
             library.get_function("jpeg_decode_fast420_scaled_region_batch", None)?;
         let fast420_scaled_region_batch_decode_pipeline = device
@@ -548,6 +558,8 @@ impl MetalRuntime {
             pack_420_windowed_rgba_pipeline,
             fast420_decode_pipeline,
             fast420_batch_decode_pipeline,
+            fast420_batch_coeffs_decode_pipeline,
+            fast420_batch_idct_deposit_pipeline,
             fast420_scaled_region_batch_decode_pipeline,
             fast422_decode_pipeline,
             fast422_batch_decode_pipeline,
@@ -1038,6 +1050,11 @@ fn dispatch_3d_pipeline(
             depth: 1,
         },
     );
+}
+
+#[cfg(target_os = "macos")]
+fn packed_pair_extent(value: u32) -> u32 {
+    value.div_ceil(2).max(1)
 }
 
 #[cfg(target_os = "macos")]
@@ -4085,6 +4102,22 @@ fn checked_u32(value: usize, label: &str) -> Result<u32, Error> {
 }
 
 #[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Fast420BatchDecodeMode {
+    Fused,
+    SplitCoeffIdct,
+}
+
+#[cfg(target_os = "macos")]
+fn fast420_batch_decode_mode() -> Fast420BatchDecodeMode {
+    if split_fast420_batch_enabled() {
+        Fast420BatchDecodeMode::SplitCoeffIdct
+    } else {
+        Fast420BatchDecodeMode::Fused
+    }
+}
+
+#[cfg(target_os = "macos")]
 struct BatchEntropyBuffers {
     payload: Buffer,
     offsets: Buffer,
@@ -4323,14 +4356,26 @@ fn try_decode_fast420_full_rgb_batch_to_surfaces(
     requests: &[batch::QueuedRequest],
     packets: &[BatchedFastPacket<'_>],
 ) -> Result<Option<Vec<Result<Surface, Error>>>, Error> {
+    try_decode_fast420_full_rgb_batch_to_surfaces_with_mode(
+        runtime,
+        requests,
+        packets,
+        fast420_batch_decode_mode(),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn try_decode_fast420_full_rgb_batch_to_surfaces_with_mode(
+    runtime: &MetalRuntime,
+    requests: &[batch::QueuedRequest],
+    packets: &[BatchedFastPacket<'_>],
+    decode_mode: Fast420BatchDecodeMode,
+) -> Result<Option<Vec<Result<Surface, Error>>>, Error> {
     if requests.len() < 2
         || requests
             .iter()
             .any(|request| request.op != batch::BatchOp::Full || request.fmt != PixelFormat::Rgb8)
     {
-        return Ok(None);
-    }
-    if split_fast420_batch_enabled() {
         return Ok(None);
     }
 
@@ -4377,6 +4422,19 @@ fn try_decode_fast420_full_rgb_batch_to_surfaces(
     let chroma_len = chroma_width as usize * chroma_height as usize;
     let out_stride = width as usize * PixelFormat::Rgb8.bytes_per_pixel();
     let out_tile_len = out_stride * height as usize;
+    let total_mcus = first.mcus_per_row as usize * first.mcu_rows as usize;
+    let blocks_per_tile = total_mcus
+        .checked_mul(6)
+        .ok_or_else(|| Error::MetalKernel {
+            message: "JPEG Metal fast420 batch block count overflowed".to_string(),
+        })?;
+    let total_blocks =
+        blocks_per_tile
+            .checked_mul(tile_count)
+            .ok_or_else(|| Error::MetalKernel {
+                message: "JPEG Metal fast420 batch total block count overflowed".to_string(),
+            })?;
+    let _total_blocks_u32 = checked_u32(total_blocks, "fast420 batch block count")?;
 
     let params = JpegFast420BatchParams {
         width,
@@ -4456,72 +4514,184 @@ fn try_decode_fast420_full_rgb_batch_to_surfaces(
     ];
 
     let command_buffer = runtime.queue.new_command_buffer();
-    let decoder_encoder = command_buffer.new_compute_command_encoder();
-    decoder_encoder.set_compute_pipeline_state(&runtime.fast420_batch_decode_pipeline);
-    decoder_encoder.set_buffer(0, Some(&entropy_buffer), 0);
-    decoder_encoder.set_buffer(1, Some(&y_plane), 0);
-    decoder_encoder.set_buffer(2, Some(&cb_plane), 0);
-    decoder_encoder.set_buffer(3, Some(&cr_plane), 0);
-    decoder_encoder.set_bytes(
-        4,
-        size_of::<JpegFast420BatchParams>() as u64,
-        (&raw const params).cast(),
-    );
-    decoder_encoder.set_bytes(
-        5,
-        size_of::<[u16; 64]>() as u64,
-        first.y_quant.as_ptr().cast(),
-    );
-    decoder_encoder.set_bytes(
-        6,
-        size_of::<[u16; 64]>() as u64,
-        first.cb_quant.as_ptr().cast(),
-    );
-    decoder_encoder.set_bytes(
-        7,
-        size_of::<[u16; 64]>() as u64,
-        first.cr_quant.as_ptr().cast(),
-    );
-    decoder_encoder.set_bytes(
-        8,
-        size_of::<PreparedHuffmanHost>() as u64,
-        (&raw const dc_tables[0]).cast(),
-    );
-    decoder_encoder.set_bytes(
-        9,
-        size_of::<PreparedHuffmanHost>() as u64,
-        (&raw const ac_tables[0]).cast(),
-    );
-    decoder_encoder.set_bytes(
-        10,
-        size_of::<PreparedHuffmanHost>() as u64,
-        (&raw const dc_tables[1]).cast(),
-    );
-    decoder_encoder.set_bytes(
-        11,
-        size_of::<PreparedHuffmanHost>() as u64,
-        (&raw const ac_tables[1]).cast(),
-    );
-    decoder_encoder.set_bytes(
-        12,
-        size_of::<PreparedHuffmanHost>() as u64,
-        (&raw const dc_tables[2]).cast(),
-    );
-    decoder_encoder.set_bytes(
-        13,
-        size_of::<PreparedHuffmanHost>() as u64,
-        (&raw const ac_tables[2]).cast(),
-    );
-    decoder_encoder.set_buffer(14, Some(&entropy_offsets_buffer), 0);
-    decoder_encoder.set_buffer(15, Some(&entropy_lens_buffer), 0);
-    decoder_encoder.set_buffer(16, Some(&status_buffer), 0);
-    decoder_encoder.set_buffer(17, Some(&entropy_checkpoints_buffer), 0);
-    dispatch_1d_pipeline(
-        decoder_encoder,
-        &runtime.fast420_batch_decode_pipeline,
-        total_decode_threads,
-    );
-    decoder_encoder.end_encoding();
+    let mut _split_scratch: Option<(Buffer, Buffer)> = None;
+    match decode_mode {
+        Fast420BatchDecodeMode::Fused => {
+            let decoder_encoder = command_buffer.new_compute_command_encoder();
+            decoder_encoder.set_compute_pipeline_state(&runtime.fast420_batch_decode_pipeline);
+            decoder_encoder.set_buffer(0, Some(&entropy_buffer), 0);
+            decoder_encoder.set_buffer(1, Some(&y_plane), 0);
+            decoder_encoder.set_buffer(2, Some(&cb_plane), 0);
+            decoder_encoder.set_buffer(3, Some(&cr_plane), 0);
+            decoder_encoder.set_bytes(
+                4,
+                size_of::<JpegFast420BatchParams>() as u64,
+                (&raw const params).cast(),
+            );
+            decoder_encoder.set_bytes(
+                5,
+                size_of::<[u16; 64]>() as u64,
+                first.y_quant.as_ptr().cast(),
+            );
+            decoder_encoder.set_bytes(
+                6,
+                size_of::<[u16; 64]>() as u64,
+                first.cb_quant.as_ptr().cast(),
+            );
+            decoder_encoder.set_bytes(
+                7,
+                size_of::<[u16; 64]>() as u64,
+                first.cr_quant.as_ptr().cast(),
+            );
+            decoder_encoder.set_bytes(
+                8,
+                size_of::<PreparedHuffmanHost>() as u64,
+                (&raw const dc_tables[0]).cast(),
+            );
+            decoder_encoder.set_bytes(
+                9,
+                size_of::<PreparedHuffmanHost>() as u64,
+                (&raw const ac_tables[0]).cast(),
+            );
+            decoder_encoder.set_bytes(
+                10,
+                size_of::<PreparedHuffmanHost>() as u64,
+                (&raw const dc_tables[1]).cast(),
+            );
+            decoder_encoder.set_bytes(
+                11,
+                size_of::<PreparedHuffmanHost>() as u64,
+                (&raw const ac_tables[1]).cast(),
+            );
+            decoder_encoder.set_bytes(
+                12,
+                size_of::<PreparedHuffmanHost>() as u64,
+                (&raw const dc_tables[2]).cast(),
+            );
+            decoder_encoder.set_bytes(
+                13,
+                size_of::<PreparedHuffmanHost>() as u64,
+                (&raw const ac_tables[2]).cast(),
+            );
+            decoder_encoder.set_buffer(14, Some(&entropy_offsets_buffer), 0);
+            decoder_encoder.set_buffer(15, Some(&entropy_lens_buffer), 0);
+            decoder_encoder.set_buffer(16, Some(&status_buffer), 0);
+            decoder_encoder.set_buffer(17, Some(&entropy_checkpoints_buffer), 0);
+            dispatch_1d_pipeline(
+                decoder_encoder,
+                &runtime.fast420_batch_decode_pipeline,
+                total_decode_threads,
+            );
+            decoder_encoder.end_encoding();
+        }
+        Fast420BatchDecodeMode::SplitCoeffIdct => {
+            let coeff_bytes = total_blocks
+                .checked_mul(64)
+                .and_then(|bytes| bytes.checked_mul(size_of::<i16>()))
+                .ok_or_else(|| Error::MetalKernel {
+                    message: "JPEG Metal fast420 batch coefficient scratch overflowed".to_string(),
+                })?;
+            let idct_component_depth =
+                tile_count_u32
+                    .checked_mul(6)
+                    .ok_or_else(|| Error::MetalKernel {
+                        message: "JPEG Metal fast420 batch IDCT dispatch overflowed".to_string(),
+                    })?;
+            let coeff_blocks = runtime
+                .device
+                .new_buffer(coeff_bytes as u64, MTLResourceOptions::StorageModePrivate);
+            let dc_only_flags = runtime
+                .device
+                .new_buffer(total_blocks as u64, MTLResourceOptions::StorageModePrivate);
+
+            let coeff_encoder = command_buffer.new_compute_command_encoder();
+            coeff_encoder.set_compute_pipeline_state(&runtime.fast420_batch_coeffs_decode_pipeline);
+            coeff_encoder.set_buffer(0, Some(&entropy_buffer), 0);
+            coeff_encoder.set_buffer(1, Some(&coeff_blocks), 0);
+            coeff_encoder.set_buffer(2, Some(&dc_only_flags), 0);
+            coeff_encoder.set_bytes(
+                4,
+                size_of::<JpegFast420BatchParams>() as u64,
+                (&raw const params).cast(),
+            );
+            coeff_encoder.set_bytes(
+                5,
+                size_of::<[u16; 64]>() as u64,
+                first.y_quant.as_ptr().cast(),
+            );
+            coeff_encoder.set_bytes(
+                6,
+                size_of::<[u16; 64]>() as u64,
+                first.cb_quant.as_ptr().cast(),
+            );
+            coeff_encoder.set_bytes(
+                7,
+                size_of::<[u16; 64]>() as u64,
+                first.cr_quant.as_ptr().cast(),
+            );
+            coeff_encoder.set_bytes(
+                8,
+                size_of::<PreparedHuffmanHost>() as u64,
+                (&raw const dc_tables[0]).cast(),
+            );
+            coeff_encoder.set_bytes(
+                9,
+                size_of::<PreparedHuffmanHost>() as u64,
+                (&raw const ac_tables[0]).cast(),
+            );
+            coeff_encoder.set_bytes(
+                10,
+                size_of::<PreparedHuffmanHost>() as u64,
+                (&raw const dc_tables[1]).cast(),
+            );
+            coeff_encoder.set_bytes(
+                11,
+                size_of::<PreparedHuffmanHost>() as u64,
+                (&raw const ac_tables[1]).cast(),
+            );
+            coeff_encoder.set_bytes(
+                12,
+                size_of::<PreparedHuffmanHost>() as u64,
+                (&raw const dc_tables[2]).cast(),
+            );
+            coeff_encoder.set_bytes(
+                13,
+                size_of::<PreparedHuffmanHost>() as u64,
+                (&raw const ac_tables[2]).cast(),
+            );
+            coeff_encoder.set_buffer(14, Some(&entropy_offsets_buffer), 0);
+            coeff_encoder.set_buffer(15, Some(&entropy_lens_buffer), 0);
+            coeff_encoder.set_buffer(16, Some(&status_buffer), 0);
+            coeff_encoder.set_buffer(17, Some(&entropy_checkpoints_buffer), 0);
+            dispatch_1d_pipeline(
+                coeff_encoder,
+                &runtime.fast420_batch_coeffs_decode_pipeline,
+                total_decode_threads,
+            );
+            coeff_encoder.end_encoding();
+
+            let idct_encoder = command_buffer.new_compute_command_encoder();
+            idct_encoder.set_compute_pipeline_state(&runtime.fast420_batch_idct_deposit_pipeline);
+            idct_encoder.set_buffer(0, Some(&coeff_blocks), 0);
+            idct_encoder.set_buffer(1, Some(&dc_only_flags), 0);
+            idct_encoder.set_buffer(2, Some(&y_plane), 0);
+            idct_encoder.set_buffer(3, Some(&cb_plane), 0);
+            idct_encoder.set_buffer(4, Some(&cr_plane), 0);
+            idct_encoder.set_bytes(
+                5,
+                size_of::<JpegFast420BatchParams>() as u64,
+                (&raw const params).cast(),
+            );
+            dispatch_3d_pipeline(
+                idct_encoder,
+                &runtime.fast420_batch_idct_deposit_pipeline,
+                (first.mcus_per_row, first.mcu_rows, idct_component_depth),
+            );
+            idct_encoder.end_encoding();
+
+            _split_scratch = Some((coeff_blocks, dc_only_flags));
+        }
+    }
 
     let pack_encoder = command_buffer.new_compute_command_encoder();
     pack_encoder.set_compute_pipeline_state(&runtime.pack_420_rgb_batch_pipeline);
@@ -4537,7 +4707,11 @@ fn try_decode_fast420_full_rgb_batch_to_surfaces(
     dispatch_3d_pipeline(
         pack_encoder,
         &runtime.pack_420_rgb_batch_pipeline,
-        (width, height, tile_count_u32),
+        (
+            packed_pair_extent(width),
+            packed_pair_extent(height),
+            tile_count_u32,
+        ),
     );
     pack_encoder.end_encoding();
 
@@ -4814,7 +4988,7 @@ fn try_decode_fast422_full_rgb_batch_to_surfaces(
     dispatch_3d_pipeline(
         pack_encoder,
         &runtime.pack_422_rgb_batch_pipeline,
-        (width, height, tile_count_u32),
+        (packed_pair_extent(width), height, tile_count_u32),
     );
     pack_encoder.end_encoding();
 
@@ -8033,6 +8207,26 @@ mod tests {
     }
 
     #[test]
+    fn shader_kernels_use_incremental_mx_my() {
+        assert!(
+            SHADER_SOURCE.contains("inline void init_mcu_cursor("),
+            "fast decode kernels should seed mx/my via init_mcu_cursor instead of dividing per MCU"
+        );
+        assert!(
+            SHADER_SOURCE.contains("inline void advance_mcu_cursor("),
+            "fast decode kernels should carry mx/my via advance_mcu_cursor instead of dividing per MCU"
+        );
+        assert!(
+            !SHADER_SOURCE.contains("mcu_index / params.mcus_per_row"),
+            "no fast kernel should still divide mcu_index by mcus_per_row inside the MCU loop"
+        );
+        assert!(
+            !SHADER_SOURCE.contains("mcu_index % params.mcus_per_row"),
+            "no fast kernel should still modulo mcu_index by mcus_per_row inside the MCU loop"
+        );
+    }
+
+    #[test]
     fn split_fast420_batch_env_requires_explicit_one() {
         assert!(split_fast420_batch_value_enabled(Some(
             std::ffi::OsStr::new("1")
@@ -8219,7 +8413,9 @@ mod tests {
         }
 
         let mut jpeg = Vec::new();
-        jpeg_encoder::Encoder::new(&mut jpeg, 90)
+        let mut encoder = jpeg_encoder::Encoder::new(&mut jpeg, 90);
+        encoder.set_sampling_factor(jpeg_encoder::SamplingFactor::F_2_2);
+        encoder
             .encode(&rgb, dim, dim, jpeg_encoder::ColorType::Rgb)
             .expect("encode generated JPEG");
         jpeg
@@ -8387,6 +8583,58 @@ mod tests {
                 panic!("expected Metal storage");
             };
             assert_eq!(*offset, index * expected.len());
+        }
+    }
+
+    #[test]
+    fn fast420_split_full_batch_decode_matches_cpu_bytes() {
+        let jpeg = generated_rgb_jpeg(32);
+        let input = Arc::<[u8]>::from(jpeg.into_boxed_slice());
+        let packet =
+            signinum_jpeg::adapter::build_metal_fast420_packet(input.as_ref()).expect("packet");
+        let requests = vec![
+            batch::QueuedRequest::new(
+                Arc::clone(&input),
+                PixelFormat::Rgb8,
+                BackendRequest::Metal,
+                batch::BatchOp::Full,
+                None,
+                None,
+                Some(packet.clone()),
+            ),
+            batch::QueuedRequest::new(
+                Arc::clone(&input),
+                PixelFormat::Rgb8,
+                BackendRequest::Metal,
+                batch::BatchOp::Full,
+                None,
+                None,
+                Some(packet),
+            ),
+        ];
+        let packets = batched_fast_packets(&requests)
+            .expect("packet lookup")
+            .expect("packets");
+        let decoder = CpuDecoder::new(input.as_ref()).expect("decoder");
+        let (expected, _) = decoder.decode(PixelFormat::Rgb8).expect("cpu full decode");
+
+        let results = with_runtime(|runtime| {
+            try_decode_fast420_full_rgb_batch_to_surfaces_with_mode(
+                runtime,
+                &requests,
+                &packets,
+                Fast420BatchDecodeMode::SplitCoeffIdct,
+            )
+        })
+        .expect("batch result")
+        .expect("split fast420 full batch should use Metal batch path");
+
+        assert_eq!(results.len(), 2);
+        for result in results {
+            let surface = result.expect("surface");
+            assert_eq!(surface.dimensions, (32, 32));
+            assert_eq!(surface.fmt, PixelFormat::Rgb8);
+            assert_eq!(surface.as_bytes(), expected.as_slice());
         }
     }
 

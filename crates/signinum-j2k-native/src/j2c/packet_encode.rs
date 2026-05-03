@@ -146,8 +146,13 @@ pub(crate) fn form_packet(resolution: &mut ResolutionPacket) -> Vec<u8> {
         }
     }
 
-    // Assemble: header (byte-aligned) + body
+    // Assemble: header (byte-aligned) + body. Packet headers use JPEG 2000
+    // bit stuffing; if the final header byte is 0xff, the following byte must
+    // carry the stuffed zero bit before any packet body bytes.
     let mut packet = header_writer.finish();
+    if packet.last().copied() == Some(0xff) {
+        packet.push(0x00);
+    }
     packet.extend_from_slice(&body);
     packet
 }
@@ -250,6 +255,7 @@ pub(crate) fn form_tile_bitstream(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::j2c::tag_tree::{TagNode, TagTree};
     use crate::reader::BitReader;
 
     fn decode_num_ht_coding_passes_for_test(data: &[u8]) -> Option<u8> {
@@ -279,6 +285,10 @@ mod tests {
 
     fn decode_num_coding_passes_for_test(data: &[u8]) -> Option<u8> {
         let mut reader = BitReader::new(data);
+        decode_num_coding_passes_from_reader_for_test(&mut reader)
+    }
+
+    fn decode_num_coding_passes_from_reader_for_test(reader: &mut BitReader<'_>) -> Option<u8> {
         let passes = if reader.peak_bits_with_stuffing(9) == Some(0x1ff) {
             reader.read_bits_with_stuffing(9)?;
             reader.read_bits_with_stuffing(7)? + 37
@@ -346,6 +356,153 @@ mod tests {
 
         let packet = form_packet(&mut resolution);
         assert!(packet.len() >= 3);
+    }
+
+    #[test]
+    fn packet_header_round_trips_varied_8x8_codeblock_lengths() {
+        let zero_bitplanes = [
+            2, 2, 2, 1, 1, 1, 1, 1, 2, 2, 2, 1, 1, 1, 1, 1, 1, 2, 3, 2, 1, 1, 1, 1, 2, 3, 2, 2, 1,
+            1, 1, 1, 2, 3, 2, 2, 1, 1, 1, 1, 2, 2, 2, 3, 1, 1, 1, 1, 2, 2, 2, 2, 2, 1, 1, 1, 1, 2,
+            2, 2, 2, 1, 1, 1,
+        ];
+        let lengths = [
+            1901, 2062, 1895, 2329, 2860, 2842, 2852, 2836, 2174, 2121, 1878, 2197, 2877, 2870,
+            2854, 2862, 2097, 2143, 1906, 2059, 2724, 2879, 2860, 2847, 1928, 1967, 2105, 2318,
+            2605, 2911, 2892, 2860, 1998, 1995, 2073, 2075, 2339, 2935, 2896, 2897, 1877, 1938,
+            1841, 2000, 2271, 2877, 2826, 2828, 2098, 1899, 1953, 2061, 2135, 2886, 2869, 2909,
+            2168, 1921, 1966, 2048, 2159, 2792, 2853, 2815,
+        ];
+        let mut resolution = ResolutionPacket {
+            subbands: vec![SubbandPrecinct {
+                code_blocks: zero_bitplanes
+                    .iter()
+                    .copied()
+                    .zip(lengths.iter().copied())
+                    .map(|(num_zero_bitplanes, len)| CodeBlockPacketData {
+                        data: vec![0; len],
+                        num_coding_passes: 1 + 3 * (8 - num_zero_bitplanes) - 2,
+                        num_zero_bitplanes,
+                        previously_included: false,
+                        l_block: 3,
+                        block_coding_mode: BlockCodingMode::Classic,
+                    })
+                    .collect(),
+                num_cbs_x: 8,
+                num_cbs_y: 8,
+            }],
+        };
+
+        let packet = form_packet(&mut resolution);
+        let body_len: usize = lengths.iter().sum();
+        let header_len = packet.len() - body_len;
+        let mut reader = BitReader::new(&packet[..header_len]);
+        assert_eq!(reader.read_bits_with_stuffing(1), Some(1));
+
+        let mut inclusion_nodes = Vec::<TagNode>::new();
+        let mut inclusion_tree = TagTree::new(8, 8, &mut inclusion_nodes);
+        let mut zbp_nodes = Vec::<TagNode>::new();
+        let mut zbp_tree = TagTree::new(8, 8, &mut zbp_nodes);
+
+        for (idx, (&expected_zbp, &expected_len)) in
+            zero_bitplanes.iter().zip(lengths.iter()).enumerate()
+        {
+            let x = idx as u32 % 8;
+            let y = idx as u32 / 8;
+            let included = inclusion_tree
+                .read(x, y, &mut reader, 1, &mut inclusion_nodes)
+                .expect("inclusion tag")
+                == 0;
+            assert!(included, "inclusion at index {idx}");
+
+            let actual_zbp = zbp_tree
+                .read(x, y, &mut reader, u32::MAX, &mut zbp_nodes)
+                .expect("zero bitplane tag");
+            assert_eq!(actual_zbp, u32::from(expected_zbp), "zbp at index {idx}");
+
+            let passes = decode_num_coding_passes_from_reader_for_test(&mut reader)
+                .expect("number of coding passes");
+            let mut l_block = 3u32;
+            while reader.read_bits_with_stuffing(1).expect("lblock increment") == 1 {
+                l_block += 1;
+            }
+            let length_bits = l_block + u32::from(passes).ilog2();
+            let actual_len = reader
+                .read_bits_with_stuffing(length_bits as u8)
+                .expect("code-block length");
+            assert_eq!(actual_len, expected_len as u32, "length at index {idx}");
+        }
+    }
+
+    #[test]
+    fn packet_header_trailing_ff_stuffs_zero_before_body() {
+        for len in 1..4096 {
+            let mut resolution = ResolutionPacket {
+                subbands: vec![SubbandPrecinct {
+                    code_blocks: vec![CodeBlockPacketData {
+                        data: vec![0x80; len],
+                        num_coding_passes: 1,
+                        num_zero_bitplanes: 0,
+                        previously_included: false,
+                        l_block: 3,
+                        block_coding_mode: BlockCodingMode::Classic,
+                    }],
+                    num_cbs_x: 1,
+                    num_cbs_y: 1,
+                }],
+            };
+
+            let packet = form_packet(&mut resolution);
+            let header_len = packet.len() - len;
+            let has_boundary_ff = packet[header_len - 1] == 0xff
+                || (header_len >= 2
+                    && packet[header_len - 2] == 0xff
+                    && packet[header_len - 1] == 0x00);
+
+            if !has_boundary_ff {
+                continue;
+            }
+
+            let mut reader = BitReader::new(&packet);
+            assert_eq!(reader.read_bits_with_stuffing(1), Some(1));
+
+            let mut inclusion_nodes = Vec::<TagNode>::new();
+            let mut inclusion_tree = TagTree::new(1, 1, &mut inclusion_nodes);
+            let included = inclusion_tree
+                .read(0, 0, &mut reader, 1, &mut inclusion_nodes)
+                .expect("inclusion tag")
+                == 0;
+            assert!(included);
+
+            let mut zbp_nodes = Vec::<TagNode>::new();
+            let mut zbp_tree = TagTree::new(1, 1, &mut zbp_nodes);
+            assert_eq!(
+                zbp_tree
+                    .read(0, 0, &mut reader, u32::MAX, &mut zbp_nodes)
+                    .expect("zero bitplane tag"),
+                0
+            );
+
+            let passes = decode_num_coding_passes_from_reader_for_test(&mut reader)
+                .expect("number of coding passes");
+            assert_eq!(passes, 1);
+
+            let mut l_block = 3u32;
+            while reader.read_bits_with_stuffing(1).expect("lblock increment") == 1 {
+                l_block += 1;
+            }
+            let actual_len = reader
+                .read_bits_with_stuffing(l_block as u8)
+                .expect("code-block length");
+            assert_eq!(actual_len, len as u32);
+
+            reader.align();
+            let expected_body = vec![0x80; len];
+            assert_eq!(reader.offset(), header_len);
+            assert_eq!(reader.read_bytes(len), Some(expected_body.as_slice()));
+            return;
+        }
+
+        panic!("did not find a packet header ending in 0xff");
     }
 
     #[test]

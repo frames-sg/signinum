@@ -168,6 +168,8 @@ impl TagTreeEncoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::j2c::tag_tree::{TagNode, TagTree};
+    use crate::reader::BitReader;
 
     #[test]
     fn test_single_value() {
@@ -203,5 +205,40 @@ mod tests {
         assert_eq!(tree.num_levels, 3);
         // 16 + 4 + 1 = 21 nodes
         assert_eq!(tree.nodes.len(), 21);
+    }
+
+    #[test]
+    fn varied_8x8_values_round_trip_against_decoder_tag_tree() {
+        let values = [
+            2, 2, 2, 1, 1, 1, 1, 1, 2, 2, 2, 1, 1, 1, 1, 1, 1, 2, 3, 2, 1, 1, 1, 1, 2, 3, 2, 2, 1,
+            1, 1, 1, 2, 3, 2, 2, 1, 1, 1, 1, 2, 2, 2, 3, 1, 1, 1, 1, 2, 2, 2, 2, 2, 1, 1, 1, 1, 2,
+            2, 2, 2, 1, 1, 1,
+        ];
+        let mut encoder = TagTreeEncoder::new(8, 8);
+        for (idx, value) in values.iter().copied().enumerate() {
+            encoder.set_value(idx as u32 % 8, idx as u32 / 8, value);
+        }
+
+        let mut writer = BitWriter::new();
+        for (idx, value) in values.iter().copied().enumerate() {
+            encoder.encode(idx as u32 % 8, idx as u32 / 8, value + 1, &mut writer);
+        }
+        let bytes = writer.finish();
+
+        let mut nodes = Vec::<TagNode>::new();
+        let mut decoder = TagTree::new(8, 8, &mut nodes);
+        let mut reader = BitReader::new(&bytes);
+        for (idx, expected) in values.iter().copied().enumerate() {
+            let actual = decoder
+                .read(
+                    idx as u32 % 8,
+                    idx as u32 / 8,
+                    &mut reader,
+                    u32::MAX,
+                    &mut nodes,
+                )
+                .expect("tag tree decode");
+            assert_eq!(actual, expected, "index {idx}");
+        }
     }
 }

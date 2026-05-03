@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::path::PathBuf;
+
 use signinum_core::{BackendKind, CodecError};
 use signinum_j2k::{
     encode_j2k_lossless, encode_j2k_lossless_with_accelerator, EncodeBackendPreference,
@@ -119,6 +121,99 @@ fn cpu_lossless_round_trips_rgb8_constant_gray_512() {
 
     let decoded = decode_native(&encoded.codestream);
     assert_eq!(decoded.data, pixels);
+}
+
+#[test]
+fn cpu_lossless_round_trips_rgb8_low_variance_slide_like_512() {
+    let mut pixels = Vec::with_capacity(512 * 512 * 3);
+    for y in 0..512u32 {
+        for x in 0..512u32 {
+            let base = 240u8.wrapping_add(((x / 19 + y / 23 + x * y / 4096) & 7) as u8);
+            pixels.push(base);
+            pixels.push(base.saturating_sub(2));
+            pixels.push(base.saturating_add(2));
+        }
+    }
+    let samples = J2kLosslessSamples::new(&pixels, 512, 512, 3, 8, false).unwrap();
+
+    let encoded = encode_j2k_lossless(
+        samples,
+        &J2kLosslessEncodeOptions {
+            backend: EncodeBackendPreference::CpuOnly,
+            ..J2kLosslessEncodeOptions::default()
+        },
+    )
+    .expect("cpu lossless encode");
+
+    let decoded = decode_native(&encoded.codestream);
+    assert_eq!(decoded.data, pixels);
+}
+
+#[test]
+fn cpu_lossless_round_trips_rgb8_variable_chroma_512() {
+    let mut pixels = Vec::with_capacity(512 * 512 * 3);
+    for y in 0..512i32 {
+        for x in 0..512i32 {
+            let base = 238 + ((x / 17 + y / 29 + x * y / 8192) & 15);
+            let red_delta = ((x * 3 + y * 5) & 31) - 15;
+            let blue_delta = ((x * 7 - y * 3) & 31) - 15;
+            pixels.push((base + red_delta).clamp(0, 255) as u8);
+            pixels.push(base.clamp(0, 255) as u8);
+            pixels.push((base + blue_delta).clamp(0, 255) as u8);
+        }
+    }
+    let samples = J2kLosslessSamples::new(&pixels, 512, 512, 3, 8, false).unwrap();
+
+    let encoded = encode_j2k_lossless(
+        samples,
+        &J2kLosslessEncodeOptions {
+            backend: EncodeBackendPreference::CpuOnly,
+            ..J2kLosslessEncodeOptions::default()
+        },
+    )
+    .expect("cpu lossless encode");
+
+    let decoded = decode_native(&encoded.codestream);
+    assert_eq!(decoded.data, pixels);
+}
+
+#[test]
+#[ignore = "requires SIGNINUM_J2K_APERIO_TILE_FIXTURE"]
+fn cpu_lossless_round_trips_aperio_jp2k_problem_tile_512() {
+    let Some(path) = std::env::var_os("SIGNINUM_J2K_APERIO_TILE_FIXTURE").map(PathBuf::from) else {
+        return;
+    };
+    let pixels = std::fs::read(&path).expect("problem tile fixture");
+    assert_eq!(pixels.len(), 512 * 512 * 3);
+    let samples = J2kLosslessSamples::new(&pixels, 512, 512, 3, 8, false).unwrap();
+
+    let codestream = signinum_j2k_native::encode(
+        samples.data,
+        samples.width,
+        samples.height,
+        samples.components,
+        samples.bit_depth,
+        samples.signed,
+        &signinum_j2k_native::EncodeOptions {
+            reversible: true,
+            num_decomposition_levels: 0,
+            ..signinum_j2k_native::EncodeOptions::default()
+        },
+    )
+    .expect("cpu lossless encode");
+    let decoded = decode_native(&codestream);
+    let mismatch = decoded
+        .data
+        .iter()
+        .zip(pixels.iter())
+        .position(|(actual, expected)| actual != expected);
+    assert!(
+        mismatch.is_none(),
+        "first mismatch at byte {:?}: expected {:?}, actual {:?}",
+        mismatch,
+        mismatch.map(|idx| pixels[idx]),
+        mismatch.map(|idx| decoded.data[idx])
+    );
 }
 
 #[test]

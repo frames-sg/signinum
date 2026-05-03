@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use criterion::{criterion_group, criterion_main, Criterion};
-use jpeg_encoder::{ColorType, Encoder};
+use jpeg_encoder::{ColorType, Encoder, SamplingFactor};
 use signinum_core::{
     BackendRequest, DecoderContext, DeviceSubmission, ImageDecodeDevice, PixelFormat,
     TileBatchDecodeSubmit,
@@ -66,6 +66,7 @@ fn generated_jpeg(dim: u16) -> Vec<u8> {
 
     let mut jpeg = Vec::new();
     let mut encoder = Encoder::new(&mut jpeg, 90);
+    encoder.set_sampling_factor(SamplingFactor::F_2_2);
     if let Some(interval) = restart_interval() {
         encoder.set_restart_interval(interval);
     }

@@ -226,6 +226,24 @@ inline short clamp_i16(int value) {
     return short(clamp(value, int(short(-32768)), int(short(32767))));
 }
 
+inline void init_mcu_cursor(
+    uint start_mcu,
+    uint mcus_per_row,
+    thread uint &mx,
+    thread uint &my
+) {
+    my = start_mcu / mcus_per_row;
+    mx = start_mcu - my * mcus_per_row;
+}
+
+inline void advance_mcu_cursor(thread uint &mx, thread uint &my, uint mcus_per_row) {
+    mx += 1u;
+    if (mx == mcus_per_row) {
+        mx = 0u;
+        my += 1u;
+    }
+}
+
 inline bool refill_one_byte(
     thread BitReader &br,
     device const uchar *bytes,
@@ -1506,6 +1524,78 @@ inline uchar h2v1_sample(
     return uchar((3u * curr + next + 2u) >> 2);
 }
 
+inline void h2v2_sample_even_pair(
+    device const uchar *near_row,
+    device const uchar *curr_row,
+    uint n,
+    uint x,
+    thread uchar &left,
+    thread uchar &right
+) {
+    if (n <= 1u) {
+        left = h2v2_sample(near_row, curr_row, n, x);
+        right = h2v2_sample(near_row, curr_row, n, x + 1u);
+        return;
+    }
+
+    const uint last_x = n * 2u - 1u;
+    if (x == 0u || x + 1u >= last_x) {
+        left = h2v2_sample(near_row, curr_row, n, x);
+        right = h2v2_sample(near_row, curr_row, n, x + 1u);
+        return;
+    }
+
+    const uint sample = x / 2u;
+    const uint this_sum = 3u * uint(curr_row[sample]) + uint(near_row[sample]);
+    const uint last_sum = 3u * uint(curr_row[sample - 1u]) + uint(near_row[sample - 1u]);
+    const uint next_sum = 3u * uint(curr_row[sample + 1u]) + uint(near_row[sample + 1u]);
+    left = uchar((this_sum * 3u + last_sum + 8u) >> 4);
+    right = uchar((this_sum * 3u + next_sum + 7u) >> 4);
+}
+
+inline void h2v1_sample_even_pair(
+    device const uchar *row,
+    uint n,
+    uint x,
+    thread uchar &left,
+    thread uchar &right
+) {
+    if (n <= 1u) {
+        left = h2v1_sample(row, n, x);
+        right = h2v1_sample(row, n, x + 1u);
+        return;
+    }
+
+    const uint last_x = n * 2u - 1u;
+    if (x == 0u || x + 1u >= last_x) {
+        left = h2v1_sample(row, n, x);
+        right = h2v1_sample(row, n, x + 1u);
+        return;
+    }
+
+    const uint sample = x / 2u;
+    const uint prev = uint(row[sample - 1u]);
+    const uint curr = uint(row[sample]);
+    const uint next = uint(row[sample + 1u]);
+    left = uchar((3u * curr + prev + 2u) >> 2);
+    right = uchar((3u * curr + next + 2u) >> 2);
+}
+
+inline void store_rgb_ycbcr(
+    device uchar *out,
+    uint out_idx,
+    uchar y_value,
+    uchar cb_value,
+    uchar cr_value
+) {
+    const int y = int(y_value);
+    const int cb_centered = int(cb_value) - 128;
+    const int cr_centered = int(cr_value) - 128;
+    out[out_idx] = clamp_u8(y + ((91881 * cr_centered + (1 << 15)) >> 16));
+    out[out_idx + 1u] = clamp_u8(y - ((22554 * cb_centered + 46802 * cr_centered + (1 << 15)) >> 16));
+    out[out_idx + 2u] = clamp_u8(y + ((116130 * cb_centered + (1 << 15)) >> 16));
+}
+
 kernel void jpeg_pack(
     device const uchar *plane0 [[buffer(0)]],
     device const uchar *plane1 [[buffer(1)]],
@@ -1657,9 +1747,10 @@ kernel void jpeg_decode_fast420(
     thread short coeffs[64];
     thread uchar pixels[64];
 
+    uint mx = 0u;
+    uint my = 0u;
+    init_mcu_cursor(start_mcu, params.mcus_per_row, mx, my);
     for (uint mcu_index = start_mcu; mcu_index < end_mcu; ++mcu_index) {
-            const uint my = mcu_index / params.mcus_per_row;
-            const uint mx = mcu_index % params.mcus_per_row;
             const uint y_x = mx * 16u;
             const uint y_y = my * 16u;
             const uint c_x = mx * 8u;
@@ -1725,6 +1816,7 @@ kernel void jpeg_decode_fast420(
                 idct_islow(coeffs, pixels);
             }
             deposit_block(cr_plane, params.chroma_width, params.chroma_width, params.chroma_height, c_x, c_y, pixels);
+            advance_mcu_cursor(mx, my, params.mcus_per_row);
     }
 }
 
@@ -1796,9 +1888,10 @@ kernel void jpeg_decode_fast420_batch(
     thread short coeffs[64];
     thread uchar pixels[64];
 
+    uint mx = 0u;
+    uint my = 0u;
+    init_mcu_cursor(start_mcu, params.mcus_per_row, mx, my);
     for (uint mcu_index = start_mcu; mcu_index < end_mcu; ++mcu_index) {
-        const uint my = mcu_index / params.mcus_per_row;
-        const uint mx = mcu_index % params.mcus_per_row;
         const uint y_x = mx * 16u;
         const uint y_y = my * 16u;
         const uint c_x = mx * 8u;
@@ -1864,6 +1957,233 @@ kernel void jpeg_decode_fast420_batch(
             idct_islow(coeffs, pixels);
         }
         deposit_block(tile_cr_plane, params.chroma_width, params.chroma_width, params.chroma_height, c_x, c_y, pixels);
+        advance_mcu_cursor(mx, my, params.mcus_per_row);
+    }
+}
+
+inline uint fast420_total_mcus(constant JpegFast420BatchParams &params) {
+    return params.mcus_per_row * params.mcu_rows;
+}
+
+inline uint fast420_y_blocks_per_tile(constant JpegFast420BatchParams &params) {
+    return fast420_total_mcus(params) * 4u;
+}
+
+inline uint fast420_blocks_per_tile(constant JpegFast420BatchParams &params) {
+    return fast420_total_mcus(params) * 6u;
+}
+
+inline void store_coeff_block(
+    device short *coeff_blocks,
+    device uchar *dc_only_flags,
+    uint block_index,
+    thread const short coeffs[64],
+    bool dc_only
+) {
+    device short *dst = coeff_blocks + block_index * 64u;
+    for (uint i = 0u; i < 64u; ++i) {
+        dst[i] = coeffs[i];
+    }
+    dc_only_flags[block_index] = dc_only ? uchar(1) : uchar(0);
+}
+
+inline void idct_deposit_coeff_block(
+    device const short *coeff_blocks,
+    device const uchar *dc_only_flags,
+    uint block_index,
+    device uchar *plane,
+    uint stride,
+    uint width,
+    uint height,
+    uint x,
+    uint y
+) {
+    thread uchar pixels[64];
+    device const short *src = coeff_blocks + block_index * 64u;
+    if (dc_only_flags[block_index] != 0u) {
+        idct_islow_dc_only(src[0], pixels);
+    } else {
+        thread short coeffs[64];
+        for (uint i = 0u; i < 64u; ++i) {
+            coeffs[i] = src[i];
+        }
+        idct_islow(coeffs, pixels);
+    }
+    deposit_block(plane, stride, width, height, x, y, pixels);
+}
+
+kernel void jpeg_decode_fast420_batch_coeffs(
+    device const uchar *entropy [[buffer(0)]],
+    device short *coeff_blocks [[buffer(1)]],
+    device uchar *dc_only_flags [[buffer(2)]],
+    constant JpegFast420BatchParams &params [[buffer(4)]],
+    constant ushort *y_quant [[buffer(5)]],
+    constant ushort *cb_quant [[buffer(6)]],
+    constant ushort *cr_quant [[buffer(7)]],
+    constant PreparedHuffman &y_dc [[buffer(8)]],
+    constant PreparedHuffman &y_ac [[buffer(9)]],
+    constant PreparedHuffman &cb_dc [[buffer(10)]],
+    constant PreparedHuffman &cb_ac [[buffer(11)]],
+    constant PreparedHuffman &cr_dc [[buffer(12)]],
+    constant PreparedHuffman &cr_ac [[buffer(13)]],
+    device const uint *entropy_offsets [[buffer(14)]],
+    device const uint *entropy_lens [[buffer(15)]],
+    device JpegDecodeStatus *status [[buffer(16)]],
+    device const JpegEntropyCheckpoint *entropy_checkpoints [[buffer(17)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    const uint tile_index = gid / params.segment_count;
+    const uint local_gid = gid - tile_index * params.segment_count;
+    if (tile_index >= params.tile_count) {
+        return;
+    }
+
+    device JpegDecodeStatus *thread_status = status + gid;
+    thread_status->code = FAST420_STATUS_OK;
+    thread_status->detail = 0;
+    thread_status->position = 0;
+    thread_status->reserved = 0;
+
+    const uint total_mcus = fast420_total_mcus(params);
+    const uint checkpoint_base = tile_index * params.segment_count;
+    const JpegEntropyCheckpoint checkpoint = entropy_checkpoints[checkpoint_base + local_gid];
+    uint start_mcu = checkpoint.mcu_index;
+    if (start_mcu >= total_mcus) {
+        return;
+    }
+    uint end_mcu = total_mcus;
+    if (local_gid + 1u < params.segment_count) {
+        end_mcu = min(total_mcus, entropy_checkpoints[checkpoint_base + local_gid + 1u].mcu_index);
+    }
+    if (end_mcu <= start_mcu) {
+        return;
+    }
+
+    const uint entropy_base = entropy_offsets[tile_index];
+    const uint entropy_end = entropy_base + entropy_lens[tile_index];
+    thread BitReader br;
+    br.pos = entropy_base + checkpoint.entropy_pos;
+    br.acc = checkpoint.bit_acc;
+    br.bits = checkpoint.bit_count;
+
+    int y_prev_dc = checkpoint.y_prev_dc;
+    int cb_prev_dc = checkpoint.cb_prev_dc;
+    int cr_prev_dc = checkpoint.cr_prev_dc;
+
+    const uint blocks_per_tile = fast420_blocks_per_tile(params);
+    const uint y_blocks_per_tile = fast420_y_blocks_per_tile(params);
+    const uint tile_block_base = tile_index * blocks_per_tile;
+    const uint cb_block_base = tile_block_base + y_blocks_per_tile;
+    const uint cr_block_base = cb_block_base + total_mcus;
+
+    thread short coeffs[64];
+    for (uint mcu_index = start_mcu; mcu_index < end_mcu; ++mcu_index) {
+        bool dc_only = false;
+        const uint y_block_base = tile_block_base + mcu_index * 4u;
+
+        if (!decode_block(br, entropy, entropy_end, y_dc, y_ac, y_quant, y_prev_dc, thread_status, coeffs, dc_only)) {
+            return;
+        }
+        store_coeff_block(coeff_blocks, dc_only_flags, y_block_base, coeffs, dc_only);
+
+        if (!decode_block(br, entropy, entropy_end, y_dc, y_ac, y_quant, y_prev_dc, thread_status, coeffs, dc_only)) {
+            return;
+        }
+        store_coeff_block(coeff_blocks, dc_only_flags, y_block_base + 1u, coeffs, dc_only);
+
+        if (!decode_block(br, entropy, entropy_end, y_dc, y_ac, y_quant, y_prev_dc, thread_status, coeffs, dc_only)) {
+            return;
+        }
+        store_coeff_block(coeff_blocks, dc_only_flags, y_block_base + 2u, coeffs, dc_only);
+
+        if (!decode_block(br, entropy, entropy_end, y_dc, y_ac, y_quant, y_prev_dc, thread_status, coeffs, dc_only)) {
+            return;
+        }
+        store_coeff_block(coeff_blocks, dc_only_flags, y_block_base + 3u, coeffs, dc_only);
+
+        if (!decode_block(br, entropy, entropy_end, cb_dc, cb_ac, cb_quant, cb_prev_dc, thread_status, coeffs, dc_only)) {
+            return;
+        }
+        store_coeff_block(coeff_blocks, dc_only_flags, cb_block_base + mcu_index, coeffs, dc_only);
+
+        if (!decode_block(br, entropy, entropy_end, cr_dc, cr_ac, cr_quant, cr_prev_dc, thread_status, coeffs, dc_only)) {
+            return;
+        }
+        store_coeff_block(coeff_blocks, dc_only_flags, cr_block_base + mcu_index, coeffs, dc_only);
+    }
+}
+
+kernel void jpeg_idct_deposit_fast420_batch(
+    device const short *coeff_blocks [[buffer(0)]],
+    device const uchar *dc_only_flags [[buffer(1)]],
+    device uchar *y_plane [[buffer(2)]],
+    device uchar *cb_plane [[buffer(3)]],
+    device uchar *cr_plane [[buffer(4)]],
+    constant JpegFast420BatchParams &params [[buffer(5)]],
+    uint3 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= params.mcus_per_row || gid.y >= params.mcu_rows) {
+        return;
+    }
+
+    const uint tile_index = gid.z / 6u;
+    const uint component = gid.z - tile_index * 6u;
+    if (tile_index >= params.tile_count || component >= 6u) {
+        return;
+    }
+
+    const uint total_mcus = fast420_total_mcus(params);
+    const uint y_blocks_per_tile = fast420_y_blocks_per_tile(params);
+    const uint blocks_per_tile = fast420_blocks_per_tile(params);
+    const uint mcu_index = gid.y * params.mcus_per_row + gid.x;
+    const uint tile_block_base = tile_index * blocks_per_tile;
+    const uint y_plane_base = tile_index * params.width * params.height;
+    const uint chroma_plane_base = tile_index * params.chroma_width * params.chroma_height;
+
+    if (component < 4u) {
+        const uint block_index = tile_block_base + mcu_index * 4u + component;
+        const uint x = gid.x * 16u + (component & 1u) * 8u;
+        const uint y = gid.y * 16u + (component >> 1u) * 8u;
+        idct_deposit_coeff_block(
+            coeff_blocks,
+            dc_only_flags,
+            block_index,
+            y_plane + y_plane_base,
+            params.width,
+            params.width,
+            params.height,
+            x,
+            y
+        );
+        return;
+    }
+
+    const uint x = gid.x * 8u;
+    const uint y = gid.y * 8u;
+    if (component == 4u) {
+        idct_deposit_coeff_block(
+            coeff_blocks,
+            dc_only_flags,
+            tile_block_base + y_blocks_per_tile + mcu_index,
+            cb_plane + chroma_plane_base,
+            params.chroma_width,
+            params.chroma_width,
+            params.chroma_height,
+            x,
+            y
+        );
+    } else {
+        idct_deposit_coeff_block(
+            coeff_blocks,
+            dc_only_flags,
+            tile_block_base + y_blocks_per_tile + total_mcus + mcu_index,
+            cr_plane + chroma_plane_base,
+            params.chroma_width,
+            params.chroma_width,
+            params.chroma_height,
+            x,
+            y
+        );
     }
 }
 
@@ -1921,9 +2241,10 @@ kernel void jpeg_decode_fast422(
     thread short coeffs[64];
     thread uchar pixels[64];
 
+    uint mx = 0u;
+    uint my = 0u;
+    init_mcu_cursor(start_mcu, params.mcus_per_row, mx, my);
     for (uint mcu_index = start_mcu; mcu_index < end_mcu; ++mcu_index) {
-        const uint my = mcu_index / params.mcus_per_row;
-        const uint mx = mcu_index % params.mcus_per_row;
         const uint y_x = mx * 16u;
         const uint y_y = my * 8u;
         const uint c_x = mx * 8u;
@@ -1969,6 +2290,7 @@ kernel void jpeg_decode_fast422(
             idct_islow(coeffs, pixels);
         }
         deposit_block(cr_plane, params.chroma_width, params.chroma_width, params.chroma_height, c_x, c_y, pixels);
+        advance_mcu_cursor(mx, my, params.mcus_per_row);
     }
 }
 
@@ -2040,9 +2362,10 @@ kernel void jpeg_decode_fast422_batch(
     thread short coeffs[64];
     thread uchar pixels[64];
 
+    uint mx = 0u;
+    uint my = 0u;
+    init_mcu_cursor(start_mcu, params.mcus_per_row, mx, my);
     for (uint mcu_index = start_mcu; mcu_index < end_mcu; ++mcu_index) {
-        const uint my = mcu_index / params.mcus_per_row;
-        const uint mx = mcu_index % params.mcus_per_row;
         const uint y_x = mx * 16u;
         const uint y_y = my * 8u;
         const uint c_x = mx * 8u;
@@ -2088,6 +2411,7 @@ kernel void jpeg_decode_fast422_batch(
             idct_islow(coeffs, pixels);
         }
         deposit_block(tile_cr_plane, params.chroma_width, params.chroma_width, params.chroma_height, c_x, c_y, pixels);
+        advance_mcu_cursor(mx, my, params.mcus_per_row);
     }
 }
 
@@ -2148,9 +2472,10 @@ kernel void jpeg_decode_fast422_region(
     const uint chroma_origin_x = params.origin_x / 2u;
     const uint chroma_origin_y = params.origin_y;
 
+    uint mx = 0u;
+    uint my = 0u;
+    init_mcu_cursor(start_mcu, params.mcus_per_row, mx, my);
     for (uint mcu_index = start_mcu; mcu_index < end_mcu; ++mcu_index) {
-        const uint my = mcu_index / params.mcus_per_row;
-        const uint mx = mcu_index % params.mcus_per_row;
         const uint y_x = mx * 16u;
         const uint y_y = my * 8u;
         const uint c_x = mx * 8u;
@@ -2289,6 +2614,7 @@ kernel void jpeg_decode_fast422_region(
                 return;
             }
         }
+        advance_mcu_cursor(mx, my, params.mcus_per_row);
     }
 }
 
@@ -2349,9 +2675,10 @@ kernel void jpeg_decode_fast422_scaled(
     const uint mcu_width = 16u >> params.scale_shift;
     const uint mcu_height = 8u >> params.scale_shift;
 
+    uint mx = 0u;
+    uint my = 0u;
+    init_mcu_cursor(start_mcu, params.mcus_per_row, mx, my);
     for (uint mcu_index = start_mcu; mcu_index < end_mcu; ++mcu_index) {
-        const uint my = mcu_index / params.mcus_per_row;
-        const uint mx = mcu_index % params.mcus_per_row;
         const uint y_x = mx * mcu_width;
         const uint y_y = my * mcu_height;
         const uint c_x = mx * block_size;
@@ -2417,6 +2744,7 @@ kernel void jpeg_decode_fast422_scaled(
             coeffs,
             dc_only
         );
+        advance_mcu_cursor(mx, my, params.mcus_per_row);
     }
 }
 
@@ -2479,9 +2807,10 @@ kernel void jpeg_decode_fast422_scaled_region(
     const uint chroma_origin_x = params.origin_x / 2u;
     const uint chroma_origin_y = params.origin_y;
 
+    uint mx = 0u;
+    uint my = 0u;
+    init_mcu_cursor(start_mcu, params.mcus_per_row, mx, my);
     for (uint mcu_index = start_mcu; mcu_index < end_mcu; ++mcu_index) {
-        const uint my = mcu_index / params.mcus_per_row;
-        const uint mx = mcu_index % params.mcus_per_row;
         const uint y_x = mx * mcu_width;
         const uint y_y = my * mcu_height;
         const uint c_x = mx * block_size;
@@ -2608,6 +2937,7 @@ kernel void jpeg_decode_fast422_scaled_region(
                 return;
             }
         }
+        advance_mcu_cursor(mx, my, params.mcus_per_row);
     }
 }
 
@@ -2681,9 +3011,10 @@ kernel void jpeg_decode_fast422_scaled_region_batch(
     const uint chroma_origin_x = params.origin_x / 2u;
     const uint chroma_origin_y = params.origin_y;
 
+    uint mx = 0u;
+    uint my = 0u;
+    init_mcu_cursor(start_mcu, params.mcus_per_row, mx, my);
     for (uint mcu_index = start_mcu; mcu_index < end_mcu; ++mcu_index) {
-        const uint my = mcu_index / params.mcus_per_row;
-        const uint mx = mcu_index % params.mcus_per_row;
         const uint y_x = mx * mcu_width;
         const uint y_y = my * mcu_height;
         const uint c_x = mx * block_size;
@@ -2810,6 +3141,7 @@ kernel void jpeg_decode_fast422_scaled_region_batch(
                 return;
             }
         }
+        advance_mcu_cursor(mx, my, params.mcus_per_row);
     }
 }
 
@@ -2870,9 +3202,10 @@ kernel void jpeg_decode_fast420_region(
     const uint chroma_origin_x = params.origin_x / 2u;
     const uint chroma_origin_y = params.origin_y / 2u;
 
+    uint mx = 0u;
+    uint my = 0u;
+    init_mcu_cursor(start_mcu, params.mcus_per_row, mx, my);
     for (uint mcu_index = start_mcu; mcu_index < end_mcu; ++mcu_index) {
-            const uint my = mcu_index / params.mcus_per_row;
-            const uint mx = mcu_index % params.mcus_per_row;
             const uint y_x = mx * 16u;
             const uint y_y = my * 16u;
             const uint c_x = mx * 8u;
@@ -3085,6 +3418,7 @@ kernel void jpeg_decode_fast420_region(
                     return;
                 }
             }
+            advance_mcu_cursor(mx, my, params.mcus_per_row);
     }
 }
 
@@ -3145,9 +3479,10 @@ kernel void jpeg_decode_fast420_scaled(
     const uint c_block_size = 8u >> params.scale_shift;
     const uint y_mcu_size = 16u >> params.scale_shift;
 
+    uint mx = 0u;
+    uint my = 0u;
+    init_mcu_cursor(start_mcu, params.mcus_per_row, mx, my);
     for (uint mcu_index = start_mcu; mcu_index < end_mcu; ++mcu_index) {
-            const uint my = mcu_index / params.mcus_per_row;
-            const uint mx = mcu_index % params.mcus_per_row;
             const uint y_x = mx * y_mcu_size;
             const uint y_y = my * y_mcu_size;
             const uint c_x = mx * c_block_size;
@@ -3243,6 +3578,7 @@ kernel void jpeg_decode_fast420_scaled(
                 coeffs,
                 dc_only
             );
+            advance_mcu_cursor(mx, my, params.mcus_per_row);
     }
 }
 
@@ -3305,9 +3641,10 @@ kernel void jpeg_decode_fast420_scaled_region(
     const uint chroma_origin_x = params.origin_x / 2u;
     const uint chroma_origin_y = params.origin_y / 2u;
 
+    uint mx = 0u;
+    uint my = 0u;
+    init_mcu_cursor(start_mcu, params.mcus_per_row, mx, my);
     for (uint mcu_index = start_mcu; mcu_index < end_mcu; ++mcu_index) {
-            const uint my = mcu_index / params.mcus_per_row;
-            const uint mx = mcu_index % params.mcus_per_row;
             const uint y_x = mx * y_mcu_size;
             const uint y_y = my * y_mcu_size;
             const uint c_x = mx * c_block_size;
@@ -3502,6 +3839,7 @@ kernel void jpeg_decode_fast420_scaled_region(
                     return;
                 }
             }
+            advance_mcu_cursor(mx, my, params.mcus_per_row);
     }
 }
 
@@ -3575,9 +3913,10 @@ kernel void jpeg_decode_fast420_scaled_region_batch(
     const uint chroma_origin_x = params.origin_x / 2u;
     const uint chroma_origin_y = params.origin_y / 2u;
 
+    uint mx = 0u;
+    uint my = 0u;
+    init_mcu_cursor(start_mcu, params.mcus_per_row, mx, my);
     for (uint mcu_index = start_mcu; mcu_index < end_mcu; ++mcu_index) {
-            const uint my = mcu_index / params.mcus_per_row;
-            const uint mx = mcu_index % params.mcus_per_row;
             const uint y_x = mx * y_mcu_size;
             const uint y_y = my * y_mcu_size;
             const uint c_x = mx * c_block_size;
@@ -3772,6 +4111,7 @@ kernel void jpeg_decode_fast420_scaled_region_batch(
                     return;
                 }
             }
+            advance_mcu_cursor(mx, my, params.mcus_per_row);
     }
 }
 
@@ -3827,9 +4167,10 @@ kernel void jpeg_decode_fast444(
 
     thread short coeffs[64];
     thread uchar pixels[64];
+    uint mx = 0u;
+    uint my = 0u;
+    init_mcu_cursor(start_mcu, params.mcus_per_row, mx, my);
     for (uint mcu_index = start_mcu; mcu_index < end_mcu; ++mcu_index) {
-        const uint my = mcu_index / params.mcus_per_row;
-        const uint mx = mcu_index % params.mcus_per_row;
         const uint block_x = mx * 8u;
         const uint block_y = my * 8u;
         bool dc_only = false;
@@ -3863,6 +4204,7 @@ kernel void jpeg_decode_fast444(
             idct_islow(coeffs, pixels);
         }
         deposit_block(cr_plane, params.width, params.width, params.height, block_x, block_y, pixels);
+        advance_mcu_cursor(mx, my, params.mcus_per_row);
     }
 }
 
@@ -3918,9 +4260,10 @@ kernel void jpeg_decode_fast444_region(
 
     thread short coeffs[64];
     thread uchar pixels[64];
+    uint mx = 0u;
+    uint my = 0u;
+    init_mcu_cursor(start_mcu, params.mcus_per_row, mx, my);
     for (uint mcu_index = start_mcu; mcu_index < end_mcu; ++mcu_index) {
-        const uint my = mcu_index / params.mcus_per_row;
-        const uint mx = mcu_index % params.mcus_per_row;
         const uint block_x = mx * 8u;
         const uint block_y = my * 8u;
         const bool intersects = block_intersects_rect(
@@ -4006,6 +4349,7 @@ kernel void jpeg_decode_fast444_region(
                 return;
             }
         }
+        advance_mcu_cursor(mx, my, params.mcus_per_row);
     }
 }
 
@@ -4062,9 +4406,10 @@ kernel void jpeg_decode_fast444_scaled(
     thread short coeffs[64];
     const uint block_size = 8u >> params.scale_shift;
 
+    uint mx = 0u;
+    uint my = 0u;
+    init_mcu_cursor(start_mcu, params.mcus_per_row, mx, my);
     for (uint mcu_index = start_mcu; mcu_index < end_mcu; ++mcu_index) {
-        const uint my = mcu_index / params.mcus_per_row;
-        const uint mx = mcu_index % params.mcus_per_row;
         const uint block_x = mx * block_size;
         const uint block_y = my * block_size;
         bool dc_only = false;
@@ -4113,6 +4458,7 @@ kernel void jpeg_decode_fast444_scaled(
             coeffs,
             dc_only
         );
+        advance_mcu_cursor(mx, my, params.mcus_per_row);
     }
 }
 
@@ -4169,9 +4515,10 @@ kernel void jpeg_decode_fast444_scaled_region(
     thread short coeffs[64];
     const uint block_size = 8u >> params.scale_shift;
 
+    uint mx = 0u;
+    uint my = 0u;
+    init_mcu_cursor(start_mcu, params.mcus_per_row, mx, my);
     for (uint mcu_index = start_mcu; mcu_index < end_mcu; ++mcu_index) {
-        const uint my = mcu_index / params.mcus_per_row;
-        const uint mx = mcu_index % params.mcus_per_row;
         const uint block_x = mx * block_size;
         const uint block_y = my * block_size;
         const bool intersects = block_intersects_rect(
@@ -4248,6 +4595,7 @@ kernel void jpeg_decode_fast444_scaled_region(
                 return;
             }
         }
+        advance_mcu_cursor(mx, my, params.mcus_per_row);
     }
 }
 
@@ -4314,9 +4662,10 @@ kernel void jpeg_decode_fast444_scaled_region_batch(
     thread short coeffs[64];
     const uint block_size = 8u >> params.scale_shift;
 
+    uint mx = 0u;
+    uint my = 0u;
+    init_mcu_cursor(start_mcu, params.mcus_per_row, mx, my);
     for (uint mcu_index = start_mcu; mcu_index < end_mcu; ++mcu_index) {
-        const uint my = mcu_index / params.mcus_per_row;
-        const uint mx = mcu_index % params.mcus_per_row;
         const uint block_x = mx * block_size;
         const uint block_y = my * block_size;
         const bool intersects = block_intersects_rect(
@@ -4393,6 +4742,7 @@ kernel void jpeg_decode_fast444_scaled_region_batch(
                 return;
             }
         }
+        advance_mcu_cursor(mx, my, params.mcus_per_row);
     }
 }
 
@@ -4480,7 +4830,9 @@ kernel void jpeg_pack_420_rgb_batch(
     constant JpegFast420BatchParams &params [[buffer(4)]],
     uint3 gid [[thread_position_in_grid]]
 ) {
-    if (gid.x >= params.width || gid.y >= params.height || gid.z >= params.tile_count) {
+    const uint x0 = gid.x * 2u;
+    const uint y0 = gid.y * 2u;
+    if (x0 >= params.width || y0 >= params.height || gid.z >= params.tile_count) {
         return;
     }
 
@@ -4490,9 +4842,11 @@ kernel void jpeg_pack_420_rgb_batch(
     device const uchar *tile_cb_plane = cb_plane + chroma_plane_base;
     device const uchar *tile_cr_plane = cr_plane + chroma_plane_base;
 
-    const uint y_idx = gid.y * params.width + gid.x;
-    const uint chroma_y = min(gid.y / 2u, params.chroma_height - 1u);
-    const uint near_y = (gid.y & 1u) == 0u
+    const uint x1 = x0 + 1u;
+    const uint out_base = gid.z * params.out_stride * params.height;
+
+    const uint chroma_y = min(y0 / 2u, params.chroma_height - 1u);
+    const uint near_y = (y0 & 1u) == 0u
         ? (chroma_y == 0u ? 0u : chroma_y - 1u)
         : min(chroma_y + 1u, params.chroma_height - 1u);
     device const uchar *curr_cb = tile_cb_plane + chroma_y * params.chroma_width;
@@ -4500,17 +4854,43 @@ kernel void jpeg_pack_420_rgb_batch(
     device const uchar *curr_cr = tile_cr_plane + chroma_y * params.chroma_width;
     device const uchar *near_cr = tile_cr_plane + near_y * params.chroma_width;
 
-    const uchar cb = h2v2_sample(near_cb, curr_cb, params.chroma_width, gid.x);
-    const uchar cr = h2v2_sample(near_cr, curr_cr, params.chroma_width, gid.x);
-    const int y = int(tile_y_plane[y_idx]);
-    const int cb_centered = int(cb) - 128;
-    const int cr_centered = int(cr) - 128;
+    uchar cb0;
+    uchar cb1;
+    uchar cr0;
+    uchar cr1;
+    h2v2_sample_even_pair(near_cb, curr_cb, params.chroma_width, x0, cb0, cb1);
+    h2v2_sample_even_pair(near_cr, curr_cr, params.chroma_width, x0, cr0, cr1);
 
-    const uint out_base = gid.z * params.out_stride * params.height;
-    const uint out_idx = out_base + gid.y * params.out_stride + gid.x * 3u;
-    out[out_idx] = clamp_u8(y + ((91881 * cr_centered + (1 << 15)) >> 16));
-    out[out_idx + 1] = clamp_u8(y - ((22554 * cb_centered + 46802 * cr_centered + (1 << 15)) >> 16));
-    out[out_idx + 2] = clamp_u8(y + ((116130 * cb_centered + (1 << 15)) >> 16));
+    const uint y_idx0 = y0 * params.width + x0;
+    const uint out_idx0 = out_base + y0 * params.out_stride + x0 * 3u;
+    store_rgb_ycbcr(out, out_idx0, tile_y_plane[y_idx0], cb0, cr0);
+    if (x1 < params.width) {
+        store_rgb_ycbcr(out, out_idx0 + 3u, tile_y_plane[y_idx0 + 1u], cb1, cr1);
+    }
+
+    const uint y1 = y0 + 1u;
+    if (y1 >= params.height) {
+        return;
+    }
+
+    const uint chroma_y1 = min(y1 / 2u, params.chroma_height - 1u);
+    const uint near_y1 = (y1 & 1u) == 0u
+        ? (chroma_y1 == 0u ? 0u : chroma_y1 - 1u)
+        : min(chroma_y1 + 1u, params.chroma_height - 1u);
+    device const uchar *curr_cb1 = tile_cb_plane + chroma_y1 * params.chroma_width;
+    device const uchar *near_cb1 = tile_cb_plane + near_y1 * params.chroma_width;
+    device const uchar *curr_cr1 = tile_cr_plane + chroma_y1 * params.chroma_width;
+    device const uchar *near_cr1 = tile_cr_plane + near_y1 * params.chroma_width;
+
+    h2v2_sample_even_pair(near_cb1, curr_cb1, params.chroma_width, x0, cb0, cb1);
+    h2v2_sample_even_pair(near_cr1, curr_cr1, params.chroma_width, x0, cr0, cr1);
+
+    const uint y_idx1 = y1 * params.width + x0;
+    const uint out_idx1 = out_base + y1 * params.out_stride + x0 * 3u;
+    store_rgb_ycbcr(out, out_idx1, tile_y_plane[y_idx1], cb0, cr0);
+    if (x1 < params.width) {
+        store_rgb_ycbcr(out, out_idx1 + 3u, tile_y_plane[y_idx1 + 1u], cb1, cr1);
+    }
 }
 
 kernel void jpeg_pack_420_rgba(
@@ -4585,7 +4965,8 @@ kernel void jpeg_pack_422_rgb_batch(
     constant JpegFast420BatchParams &params [[buffer(4)]],
     uint3 gid [[thread_position_in_grid]]
 ) {
-    if (gid.x >= params.width || gid.y >= params.height || gid.z >= params.tile_count) {
+    const uint x0 = gid.x * 2u;
+    if (x0 >= params.width || gid.y >= params.height || gid.z >= params.tile_count) {
         return;
     }
 
@@ -4595,22 +4976,25 @@ kernel void jpeg_pack_422_rgb_batch(
     device const uchar *tile_cb_plane = cb_plane + chroma_plane_base;
     device const uchar *tile_cr_plane = cr_plane + chroma_plane_base;
 
-    const uint y_idx = gid.y * params.width + gid.x;
+    const uint x1 = x0 + 1u;
+    const uint y_idx = gid.y * params.width + x0;
     const uint chroma_y = min(gid.y, params.chroma_height - 1u);
     device const uchar *curr_cb = tile_cb_plane + chroma_y * params.chroma_width;
     device const uchar *curr_cr = tile_cr_plane + chroma_y * params.chroma_width;
 
-    const uchar cb = h2v1_sample(curr_cb, params.chroma_width, gid.x);
-    const uchar cr = h2v1_sample(curr_cr, params.chroma_width, gid.x);
-    const int y = int(tile_y_plane[y_idx]);
-    const int cb_centered = int(cb) - 128;
-    const int cr_centered = int(cr) - 128;
+    uchar cb0;
+    uchar cb1;
+    uchar cr0;
+    uchar cr1;
+    h2v1_sample_even_pair(curr_cb, params.chroma_width, x0, cb0, cb1);
+    h2v1_sample_even_pair(curr_cr, params.chroma_width, x0, cr0, cr1);
 
     const uint out_base = gid.z * params.out_stride * params.height;
-    const uint out_idx = out_base + gid.y * params.out_stride + gid.x * 3u;
-    out[out_idx] = clamp_u8(y + ((91881 * cr_centered + (1 << 15)) >> 16));
-    out[out_idx + 1] = clamp_u8(y - ((22554 * cb_centered + 46802 * cr_centered + (1 << 15)) >> 16));
-    out[out_idx + 2] = clamp_u8(y + ((116130 * cb_centered + (1 << 15)) >> 16));
+    const uint out_idx = out_base + gid.y * params.out_stride + x0 * 3u;
+    store_rgb_ycbcr(out, out_idx, tile_y_plane[y_idx], cb0, cr0);
+    if (x1 < params.width) {
+        store_rgb_ycbcr(out, out_idx + 3u, tile_y_plane[y_idx + 1u], cb1, cr1);
+    }
 }
 
 kernel void jpeg_pack_422_rgba(

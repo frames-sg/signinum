@@ -8207,6 +8207,26 @@ mod tests {
     }
 
     #[test]
+    fn shader_kernels_use_incremental_mx_my() {
+        assert!(
+            SHADER_SOURCE.contains("inline void init_mcu_cursor("),
+            "fast decode kernels should seed mx/my via init_mcu_cursor instead of dividing per MCU"
+        );
+        assert!(
+            SHADER_SOURCE.contains("inline void advance_mcu_cursor("),
+            "fast decode kernels should carry mx/my via advance_mcu_cursor instead of dividing per MCU"
+        );
+        assert!(
+            !SHADER_SOURCE.contains("mcu_index / params.mcus_per_row"),
+            "no fast kernel should still divide mcu_index by mcus_per_row inside the MCU loop"
+        );
+        assert!(
+            !SHADER_SOURCE.contains("mcu_index % params.mcus_per_row"),
+            "no fast kernel should still modulo mcu_index by mcus_per_row inside the MCU loop"
+        );
+    }
+
+    #[test]
     fn split_fast420_batch_env_requires_explicit_one() {
         assert!(split_fast420_batch_value_enabled(Some(
             std::ffi::OsStr::new("1")

@@ -580,23 +580,6 @@ impl CudaContext {
         let low_height = pass.current_height.div_ceil(2);
         let mut dispatches = 0usize;
 
-        if pass.current_width >= 2 {
-            let (input, output) = active_dwt53_buffers(buffer_a, buffer_b, *active_is_a);
-            self.launch_j2k_forward_dwt53_pass(
-                CudaKernel::J2kForwardDwt53Horizontal,
-                input,
-                output,
-                CudaDwt53Pass {
-                    full_width: pass.full_width,
-                    current_width: pass.current_width,
-                    current_height: pass.current_height,
-                    low_extent: low_width,
-                },
-            )?;
-            *active_is_a = !*active_is_a;
-            dispatches = dispatches.saturating_add(1);
-        }
-
         if pass.current_height >= 2 {
             let (input, output) = active_dwt53_buffers(buffer_a, buffer_b, *active_is_a);
             self.launch_j2k_forward_dwt53_pass(
@@ -608,6 +591,23 @@ impl CudaContext {
                     current_width: pass.current_width,
                     current_height: pass.current_height,
                     low_extent: low_height,
+                },
+            )?;
+            *active_is_a = !*active_is_a;
+            dispatches = dispatches.saturating_add(1);
+        }
+
+        if pass.current_width >= 2 {
+            let (input, output) = active_dwt53_buffers(buffer_a, buffer_b, *active_is_a);
+            self.launch_j2k_forward_dwt53_pass(
+                CudaKernel::J2kForwardDwt53Horizontal,
+                input,
+                output,
+                CudaDwt53Pass {
+                    full_width: pass.full_width,
+                    current_width: pass.current_width,
+                    current_height: pass.current_height,
+                    low_extent: low_width,
                 },
             )?;
             *active_is_a = !*active_is_a;
@@ -1083,21 +1083,6 @@ mod tests {
             if current_width < 2 && current_height < 2 {
                 break;
             }
-            if current_width >= 2 {
-                let mut row = vec![0.0; current_width];
-                for y in 0..current_height {
-                    let row_start = y * width;
-                    row.copy_from_slice(&buffer[row_start..row_start + current_width]);
-                    forward_lift_53(&mut row);
-                    let low_width = current_width.div_ceil(2);
-                    for x in 0..low_width {
-                        buffer[row_start + x] = row[x * 2];
-                    }
-                    for x in 0..current_width / 2 {
-                        buffer[row_start + low_width + x] = row[x * 2 + 1];
-                    }
-                }
-            }
             if current_height >= 2 {
                 let low_height = current_height.div_ceil(2);
                 let mut col = vec![0.0; current_height];
@@ -1111,6 +1096,21 @@ mod tests {
                     }
                     for y in 0..current_height / 2 {
                         buffer[(low_height + y) * width + x] = col[y * 2 + 1];
+                    }
+                }
+            }
+            if current_width >= 2 {
+                let mut row = vec![0.0; current_width];
+                for y in 0..current_height {
+                    let row_start = y * width;
+                    row.copy_from_slice(&buffer[row_start..row_start + current_width]);
+                    forward_lift_53(&mut row);
+                    let low_width = current_width.div_ceil(2);
+                    for x in 0..low_width {
+                        buffer[row_start + x] = row[x * 2];
+                    }
+                    for x in 0..current_width / 2 {
+                        buffer[row_start + low_width + x] = row[x * 2 + 1];
                     }
                 }
             }

@@ -5,6 +5,7 @@
 #[cfg(target_os = "macos")]
 use std::{
     cell::RefCell,
+    ffi::OsStr,
     mem::{size_of, size_of_val},
 };
 
@@ -54,6 +55,8 @@ const AUTO_METAL_MIN_BATCH_REQUESTS: usize = 8;
 const AUTO_METAL_MIN_BATCH_EDGE: u32 = 512;
 #[cfg(target_os = "macos")]
 const REGION_SCALED_BATCH_CHUNK: usize = 8;
+#[cfg(target_os = "macos")]
+const SPLIT_FAST420_BATCH_ENV: &str = "SIGNINUM_JPEG_METAL_SPLIT_FAST420_BATCH";
 
 #[cfg(target_os = "macos")]
 #[repr(C)]
@@ -4107,11 +4110,10 @@ enum Fast420BatchDecodeMode {
 
 #[cfg(target_os = "macos")]
 fn fast420_batch_decode_mode() -> Fast420BatchDecodeMode {
-    match std::env::var("SIGNINUM_JPEG_METAL_SPLIT_FAST420_BATCH") {
-        Ok(value) if matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "on") => {
-            Fast420BatchDecodeMode::SplitCoeffIdct
-        }
-        _ => Fast420BatchDecodeMode::Fused,
+    if split_fast420_batch_enabled() {
+        Fast420BatchDecodeMode::SplitCoeffIdct
+    } else {
+        Fast420BatchDecodeMode::Fused
     }
 }
 
@@ -4735,6 +4737,16 @@ fn try_decode_fast420_full_rgb_batch_to_surfaces_with_mode(
         )));
     }
     Ok(Some(results))
+}
+
+#[cfg(target_os = "macos")]
+fn split_fast420_batch_enabled() -> bool {
+    split_fast420_batch_value_enabled(std::env::var_os(SPLIT_FAST420_BATCH_ENV).as_deref())
+}
+
+#[cfg(target_os = "macos")]
+fn split_fast420_batch_value_enabled(value: Option<&OsStr>) -> bool {
+    value.is_some_and(|value| value == OsStr::new("1"))
 }
 
 #[cfg(target_os = "macos")]
@@ -8170,6 +8182,42 @@ mod tests {
     }
 
     #[test]
+    fn shader_decode_block_clears_coefficients_with_vector_stores() {
+        assert!(
+            SHADER_SOURCE.contains("thread short4 *coeff_chunks"),
+            "decode_block should clear coeffs with packed short4 stores"
+        );
+        assert!(
+            SHADER_SOURCE.contains("coeff_chunks[i] = short4(0);"),
+            "decode_block should zero each packed coefficient chunk"
+        );
+    }
+
+    #[test]
+    fn shader_source_keeps_entropy_fast_paths() {
+        assert!(SHADER_SOURCE.contains("inline bool refill_four_bytes("));
+        assert!(
+            SHADER_SOURCE.contains("return refill_four_bytes(br, bytes, len) || refill_one_byte")
+        );
+        assert!(SHADER_SOURCE.contains("ensure_bits_padded(br, bytes, len, 9)"));
+        assert!(SHADER_SOURCE.contains("table.fast_len[fast_index]"));
+        assert!(SHADER_SOURCE.contains("inline bool decode_block_skip("));
+        assert!(SHADER_SOURCE.contains("skip_receive_extend(br, bytes, len, ssss, status)"));
+        assert!(SHADER_SOURCE.contains("inline bool configure_batch_entropy_thread("));
+    }
+
+    #[test]
+    fn split_fast420_batch_env_requires_explicit_one() {
+        assert!(split_fast420_batch_value_enabled(Some(
+            std::ffi::OsStr::new("1")
+        )));
+        assert!(!split_fast420_batch_value_enabled(Some(
+            std::ffi::OsStr::new("true")
+        )));
+        assert!(!split_fast420_batch_value_enabled(None));
+    }
+
+    #[test]
     fn one_dimensional_dispatch_width_tracks_work_without_full_threadgroup_waste() {
         assert_eq!(choose_1d_threadgroup_width(32, 1024, 1), 32);
         assert_eq!(choose_1d_threadgroup_width(32, 1024, 33), 64);
@@ -8565,6 +8613,88 @@ mod tests {
         for result in results {
             let surface = result.expect("surface");
             assert_eq!(surface.dimensions, (32, 32));
+            assert_eq!(surface.fmt, PixelFormat::Rgb8);
+            assert_eq!(surface.as_bytes(), expected.as_slice());
+        }
+    }
+
+    #[test]
+    fn fast420_batch_clears_high_ac_before_dc_only_blocks() {
+        let input = Arc::<[u8]>::from(fast420_high_ac_then_dc_only_jpeg(1));
+        let packet =
+            signinum_jpeg::adapter::build_metal_fast420_packet(input.as_ref()).expect("packet");
+        let requests = vec![
+            batch::QueuedRequest::new(
+                Arc::clone(&input),
+                PixelFormat::Rgb8,
+                BackendRequest::Metal,
+                batch::BatchOp::Full,
+                None,
+                None,
+                Some(packet.clone()),
+            ),
+            batch::QueuedRequest::new(
+                Arc::clone(&input),
+                PixelFormat::Rgb8,
+                BackendRequest::Metal,
+                batch::BatchOp::Full,
+                None,
+                None,
+                Some(packet),
+            ),
+        ];
+        let decoder = CpuDecoder::new(input.as_ref()).expect("decoder");
+        let (expected, _) = decoder.decode(PixelFormat::Rgb8).expect("cpu full decode");
+
+        let results = decode_full_batch_to_surfaces(&requests)
+            .expect("batch result")
+            .expect("fast420 full batch should use Metal batch path");
+
+        assert_eq!(results.len(), 2);
+        for result in results {
+            let surface = result.expect("surface");
+            assert_eq!(surface.dimensions, (16, 16));
+            assert_eq!(surface.fmt, PixelFormat::Rgb8);
+            assert_eq!(surface.as_bytes(), expected.as_slice());
+        }
+    }
+
+    #[test]
+    fn fast420_batch_matches_cpu_for_high_ac_overflow_coefficients() {
+        let input = Arc::<[u8]>::from(fast420_high_ac_then_dc_only_jpeg(u8::MAX));
+        let packet =
+            signinum_jpeg::adapter::build_metal_fast420_packet(input.as_ref()).expect("packet");
+        let requests = vec![
+            batch::QueuedRequest::new(
+                Arc::clone(&input),
+                PixelFormat::Rgb8,
+                BackendRequest::Metal,
+                batch::BatchOp::Full,
+                None,
+                None,
+                Some(packet.clone()),
+            ),
+            batch::QueuedRequest::new(
+                Arc::clone(&input),
+                PixelFormat::Rgb8,
+                BackendRequest::Metal,
+                batch::BatchOp::Full,
+                None,
+                None,
+                Some(packet),
+            ),
+        ];
+        let decoder = CpuDecoder::new(input.as_ref()).expect("decoder");
+        let (expected, _) = decoder.decode(PixelFormat::Rgb8).expect("cpu full decode");
+
+        let results = decode_full_batch_to_surfaces(&requests)
+            .expect("batch result")
+            .expect("fast420 full batch should use Metal batch path");
+
+        assert_eq!(results.len(), 2);
+        for result in results {
+            let surface = result.expect("surface");
+            assert_eq!(surface.dimensions, (16, 16));
             assert_eq!(surface.fmt, PixelFormat::Rgb8);
             assert_eq!(surface.as_bytes(), expected.as_slice());
         }
@@ -9321,6 +9451,132 @@ mod tests {
             assert_eq!(surface.dimensions, (2, 2));
             assert_eq!(surface.fmt, PixelFormat::Rgb8);
             assert_eq!(surface.as_bytes(), expected.as_slice());
+        }
+    }
+
+    fn fast420_high_ac_then_dc_only_jpeg(ac_quant: u8) -> Vec<u8> {
+        assert!(ac_quant > 0, "JPEG quant entries must be nonzero");
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&[0xff, 0xd8]);
+
+        let mut quant = [1u8; 64];
+        quant[63] = ac_quant;
+        let mut dqt = Vec::with_capacity(65);
+        dqt.push(0x00);
+        dqt.extend_from_slice(&quant);
+        append_jpeg_segment(&mut bytes, 0xdb, &dqt);
+
+        append_jpeg_segment(
+            &mut bytes,
+            0xc0,
+            &[
+                8,
+                0,
+                16,
+                0,
+                16,
+                3,
+                1,
+                (2 << 4) | 2,
+                0,
+                2,
+                (1 << 4) | 1,
+                0,
+                3,
+                (1 << 4) | 1,
+                0,
+            ],
+        );
+
+        let mut dc_bits = [0u8; 16];
+        dc_bits[0] = 1;
+        let mut dht_dc = Vec::with_capacity(18);
+        dht_dc.push(0x00);
+        dht_dc.extend_from_slice(&dc_bits);
+        dht_dc.push(0x00);
+        append_jpeg_segment(&mut bytes, 0xc4, &dht_dc);
+
+        let mut ac_bits = [0u8; 16];
+        ac_bits[1] = 3;
+        let mut dht_ac = Vec::with_capacity(20);
+        dht_ac.push(0x10);
+        dht_ac.extend_from_slice(&ac_bits);
+        dht_ac.extend_from_slice(&[0x00, 0xf0, 0xea]);
+        append_jpeg_segment(&mut bytes, 0xc4, &dht_ac);
+
+        append_jpeg_segment(&mut bytes, 0xda, &[3, 1, 0x00, 2, 0x00, 3, 0x00, 0, 63, 0]);
+
+        bytes.extend_from_slice(&fast420_high_ac_entropy());
+        bytes.extend_from_slice(&[0xff, 0xd9]);
+        bytes
+    }
+
+    fn append_jpeg_segment(bytes: &mut Vec<u8>, marker: u8, payload: &[u8]) {
+        bytes.extend_from_slice(&[0xff, marker]);
+        let len = u16::try_from(payload.len() + 2).expect("JPEG segment length fits in u16");
+        bytes.extend_from_slice(&len.to_be_bytes());
+        bytes.extend_from_slice(payload);
+    }
+
+    fn fast420_high_ac_entropy() -> Vec<u8> {
+        let mut writer = EntropyBitWriter::default();
+        emit_high_ac_block(&mut writer);
+        for _ in 0..5 {
+            emit_dc_only_block(&mut writer);
+        }
+        writer.finish()
+    }
+
+    fn emit_high_ac_block(writer: &mut EntropyBitWriter) {
+        writer.push_bits(0, 1);
+        for _ in 0..3 {
+            writer.push_bits(0b01, 2);
+        }
+        writer.push_bits(0b10, 2);
+        writer.push_bits(0b11_1111_1111, 10);
+    }
+
+    fn emit_dc_only_block(writer: &mut EntropyBitWriter) {
+        writer.push_bits(0, 1);
+        writer.push_bits(0b00, 2);
+    }
+
+    #[derive(Default)]
+    struct EntropyBitWriter {
+        bytes: Vec<u8>,
+        current: u8,
+        bit_count: u8,
+    }
+
+    impl EntropyBitWriter {
+        fn push_bits(&mut self, bits: u16, len: u8) {
+            for shift in (0..len).rev() {
+                let bit = u8::from(((bits >> shift) & 1) != 0);
+                self.current = (self.current << 1) | bit;
+                self.bit_count += 1;
+                if self.bit_count == 8 {
+                    self.push_current_byte();
+                }
+            }
+        }
+
+        fn finish(mut self) -> Vec<u8> {
+            if self.bit_count != 0 {
+                let pad_bits = 8 - self.bit_count;
+                self.current = (self.current << pad_bits) | ((1u8 << pad_bits) - 1);
+                self.push_current_byte();
+            }
+            self.bytes
+        }
+
+        fn push_current_byte(&mut self) {
+            self.bytes.push(self.current);
+            if self.current == 0xff {
+                self.bytes.push(0x00);
+            }
+            self.current = 0;
+            self.bit_count = 0;
         }
     }
 }

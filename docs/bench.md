@@ -250,6 +250,21 @@ SIGNINUM_BENCH_INPUTS="${SIGNINUM_WSI_ROOT:?set SIGNINUM_WSI_ROOT to extracted J
   cargo bench -p signinum-jpeg --bench compare
 ```
 
+Measure Metal fast 4:2:0 full-batch stages:
+
+```sh
+SIGNINUM_JPEG_METAL_FAST420_BATCH_TIMING=1 \
+SIGNINUM_GPU_BENCH_BATCH_DIM=1024 \
+SIGNINUM_GPU_BENCH_BATCH=64 \
+  cargo bench -p signinum-jpeg-metal --bench device_upload -- \
+  jpeg_metal_batch_decode/metal_rgb8_batch64_surfaces
+```
+
+The timing mode prints `JPEG Metal fast420 batch timing` lines to stderr with
+host setup and GPU wait timings for fused decode and RGB pack. It is diagnostic
+only: enabling it splits fused decode and pack into separate command buffers, so
+use normal benchmark runs without the env var for acceptance wall-clock numbers.
+
 ## `signinum-j2k`
 
 `signinum-j2k` and `signinum-j2k-metal` carry a dedicated Criterion comparator

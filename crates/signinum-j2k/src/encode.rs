@@ -4,7 +4,8 @@ use alloc::vec::Vec;
 
 use signinum_core::{BackendKind, Unsupported};
 use signinum_j2k_native::{
-    DecodeSettings, EncodeOptions, Image, J2kEncodeDispatchReport, J2kEncodeStageAccelerator,
+    DecodeSettings, EncodeOptions, EncodeProgressionOrder, Image, J2kEncodeDispatchReport,
+    J2kEncodeStageAccelerator,
 };
 
 use crate::J2kError;
@@ -29,6 +30,18 @@ pub enum J2kProgressionOrder {
     /// Layer-resolution-component-position progression.
     #[default]
     Lrcp,
+    /// Resolution-position-component-layer progression.
+    Rpcl,
+}
+
+/// Supported code-block coding modes for the lossless encode facade.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum J2kBlockCodingMode {
+    /// Classic JPEG 2000 Part 1 EBCOT block coding.
+    #[default]
+    Classic,
+    /// High-throughput JPEG 2000 Part 15 block coding.
+    HighThroughput,
 }
 
 /// Reversible transform profile for lossless JPEG 2000 output.
@@ -39,20 +52,36 @@ pub enum ReversibleTransform {
     Rct53,
 }
 
+/// Validation policy for the lossless encode facade.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum J2kEncodeValidation {
+    /// Decode the produced codestream with the native CPU decoder and compare
+    /// decoded samples before returning.
+    #[default]
+    CpuRoundTrip,
+    /// Skip facade validation because the caller performs equivalent external
+    /// validation, for example by decoding on a device backend.
+    External,
+}
+
 /// Options controlling JPEG 2000 lossless encoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct J2kLosslessEncodeOptions {
     pub backend: EncodeBackendPreference,
+    pub block_coding_mode: J2kBlockCodingMode,
     pub progression: J2kProgressionOrder,
     pub reversible_transform: ReversibleTransform,
+    pub validation: J2kEncodeValidation,
 }
 
 impl Default for J2kLosslessEncodeOptions {
     fn default() -> Self {
         Self {
             backend: EncodeBackendPreference::Auto,
+            block_coding_mode: J2kBlockCodingMode::Classic,
             progression: J2kProgressionOrder::Lrcp,
             reversible_transform: ReversibleTransform::Rct53,
+            validation: J2kEncodeValidation::CpuRoundTrip,
         }
     }
 }
@@ -132,8 +161,8 @@ pub fn encode_j2k_lossless(
     options: &J2kLosslessEncodeOptions,
 ) -> Result<EncodedJ2k, J2kError> {
     let backend = resolve_encode_backend(options.backend)?;
-    let codestream = encode_cpu(samples)?;
-    validate_lossless_roundtrip(samples, &codestream)?;
+    let codestream = encode_cpu(samples, *options)?;
+    validate_lossless_roundtrip(samples, &codestream, options.validation)?;
     Ok(EncodedJ2k {
         codestream,
         backend,
@@ -162,12 +191,17 @@ pub fn encode_j2k_lossless_with_accelerator(
     }
 
     let before = accelerator.dispatch_report();
-    let codestream = encode_with_native_accelerator(samples, accelerator)?;
+    let required_stages = required_encode_stages(samples, *options);
+    let codestream = encode_with_native_accelerator(samples, *options, accelerator)?;
     let dispatch = accelerator.dispatch_report().saturating_delta(before);
-    validate_lossless_roundtrip(samples, &codestream)?;
+    validate_lossless_roundtrip(samples, &codestream, options.validation)?;
 
-    let backend =
-        resolve_accelerated_encode_backend(options.backend, accelerated_backend, dispatch)?;
+    let backend = resolve_accelerated_encode_backend(
+        options.backend,
+        accelerated_backend,
+        dispatch,
+        required_stages,
+    )?;
     Ok(EncodedJ2k {
         codestream,
         backend,
@@ -194,13 +228,14 @@ fn resolve_accelerated_encode_backend(
     preference: EncodeBackendPreference,
     accelerated_backend: BackendKind,
     dispatch: J2kEncodeDispatchReport,
+    required_stages: RequiredEncodeStages,
 ) -> Result<BackendKind, J2kError> {
-    if dispatch.any() {
+    if required_stages.satisfied_by(dispatch) {
         return Ok(accelerated_backend);
     }
     match preference {
         EncodeBackendPreference::RequireDevice => Err(J2kError::Unsupported(Unsupported {
-            what: "requested JPEG 2000 lossless device encode backend did not dispatch",
+            what: required_stages.missing_message(dispatch),
         })),
         EncodeBackendPreference::Auto
         | EncodeBackendPreference::CpuOnly
@@ -208,8 +243,11 @@ fn resolve_accelerated_encode_backend(
     }
 }
 
-fn encode_cpu(samples: J2kLosslessSamples<'_>) -> Result<Vec<u8>, J2kError> {
-    let options = native_lossless_options(samples);
+fn encode_cpu(
+    samples: J2kLosslessSamples<'_>,
+    options: J2kLosslessEncodeOptions,
+) -> Result<Vec<u8>, J2kError> {
+    let options = native_lossless_options(samples, options);
     signinum_j2k_native::encode(
         samples.data,
         samples.width,
@@ -224,9 +262,10 @@ fn encode_cpu(samples: J2kLosslessSamples<'_>) -> Result<Vec<u8>, J2kError> {
 
 fn encode_with_native_accelerator(
     samples: J2kLosslessSamples<'_>,
+    options: J2kLosslessEncodeOptions,
     accelerator: &mut impl J2kEncodeStageAccelerator,
 ) -> Result<Vec<u8>, J2kError> {
-    let options = native_lossless_options(samples);
+    let options = native_lossless_options(samples, options);
     signinum_j2k_native::encode_with_accelerator(
         samples.data,
         samples.width,
@@ -240,11 +279,28 @@ fn encode_with_native_accelerator(
     .map_err(|err| J2kError::Backend(format!("JPEG 2000 lossless encode failed: {err}")))
 }
 
-fn native_lossless_options(samples: J2kLosslessSamples<'_>) -> EncodeOptions {
+fn native_lossless_options(
+    samples: J2kLosslessSamples<'_>,
+    options: J2kLosslessEncodeOptions,
+) -> EncodeOptions {
+    let progression_order = native_progression_order(options.progression);
     EncodeOptions {
         reversible: true,
-        num_decomposition_levels: j2k_lossless_decomposition_levels(samples),
+        num_decomposition_levels: j2k_lossless_decomposition_levels_for_progression(
+            samples,
+            options.progression,
+        ),
+        use_ht_block_coding: options.block_coding_mode == J2kBlockCodingMode::HighThroughput,
+        progression_order,
+        write_tlm: options.progression == J2kProgressionOrder::Rpcl,
         ..EncodeOptions::default()
+    }
+}
+
+fn native_progression_order(progression: J2kProgressionOrder) -> EncodeProgressionOrder {
+    match progression {
+        J2kProgressionOrder::Lrcp => EncodeProgressionOrder::Lrcp,
+        J2kProgressionOrder::Rpcl => EncodeProgressionOrder::Rpcl,
     }
 }
 
@@ -252,6 +308,18 @@ const MIN_LOSSLESS_DWT_DIMENSION: u32 = 64;
 
 /// Return the default lossless decomposition level policy used by the facade.
 pub fn j2k_lossless_decomposition_levels(samples: J2kLosslessSamples<'_>) -> u8 {
+    j2k_lossless_decomposition_levels_for_progression(samples, J2kProgressionOrder::Lrcp)
+}
+
+/// Return the default lossless decomposition level policy for a progression.
+pub fn j2k_lossless_decomposition_levels_for_progression(
+    samples: J2kLosslessSamples<'_>,
+    progression: J2kProgressionOrder,
+) -> u8 {
+    if progression == J2kProgressionOrder::Rpcl {
+        return j2k_rpcl_lossless_decomposition_levels(samples);
+    }
+
     if samples.width.min(samples.height) < MIN_LOSSLESS_DWT_DIMENSION {
         return 0;
     }
@@ -259,10 +327,123 @@ pub fn j2k_lossless_decomposition_levels(samples: J2kLosslessSamples<'_>) -> u8 
     1
 }
 
+fn j2k_rpcl_lossless_decomposition_levels(samples: J2kLosslessSamples<'_>) -> u8 {
+    let mut levels = 0u8;
+    let mut width = samples.width;
+    let mut height = samples.height;
+    let max_levels = max_decomposition_levels(samples.width, samples.height);
+
+    while width.min(height) > MIN_LOSSLESS_DWT_DIMENSION && levels < max_levels {
+        width = width.div_ceil(2);
+        height = height.div_ceil(2);
+        levels += 1;
+    }
+
+    levels
+}
+
+fn max_decomposition_levels(width: u32, height: u32) -> u8 {
+    let min_dim = width.min(height);
+    if min_dim <= 1 {
+        return 0;
+    }
+    min_dim.ilog2() as u8
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RequiredEncodeStages {
+    bits: u8,
+}
+
+impl RequiredEncodeStages {
+    const FORWARD_RCT: u8 = 1 << 0;
+    const FORWARD_DWT53: u8 = 1 << 1;
+    const TIER1_CODE_BLOCK: u8 = 1 << 2;
+    const HT_CODE_BLOCK: u8 = 1 << 3;
+    const PACKETIZATION: u8 = 1 << 4;
+
+    fn satisfied_by(self, dispatch: J2kEncodeDispatchReport) -> bool {
+        self.missing_stage(dispatch).is_none()
+    }
+
+    fn missing_message(self, dispatch: J2kEncodeDispatchReport) -> &'static str {
+        match self.missing_stage(dispatch) {
+            Some("forward_rct") => {
+                "requested JPEG 2000 lossless device encode backend did not dispatch forward_rct"
+            }
+            Some("forward_dwt53") => {
+                "requested JPEG 2000 lossless device encode backend did not dispatch forward_dwt53"
+            }
+            Some("tier1_code_block") => {
+                "requested JPEG 2000 lossless device encode backend did not dispatch tier1_code_block"
+            }
+            Some("ht_code_block") => {
+                "requested JPEG 2000 lossless device encode backend did not dispatch ht_code_block"
+            }
+            Some("packetization") => {
+                "requested JPEG 2000 lossless device encode backend did not dispatch packetization"
+            }
+            _ => "requested JPEG 2000 lossless device encode backend did not dispatch",
+        }
+    }
+
+    fn missing_stage(self, dispatch: J2kEncodeDispatchReport) -> Option<&'static str> {
+        if self.contains(Self::FORWARD_RCT) && dispatch.forward_rct == 0 {
+            return Some("forward_rct");
+        }
+        if self.contains(Self::FORWARD_DWT53) && dispatch.forward_dwt53 == 0 {
+            return Some("forward_dwt53");
+        }
+        if self.contains(Self::TIER1_CODE_BLOCK) && dispatch.tier1_code_block == 0 {
+            return Some("tier1_code_block");
+        }
+        if self.contains(Self::HT_CODE_BLOCK) && dispatch.ht_code_block == 0 {
+            return Some("ht_code_block");
+        }
+        if self.contains(Self::PACKETIZATION) && dispatch.packetization == 0 {
+            return Some("packetization");
+        }
+        None
+    }
+
+    fn contains(self, stage: u8) -> bool {
+        self.bits & stage != 0
+    }
+}
+
+fn required_encode_stages(
+    samples: J2kLosslessSamples<'_>,
+    options: J2kLosslessEncodeOptions,
+) -> RequiredEncodeStages {
+    let decomposition_levels =
+        j2k_lossless_decomposition_levels_for_progression(samples, options.progression);
+    let high_throughput = options.block_coding_mode == J2kBlockCodingMode::HighThroughput;
+
+    let mut bits = RequiredEncodeStages::PACKETIZATION;
+    if samples.components >= 3 {
+        bits |= RequiredEncodeStages::FORWARD_RCT;
+    }
+    if decomposition_levels > 0 {
+        bits |= RequiredEncodeStages::FORWARD_DWT53;
+    }
+    if high_throughput {
+        bits |= RequiredEncodeStages::HT_CODE_BLOCK;
+    } else {
+        bits |= RequiredEncodeStages::TIER1_CODE_BLOCK;
+    }
+
+    RequiredEncodeStages { bits }
+}
+
 fn validate_lossless_roundtrip(
     samples: J2kLosslessSamples<'_>,
     codestream: &[u8],
+    validation: J2kEncodeValidation,
 ) -> Result<(), J2kError> {
+    if validation == J2kEncodeValidation::External {
+        return Ok(());
+    }
+
     let decoded = Image::new(codestream, &DecodeSettings::default())
         .map_err(|err| J2kError::Backend(format!("encoded codestream validation failed: {err}")))?
         .decode_native()

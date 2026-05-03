@@ -106,12 +106,16 @@ pub use error::{
     ColorError, DecodeError, DecodingError, FormatError, MarkerError, Result, TileError,
     ValidationError,
 };
-pub use j2c::encode::{encode, encode_htj2k, encode_with_accelerator, EncodeOptions};
+pub use j2c::encode::{
+    encode, encode_htj2k, encode_with_accelerator, EncodeOptions, EncodeProgressionOrder,
+};
 pub use j2c::DecoderContext;
 
 mod j2c;
 mod jp2;
 pub(crate) mod reader;
+#[doc(hidden)]
+pub use j2c::ht_encode_tables::HtUvlcTableEntry;
 
 /// Hidden HTJ2K code-block job description for backend experimentation.
 #[doc(hidden)]
@@ -257,6 +261,18 @@ pub struct EncodedJ2kCodeBlock {
     pub missing_bit_planes: u8,
 }
 
+/// Hidden encoded HTJ2K cleanup code-block payload for backend experimentation.
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct EncodedHtJ2kCodeBlock {
+    /// Combined cleanup/refinement bytes for this code block.
+    pub data: Vec<u8>,
+    /// Number of coding passes present for this code block.
+    pub num_coding_passes: u8,
+    /// Number of zero most-significant bitplanes before first inclusion.
+    pub num_zero_bitplanes: u8,
+}
+
 /// Hidden forward RCT job for backend experimentation.
 #[doc(hidden)]
 #[derive(Debug)]
@@ -339,6 +355,20 @@ pub struct J2kTier1CodeBlockEncodeJob<'a> {
     pub style: J2kCodeBlockStyle,
 }
 
+/// Hidden HTJ2K cleanup-only code-block encode job for backend experimentation.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy)]
+pub struct J2kHtCodeBlockEncodeJob<'a> {
+    /// Quantized coefficients in row-major order.
+    pub coefficients: &'a [i32],
+    /// Code-block width in samples.
+    pub width: u32,
+    /// Code-block height in samples.
+    pub height: u32,
+    /// Total bitplanes for this subband/code-block.
+    pub total_bitplanes: u8,
+}
+
 /// Hidden LRCP packetization code-block contribution for backend experimentation.
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -367,6 +397,16 @@ pub enum J2kPacketizationBlockCodingMode {
     HighThroughput,
 }
 
+/// Hidden packet progression order for backend packetization experimentation.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum J2kPacketizationProgressionOrder {
+    /// Layer-resolution-component-position progression.
+    Lrcp,
+    /// Resolution-position-component-layer progression.
+    Rpcl,
+}
+
 /// Hidden LRCP packetization subband precinct for backend experimentation.
 #[doc(hidden)]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -387,6 +427,24 @@ pub struct J2kPacketizationResolution<'a> {
     pub subbands: Vec<J2kPacketizationSubband<'a>>,
 }
 
+/// Hidden explicit packet descriptor for backend packetization experimentation.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct J2kPacketizationPacketDescriptor {
+    /// Index into the packet contribution array.
+    pub packet_index: u32,
+    /// Persistent packet-state index for repeated layer/precinct packets.
+    pub state_index: u32,
+    /// Quality layer for inclusion tag-tree thresholds.
+    pub layer: u8,
+    /// Resolution index in the output progression.
+    pub resolution: u32,
+    /// Component index in the output progression.
+    pub component: u8,
+    /// Precinct index in the output progression.
+    pub precinct: u64,
+}
+
 /// Hidden LRCP packetization job for backend experimentation.
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -399,6 +457,10 @@ pub struct J2kPacketizationEncodeJob<'a> {
     pub num_components: u8,
     /// Total number of code-block contributions.
     pub code_block_count: u32,
+    /// Packet progression order to emit.
+    pub progression_order: J2kPacketizationProgressionOrder,
+    /// Explicit packet descriptors in output progression order.
+    pub packet_descriptors: &'a [J2kPacketizationPacketDescriptor],
     /// Packet payload prepared by Tier-1, in LRCP packet order.
     pub resolutions: &'a [J2kPacketizationResolution<'a>],
 }
@@ -413,6 +475,8 @@ pub struct J2kEncodeDispatchReport {
     pub forward_dwt53: usize,
     /// Tier-1 code-block encode dispatch count.
     pub tier1_code_block: usize,
+    /// HTJ2K cleanup-only code-block encode dispatch count.
+    pub ht_code_block: usize,
     /// Packetization dispatch count.
     pub packetization: usize,
 }
@@ -427,6 +491,7 @@ impl J2kEncodeDispatchReport {
             tier1_code_block: self
                 .tier1_code_block
                 .saturating_sub(before.tier1_code_block),
+            ht_code_block: self.ht_code_block.saturating_sub(before.ht_code_block),
             packetization: self.packetization.saturating_sub(before.packetization),
         }
     }
@@ -437,6 +502,7 @@ impl J2kEncodeDispatchReport {
         self.forward_rct
             .saturating_add(self.forward_dwt53)
             .saturating_add(self.tier1_code_block)
+            .saturating_add(self.ht_code_block)
             .saturating_add(self.packetization)
     }
 
@@ -488,7 +554,40 @@ pub trait J2kEncodeStageAccelerator {
         Ok(None)
     }
 
-    /// Optionally packetize prepared LRCP packet contributions.
+    /// Optionally encode multiple classic Tier-1 code-blocks in one backend dispatch.
+    ///
+    /// Return `Ok(Some(outputs))` with one encoded output per input job. Return
+    /// `Ok(None)` to use the per-block hook or CPU fallback.
+    fn encode_tier1_code_blocks(
+        &mut self,
+        _jobs: &[J2kTier1CodeBlockEncodeJob<'_>],
+    ) -> core::result::Result<Option<Vec<EncodedJ2kCodeBlock>>, &'static str> {
+        Ok(None)
+    }
+
+    /// Optionally encode one HTJ2K cleanup-only code-block.
+    ///
+    /// Return `Ok(Some(output))` with encoded bytes and pass metadata. Return
+    /// `Ok(None)` to use the CPU fallback.
+    fn encode_ht_code_block(
+        &mut self,
+        _job: J2kHtCodeBlockEncodeJob<'_>,
+    ) -> core::result::Result<Option<EncodedHtJ2kCodeBlock>, &'static str> {
+        Ok(None)
+    }
+
+    /// Optionally encode multiple HTJ2K cleanup-only code-blocks in one backend dispatch.
+    ///
+    /// Return `Ok(Some(outputs))` with one encoded output per input job. Return
+    /// `Ok(None)` to use the per-block hook or CPU fallback.
+    fn encode_ht_code_blocks(
+        &mut self,
+        _jobs: &[J2kHtCodeBlockEncodeJob<'_>],
+    ) -> core::result::Result<Option<Vec<EncodedHtJ2kCodeBlock>>, &'static str> {
+        Ok(None)
+    }
+
+    /// Optionally packetize prepared packet contributions.
     ///
     /// Return `Ok(Some(bytes))` with the complete tile bitstream. Return
     /// `Ok(None)` to use the CPU fallback.
@@ -782,6 +881,87 @@ pub fn encode_j2k_code_block_scalar_with_style(
     })
 }
 
+/// Hidden scalar HTJ2K cleanup-only encoder helper for backend experimentation.
+#[doc(hidden)]
+pub fn encode_ht_code_block_scalar(
+    coefficients: &[i32],
+    width: u32,
+    height: u32,
+    total_bitplanes: u8,
+) -> core::result::Result<EncodedHtJ2kCodeBlock, &'static str> {
+    let encoded =
+        j2c::ht_block_encode::encode_code_block(coefficients, width, height, total_bitplanes)?;
+    Ok(EncodedHtJ2kCodeBlock {
+        data: encoded.data,
+        num_coding_passes: encoded.num_coding_passes,
+        num_zero_bitplanes: encoded.num_zero_bitplanes,
+    })
+}
+
+/// Hidden scalar Tier-2 packetization helper for backend experimentation.
+#[doc(hidden)]
+pub fn encode_j2k_packetization_scalar(
+    job: J2kPacketizationEncodeJob<'_>,
+) -> core::result::Result<Vec<u8>, &'static str> {
+    let mut resolutions = job
+        .resolutions
+        .iter()
+        .map(|resolution| j2c::packet_encode::ResolutionPacket {
+            subbands: resolution
+                .subbands
+                .iter()
+                .map(|subband| j2c::packet_encode::SubbandPrecinct {
+                    code_blocks: subband
+                        .code_blocks
+                        .iter()
+                        .map(|code_block| j2c::packet_encode::CodeBlockPacketData {
+                            data: code_block.data.to_vec(),
+                            num_coding_passes: code_block.num_coding_passes,
+                            num_zero_bitplanes: code_block.num_zero_bitplanes,
+                            previously_included: code_block.previously_included,
+                            l_block: code_block.l_block,
+                            block_coding_mode: match code_block.block_coding_mode {
+                                J2kPacketizationBlockCodingMode::Classic => {
+                                    j2c::codestream_write::BlockCodingMode::Classic
+                                }
+                                J2kPacketizationBlockCodingMode::HighThroughput => {
+                                    j2c::codestream_write::BlockCodingMode::HighThroughput
+                                }
+                            },
+                        })
+                        .collect(),
+                    num_cbs_x: subband.num_cbs_x,
+                    num_cbs_y: subband.num_cbs_y,
+                })
+                .collect(),
+        })
+        .collect::<Vec<_>>();
+
+    let descriptors = job
+        .packet_descriptors
+        .iter()
+        .map(|descriptor| j2c::packet_encode::PacketDescriptor {
+            packet_index: descriptor.packet_index,
+            state_index: descriptor.state_index,
+            layer: descriptor.layer,
+            resolution: descriptor.resolution,
+            component: descriptor.component,
+            precinct: descriptor.precinct,
+        })
+        .collect::<Vec<_>>();
+
+    if descriptors.is_empty() {
+        Ok(j2c::packet_encode::form_tile_bitstream_for_progression(
+            &mut resolutions,
+            job.num_layers,
+            job.num_components,
+            job.progression_order,
+        ))
+    } else {
+        j2c::packet_encode::form_tile_bitstream_with_descriptors(&mut resolutions, &descriptors)
+    }
+}
+
 /// Hidden scalar classic J2K decoder helper for backend experimentation.
 #[doc(hidden)]
 pub fn decode_j2k_code_block_scalar(
@@ -978,6 +1158,24 @@ pub fn ht_uvlc_table0() -> &'static [u16; 320] {
 #[doc(hidden)]
 pub fn ht_uvlc_table1() -> &'static [u16; 256] {
     &j2c::ht_tables::UVLC_TABLE1
+}
+
+/// Hidden HTJ2K cleanup encoder VLC table 0 for backend experimentation.
+#[doc(hidden)]
+pub fn ht_vlc_encode_table0() -> &'static [u16; 2048] {
+    &j2c::ht_encode_tables::HT_VLC_ENCODE_TABLE0
+}
+
+/// Hidden HTJ2K cleanup encoder VLC table 1 for backend experimentation.
+#[doc(hidden)]
+pub fn ht_vlc_encode_table1() -> &'static [u16; 2048] {
+    &j2c::ht_encode_tables::HT_VLC_ENCODE_TABLE1
+}
+
+/// Hidden HTJ2K cleanup encoder UVLC table for backend experimentation.
+#[doc(hidden)]
+pub fn ht_uvlc_encode_table() -> &'static [HtUvlcTableEntry; 75] {
+    &j2c::ht_encode_tables::HT_UVLC_ENCODE_TABLE
 }
 
 /// JP2 signature box: 00 00 00 0C 6A 50 20 20

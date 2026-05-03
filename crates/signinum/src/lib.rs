@@ -201,8 +201,8 @@ pub use core::{
 pub use j2k::{
     encode_j2k_lossless, encode_j2k_lossless_with_accelerator, j2k_lossless_decomposition_levels,
     EncodeBackendPreference, EncodedJ2k, J2kCodec, J2kContext, J2kDecoder, J2kEncodeDispatchReport,
-    J2kEncodeStageAccelerator, J2kError, J2kLosslessEncodeOptions, J2kLosslessSamples,
-    J2kProgressionOrder, ReversibleTransform,
+    J2kEncodeStageAccelerator, J2kEncodeValidation, J2kError, J2kLosslessEncodeOptions,
+    J2kLosslessSamples, J2kProgressionOrder, ReversibleTransform,
 };
 pub use jpeg::{
     ColorSpace, ColorTransform, DecodeOptions, Decoder as JpegDecoder, JpegCodec, JpegError,

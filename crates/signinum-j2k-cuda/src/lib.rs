@@ -25,8 +25,9 @@ use signinum_j2k::{
     J2kScratchPool as CpuJ2kScratchPool, J2kView,
 };
 use signinum_j2k_native::{
-    EncodedJ2kCodeBlock, J2kEncodeDispatchReport, J2kEncodeStageAccelerator, J2kForwardDwt53Job,
-    J2kForwardDwt53Output, J2kForwardRctJob, J2kPacketizationEncodeJob, J2kTier1CodeBlockEncodeJob,
+    EncodedHtJ2kCodeBlock, EncodedJ2kCodeBlock, J2kEncodeDispatchReport, J2kEncodeStageAccelerator,
+    J2kForwardDwt53Job, J2kForwardDwt53Output, J2kForwardRctJob, J2kHtCodeBlockEncodeJob,
+    J2kPacketizationEncodeJob, J2kTier1CodeBlockEncodeJob,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -51,10 +52,12 @@ pub struct CudaEncodeStageAccelerator {
     forward_rct_attempts: usize,
     forward_dwt53_attempts: usize,
     tier1_code_block_attempts: usize,
+    ht_code_block_attempts: usize,
     packetization_attempts: usize,
     forward_rct_dispatches: usize,
     forward_dwt53_dispatches: usize,
     tier1_code_block_dispatches: usize,
+    ht_code_block_dispatches: usize,
     packetization_dispatches: usize,
 }
 
@@ -83,6 +86,10 @@ impl CudaEncodeStageAccelerator {
         self.tier1_code_block_attempts
     }
 
+    pub fn ht_code_block_attempts(&self) -> usize {
+        self.ht_code_block_attempts
+    }
+
     pub fn packetization_attempts(&self) -> usize {
         self.packetization_attempts
     }
@@ -97,6 +104,10 @@ impl CudaEncodeStageAccelerator {
 
     pub fn tier1_code_block_dispatches(&self) -> usize {
         self.tier1_code_block_dispatches
+    }
+
+    pub fn ht_code_block_dispatches(&self) -> usize {
+        self.ht_code_block_dispatches
     }
 
     pub fn packetization_dispatches(&self) -> usize {
@@ -115,6 +126,7 @@ impl J2kEncodeStageAccelerator for CudaEncodeStageAccelerator {
             forward_rct: self.forward_rct_dispatches,
             forward_dwt53: self.forward_dwt53_dispatches,
             tier1_code_block: self.tier1_code_block_dispatches,
+            ht_code_block: self.ht_code_block_dispatches,
             packetization: self.packetization_dispatches,
         }
     }
@@ -165,6 +177,14 @@ impl J2kEncodeStageAccelerator for CudaEncodeStageAccelerator {
         _job: J2kTier1CodeBlockEncodeJob<'_>,
     ) -> core::result::Result<Option<EncodedJ2kCodeBlock>, &'static str> {
         self.tier1_code_block_attempts = self.tier1_code_block_attempts.saturating_add(1);
+        Ok(None)
+    }
+
+    fn encode_ht_code_block(
+        &mut self,
+        _job: J2kHtCodeBlockEncodeJob<'_>,
+    ) -> core::result::Result<Option<EncodedHtJ2kCodeBlock>, &'static str> {
+        self.ht_code_block_attempts = self.ht_code_block_attempts.saturating_add(1);
         Ok(None)
     }
 

@@ -7,6 +7,7 @@ use std::{
     cell::RefCell,
     ffi::OsStr,
     mem::{size_of, size_of_val},
+    time::{Duration, Instant},
 };
 
 #[cfg(target_os = "macos")]
@@ -57,6 +58,8 @@ const AUTO_METAL_MIN_BATCH_EDGE: u32 = 512;
 const REGION_SCALED_BATCH_CHUNK: usize = 8;
 #[cfg(target_os = "macos")]
 const SPLIT_FAST420_BATCH_ENV: &str = "SIGNINUM_JPEG_METAL_SPLIT_FAST420_BATCH";
+#[cfg(target_os = "macos")]
+const FAST420_BATCH_TIMING_ENV: &str = "SIGNINUM_JPEG_METAL_FAST420_BATCH_TIMING";
 
 #[cfg(target_os = "macos")]
 #[repr(C)]
@@ -4109,6 +4112,51 @@ enum Fast420BatchDecodeMode {
 }
 
 #[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, Default)]
+struct Fast420BatchTiming {
+    accepted: Duration,
+    entropy_concat: Duration,
+    buffer_alloc: Duration,
+    encode_decode: Duration,
+    wait_decode: Duration,
+    encode_pack: Duration,
+    wait_pack: Duration,
+    total: Duration,
+}
+
+#[cfg(target_os = "macos")]
+impl Fast420BatchTiming {
+    fn micros(duration: Duration) -> u128 {
+        duration.as_micros()
+    }
+
+    fn log(self, label: &str, tile_count: usize, dimensions: (u32, u32), segment_count: usize) {
+        eprintln!(
+            concat!(
+                "JPEG Metal fast420 batch timing ",
+                "mode={} tiles={} dims={}x{} segments={} ",
+                "accepted_us={} entropy_concat_us={} buffer_alloc_us={} ",
+                "encode_decode_us={} wait_decode_us={} ",
+                "encode_pack_us={} wait_pack_us={} total_us={}"
+            ),
+            label,
+            tile_count,
+            dimensions.0,
+            dimensions.1,
+            segment_count,
+            Self::micros(self.accepted),
+            Self::micros(self.entropy_concat),
+            Self::micros(self.buffer_alloc),
+            Self::micros(self.encode_decode),
+            Self::micros(self.wait_decode),
+            Self::micros(self.encode_pack),
+            Self::micros(self.wait_pack),
+            Self::micros(self.total)
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn fast420_batch_decode_mode() -> Fast420BatchDecodeMode {
     if split_fast420_batch_enabled() {
         Fast420BatchDecodeMode::SplitCoeffIdct
@@ -4371,6 +4419,11 @@ fn try_decode_fast420_full_rgb_batch_to_surfaces_with_mode(
     packets: &[BatchedFastPacket<'_>],
     decode_mode: Fast420BatchDecodeMode,
 ) -> Result<Option<Vec<Result<Surface, Error>>>, Error> {
+    let timing_enabled =
+        decode_mode == Fast420BatchDecodeMode::Fused && fast420_batch_timing_enabled();
+    let timing_total_start = timing_enabled.then(Instant::now);
+    let mut timing = Fast420BatchTiming::default();
+
     if requests.len() < 2
         || requests
             .iter()
@@ -4448,7 +4501,13 @@ fn try_decode_fast420_full_rgb_batch_to_surfaces_with_mode(
         out_stride: checked_u32(out_stride, "batch output stride")?,
         alpha: u32::from(u8::MAX),
     };
+    if timing_enabled {
+        timing.accepted = timing_total_start
+            .expect("timing start is set when timing is enabled")
+            .elapsed();
+    }
 
+    let timing_entropy_start = timing_enabled.then(Instant::now);
     let total_entropy_len = fast420_packets
         .iter()
         .map(|packet| packet.entropy_bytes.len())
@@ -4473,7 +4532,13 @@ fn try_decode_fast420_full_rgb_batch_to_surfaces_with_mode(
         entropy_bytes.extend_from_slice(&packet.entropy_bytes);
         entropy_checkpoints.extend(packet.entropy_checkpoints.iter().copied());
     }
+    if timing_enabled {
+        timing.entropy_concat = timing_entropy_start
+            .expect("timing start is set when timing is enabled")
+            .elapsed();
+    }
 
+    let timing_buffer_start = timing_enabled.then(Instant::now);
     let y_plane = runtime.device.new_buffer(
         (y_len * tile_count) as u64,
         MTLResourceOptions::StorageModeShared,
@@ -4501,6 +4566,11 @@ fn try_decode_fast420_full_rgb_batch_to_surfaces_with_mode(
     let entropy_lens_buffer = u32_buffer(&runtime.device, &entropy_lens, "batch entropy lengths")?;
     let entropy_checkpoints_buffer =
         entropy_checkpoints_buffer(&runtime.device, &entropy_checkpoints)?;
+    if timing_enabled {
+        timing.buffer_alloc = timing_buffer_start
+            .expect("timing start is set when timing is enabled")
+            .elapsed();
+    }
 
     let dc_tables = [
         PreparedHuffmanHost::from(&first.y_dc_table),
@@ -4513,10 +4583,11 @@ fn try_decode_fast420_full_rgb_batch_to_surfaces_with_mode(
         PreparedHuffmanHost::from(&first.cr_ac_table),
     ];
 
-    let command_buffer = runtime.queue.new_command_buffer();
+    let mut command_buffer = runtime.queue.new_command_buffer();
     let mut _split_scratch: Option<(Buffer, Buffer)> = None;
     match decode_mode {
         Fast420BatchDecodeMode::Fused => {
+            let timing_encode_start = timing_enabled.then(Instant::now);
             let decoder_encoder = command_buffer.new_compute_command_encoder();
             decoder_encoder.set_compute_pipeline_state(&runtime.fast420_batch_decode_pipeline);
             decoder_encoder.set_buffer(0, Some(&entropy_buffer), 0);
@@ -4583,6 +4654,16 @@ fn try_decode_fast420_full_rgb_batch_to_surfaces_with_mode(
                 total_decode_threads,
             );
             decoder_encoder.end_encoding();
+            if timing_enabled {
+                timing.encode_decode = timing_encode_start
+                    .expect("timing start is set when timing is enabled")
+                    .elapsed();
+                command_buffer.commit();
+                let timing_wait_start = Instant::now();
+                command_buffer.wait_until_completed();
+                timing.wait_decode = timing_wait_start.elapsed();
+                command_buffer = runtime.queue.new_command_buffer();
+            }
         }
         Fast420BatchDecodeMode::SplitCoeffIdct => {
             let coeff_bytes = total_blocks
@@ -4693,6 +4774,7 @@ fn try_decode_fast420_full_rgb_batch_to_surfaces_with_mode(
         }
     }
 
+    let timing_pack_encode_start = timing_enabled.then(Instant::now);
     let pack_encoder = command_buffer.new_compute_command_encoder();
     pack_encoder.set_compute_pipeline_state(&runtime.pack_420_rgb_batch_pipeline);
     pack_encoder.set_buffer(0, Some(&y_plane), 0);
@@ -4714,9 +4796,24 @@ fn try_decode_fast420_full_rgb_batch_to_surfaces_with_mode(
         ),
     );
     pack_encoder.end_encoding();
+    if timing_enabled {
+        timing.encode_pack = timing_pack_encode_start
+            .expect("timing start is set when timing is enabled")
+            .elapsed();
+    }
 
     command_buffer.commit();
-    command_buffer.wait_until_completed();
+    if timing_enabled {
+        let timing_wait_start = Instant::now();
+        command_buffer.wait_until_completed();
+        timing.wait_pack = timing_wait_start.elapsed();
+        timing.total = timing_total_start
+            .expect("timing start is set when timing is enabled")
+            .elapsed();
+        timing.log("fused-stages", tile_count, first.dimensions, segment_count);
+    } else {
+        command_buffer.wait_until_completed();
+    }
 
     if let Some(status) = first_decode_error_status(&status_buffer, total_decode_threads) {
         let mut results = Vec::with_capacity(requests.len());
@@ -4746,6 +4843,16 @@ fn split_fast420_batch_enabled() -> bool {
 
 #[cfg(target_os = "macos")]
 fn split_fast420_batch_value_enabled(value: Option<&OsStr>) -> bool {
+    value.is_some_and(|value| value == OsStr::new("1"))
+}
+
+#[cfg(target_os = "macos")]
+fn fast420_batch_timing_enabled() -> bool {
+    fast420_batch_timing_value_enabled(std::env::var_os(FAST420_BATCH_TIMING_ENV).as_deref())
+}
+
+#[cfg(target_os = "macos")]
+fn fast420_batch_timing_value_enabled(value: Option<&OsStr>) -> bool {
     value.is_some_and(|value| value == OsStr::new("1"))
 }
 
@@ -8235,6 +8342,17 @@ mod tests {
             std::ffi::OsStr::new("true")
         )));
         assert!(!split_fast420_batch_value_enabled(None));
+    }
+
+    #[test]
+    fn fast420_batch_timing_env_requires_explicit_one() {
+        assert!(fast420_batch_timing_value_enabled(Some(
+            std::ffi::OsStr::new("1")
+        )));
+        assert!(!fast420_batch_timing_value_enabled(Some(
+            std::ffi::OsStr::new("true")
+        )));
+        assert!(!fast420_batch_timing_value_enabled(None));
     }
 
     #[test]

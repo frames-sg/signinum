@@ -6,11 +6,14 @@
 mod batch;
 #[cfg(target_os = "macos")]
 mod compute;
+mod encode;
 mod routing;
 mod session;
 pub mod viewport;
 
 use std::sync::Arc;
+#[cfg(target_os = "macos")]
+use std::sync::OnceLock;
 
 use signinum_core::{
     BackendKind, BackendRequest, BufferError, CodecError, DecodeOutcome, DeviceSubmission,
@@ -29,6 +32,11 @@ use signinum_jpeg::{
     ScratchPool as CpuScratchPool, Warning as CpuWarning,
 };
 
+pub use encode::{
+    encode_jpeg_baseline_batch_from_metal_buffers, encode_jpeg_baseline_from_metal_buffer,
+    JpegBaselineMetalEncodeTile,
+};
+
 #[cfg(target_os = "macos")]
 use metal::{Buffer, Device, MTLResourceOptions};
 
@@ -36,6 +44,8 @@ use metal::{Buffer, Device, MTLResourceOptions};
 pub enum Error {
     #[error(transparent)]
     Decode(#[from] JpegError),
+    #[error(transparent)]
+    Encode(#[from] signinum_jpeg::JpegEncodeError),
     #[error(transparent)]
     Buffer(#[from] BufferError),
     #[error("backend request {request:?} is not supported by signinum-jpeg-metal")]
@@ -170,12 +180,16 @@ impl DeviceSurface for Surface {
 #[derive(Clone)]
 pub struct MetalBackendSession {
     device: Device,
+    runtime: Arc<OnceLock<Result<compute::MetalRuntime, String>>>,
 }
 
 #[cfg(target_os = "macos")]
 impl MetalBackendSession {
     pub fn new(device: Device) -> Self {
-        Self { device }
+        Self {
+            device,
+            runtime: Arc::new(OnceLock::new()),
+        }
     }
 
     pub fn system_default() -> Result<Self, Error> {
@@ -194,6 +208,7 @@ impl core::fmt::Debug for MetalBackendSession {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("MetalBackendSession")
             .field("device", &self.device.name())
+            .field("runtime_initialized", &self.runtime.get().is_some())
             .finish()
     }
 }
@@ -321,14 +336,14 @@ impl<'a> Decoder<'a> {
                 return Err(err);
             }
             match decision {
-                routing::RouteDecision::MetalKernel => compute::decode_to_surface_with_device(
+                routing::RouteDecision::MetalKernel => compute::decode_to_surface_with_session(
                     &self.inner,
                     &mut pool,
                     fmt,
                     self.fast444_packet.as_deref(),
                     self.fast422_packet.as_deref(),
                     self.fast420_packet.as_deref(),
-                    &session.device,
+                    session,
                 ),
                 routing::RouteDecision::CpuHost
                 | routing::RouteDecision::RejectExplicitMetal { .. }
@@ -1591,6 +1606,37 @@ mod tests {
             ),
             routing::RouteDecision::CpuHost
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn metal_backend_session_reuses_compiled_runtime() {
+        let session = MetalBackendSession::system_default().expect("Metal backend session");
+        assert!(session.runtime.get().is_none());
+
+        let mut first = Decoder::new(BASELINE_420).expect("first decoder");
+        first
+            .decode_to_device_with_session(PixelFormat::Rgb8, &session)
+            .expect("first session decode");
+        let first_runtime = session
+            .runtime
+            .get()
+            .and_then(|runtime| runtime.as_ref().ok())
+            .map(std::ptr::from_ref::<compute::MetalRuntime>)
+            .expect("session runtime after first decode");
+
+        let mut second = Decoder::new(BASELINE_420).expect("second decoder");
+        second
+            .decode_to_device_with_session(PixelFormat::Rgb8, &session)
+            .expect("second session decode");
+        let second_runtime = session
+            .runtime
+            .get()
+            .and_then(|runtime| runtime.as_ref().ok())
+            .map(std::ptr::from_ref::<compute::MetalRuntime>)
+            .expect("session runtime after second decode");
+
+        assert_eq!(first_runtime, second_runtime);
     }
 
     #[test]

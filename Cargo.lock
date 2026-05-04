@@ -950,6 +950,7 @@ name = "signinum-jpeg-metal"
 version = "0.2.0"
 dependencies = [
  "criterion",
+ "jpeg-decoder",
  "jpeg-encoder",
  "metal",
  "signinum-core",

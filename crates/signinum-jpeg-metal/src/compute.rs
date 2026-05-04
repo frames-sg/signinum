@@ -45,6 +45,19 @@ const OUT_RGB: u32 = 1;
 const OUT_RGBA: u32 = 2;
 
 #[cfg(target_os = "macos")]
+pub(crate) const JPEG_BASELINE_ENCODE_FORMAT_GRAY8: u32 = 0;
+#[cfg(target_os = "macos")]
+pub(crate) const JPEG_BASELINE_ENCODE_FORMAT_RGB8: u32 = 1;
+#[cfg(target_os = "macos")]
+const JPEG_BASELINE_ENCODE_STATUS_OK: u32 = 0;
+#[cfg(target_os = "macos")]
+const JPEG_BASELINE_ENCODE_STATUS_OVERFLOW: u32 = 1;
+#[cfg(target_os = "macos")]
+const JPEG_BASELINE_ENCODE_STATUS_MISSING_HUFFMAN: u32 = 2;
+#[cfg(target_os = "macos")]
+const JPEG_BASELINE_ENCODE_STATUS_INVALID_PARAMS: u32 = 3;
+
+#[cfg(target_os = "macos")]
 const FAST420_STATUS_OK: u32 = 0;
 #[cfg(target_os = "macos")]
 const FAST420_STATUS_TRUNCATED: u32 = 1;
@@ -71,6 +84,88 @@ struct JpegPackParams {
     alpha: u32,
     mode: u32,
     out_format: u32,
+}
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(crate) struct JpegBaselineEncodeParams {
+    pub(crate) input_offset_bytes: u32,
+    pub(crate) input_width: u32,
+    pub(crate) input_height: u32,
+    pub(crate) output_width: u32,
+    pub(crate) output_height: u32,
+    pub(crate) pitch_bytes: u32,
+    pub(crate) mcus_per_row: u32,
+    pub(crate) mcu_rows: u32,
+    pub(crate) restart_interval_mcus: u32,
+    pub(crate) format: u32,
+    pub(crate) components: u32,
+    pub(crate) max_h: u32,
+    pub(crate) max_v: u32,
+    pub(crate) h0: u32,
+    pub(crate) v0: u32,
+    pub(crate) h1: u32,
+    pub(crate) v1: u32,
+    pub(crate) h2: u32,
+    pub(crate) v2: u32,
+    pub(crate) entropy_offset_bytes: u32,
+    pub(crate) entropy_capacity: u32,
+}
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(crate) struct JpegBaselineEncodeHuffmanTable {
+    pub(crate) codes: [u16; 256],
+    pub(crate) lens: [u8; 256],
+}
+
+#[cfg(target_os = "macos")]
+impl Default for JpegBaselineEncodeHuffmanTable {
+    fn default() -> Self {
+        Self {
+            codes: [0; 256],
+            lens: [0; 256],
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct JpegBaselineEncodeStatus {
+    code: u32,
+    entropy_len: u32,
+    detail: u32,
+    reserved: u32,
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) struct JpegBaselineEntropyEncodeJob<'a> {
+    pub(crate) input: &'a Buffer,
+    pub(crate) input_offset: usize,
+    pub(crate) params: JpegBaselineEncodeParams,
+    pub(crate) q_luma: [u8; 64],
+    pub(crate) q_chroma: [u8; 64],
+    pub(crate) huff_dc_luma: JpegBaselineEncodeHuffmanTable,
+    pub(crate) huff_ac_luma: JpegBaselineEncodeHuffmanTable,
+    pub(crate) huff_dc_chroma: JpegBaselineEncodeHuffmanTable,
+    pub(crate) huff_ac_chroma: JpegBaselineEncodeHuffmanTable,
+    pub(crate) entropy_capacity: usize,
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) struct JpegBaselineEntropyEncodeBatchJob<'a> {
+    pub(crate) input: &'a Buffer,
+    pub(crate) params: Vec<JpegBaselineEncodeParams>,
+    pub(crate) q_luma: [u8; 64],
+    pub(crate) q_chroma: [u8; 64],
+    pub(crate) huff_dc_luma: JpegBaselineEncodeHuffmanTable,
+    pub(crate) huff_ac_luma: JpegBaselineEncodeHuffmanTable,
+    pub(crate) huff_dc_chroma: JpegBaselineEncodeHuffmanTable,
+    pub(crate) huff_ac_chroma: JpegBaselineEncodeHuffmanTable,
+    pub(crate) entropy_capacity: usize,
 }
 
 #[cfg(target_os = "macos")]
@@ -351,10 +446,12 @@ thread_local! {
 }
 
 #[cfg(target_os = "macos")]
-struct MetalRuntime {
+pub(crate) struct MetalRuntime {
     device: Device,
     queue: CommandQueue,
     pack_pipeline: ComputePipelineState,
+    jpeg_baseline_encode_pipeline: ComputePipelineState,
+    jpeg_baseline_encode_batch_pipeline: ComputePipelineState,
     pack_420_pipeline: ComputePipelineState,
     pack_420_rgb_pipeline: ComputePipelineState,
     pack_420_rgba_pipeline: ComputePipelineState,
@@ -400,11 +497,19 @@ impl MetalRuntime {
         Self::new_with_device(device)
     }
 
-    fn new_with_device(device: Device) -> Result<Self, String> {
+    pub(crate) fn new_with_device(device: Device) -> Result<Self, String> {
         let options = CompileOptions::new();
         let library = device.new_library_with_source(SHADER_SOURCE, &options)?;
         let pack_function = library.get_function("jpeg_pack", None)?;
         let pack_pipeline = device.new_compute_pipeline_state_with_function(&pack_function)?;
+        let jpeg_baseline_encode_function =
+            library.get_function("jpeg_encode_baseline_entropy", None)?;
+        let jpeg_baseline_encode_pipeline =
+            device.new_compute_pipeline_state_with_function(&jpeg_baseline_encode_function)?;
+        let jpeg_baseline_encode_batch_function =
+            library.get_function("jpeg_encode_baseline_entropy_batch", None)?;
+        let jpeg_baseline_encode_batch_pipeline = device
+            .new_compute_pipeline_state_with_function(&jpeg_baseline_encode_batch_function)?;
         let pack_420_function = library.get_function("jpeg_pack_420", None)?;
         let pack_420_pipeline =
             device.new_compute_pipeline_state_with_function(&pack_420_function)?;
@@ -543,6 +648,8 @@ impl MetalRuntime {
             device,
             queue,
             pack_pipeline,
+            jpeg_baseline_encode_pipeline,
+            jpeg_baseline_encode_batch_pipeline,
             pack_420_pipeline,
             pack_420_rgb_pipeline,
             pack_420_rgba_pipeline,
@@ -642,17 +749,21 @@ fn with_runtime<R>(f: impl FnOnce(&MetalRuntime) -> Result<R, Error>) -> Result<
 }
 
 #[cfg(target_os = "macos")]
-fn with_runtime_for_device<R>(
-    device: &Device,
+fn with_runtime_for_session<R>(
+    session: &crate::MetalBackendSession,
     f: impl FnOnce(&MetalRuntime) -> Result<R, Error>,
 ) -> Result<R, Error> {
-    let runtime = MetalRuntime::new_with_device(device.clone())
-        .map_err(|message| runtime_initialization_error(&message))?;
-    f(&runtime)
+    let runtime = session
+        .runtime
+        .get_or_init(|| MetalRuntime::new_with_device(session.device.clone()));
+    match runtime {
+        Ok(runtime) => f(runtime),
+        Err(message) => Err(runtime_initialization_error(message)),
+    }
 }
 
 #[cfg(target_os = "macos")]
-fn runtime_initialization_error(message: &str) -> Error {
+pub(crate) fn runtime_initialization_error(message: &str) -> Error {
     if message == "Metal is unavailable on this host" {
         Error::MetalUnavailable
     } else {
@@ -660,6 +771,252 @@ fn runtime_initialization_error(message: &str) -> Error {
             message: message.to_string(),
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn encode_jpeg_baseline_entropy_with_session(
+    session: &crate::MetalBackendSession,
+    job: &JpegBaselineEntropyEncodeJob<'_>,
+) -> Result<Vec<u8>, Error> {
+    with_runtime_for_session(session, |runtime| {
+        let entropy_buffer = runtime.device.new_buffer(
+            job.entropy_capacity as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let status = JpegBaselineEncodeStatus::default();
+        let status_buffer = runtime.device.new_buffer_with_data(
+            (&raw const status).cast(),
+            size_of::<JpegBaselineEncodeStatus>() as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+
+        let command_buffer = runtime.queue.new_command_buffer();
+        let encoder = command_buffer.new_compute_command_encoder();
+        encoder.set_compute_pipeline_state(&runtime.jpeg_baseline_encode_pipeline);
+        encoder.set_buffer(0, Some(job.input), job.input_offset as u64);
+        encoder.set_buffer(1, Some(&entropy_buffer), 0);
+        encoder.set_buffer(2, Some(&status_buffer), 0);
+        encoder.set_bytes(
+            3,
+            size_of::<JpegBaselineEncodeParams>() as u64,
+            (&raw const job.params).cast(),
+        );
+        encoder.set_bytes(
+            4,
+            size_of_val(&job.q_luma) as u64,
+            job.q_luma.as_ptr().cast(),
+        );
+        encoder.set_bytes(
+            5,
+            size_of_val(&job.q_chroma) as u64,
+            job.q_chroma.as_ptr().cast(),
+        );
+        encoder.set_bytes(
+            6,
+            size_of::<JpegBaselineEncodeHuffmanTable>() as u64,
+            (&raw const job.huff_dc_luma).cast(),
+        );
+        encoder.set_bytes(
+            7,
+            size_of::<JpegBaselineEncodeHuffmanTable>() as u64,
+            (&raw const job.huff_ac_luma).cast(),
+        );
+        encoder.set_bytes(
+            8,
+            size_of::<JpegBaselineEncodeHuffmanTable>() as u64,
+            (&raw const job.huff_dc_chroma).cast(),
+        );
+        encoder.set_bytes(
+            9,
+            size_of::<JpegBaselineEncodeHuffmanTable>() as u64,
+            (&raw const job.huff_ac_chroma).cast(),
+        );
+        encoder.dispatch_threads(
+            MTLSize {
+                width: 1,
+                height: 1,
+                depth: 1,
+            },
+            MTLSize {
+                width: 1,
+                height: 1,
+                depth: 1,
+            },
+        );
+        encoder.end_encoding();
+        command_buffer.commit();
+        command_buffer.wait_until_completed();
+
+        let status = unsafe { *(status_buffer.contents().cast::<JpegBaselineEncodeStatus>()) };
+        if status.code != JPEG_BASELINE_ENCODE_STATUS_OK {
+            return Err(jpeg_baseline_encode_status_error(status));
+        }
+        let entropy_len = usize::try_from(status.entropy_len).map_err(|_| Error::MetalKernel {
+            message: "JPEG Baseline Metal encode entropy length exceeds usize".to_string(),
+        })?;
+        if entropy_len > job.entropy_capacity {
+            return Err(Error::MetalKernel {
+                message: "JPEG Baseline Metal encode reported length exceeds output capacity"
+                    .to_string(),
+            });
+        }
+        let entropy = unsafe {
+            core::slice::from_raw_parts(entropy_buffer.contents().cast::<u8>(), entropy_len)
+        };
+        Ok(entropy.to_vec())
+    })
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn encode_jpeg_baseline_entropy_batch_with_session(
+    session: &crate::MetalBackendSession,
+    job: &JpegBaselineEntropyEncodeBatchJob<'_>,
+) -> Result<Vec<Vec<u8>>, Error> {
+    if job.params.is_empty() {
+        return Ok(Vec::new());
+    }
+    with_runtime_for_session(session, |runtime| {
+        let entropy_buffer = runtime.device.new_buffer(
+            job.entropy_capacity as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let statuses = vec![JpegBaselineEncodeStatus::default(); job.params.len()];
+        let status_buffer = runtime.device.new_buffer_with_data(
+            statuses.as_ptr().cast(),
+            size_of::<JpegBaselineEncodeStatus>() as u64 * statuses.len() as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let params_buffer = runtime.device.new_buffer_with_data(
+            job.params.as_ptr().cast(),
+            size_of::<JpegBaselineEncodeParams>() as u64 * job.params.len() as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let tile_count = u32::try_from(job.params.len()).map_err(|_| Error::MetalKernel {
+            message: "JPEG Baseline Metal batch tile count exceeds u32".to_string(),
+        })?;
+
+        let command_buffer = runtime.queue.new_command_buffer();
+        let encoder = command_buffer.new_compute_command_encoder();
+        encoder.set_compute_pipeline_state(&runtime.jpeg_baseline_encode_batch_pipeline);
+        encoder.set_buffer(0, Some(job.input), 0);
+        encoder.set_buffer(1, Some(&entropy_buffer), 0);
+        encoder.set_buffer(2, Some(&status_buffer), 0);
+        encoder.set_buffer(3, Some(&params_buffer), 0);
+        encoder.set_bytes(
+            4,
+            size_of_val(&job.q_luma) as u64,
+            job.q_luma.as_ptr().cast(),
+        );
+        encoder.set_bytes(
+            5,
+            size_of_val(&job.q_chroma) as u64,
+            job.q_chroma.as_ptr().cast(),
+        );
+        encoder.set_bytes(
+            6,
+            size_of::<JpegBaselineEncodeHuffmanTable>() as u64,
+            (&raw const job.huff_dc_luma).cast(),
+        );
+        encoder.set_bytes(
+            7,
+            size_of::<JpegBaselineEncodeHuffmanTable>() as u64,
+            (&raw const job.huff_ac_luma).cast(),
+        );
+        encoder.set_bytes(
+            8,
+            size_of::<JpegBaselineEncodeHuffmanTable>() as u64,
+            (&raw const job.huff_dc_chroma).cast(),
+        );
+        encoder.set_bytes(
+            9,
+            size_of::<JpegBaselineEncodeHuffmanTable>() as u64,
+            (&raw const job.huff_ac_chroma).cast(),
+        );
+        encoder.set_bytes(10, size_of::<u32>() as u64, (&raw const tile_count).cast());
+        encoder.dispatch_threads(
+            MTLSize {
+                width: u64::from(tile_count),
+                height: 1,
+                depth: 1,
+            },
+            MTLSize {
+                width: 1,
+                height: 1,
+                depth: 1,
+            },
+        );
+        encoder.end_encoding();
+        command_buffer.commit();
+        command_buffer.wait_until_completed();
+
+        let status_slice = unsafe {
+            core::slice::from_raw_parts(
+                status_buffer.contents().cast::<JpegBaselineEncodeStatus>(),
+                job.params.len(),
+            )
+        };
+        let entropy_bytes = unsafe {
+            core::slice::from_raw_parts(
+                entropy_buffer.contents().cast::<u8>(),
+                job.entropy_capacity,
+            )
+        };
+        let mut out = Vec::with_capacity(job.params.len());
+        for (status, params) in status_slice.iter().copied().zip(job.params.iter()) {
+            if status.code != JPEG_BASELINE_ENCODE_STATUS_OK {
+                return Err(jpeg_baseline_encode_status_error(status));
+            }
+            let entropy_len =
+                usize::try_from(status.entropy_len).map_err(|_| Error::MetalKernel {
+                    message: "JPEG Baseline Metal encode entropy length exceeds usize".to_string(),
+                })?;
+            let offset =
+                usize::try_from(params.entropy_offset_bytes).map_err(|_| Error::MetalKernel {
+                    message: "JPEG Baseline Metal batch entropy offset exceeds usize".to_string(),
+                })?;
+            let capacity =
+                usize::try_from(params.entropy_capacity).map_err(|_| Error::MetalKernel {
+                    message: "JPEG Baseline Metal batch entropy capacity exceeds usize".to_string(),
+                })?;
+            if entropy_len > capacity {
+                return Err(Error::MetalKernel {
+                    message:
+                        "JPEG Baseline Metal encode reported length exceeds tile output capacity"
+                            .to_string(),
+                });
+            }
+            let end = offset
+                .checked_add(entropy_len)
+                .ok_or_else(|| Error::MetalKernel {
+                    message: "JPEG Baseline Metal batch entropy range overflow".to_string(),
+                })?;
+            if end > entropy_bytes.len() {
+                return Err(Error::MetalKernel {
+                    message: "JPEG Baseline Metal batch entropy range exceeds buffer".to_string(),
+                });
+            }
+            out.push(entropy_bytes[offset..end].to_vec());
+        }
+        Ok(out)
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn jpeg_baseline_encode_status_error(status: JpegBaselineEncodeStatus) -> Error {
+    let message = match status.code {
+        JPEG_BASELINE_ENCODE_STATUS_OVERFLOW => {
+            "JPEG Baseline Metal encode entropy output exceeded capacity".to_string()
+        }
+        JPEG_BASELINE_ENCODE_STATUS_MISSING_HUFFMAN => format!(
+            "JPEG Baseline Metal encode missing Huffman code for symbol {}",
+            status.detail
+        ),
+        JPEG_BASELINE_ENCODE_STATUS_INVALID_PARAMS => {
+            "JPEG Baseline Metal encode received invalid kernel parameters".to_string()
+        }
+        other => format!("JPEG Baseline Metal encode failed with status {other}"),
+    };
+    Error::MetalKernel { message }
 }
 
 #[cfg(target_os = "macos")]
@@ -7974,16 +8331,16 @@ pub(crate) fn decode_to_surface(
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) fn decode_to_surface_with_device(
+pub(crate) fn decode_to_surface_with_session(
     decoder: &CpuDecoder<'_>,
     pool: &mut signinum_jpeg::ScratchPool,
     fmt: PixelFormat,
     fast444_packet: Option<&JpegMetalFast444PacketV1>,
     fast422_packet: Option<&JpegMetalFast422PacketV1>,
     fast420_packet: Option<&JpegMetalFast420PacketV1>,
-    device: &Device,
+    session: &crate::MetalBackendSession,
 ) -> Result<Surface, Error> {
-    with_runtime_for_device(device, |runtime| {
+    with_runtime_for_session(session, |runtime| {
         decode_to_surface_with_runtime(
             runtime,
             decoder,

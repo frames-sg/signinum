@@ -1169,6 +1169,12 @@ struct J2kPacketEncodeStatus {
 static METAL_RUNTIME: OnceLock<Result<Arc<MetalRuntime>, String>> = OnceLock::new();
 
 #[cfg(target_os = "macos")]
+type MetalRuntimeCache = Mutex<HashMap<usize, Result<Arc<MetalRuntime>, String>>>;
+
+#[cfg(target_os = "macos")]
+static METAL_DEVICE_RUNTIMES: OnceLock<MetalRuntimeCache> = OnceLock::new();
+
+#[cfg(target_os = "macos")]
 thread_local! {
     static METAL_RUNTIME_OVERRIDE: RefCell<Option<Arc<MetalRuntime>>> = const { RefCell::new(None) };
 }
@@ -1533,10 +1539,18 @@ fn with_runtime_for_device<R>(
     device: &Device,
     f: impl FnOnce(&MetalRuntime) -> Result<R, Error>,
 ) -> Result<R, Error> {
-    let runtime = Arc::new(
-        MetalRuntime::new_with_device(device)
-            .map_err(|message| runtime_initialization_error(&message))?,
-    );
+    let cache = METAL_DEVICE_RUNTIMES.get_or_init(|| Mutex::new(HashMap::new()));
+    let key = device.as_ptr() as usize;
+    let runtime = {
+        let mut cache = cache
+            .lock()
+            .expect("J2K Metal runtime cache lock not poisoned");
+        cache
+            .entry(key)
+            .or_insert_with(|| MetalRuntime::new_with_device(device).map(Arc::new))
+            .clone()
+    }
+    .map_err(|message| runtime_initialization_error(&message))?;
     let previous = METAL_RUNTIME_OVERRIDE.with(|slot| slot.replace(Some(runtime.clone())));
     let _guard = RuntimeOverrideGuard { previous };
     f(&runtime)
@@ -10347,9 +10361,10 @@ mod tests {
         prepared_direct_grayscale_plan_compute_encoder_count,
         prepared_repeated_direct_ht_cleanup_dispatch_count,
         repeated_gray_store_is_contiguous_full_surface, runtime_initialization_error,
-        J2kClassicCleanupBatchJob, J2kClassicSegment, J2kRepeatedGrayStoreParams, MetalRuntime,
-        PreparedDirectGrayscaleStep,
+        with_runtime_for_device, J2kClassicCleanupBatchJob, J2kClassicSegment,
+        J2kRepeatedGrayStoreParams, MetalRuntime, PreparedDirectGrayscaleStep,
     };
+    use metal::Device;
     use signinum_core::PixelFormat;
     use signinum_j2k_native::{
         encode, encode_htj2k, ColorSpace as NativeColorSpace, DecodeSettings, DecoderContext,
@@ -10375,6 +10390,20 @@ mod tests {
             runtime_initialization_error("Metal command queue is unavailable on this host"),
             crate::Error::MetalUnavailable
         ));
+    }
+
+    #[test]
+    fn with_runtime_for_device_reuses_cached_runtime_for_device() {
+        let Some(device) = Device::system_default() else {
+            return;
+        };
+
+        let first = with_runtime_for_device(&device, |runtime| Ok(std::ptr::from_ref(runtime)))
+            .expect("first Metal runtime");
+        let second = with_runtime_for_device(&device, |runtime| Ok(std::ptr::from_ref(runtime)))
+            .expect("second Metal runtime");
+
+        assert_eq!(first, second);
     }
 
     #[test]

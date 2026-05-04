@@ -25,6 +25,7 @@ metal = "0.31"
 [dev-dependencies]
 criterion = { workspace = true }
 jpeg-encoder = "0.7.0"
+jpeg-decoder = { version = "0.3.2", default-features = false }
 
 [[bench]]
 name = "device_upload"
@@ -32,6 +33,10 @@ harness = false
 
 [[bench]]
 name = "compare"
+harness = false
+
+[[bench]]
+name = "encode_baseline"
 harness = false
 
 [lints.rust]

@@ -49,6 +49,12 @@ pub(crate) mod backend;
 
 pub(crate) mod output;
 
+pub mod encoder;
+pub use encoder::{
+    encode_jpeg_baseline, EncodedJpeg, JpegBackend, JpegEncodeError, JpegEncodeOptions,
+    JpegSamples, JpegSubsampling,
+};
+
 pub mod decoder;
 pub use decoder::{
     decode_tile_into, decode_tile_into_in_context, decode_tile_region_into_in_context,

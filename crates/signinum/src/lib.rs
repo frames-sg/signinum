@@ -84,9 +84,9 @@ pub mod j2k {
         view, BackendKind, BackendRequest, BufferError, CodecError, DecodeOutcome, DecodeRowsError,
         DecoderContext, Downscale, EncodeBackendPreference, EncodedJ2k, ImageCodec, ImageDecode,
         ImageDecodeRows, J2kCodec, J2kContext, J2kDecoder, J2kEncodeDispatchReport,
-        J2kEncodeStageAccelerator, J2kError, J2kLosslessEncodeOptions, J2kLosslessSamples,
-        J2kProgressionOrder, J2kScratchPool, J2kView, PixelFormat, Rect, ReversibleTransform,
-        RowSink, TileBatchDecode,
+        J2kEncodeStageAccelerator, J2kEncodeValidation, J2kError, J2kLosslessEncodeOptions,
+        J2kLosslessSamples, J2kProgressionOrder, J2kScratchPool, J2kView, PixelFormat, Rect,
+        ReversibleTransform, RowSink, TileBatchDecode,
     };
 
     #[cfg(feature = "cuda")]

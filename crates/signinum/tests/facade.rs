@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use signinum::{
-    j2k::{encode_j2k_lossless, J2kLosslessEncodeOptions, J2kLosslessSamples},
+    j2k::{
+        encode_j2k_lossless, EncodeBackendPreference, J2kLosslessEncodeOptions, J2kLosslessSamples,
+    },
     tilecodec::UncompressedCodec,
     BackendKind, BackendRequest, TileDecompress,
 };
@@ -37,7 +39,25 @@ fn facade_auto_j2k_lossless_encode_uses_device_when_available() {
         encode_j2k_lossless(samples, &J2kLosslessEncodeOptions::default()).expect("encode");
 
     #[cfg(all(feature = "metal", target_os = "macos"))]
-    assert_eq!(encoded.backend, BackendKind::Metal);
+    match encoded.backend {
+        BackendKind::Metal => {}
+        BackendKind::Cpu => {
+            let samples =
+                J2kLosslessSamples::new(&pixels, 4, 4, 3, 8, false).expect("valid samples");
+            let required = encode_j2k_lossless(
+                samples,
+                &J2kLosslessEncodeOptions {
+                    backend: EncodeBackendPreference::RequireDevice,
+                    ..J2kLosslessEncodeOptions::default()
+                },
+            );
+            assert!(
+                required.is_err(),
+                "Auto fell back to CPU even though RequireDevice succeeded"
+            );
+        }
+        BackendKind::Cuda => panic!("unexpected facade backend: Cuda"),
+    }
     #[cfg(not(all(feature = "metal", target_os = "macos")))]
     assert_eq!(encoded.backend, BackendKind::Cpu);
     assert!(encoded.codestream.starts_with(&[0xFF, 0x4F]));

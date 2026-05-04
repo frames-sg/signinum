@@ -73,6 +73,30 @@ impl MetalEncodeStageAccelerator {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn metal_dispatch_result(
+    result: &Result<(), crate::Error>,
+    message: &'static str,
+) -> Result<bool, &'static str> {
+    match result {
+        Ok(()) => Ok(true),
+        Err(crate::Error::MetalUnavailable) => Ok(false),
+        Err(_) => Err(message),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn metal_dispatch_option<T>(
+    result: Result<T, crate::Error>,
+    message: &'static str,
+) -> Result<Option<T>, &'static str> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(crate::Error::MetalUnavailable) => Ok(None),
+        Err(_) => Err(message),
+    }
+}
+
 impl J2kEncodeStageAccelerator for MetalEncodeStageAccelerator {
     fn dispatch_report(&self) -> J2kEncodeDispatchReport {
         J2kEncodeDispatchReport {
@@ -91,10 +115,13 @@ impl J2kEncodeStageAccelerator for MetalEncodeStageAccelerator {
         self.forward_rct_attempts = self.forward_rct_attempts.saturating_add(1);
         #[cfg(target_os = "macos")]
         {
-            compute::encode_forward_rct(job.plane0, job.plane1, job.plane2)
-                .map_err(|_| "Metal forward RCT encode kernel failed")?;
-            self.forward_rct_dispatches = self.forward_rct_dispatches.saturating_add(1);
-            Ok(true)
+            let result = compute::encode_forward_rct(job.plane0, job.plane1, job.plane2);
+            let dispatched =
+                metal_dispatch_result(&result, "Metal forward RCT encode kernel failed")?;
+            if dispatched {
+                self.forward_rct_dispatches = self.forward_rct_dispatches.saturating_add(1);
+            }
+            Ok(dispatched)
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -113,11 +140,14 @@ impl J2kEncodeStageAccelerator for MetalEncodeStageAccelerator {
         }
         #[cfg(target_os = "macos")]
         {
-            let output =
-                compute::encode_forward_dwt53(job.samples, job.width, job.height, job.num_levels)
-                    .map_err(|_| "Metal forward 5/3 DWT encode kernel failed")?;
-            self.forward_dwt53_dispatches = self.forward_dwt53_dispatches.saturating_add(1);
-            Ok(Some(output))
+            let output = metal_dispatch_option(
+                compute::encode_forward_dwt53(job.samples, job.width, job.height, job.num_levels),
+                "Metal forward 5/3 DWT encode kernel failed",
+            )?;
+            if output.is_some() {
+                self.forward_dwt53_dispatches = self.forward_dwt53_dispatches.saturating_add(1);
+            }
+            Ok(output)
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -133,10 +163,15 @@ impl J2kEncodeStageAccelerator for MetalEncodeStageAccelerator {
         self.tier1_code_block_attempts = self.tier1_code_block_attempts.saturating_add(1);
         #[cfg(target_os = "macos")]
         {
-            let encoded = compute::encode_classic_tier1_code_block(job)
-                .map_err(|_| "Metal classic Tier-1 encode kernel failed")?;
-            self.tier1_code_block_dispatches = self.tier1_code_block_dispatches.saturating_add(1);
-            Ok(Some(encoded))
+            let encoded = metal_dispatch_option(
+                compute::encode_classic_tier1_code_block(job),
+                "Metal classic Tier-1 encode kernel failed",
+            )?;
+            if encoded.is_some() {
+                self.tier1_code_block_dispatches =
+                    self.tier1_code_block_dispatches.saturating_add(1);
+            }
+            Ok(encoded)
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -152,13 +187,15 @@ impl J2kEncodeStageAccelerator for MetalEncodeStageAccelerator {
         self.tier1_code_block_attempts = self.tier1_code_block_attempts.saturating_add(jobs.len());
         #[cfg(target_os = "macos")]
         {
-            let encoded = compute::encode_classic_tier1_code_blocks(jobs)
-                .map_err(|_| "Metal classic Tier-1 encode batch kernel failed")?;
-            if !jobs.is_empty() {
+            let encoded = metal_dispatch_option(
+                compute::encode_classic_tier1_code_blocks(jobs),
+                "Metal classic Tier-1 encode batch kernel failed",
+            )?;
+            if encoded.is_some() && !jobs.is_empty() {
                 self.tier1_code_block_dispatches =
                     self.tier1_code_block_dispatches.saturating_add(1);
             }
-            Ok(Some(encoded))
+            Ok(encoded)
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -174,10 +211,14 @@ impl J2kEncodeStageAccelerator for MetalEncodeStageAccelerator {
         self.ht_code_block_attempts = self.ht_code_block_attempts.saturating_add(1);
         #[cfg(target_os = "macos")]
         {
-            let encoded = compute::encode_ht_cleanup_code_block(job)
-                .map_err(|_| "Metal HTJ2K code-block encode kernel failed")?;
-            self.ht_code_block_dispatches = self.ht_code_block_dispatches.saturating_add(1);
-            Ok(Some(encoded))
+            let encoded = metal_dispatch_option(
+                compute::encode_ht_cleanup_code_block(job),
+                "Metal HTJ2K code-block encode kernel failed",
+            )?;
+            if encoded.is_some() {
+                self.ht_code_block_dispatches = self.ht_code_block_dispatches.saturating_add(1);
+            }
+            Ok(encoded)
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -193,12 +234,14 @@ impl J2kEncodeStageAccelerator for MetalEncodeStageAccelerator {
         self.ht_code_block_attempts = self.ht_code_block_attempts.saturating_add(jobs.len());
         #[cfg(target_os = "macos")]
         {
-            let encoded = compute::encode_ht_cleanup_code_blocks(jobs)
-                .map_err(|_| "Metal HTJ2K code-block encode batch kernel failed")?;
-            if !jobs.is_empty() {
+            let encoded = metal_dispatch_option(
+                compute::encode_ht_cleanup_code_blocks(jobs),
+                "Metal HTJ2K code-block encode batch kernel failed",
+            )?;
+            if encoded.is_some() && !jobs.is_empty() {
                 self.ht_code_block_dispatches = self.ht_code_block_dispatches.saturating_add(1);
             }
-            Ok(Some(encoded))
+            Ok(encoded)
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -214,10 +257,14 @@ impl J2kEncodeStageAccelerator for MetalEncodeStageAccelerator {
         self.packetization_attempts = self.packetization_attempts.saturating_add(1);
         #[cfg(target_os = "macos")]
         {
-            let encoded = compute::encode_tier2_packetization(job)
-                .map_err(|_| "Metal Tier-2 packetization encode kernel failed")?;
-            self.packetization_dispatches = self.packetization_dispatches.saturating_add(1);
-            Ok(Some(encoded))
+            let encoded = metal_dispatch_option(
+                compute::encode_tier2_packetization(job),
+                "Metal Tier-2 packetization encode kernel failed",
+            )?;
+            if encoded.is_some() {
+                self.packetization_dispatches = self.packetization_dispatches.saturating_add(1);
+            }
+            Ok(encoded)
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -487,6 +534,28 @@ mod tests {
         encode_with_accelerator, DecodeSettings, EncodeOptions, Image, J2kCodeBlockStyle,
         J2kEncodeStageAccelerator, J2kForwardDwt53Job,
     };
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn metal_dispatch_option_treats_unavailable_as_no_dispatch() {
+        let result: Result<Option<u8>, &'static str> =
+            super::metal_dispatch_option(Err(crate::Error::MetalUnavailable), "kernel failed");
+
+        assert_eq!(result, Ok(None));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn metal_dispatch_option_preserves_kernel_errors() {
+        let result: Result<Option<u8>, &'static str> = super::metal_dispatch_option(
+            Err(crate::Error::MetalKernel {
+                message: "bad status".to_string(),
+            }),
+            "kernel failed",
+        );
+
+        assert_eq!(result, Err("kernel failed"));
+    }
 
     #[test]
     fn metal_encode_stage_accelerator_preserves_cpu_codestream_validity() {

@@ -10,8 +10,10 @@ use std::{
 
 #[cfg(target_os = "macos")]
 use metal::{
+    foreign_types::ForeignType,
+    objc::{runtime::Sel, Message},
     Buffer, CommandBufferRef, CommandQueue, CompileOptions, ComputeCommandEncoderRef,
-    ComputePipelineState, Device, MTLResourceOptions, MTLSize,
+    ComputePipelineState, Device, MTLCommandQueue, MTLResourceOptions, MTLSize,
 };
 use signinum_core::{PixelFormat, Rect};
 #[cfg(target_os = "macos")]
@@ -1358,7 +1360,7 @@ impl MetalRuntime {
             device.new_compute_pipeline_state_with_function(&ht_cleanup_batched_fn)?;
         let ht_cleanup_repeated_batched =
             device.new_compute_pipeline_state_with_function(&ht_cleanup_repeated_batched_fn)?;
-        let queue = device.new_command_queue();
+        let queue = new_command_queue(device)?;
         Ok(Self {
             device: device.clone(),
             queue,
@@ -1473,6 +1475,20 @@ impl MetalRuntime {
 }
 
 #[cfg(target_os = "macos")]
+fn new_command_queue(device: &Device) -> Result<CommandQueue, String> {
+    let queue: *mut MTLCommandQueue = unsafe {
+        device
+            .as_ref()
+            .send_message(Sel::register("newCommandQueue"), ())
+            .map_err(|error| format!("Metal command queue creation failed: {error}"))?
+    };
+    if queue.is_null() {
+        return Err("Metal command queue is unavailable on this host".to_string());
+    }
+    Ok(unsafe { CommandQueue::from_ptr(queue) })
+}
+
+#[cfg(target_os = "macos")]
 fn with_runtime<R>(f: impl FnOnce(&MetalRuntime) -> Result<R, Error>) -> Result<R, Error> {
     let override_runtime = METAL_RUNTIME_OVERRIDE.with(|slot| slot.borrow().clone());
     if let Some(runtime) = override_runtime {
@@ -1481,9 +1497,19 @@ fn with_runtime<R>(f: impl FnOnce(&MetalRuntime) -> Result<R, Error>) -> Result<
 
     match METAL_RUNTIME.get_or_init(|| MetalRuntime::new().map(Arc::new)) {
         Ok(runtime) => f(runtime),
-        Err(message) => Err(Error::MetalKernel {
-            message: message.clone(),
-        }),
+        Err(message) => Err(runtime_initialization_error(message)),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn runtime_initialization_error(message: &str) -> Error {
+    match message {
+        "Metal is unavailable on this host" | "Metal command queue is unavailable on this host" => {
+            Error::MetalUnavailable
+        }
+        _ => Error::MetalKernel {
+            message: message.to_string(),
+        },
     }
 }
 
@@ -1508,7 +1534,8 @@ fn with_runtime_for_device<R>(
     f: impl FnOnce(&MetalRuntime) -> Result<R, Error>,
 ) -> Result<R, Error> {
     let runtime = Arc::new(
-        MetalRuntime::new_with_device(device).map_err(|message| Error::MetalKernel { message })?,
+        MetalRuntime::new_with_device(device)
+            .map_err(|message| runtime_initialization_error(&message))?,
     );
     let previous = METAL_RUNTIME_OVERRIDE.with(|slot| slot.replace(Some(runtime.clone())));
     let _guard = RuntimeOverrideGuard { previous };
@@ -10319,8 +10346,9 @@ mod tests {
         output_shape_for, prepare_direct_grayscale_plan,
         prepared_direct_grayscale_plan_compute_encoder_count,
         prepared_repeated_direct_ht_cleanup_dispatch_count,
-        repeated_gray_store_is_contiguous_full_surface, J2kClassicCleanupBatchJob,
-        J2kClassicSegment, J2kRepeatedGrayStoreParams, MetalRuntime, PreparedDirectGrayscaleStep,
+        repeated_gray_store_is_contiguous_full_surface, runtime_initialization_error,
+        J2kClassicCleanupBatchJob, J2kClassicSegment, J2kRepeatedGrayStoreParams, MetalRuntime,
+        PreparedDirectGrayscaleStep,
     };
     use signinum_core::PixelFormat;
     use signinum_j2k_native::{
@@ -10339,6 +10367,14 @@ mod tests {
             &runtime,
         );
         assert!(result.is_err(), "RGBA input must not silently map to Rgb16");
+    }
+
+    #[test]
+    fn runtime_initialization_error_classifies_null_queue_as_unavailable() {
+        assert!(matches!(
+            runtime_initialization_error("Metal command queue is unavailable on this host"),
+            crate::Error::MetalUnavailable
+        ));
     }
 
     #[test]

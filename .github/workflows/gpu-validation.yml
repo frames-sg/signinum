@@ -13,6 +13,11 @@ on:
         type: boolean
         required: false
         default: true
+      run-linux-ci:
+        description: "Run the Linux CI gate on the self-hosted CUDA runner"
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -22,6 +27,29 @@ env:
   RUSTFLAGS: "-D warnings"
 
 jobs:
+  linux-ci:
+    if: ${{ inputs.run-linux-ci }}
+    name: Linux CI on self-hosted CUDA runner
+    runs-on: [self-hosted, Linux, X64, cuda]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: rustfmt, clippy }
+      - name: Show runner diagnostics
+        run: |
+          uname -a
+          rustc -Vv
+          cargo -V
+      - run: cargo xtask ci
+      - run: cargo xtask no-std
+      - run: cargo xtask bench-build
+      - run: cargo xtask fuzz-build
+      - uses: crate-ci/typos@v1
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with: { command: check licenses advisories bans sources }
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - run: cargo xtask coverage
+
   metal-apple-silicon:
     if: ${{ inputs.run-metal-validation }}
     name: Metal validation on Apple Silicon

@@ -12,6 +12,9 @@ use signinum_j2k_native::{
     J2kForwardDwt53Job, J2kForwardDwt53Output, J2kForwardRctJob, J2kHtCodeBlockEncodeJob,
     J2kPacketizationEncodeJob, J2kTier1CodeBlockEncodeJob,
 };
+use std::time::Duration;
+#[cfg(target_os = "macos")]
+use std::time::Instant;
 
 /// Encode-stage accelerator for JPEG 2000 Metal work.
 ///
@@ -246,34 +249,194 @@ pub struct MetalLosslessEncodeTile<'a> {
     _private: core::marker::PhantomData<&'a ()>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetalLosslessEncodeOutcome {
+    pub encoded: EncodedJ2k,
+    pub input_copy_used: bool,
+    pub input_copy_duration: Duration,
+    pub encode_duration: Duration,
+    pub validation_duration: Duration,
+}
+
 #[cfg(target_os = "macos")]
 pub fn encode_lossless_from_metal_buffer(
     tile: MetalLosslessEncodeTile<'_>,
     options: &J2kLosslessEncodeOptions,
     session: &crate::MetalBackendSession,
 ) -> Result<EncodedJ2k, crate::Error> {
+    encode_lossless_from_metal_buffer_with_report(tile, options, session)
+        .map(|outcome| outcome.encoded)
+}
+
+#[cfg(target_os = "macos")]
+pub fn encode_lossless_from_metal_buffer_with_report(
+    tile: MetalLosslessEncodeTile<'_>,
+    options: &J2kLosslessEncodeOptions,
+    session: &crate::MetalBackendSession,
+) -> Result<MetalLosslessEncodeOutcome, crate::Error> {
+    let mut accelerator = MetalEncodeStageAccelerator::default();
+    encode_lossless_tile_with_report(
+        tile,
+        *options,
+        session,
+        MetalEncodeInputStaging::CopyAndPad,
+        &mut accelerator,
+    )
+}
+
+#[cfg(target_os = "macos")]
+pub fn encode_lossless_from_padded_metal_buffer(
+    tile: MetalLosslessEncodeTile<'_>,
+    options: &J2kLosslessEncodeOptions,
+    session: &crate::MetalBackendSession,
+) -> Result<EncodedJ2k, crate::Error> {
+    encode_lossless_from_padded_metal_buffer_with_report(tile, options, session)
+        .map(|outcome| outcome.encoded)
+}
+
+#[cfg(target_os = "macos")]
+pub fn encode_lossless_from_padded_metal_buffer_with_report(
+    tile: MetalLosslessEncodeTile<'_>,
+    options: &J2kLosslessEncodeOptions,
+    session: &crate::MetalBackendSession,
+) -> Result<MetalLosslessEncodeOutcome, crate::Error> {
+    let mut accelerator = MetalEncodeStageAccelerator::default();
+    encode_lossless_tile_with_report(
+        tile,
+        *options,
+        session,
+        MetalEncodeInputStaging::AlreadyPaddedContiguous,
+        &mut accelerator,
+    )
+}
+
+#[cfg(target_os = "macos")]
+pub fn encode_lossless_from_metal_buffers(
+    tiles: &[MetalLosslessEncodeTile<'_>],
+    options: &J2kLosslessEncodeOptions,
+    session: &crate::MetalBackendSession,
+) -> Result<Vec<EncodedJ2k>, crate::Error> {
+    encode_lossless_from_metal_buffers_with_report(tiles, options, session).map(|outcomes| {
+        outcomes
+            .into_iter()
+            .map(|outcome| outcome.encoded)
+            .collect()
+    })
+}
+
+#[cfg(target_os = "macos")]
+pub fn encode_lossless_from_metal_buffers_with_report(
+    tiles: &[MetalLosslessEncodeTile<'_>],
+    options: &J2kLosslessEncodeOptions,
+    session: &crate::MetalBackendSession,
+) -> Result<Vec<MetalLosslessEncodeOutcome>, crate::Error> {
+    encode_lossless_tiles_with_report(
+        tiles,
+        *options,
+        session,
+        MetalEncodeInputStaging::CopyAndPad,
+    )
+}
+
+#[cfg(target_os = "macos")]
+pub fn encode_lossless_from_padded_metal_buffers(
+    tiles: &[MetalLosslessEncodeTile<'_>],
+    options: &J2kLosslessEncodeOptions,
+    session: &crate::MetalBackendSession,
+) -> Result<Vec<EncodedJ2k>, crate::Error> {
+    encode_lossless_from_padded_metal_buffers_with_report(tiles, options, session).map(|outcomes| {
+        outcomes
+            .into_iter()
+            .map(|outcome| outcome.encoded)
+            .collect()
+    })
+}
+
+#[cfg(target_os = "macos")]
+pub fn encode_lossless_from_padded_metal_buffers_with_report(
+    tiles: &[MetalLosslessEncodeTile<'_>],
+    options: &J2kLosslessEncodeOptions,
+    session: &crate::MetalBackendSession,
+) -> Result<Vec<MetalLosslessEncodeOutcome>, crate::Error> {
+    encode_lossless_tiles_with_report(
+        tiles,
+        *options,
+        session,
+        MetalEncodeInputStaging::AlreadyPaddedContiguous,
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn encode_lossless_tiles_with_report(
+    tiles: &[MetalLosslessEncodeTile<'_>],
+    options: J2kLosslessEncodeOptions,
+    session: &crate::MetalBackendSession,
+    staging: MetalEncodeInputStaging,
+) -> Result<Vec<MetalLosslessEncodeOutcome>, crate::Error> {
+    let mut accelerator = MetalEncodeStageAccelerator::default();
+    let mut outcomes = Vec::with_capacity(tiles.len());
+    for &tile in tiles {
+        outcomes.push(encode_lossless_tile_with_report(
+            tile,
+            options,
+            session,
+            staging,
+            &mut accelerator,
+        )?);
+    }
+    Ok(outcomes)
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Copy)]
+enum MetalEncodeInputStaging {
+    CopyAndPad,
+    AlreadyPaddedContiguous,
+}
+
+#[cfg(target_os = "macos")]
+fn encode_lossless_tile_with_report(
+    tile: MetalLosslessEncodeTile<'_>,
+    options: J2kLosslessEncodeOptions,
+    session: &crate::MetalBackendSession,
+    staging: MetalEncodeInputStaging,
+    accelerator: &mut MetalEncodeStageAccelerator,
+) -> Result<MetalLosslessEncodeOutcome, crate::Error> {
     validate_metal_encode_tile(tile)?;
     let (components, bit_depth) = lossless_sample_shape(tile.format)?;
     let bytes_per_pixel = tile.format.bytes_per_pixel();
-    let buffer = compute::copy_interleaved_padded_to_shared_buffer(
-        tile.buffer,
-        tile.byte_offset,
-        tile.width,
-        tile.height,
-        tile.pitch_bytes,
-        tile.output_width,
-        tile.output_height,
-        bytes_per_pixel,
-        session,
-    )?;
+    let mut input_copy_used = false;
+    let mut input_copy_duration = Duration::ZERO;
+    let mut staged_buffer = None;
+    let mut source_byte_offset = tile.byte_offset;
+    if matches!(staging, MetalEncodeInputStaging::AlreadyPaddedContiguous) {
+        validate_padded_contiguous_metal_encode_tile(tile, bytes_per_pixel)?;
+    } else {
+        let copy_started = Instant::now();
+        staged_buffer = Some(compute::copy_interleaved_padded_to_shared_buffer(
+            tile.buffer,
+            tile.byte_offset,
+            tile.width,
+            tile.height,
+            tile.pitch_bytes,
+            tile.output_width,
+            tile.output_height,
+            bytes_per_pixel,
+            session,
+        )?);
+        input_copy_duration = copy_started.elapsed();
+        input_copy_used = true;
+        source_byte_offset = 0;
+    }
+    let buffer = staged_buffer.as_ref().unwrap_or(tile.buffer);
     let len = tile.output_width as usize * tile.output_height as usize * bytes_per_pixel;
     let ptr = buffer.contents().cast::<u8>();
     if ptr.is_null() {
         return Err(crate::Error::UnsupportedMetalRequest {
-            reason: "J2K Metal encode staging buffer is not host-visible",
+            reason: "J2K Metal encode input buffer is not host-visible",
         });
     }
-    let data = unsafe { core::slice::from_raw_parts(ptr, len) };
+    let data = unsafe { core::slice::from_raw_parts(ptr.add(source_byte_offset), len) };
     let samples = J2kLosslessSamples::new(
         data,
         tile.output_width,
@@ -284,18 +447,27 @@ pub fn encode_lossless_from_metal_buffer(
     )
     .map_err(crate::Error::Decode)?;
 
-    let mut encode_options = *options;
+    let mut encode_options = options;
     encode_options.validation = J2kEncodeValidation::External;
-    let mut accelerator = MetalEncodeStageAccelerator::default();
+    let encode_started = Instant::now();
     let encoded = signinum_j2k::encode_j2k_lossless_with_accelerator(
         samples,
         &encode_options,
         BackendKind::Metal,
-        &mut accelerator,
+        accelerator,
     )
     .map_err(crate::Error::Decode)?;
+    let encode_duration = encode_started.elapsed();
+    let validation_started = Instant::now();
     validate_lossless_roundtrip_on_metal_with_session(samples, &encoded.codestream, session)?;
-    Ok(encoded)
+    let validation_duration = validation_started.elapsed();
+    Ok(MetalLosslessEncodeOutcome {
+        encoded,
+        input_copy_used,
+        input_copy_duration,
+        encode_duration,
+        validation_duration,
+    })
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -305,6 +477,76 @@ pub fn encode_lossless_from_metal_buffer(
     session: &crate::MetalBackendSession,
 ) -> Result<EncodedJ2k, crate::Error> {
     let _ = (tile, options, session);
+    Err(crate::Error::MetalUnavailable)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn encode_lossless_from_metal_buffer_with_report(
+    tile: MetalLosslessEncodeTile<'_>,
+    options: &J2kLosslessEncodeOptions,
+    session: &crate::MetalBackendSession,
+) -> Result<MetalLosslessEncodeOutcome, crate::Error> {
+    let _ = (tile, options, session);
+    Err(crate::Error::MetalUnavailable)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn encode_lossless_from_padded_metal_buffer(
+    tile: MetalLosslessEncodeTile<'_>,
+    options: &J2kLosslessEncodeOptions,
+    session: &crate::MetalBackendSession,
+) -> Result<EncodedJ2k, crate::Error> {
+    let _ = (tile, options, session);
+    Err(crate::Error::MetalUnavailable)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn encode_lossless_from_padded_metal_buffer_with_report(
+    tile: MetalLosslessEncodeTile<'_>,
+    options: &J2kLosslessEncodeOptions,
+    session: &crate::MetalBackendSession,
+) -> Result<MetalLosslessEncodeOutcome, crate::Error> {
+    let _ = (tile, options, session);
+    Err(crate::Error::MetalUnavailable)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn encode_lossless_from_metal_buffers(
+    tiles: &[MetalLosslessEncodeTile<'_>],
+    options: &J2kLosslessEncodeOptions,
+    session: &crate::MetalBackendSession,
+) -> Result<Vec<EncodedJ2k>, crate::Error> {
+    let _ = (tiles, options, session);
+    Err(crate::Error::MetalUnavailable)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn encode_lossless_from_metal_buffers_with_report(
+    tiles: &[MetalLosslessEncodeTile<'_>],
+    options: &J2kLosslessEncodeOptions,
+    session: &crate::MetalBackendSession,
+) -> Result<Vec<MetalLosslessEncodeOutcome>, crate::Error> {
+    let _ = (tiles, options, session);
+    Err(crate::Error::MetalUnavailable)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn encode_lossless_from_padded_metal_buffers(
+    tiles: &[MetalLosslessEncodeTile<'_>],
+    options: &J2kLosslessEncodeOptions,
+    session: &crate::MetalBackendSession,
+) -> Result<Vec<EncodedJ2k>, crate::Error> {
+    let _ = (tiles, options, session);
+    Err(crate::Error::MetalUnavailable)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn encode_lossless_from_padded_metal_buffers_with_report(
+    tiles: &[MetalLosslessEncodeTile<'_>],
+    options: &J2kLosslessEncodeOptions,
+    session: &crate::MetalBackendSession,
+) -> Result<Vec<MetalLosslessEncodeOutcome>, crate::Error> {
+    let _ = (tiles, options, session);
     Err(crate::Error::MetalUnavailable)
 }
 
@@ -473,6 +715,34 @@ fn validate_metal_encode_tile(tile: MetalLosslessEncodeTile<'_>) -> Result<(), c
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+fn validate_padded_contiguous_metal_encode_tile(
+    tile: MetalLosslessEncodeTile<'_>,
+    bytes_per_pixel: usize,
+) -> Result<(), crate::Error> {
+    if tile.width != tile.output_width || tile.height != tile.output_height {
+        return Err(crate::Error::MetalKernel {
+            message:
+                "J2K Metal no-copy encode requires input dimensions to match output dimensions"
+                    .to_string(),
+        });
+    }
+    let expected_pitch = (tile.output_width as usize)
+        .checked_mul(bytes_per_pixel)
+        .ok_or_else(|| crate::Error::MetalKernel {
+            message: "J2K Metal no-copy encode pitch overflow".to_string(),
+        })?;
+    if tile.pitch_bytes != expected_pitch {
+        return Err(crate::Error::MetalKernel {
+            message: format!(
+                "J2K Metal no-copy encode requires contiguous rows: expected pitch {expected_pitch}, got {}",
+                tile.pitch_bytes
+            ),
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::MetalEncodeStageAccelerator;
@@ -605,6 +875,111 @@ mod tests {
                     assert_eq!(&decoded.data[dst..dst + 3], &[0, 0, 0]);
                 }
             }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn metal_buffer_lossless_encode_accepts_padded_contiguous_input_without_copy() {
+        let pixels: Vec<u8> = (0..8 * 8 * 3).map(|i| ((i * 31) & 0xFF) as u8).collect();
+        let session = crate::MetalBackendSession::system_default().expect("Metal session");
+        let buffer = session.device().new_buffer_with_data(
+            pixels.as_ptr().cast(),
+            pixels.len() as u64,
+            metal::MTLResourceOptions::StorageModeShared,
+        );
+
+        let encoded = super::encode_lossless_from_padded_metal_buffer_with_report(
+            super::MetalLosslessEncodeTile {
+                buffer: &buffer,
+                byte_offset: 0,
+                width: 8,
+                height: 8,
+                pitch_bytes: 8 * 3,
+                output_width: 8,
+                output_height: 8,
+                format: PixelFormat::Rgb8,
+            },
+            &J2kLosslessEncodeOptions {
+                backend: EncodeBackendPreference::RequireDevice,
+                ..J2kLosslessEncodeOptions::default()
+            },
+            &session,
+        )
+        .expect("Metal padded buffer lossless encode");
+
+        assert_eq!(encoded.encoded.backend, BackendKind::Metal);
+        assert!(!encoded.input_copy_used);
+        assert_eq!(encoded.input_copy_duration, std::time::Duration::ZERO);
+        let decoded = Image::new(&encoded.encoded.codestream, &DecodeSettings::default())
+            .expect("codestream parses")
+            .decode_native()
+            .expect("codestream decodes");
+        assert_eq!(decoded.width, 8);
+        assert_eq!(decoded.height, 8);
+        assert_eq!(decoded.data, pixels);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn metal_buffer_lossless_batch_encodes_padded_contiguous_inputs() {
+        let first: Vec<u8> = (0..8 * 8 * 3).map(|i| ((i * 7) & 0xFF) as u8).collect();
+        let second: Vec<u8> = (0..8 * 8 * 3)
+            .map(|i| ((i * 13 + 5) & 0xFF) as u8)
+            .collect();
+        let session = crate::MetalBackendSession::system_default().expect("Metal session");
+        let first_buffer = session.device().new_buffer_with_data(
+            first.as_ptr().cast(),
+            first.len() as u64,
+            metal::MTLResourceOptions::StorageModeShared,
+        );
+        let second_buffer = session.device().new_buffer_with_data(
+            second.as_ptr().cast(),
+            second.len() as u64,
+            metal::MTLResourceOptions::StorageModeShared,
+        );
+        let tiles = [
+            super::MetalLosslessEncodeTile {
+                buffer: &first_buffer,
+                byte_offset: 0,
+                width: 8,
+                height: 8,
+                pitch_bytes: 8 * 3,
+                output_width: 8,
+                output_height: 8,
+                format: PixelFormat::Rgb8,
+            },
+            super::MetalLosslessEncodeTile {
+                buffer: &second_buffer,
+                byte_offset: 0,
+                width: 8,
+                height: 8,
+                pitch_bytes: 8 * 3,
+                output_width: 8,
+                output_height: 8,
+                format: PixelFormat::Rgb8,
+            },
+        ];
+
+        let encoded = super::encode_lossless_from_padded_metal_buffers_with_report(
+            &tiles,
+            &J2kLosslessEncodeOptions {
+                backend: EncodeBackendPreference::RequireDevice,
+                ..J2kLosslessEncodeOptions::default()
+            },
+            &session,
+        )
+        .expect("Metal padded buffer batch lossless encode");
+
+        assert_eq!(encoded.len(), 2);
+        for (frame, expected) in encoded.iter().zip([first, second]) {
+            assert_eq!(frame.encoded.backend, BackendKind::Metal);
+            assert!(!frame.input_copy_used);
+            let decoded = Image::new(&frame.encoded.codestream, &DecodeSettings::default())
+                .expect("codestream parses")
+                .decode_native()
+                .expect("codestream decodes");
+            assert_eq!(decoded.data, expected);
         }
     }
 

@@ -44,10 +44,13 @@ jobs:
       - run: cargo xtask no-std
       - run: cargo xtask bench-build
       - run: cargo xtask fuzz-build
-      - uses: crate-ci/typos@v1
-      - uses: EmbarkStudios/cargo-deny-action@v2
-        with: { command: check licenses advisories bans sources }
-      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Install CI helper tools
+        run: |
+          cargo install typos-cli --locked
+          cargo install cargo-deny --locked
+          cargo install cargo-llvm-cov --locked
+      - run: cargo xtask typos
+      - run: cargo xtask deny
       - run: cargo xtask coverage
 
   metal-apple-silicon:

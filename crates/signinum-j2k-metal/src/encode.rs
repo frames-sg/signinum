@@ -6,7 +6,9 @@ use crate::compute;
 use metal::Buffer;
 #[cfg(target_os = "macos")]
 use signinum_core::{BackendKind, DeviceSurface, PixelFormat};
-use signinum_j2k::{EncodedJ2k, J2kEncodeValidation, J2kLosslessEncodeOptions, J2kLosslessSamples};
+#[cfg(target_os = "macos")]
+use signinum_j2k::J2kEncodeValidation;
+use signinum_j2k::{EncodedJ2k, J2kLosslessEncodeOptions, J2kLosslessSamples};
 use signinum_j2k_native::{
     EncodedHtJ2kCodeBlock, EncodedJ2kCodeBlock, J2kEncodeDispatchReport, J2kEncodeStageAccelerator,
     J2kForwardDwt53Job, J2kForwardDwt53Output, J2kForwardRctJob, J2kHtCodeBlockEncodeJob,

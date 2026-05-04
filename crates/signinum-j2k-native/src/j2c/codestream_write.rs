@@ -181,7 +181,7 @@ fn ht_capability_word(params: &EncodeParams) -> u16 {
 fn write_cod_marker(out: &mut Vec<u8>, params: &EncodeParams) {
     write_marker(out, markers::COD);
 
-    let marker_len = 12u16 + 1; // Fixed length for no precincts
+    let marker_len = 12u16; // Fixed length for no precincts
     out.extend_from_slice(&marker_len.to_be_bytes());
 
     // Scod (coding style flags) — no precincts, no SOP, no EPH

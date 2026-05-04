@@ -83,10 +83,10 @@ pub mod j2k {
         encode_j2k_lossless_with_accelerator, error, j2k_lossless_decomposition_levels, scratch,
         view, BackendKind, BackendRequest, BufferError, CodecError, DecodeOutcome, DecodeRowsError,
         DecoderContext, Downscale, EncodeBackendPreference, EncodedJ2k, ImageCodec, ImageDecode,
-        ImageDecodeRows, J2kCodec, J2kContext, J2kDecoder, J2kEncodeDispatchReport,
-        J2kEncodeStageAccelerator, J2kEncodeValidation, J2kError, J2kLosslessEncodeOptions,
-        J2kLosslessSamples, J2kProgressionOrder, J2kScratchPool, J2kView, PixelFormat, Rect,
-        ReversibleTransform, RowSink, TileBatchDecode,
+        ImageDecodeRows, J2kBlockCodingMode, J2kCodec, J2kContext, J2kDecoder,
+        J2kEncodeDispatchReport, J2kEncodeStageAccelerator, J2kEncodeValidation, J2kError,
+        J2kLosslessEncodeOptions, J2kLosslessSamples, J2kProgressionOrder, J2kScratchPool, J2kView,
+        PixelFormat, Rect, ReversibleTransform, RowSink, TileBatchDecode,
     };
 
     #[cfg(feature = "cuda")]
@@ -200,9 +200,9 @@ pub use core::{
 };
 pub use j2k::{
     encode_j2k_lossless, encode_j2k_lossless_with_accelerator, j2k_lossless_decomposition_levels,
-    EncodeBackendPreference, EncodedJ2k, J2kCodec, J2kContext, J2kDecoder, J2kEncodeDispatchReport,
-    J2kEncodeStageAccelerator, J2kEncodeValidation, J2kError, J2kLosslessEncodeOptions,
-    J2kLosslessSamples, J2kProgressionOrder, ReversibleTransform,
+    EncodeBackendPreference, EncodedJ2k, J2kBlockCodingMode, J2kCodec, J2kContext, J2kDecoder,
+    J2kEncodeDispatchReport, J2kEncodeStageAccelerator, J2kEncodeValidation, J2kError,
+    J2kLosslessEncodeOptions, J2kLosslessSamples, J2kProgressionOrder, ReversibleTransform,
 };
 pub use jpeg::{
     ColorSpace, ColorTransform, DecodeOptions, Decoder as JpegDecoder, JpegCodec, JpegError,

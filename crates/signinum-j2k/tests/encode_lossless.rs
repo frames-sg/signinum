@@ -160,6 +160,30 @@ fn cpu_lossless_round_trips_gray8() {
 }
 
 #[test]
+fn cpu_classic_lossless_cod_marker_length_reaches_next_marker() {
+    let pixels = vec![127u8; 64 * 64 * 3];
+    let samples = J2kLosslessSamples::new(&pixels, 64, 64, 3, 8, false).unwrap();
+
+    let encoded = encode_j2k_lossless(
+        samples,
+        &J2kLosslessEncodeOptions {
+            backend: EncodeBackendPreference::CpuOnly,
+            ..J2kLosslessEncodeOptions::default()
+        },
+    )
+    .expect("cpu lossless encode");
+
+    let cod_offset = marker_offset(&encoded.codestream, 0x52).expect("COD marker");
+    let qcd_offset = marker_offset(&encoded.codestream, 0x5C).expect("QCD marker");
+    let lcod = u16::from_be_bytes([
+        encoded.codestream[cod_offset + 2],
+        encoded.codestream[cod_offset + 3],
+    ]) as usize;
+
+    assert_eq!(cod_offset + 2 + lcod, qcd_offset);
+}
+
+#[test]
 fn auto_lossless_round_trips_rgb16_odd_dimensions() {
     let mut pixels = Vec::new();
     for y in 0..3u16 {

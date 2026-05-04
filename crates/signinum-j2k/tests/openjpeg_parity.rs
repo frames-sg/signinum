@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use signinum_core::{Downscale, PixelFormat, Rect};
-use signinum_j2k::J2kDecoder;
+use signinum_j2k::{
+    encode_j2k_lossless, EncodeBackendPreference, J2kDecoder, J2kLosslessEncodeOptions,
+    J2kLosslessSamples,
+};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -90,6 +93,27 @@ fn classic_gray_scaled_decode_matches_openjpeg_reduce() {
     assert_eq!(out, expected);
 }
 
+#[test]
+fn classic_lossless_encode_decodes_with_openjpeg() {
+    let Some(paths) = OpenJpegPaths::discover() else {
+        return;
+    };
+    let pixels = gradient_u8(64, 64, 3);
+    let samples = J2kLosslessSamples::new(&pixels, 64, 64, 3, 8, false).unwrap();
+
+    let encoded = encode_j2k_lossless(
+        samples,
+        &J2kLosslessEncodeOptions {
+            backend: EncodeBackendPreference::CpuOnly,
+            ..J2kLosslessEncodeOptions::default()
+        },
+    )
+    .expect("signinum encode");
+
+    let decoded = decode_j2k_with_openjpeg(&paths, "signinum_encode_rgb", &encoded.codestream);
+    assert_eq!(decoded, pixels);
+}
+
 fn gradient_u8(width: u32, height: u32, channels: usize) -> Vec<u8> {
     let mut out = Vec::with_capacity(width as usize * height as usize * channels);
     for y in 0..height {
@@ -169,6 +193,23 @@ fn decode_with_openjpeg(
     command.arg("-quiet");
     command.args(extra_args);
     let status = command.status().expect("run opj_decompress");
+    assert!(status.success(), "opj_decompress failed");
+    read_pnm_pixels(&output_path)
+}
+
+fn decode_j2k_with_openjpeg(paths: &OpenJpegPaths, stem: &str, codestream: &[u8]) -> Vec<u8> {
+    let dir = temp_dir();
+    let input_path = dir.join(format!("{stem}.j2k"));
+    let output_path = dir.join(format!("{stem}.ppm"));
+    fs::write(&input_path, codestream).expect("write j2k");
+    let status = Command::new(&paths.decompress)
+        .arg("-i")
+        .arg(&input_path)
+        .arg("-o")
+        .arg(&output_path)
+        .arg("-quiet")
+        .status()
+        .expect("run opj_decompress");
     assert!(status.success(), "opj_decompress failed");
     read_pnm_pixels(&output_path)
 }

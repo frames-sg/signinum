@@ -10,6 +10,7 @@
 //!
 //! See Annex B of ITU-T T.800.
 
+use alloc::vec;
 use alloc::vec::Vec;
 
 use super::codestream_write::BlockCodingMode;

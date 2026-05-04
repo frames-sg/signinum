@@ -7,13 +7,19 @@ use signinum_core::{
     PixelFormat,
 };
 #[cfg(feature = "cuda-runtime")]
+use signinum_core::{DecoderContext, TileBatchDecodeManyDevice};
+#[cfg(feature = "cuda-runtime")]
 use signinum_cuda_runtime::CudaContext;
 use signinum_jpeg::Decoder as CpuDecoder;
+#[cfg(feature = "cuda-runtime")]
+use signinum_jpeg_cuda::Codec as CudaCodec;
 use signinum_jpeg_cuda::{CudaSession, Decoder as CudaDecoder};
 
 const DEFAULT_JPEG: &[u8] = include_bytes!("../fixtures/jpeg/baseline_420_16x16.jpg");
 const DEFAULT_GENERATED_DIM: u16 = 2048;
+#[cfg(feature = "cuda-runtime")]
 const DEFAULT_BATCH_DIM: u16 = 1024;
+#[cfg(feature = "cuda-runtime")]
 const DEFAULT_BATCH_SIZE: usize = 64;
 
 fn bench_device_decode(c: &mut Criterion) {
@@ -147,6 +153,7 @@ fn bench_batch_decode(c: &mut Criterion) {
     let dimensions = (u32::from(dim), u32::from(dim));
     let batch_size = batch_size();
     let batch_inputs = vec![(input.as_slice(), dimensions); batch_size];
+    let batch_refs = vec![input.as_slice(); batch_size];
 
     let mut group = c.benchmark_group("jpeg_cuda_batch_decode");
     group.sample_size(10);
@@ -188,12 +195,31 @@ fn bench_batch_decode(c: &mut Criterion) {
     }
 
     group.bench_function(
-        format!("cuda_nvjpeg_rgb8_batch{batch_size}_surfaces"),
+        format!("cuda_nvjpeg_runtime_rgb8_batch{batch_size}_surfaces"),
         |b| {
             b.iter(|| {
                 let outputs = context
                     .decode_jpeg_rgb8_batch_with_nvjpeg(&batch_inputs)
                     .expect("cuda batch decode");
+                std::hint::black_box(outputs)
+            });
+        },
+    );
+
+    group.bench_function(
+        format!("cuda_adapter_rgb8_batch{batch_size}_surfaces"),
+        |b| {
+            let mut ctx = DecoderContext::<signinum_jpeg::DecoderContext>::new();
+            let mut pool = signinum_jpeg::ScratchPool::new();
+            b.iter(|| {
+                let outputs = CudaCodec::decode_tiles_to_device(
+                    &mut ctx,
+                    &mut pool,
+                    &batch_refs,
+                    PixelFormat::Rgb8,
+                    BackendRequest::Cuda,
+                )
+                .expect("cuda adapter batch decode");
                 std::hint::black_box(outputs)
             });
         },
@@ -205,6 +231,7 @@ fn bench_batch_decode(c: &mut Criterion) {
 #[cfg(not(feature = "cuda-runtime"))]
 fn bench_batch_decode(_c: &mut Criterion) {}
 
+#[cfg(feature = "cuda-runtime")]
 fn batch_size() -> usize {
     let Some(value) = std::env::var_os("SIGNINUM_GPU_BENCH_BATCH") else {
         return DEFAULT_BATCH_SIZE;
@@ -220,6 +247,7 @@ fn batch_size() -> usize {
     value
 }
 
+#[cfg(feature = "cuda-runtime")]
 fn batch_dim() -> u16 {
     let Some(value) = std::env::var_os("SIGNINUM_GPU_BENCH_BATCH_DIM") else {
         return DEFAULT_BATCH_DIM;

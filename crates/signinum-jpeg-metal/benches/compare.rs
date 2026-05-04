@@ -770,10 +770,26 @@ fn sparse_viewport_workload(workload: &ViewportWorkload) -> Option<ViewportWorkl
     })
 }
 
+fn metal_available() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        metal::Device::system_default().is_some()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        assert!(
+            std::env::var_os("SIGNINUM_REQUIRE_METAL_BENCH").is_none(),
+            "SIGNINUM_REQUIRE_METAL_BENCH is set but this is not a Metal host"
+        );
+        false
+    }
+}
+
 fn bench_compare(c: &mut Criterion) {
     let inputs = load_bench_inputs();
     let distinct_batches = distinct_region_scaled_batches(&inputs, 64, 256);
     let coalesced_hit_rate = coalesce_hit_rate_label(63, 64);
+    let has_metal = metal_available();
 
     let mut decode_rgb = c.benchmark_group("decode_rgb");
     for input in inputs.iter().filter(|input| {
@@ -782,9 +798,11 @@ fn bench_compare(c: &mut Criterion) {
         decode_rgb.bench_function(format!("{}/cpu", input.name), |b| {
             b.iter(|| cpu_decode_full(&input.bytes));
         });
-        decode_rgb.bench_function(format!("{}/metal", input.name), |b| {
-            b.iter(|| metal_decode_full(&input.bytes));
-        });
+        if has_metal {
+            decode_rgb.bench_function(format!("{}/metal", input.name), |b| {
+                b.iter(|| metal_decode_full(&input.bytes));
+            });
+        }
     }
     decode_rgb.finish();
 
@@ -793,9 +811,11 @@ fn bench_compare(c: &mut Criterion) {
         wsi_tile_batch_rgb.bench_function(format!("{}/cpu", input.name), |b| {
             b.iter(|| cpu_decode_tile_batch(&input.bytes, 64));
         });
-        wsi_tile_batch_rgb.bench_function(format!("{}/metal", input.name), |b| {
-            b.iter(|| metal_decode_tile_batch(&input.bytes, 64));
-        });
+        if has_metal {
+            wsi_tile_batch_rgb.bench_function(format!("{}/metal", input.name), |b| {
+                b.iter(|| metal_decode_tile_batch(&input.bytes, 64));
+            });
+        }
         wsi_tile_batch_rgb.bench_function(format!("{}/auto", input.name), |b| {
             b.iter(|| auto_decode_tile_batch(&input.bytes, 64));
         });
@@ -809,9 +829,11 @@ fn bench_compare(c: &mut Criterion) {
         wsi_region_rgb.bench_function(format!("{}/cpu", input.name), |b| {
             b.iter(|| cpu_decode_region(&input.bytes, 256));
         });
-        wsi_region_rgb.bench_function(format!("{}/metal", input.name), |b| {
-            b.iter(|| metal_decode_region(&input.bytes, 256));
-        });
+        if has_metal {
+            wsi_region_rgb.bench_function(format!("{}/metal", input.name), |b| {
+                b.iter(|| metal_decode_region(&input.bytes, 256));
+            });
+        }
     }
     wsi_region_rgb.finish();
 
@@ -822,9 +844,11 @@ fn bench_compare(c: &mut Criterion) {
         wsi_scaled_rgb_q4.bench_function(format!("{}/cpu", input.name), |b| {
             b.iter(|| cpu_decode_scaled(&input.bytes, Downscale::Quarter));
         });
-        wsi_scaled_rgb_q4.bench_function(format!("{}/metal", input.name), |b| {
-            b.iter(|| metal_decode_scaled(&input.bytes, Downscale::Quarter));
-        });
+        if has_metal {
+            wsi_scaled_rgb_q4.bench_function(format!("{}/metal", input.name), |b| {
+                b.iter(|| metal_decode_scaled(&input.bytes, Downscale::Quarter));
+            });
+        }
     }
     wsi_scaled_rgb_q4.finish();
 
@@ -835,9 +859,11 @@ fn bench_compare(c: &mut Criterion) {
         wsi_scaled_rgb_q8.bench_function(format!("{}/cpu", input.name), |b| {
             b.iter(|| cpu_decode_scaled(&input.bytes, Downscale::Eighth));
         });
-        wsi_scaled_rgb_q8.bench_function(format!("{}/metal", input.name), |b| {
-            b.iter(|| metal_decode_scaled(&input.bytes, Downscale::Eighth));
-        });
+        if has_metal {
+            wsi_scaled_rgb_q8.bench_function(format!("{}/metal", input.name), |b| {
+                b.iter(|| metal_decode_scaled(&input.bytes, Downscale::Eighth));
+            });
+        }
     }
     wsi_scaled_rgb_q8.finish();
 
@@ -848,9 +874,11 @@ fn bench_compare(c: &mut Criterion) {
         wsi_region_scaled_rgb_q4.bench_function(format!("{}/cpu", input.name), |b| {
             b.iter(|| cpu_decode_region_scaled(&input.bytes, 256, Downscale::Quarter));
         });
-        wsi_region_scaled_rgb_q4.bench_function(format!("{}/metal", input.name), |b| {
-            b.iter(|| metal_decode_region_scaled(&input.bytes, 256, Downscale::Quarter));
-        });
+        if has_metal {
+            wsi_region_scaled_rgb_q4.bench_function(format!("{}/metal", input.name), |b| {
+                b.iter(|| metal_decode_region_scaled(&input.bytes, 256, Downscale::Quarter));
+            });
+        }
     }
     wsi_region_scaled_rgb_q4.finish();
 
@@ -861,9 +889,11 @@ fn bench_compare(c: &mut Criterion) {
         wsi_region_scaled_rgb_q8.bench_function(format!("{}/cpu", input.name), |b| {
             b.iter(|| cpu_decode_region_scaled(&input.bytes, 256, Downscale::Eighth));
         });
-        wsi_region_scaled_rgb_q8.bench_function(format!("{}/metal", input.name), |b| {
-            b.iter(|| metal_decode_region_scaled(&input.bytes, 256, Downscale::Eighth));
-        });
+        if has_metal {
+            wsi_region_scaled_rgb_q8.bench_function(format!("{}/metal", input.name), |b| {
+                b.iter(|| metal_decode_region_scaled(&input.bytes, 256, Downscale::Eighth));
+            });
+        }
     }
     wsi_region_scaled_rgb_q8.finish();
 
@@ -872,9 +902,11 @@ fn bench_compare(c: &mut Criterion) {
         wsi_tile_batch_scaled_rgb_q4.bench_function(format!("{}/cpu", input.name), |b| {
             b.iter(|| cpu_decode_tile_batch_scaled(&input.bytes, 64, Downscale::Quarter));
         });
-        wsi_tile_batch_scaled_rgb_q4.bench_function(format!("{}/metal", input.name), |b| {
-            b.iter(|| metal_decode_tile_batch_scaled(&input.bytes, 64, Downscale::Quarter));
-        });
+        if has_metal {
+            wsi_tile_batch_scaled_rgb_q4.bench_function(format!("{}/metal", input.name), |b| {
+                b.iter(|| metal_decode_tile_batch_scaled(&input.bytes, 64, Downscale::Quarter));
+            });
+        }
         wsi_tile_batch_scaled_rgb_q4.bench_function(format!("{}/auto", input.name), |b| {
             b.iter(|| auto_decode_tile_batch_scaled(&input.bytes, 64, Downscale::Quarter));
         });
@@ -892,19 +924,21 @@ fn bench_compare(c: &mut Criterion) {
                 });
             },
         );
-        wsi_tile_batch_region_scaled_coalesced_rgb_q4.bench_function(
-            format!("coalesce_all/{coalesced_hit_rate}/metal/{}", input.name),
-            |b| {
-                b.iter(|| {
-                    metal_decode_tile_batch_region_scaled(
-                        &input.bytes,
-                        64,
-                        256,
-                        Downscale::Quarter,
-                    );
-                });
-            },
-        );
+        if has_metal {
+            wsi_tile_batch_region_scaled_coalesced_rgb_q4.bench_function(
+                format!("coalesce_all/{coalesced_hit_rate}/metal/{}", input.name),
+                |b| {
+                    b.iter(|| {
+                        metal_decode_tile_batch_region_scaled(
+                            &input.bytes,
+                            64,
+                            256,
+                            Downscale::Quarter,
+                        );
+                    });
+                },
+            );
+        }
     }
     wsi_tile_batch_region_scaled_coalesced_rgb_q4.finish();
 
@@ -926,21 +960,23 @@ fn bench_compare(c: &mut Criterion) {
                 });
             },
         );
-        wsi_tile_batch_region_scaled_distinct_rgb_q4.bench_function(
-            format!(
-                "coalesce_none/{}/metal/{}",
-                batch.coalesce_hit_rate, batch.name
-            ),
-            |b| {
-                b.iter(|| {
-                    metal_decode_distinct_tile_batch_region_scaled(
-                        &batch.tiles,
-                        256,
-                        Downscale::Quarter,
-                    );
-                });
-            },
-        );
+        if has_metal {
+            wsi_tile_batch_region_scaled_distinct_rgb_q4.bench_function(
+                format!(
+                    "coalesce_none/{}/metal/{}",
+                    batch.coalesce_hit_rate, batch.name
+                ),
+                |b| {
+                    b.iter(|| {
+                        metal_decode_distinct_tile_batch_region_scaled(
+                            &batch.tiles,
+                            256,
+                            Downscale::Quarter,
+                        );
+                    });
+                },
+            );
+        }
     }
     wsi_tile_batch_region_scaled_distinct_rgb_q4.finish();
 
@@ -954,9 +990,14 @@ fn bench_compare(c: &mut Criterion) {
         viewer_region_scaled_composite_rgb.bench_function(format!("{}/cpu", input.name), |b| {
             b.iter(|| cpu_viewport_composite(&input.bytes, input.dimensions));
         });
-        viewer_region_scaled_composite_rgb.bench_function(format!("{}/hybrid", input.name), |b| {
-            b.iter(|| hybrid_viewport_composite(&input.bytes, input.dimensions));
-        });
+        if has_metal {
+            viewer_region_scaled_composite_rgb.bench_function(
+                format!("{}/hybrid", input.name),
+                |b| {
+                    b.iter(|| hybrid_viewport_composite(&input.bytes, input.dimensions));
+                },
+            );
+        }
     }
     viewer_region_scaled_composite_rgb.finish();
 
@@ -973,12 +1014,14 @@ fn bench_compare(c: &mut Criterion) {
                 b.iter(|| cpu_viewport_composite_device(&input.bytes, input.dimensions));
             },
         );
-        viewer_region_scaled_composite_rgb_device.bench_function(
-            format!("{}/hybrid", input.name),
-            |b| {
-                b.iter(|| hybrid_viewport_composite_device(&input.bytes, input.dimensions));
-            },
-        );
+        if has_metal {
+            viewer_region_scaled_composite_rgb_device.bench_function(
+                format!("{}/hybrid", input.name),
+                |b| {
+                    b.iter(|| hybrid_viewport_composite_device(&input.bytes, input.dimensions));
+                },
+            );
+        }
     }
     viewer_region_scaled_composite_rgb_device.finish();
 
@@ -1011,32 +1054,34 @@ fn bench_compare(c: &mut Criterion) {
             },
         );
 
-        let workload = suggest_viewport_workload(input.dimensions).expect("warm workload");
-        let hybrid_bytes = input.bytes.clone();
-        viewer_region_scaled_composite_rgb_warm.bench_function(
-            format!("{}/hybrid", input.name),
-            move |b| {
-                let decoder = CpuDecoder::new(&hybrid_bytes).expect("cpu decoder");
-                let mut pool = CpuScratchPool::new();
-                let stride =
-                    workload.viewport_dims.0 as usize * PixelFormat::Rgb8.bytes_per_pixel();
-                let mut out = vec![0u8; stride * workload.viewport_dims.1 as usize];
-                b.iter(|| {
-                    let surface = compose_viewport_hybrid(
-                        &decoder,
-                        &mut pool,
-                        workload.scale,
-                        workload.viewport_dims,
-                        &workload.tiles,
-                    )
-                    .expect("hybrid warm viewport");
-                    surface
-                        .download_into(&mut out, stride)
-                        .expect("hybrid warm download");
-                    std::hint::black_box(&out);
-                });
-            },
-        );
+        if has_metal {
+            let workload = suggest_viewport_workload(input.dimensions).expect("warm workload");
+            let hybrid_bytes = input.bytes.clone();
+            viewer_region_scaled_composite_rgb_warm.bench_function(
+                format!("{}/hybrid", input.name),
+                move |b| {
+                    let decoder = CpuDecoder::new(&hybrid_bytes).expect("cpu decoder");
+                    let mut pool = CpuScratchPool::new();
+                    let stride =
+                        workload.viewport_dims.0 as usize * PixelFormat::Rgb8.bytes_per_pixel();
+                    let mut out = vec![0u8; stride * workload.viewport_dims.1 as usize];
+                    b.iter(|| {
+                        let surface = compose_viewport_hybrid(
+                            &decoder,
+                            &mut pool,
+                            workload.scale,
+                            workload.viewport_dims,
+                            &workload.tiles,
+                        )
+                        .expect("hybrid warm viewport");
+                        surface
+                            .download_into(&mut out, stride)
+                            .expect("hybrid warm download");
+                        std::hint::black_box(&out);
+                    });
+                },
+            );
+        }
     }
     viewer_region_scaled_composite_rgb_warm.finish();
 
@@ -1068,26 +1113,28 @@ fn bench_compare(c: &mut Criterion) {
             },
         );
 
-        let workload = suggest_viewport_workload(input.dimensions).expect("warm workload");
-        let hybrid_bytes = input.bytes.clone();
-        viewer_region_scaled_composite_rgb_device_warm.bench_function(
-            format!("{}/hybrid", input.name),
-            move |b| {
-                let decoder = CpuDecoder::new(&hybrid_bytes).expect("cpu decoder");
-                let mut pool = CpuScratchPool::new();
-                b.iter(|| {
-                    let surface = compose_viewport_hybrid(
-                        &decoder,
-                        &mut pool,
-                        workload.scale,
-                        workload.viewport_dims,
-                        &workload.tiles,
-                    )
-                    .expect("hybrid warm viewport surface");
-                    std::hint::black_box(surface);
-                });
-            },
-        );
+        if has_metal {
+            let workload = suggest_viewport_workload(input.dimensions).expect("warm workload");
+            let hybrid_bytes = input.bytes.clone();
+            viewer_region_scaled_composite_rgb_device_warm.bench_function(
+                format!("{}/hybrid", input.name),
+                move |b| {
+                    let decoder = CpuDecoder::new(&hybrid_bytes).expect("cpu decoder");
+                    let mut pool = CpuScratchPool::new();
+                    b.iter(|| {
+                        let surface = compose_viewport_hybrid(
+                            &decoder,
+                            &mut pool,
+                            workload.scale,
+                            workload.viewport_dims,
+                            &workload.tiles,
+                        )
+                        .expect("hybrid warm viewport surface");
+                        std::hint::black_box(surface);
+                    });
+                },
+            );
+        }
     }
     viewer_region_scaled_composite_rgb_device_warm.finish();
 
@@ -1109,20 +1156,26 @@ fn bench_compare(c: &mut Criterion) {
                 std::hint::black_box(out);
             });
         });
-        viewer_contiguous_region_scaled_rgb.bench_function(format!("{}/hybrid", input.name), |b| {
-            let decoder = CpuDecoder::new(&input.bytes).expect("cpu decoder");
-            let mut pool = CpuScratchPool::new();
-            let stride = workload.viewport_dims.0 as usize * PixelFormat::Rgb8.bytes_per_pixel();
-            let mut out = vec![0u8; stride * workload.viewport_dims.1 as usize];
-            b.iter(|| {
-                let surface = decode_viewport_region_hybrid(&decoder, &mut pool, &workload)
-                    .expect("hybrid contiguous viewport");
-                surface
-                    .download_into(&mut out, stride)
-                    .expect("hybrid contiguous download");
-                std::hint::black_box(&out);
-            });
-        });
+        if has_metal {
+            viewer_contiguous_region_scaled_rgb.bench_function(
+                format!("{}/hybrid", input.name),
+                |b| {
+                    let decoder = CpuDecoder::new(&input.bytes).expect("cpu decoder");
+                    let mut pool = CpuScratchPool::new();
+                    let stride =
+                        workload.viewport_dims.0 as usize * PixelFormat::Rgb8.bytes_per_pixel();
+                    let mut out = vec![0u8; stride * workload.viewport_dims.1 as usize];
+                    b.iter(|| {
+                        let surface = decode_viewport_region_hybrid(&decoder, &mut pool, &workload)
+                            .expect("hybrid contiguous viewport");
+                        surface
+                            .download_into(&mut out, stride)
+                            .expect("hybrid contiguous download");
+                        std::hint::black_box(&out);
+                    });
+                },
+            );
+        }
     }
     viewer_contiguous_region_scaled_rgb.finish();
 
@@ -1147,18 +1200,20 @@ fn bench_compare(c: &mut Criterion) {
                 });
             },
         );
-        viewer_contiguous_region_scaled_rgb_device.bench_function(
-            format!("{}/hybrid", input.name),
-            |b| {
-                let decoder = CpuDecoder::new(&input.bytes).expect("cpu decoder");
-                let mut pool = CpuScratchPool::new();
-                b.iter(|| {
-                    let surface = decode_viewport_region_hybrid(&decoder, &mut pool, &workload)
-                        .expect("hybrid contiguous viewport");
-                    std::hint::black_box(surface);
-                });
-            },
-        );
+        if has_metal {
+            viewer_contiguous_region_scaled_rgb_device.bench_function(
+                format!("{}/hybrid", input.name),
+                |b| {
+                    let decoder = CpuDecoder::new(&input.bytes).expect("cpu decoder");
+                    let mut pool = CpuScratchPool::new();
+                    b.iter(|| {
+                        let surface = decode_viewport_region_hybrid(&decoder, &mut pool, &workload)
+                            .expect("hybrid contiguous viewport");
+                        std::hint::black_box(surface);
+                    });
+                },
+            );
+        }
     }
     viewer_contiguous_region_scaled_rgb_device.finish();
 

@@ -30,16 +30,33 @@ fn bench_device_upload(c: &mut Criterion) {
         });
     });
 
-    group.bench_function("metal_surface_rgb8", |b| {
-        let mut decoder = MetalDecoder::new(&bytes).expect("metal decoder");
-        b.iter(|| {
-            decoder
-                .decode_to_device(PixelFormat::Rgb8, BackendRequest::Metal)
-                .expect("device decode")
+    if metal_decode_available() {
+        group.bench_function("metal_surface_rgb8", |b| {
+            let mut decoder = MetalDecoder::new(&bytes).expect("metal decoder");
+            b.iter(|| {
+                decoder
+                    .decode_to_device(PixelFormat::Rgb8, BackendRequest::Metal)
+                    .expect("device decode")
+            });
         });
-    });
+    }
 
     group.finish();
+}
+
+fn metal_decode_available() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        metal::Device::system_default().is_some()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        assert!(
+            std::env::var_os("SIGNINUM_REQUIRE_METAL_BENCH").is_none(),
+            "SIGNINUM_REQUIRE_METAL_BENCH is set but this is not a Metal host"
+        );
+        false
+    }
 }
 
 criterion_group!(benches, bench_device_upload);

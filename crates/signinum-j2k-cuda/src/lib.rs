@@ -15,7 +15,7 @@ use signinum_core::{
     BackendKind, BackendRequest, BufferError, CodecError, DecodeOutcome, DeviceSubmission,
     DeviceSurface, Downscale, ImageCodec, ImageDecode, ImageDecodeDevice, ImageDecodeSubmit,
     PixelFormat, ReadySubmission, Rect, TileBatchDecode, TileBatchDecodeDevice,
-    TileBatchDecodeSubmit,
+    TileBatchDecodeManyDevice, TileBatchDecodeSubmit,
 };
 #[cfg(feature = "cuda-runtime")]
 use signinum_cuda_runtime::{CudaContext, CudaDeviceBuffer, CudaDwt53Output, CudaError};
@@ -1018,6 +1018,28 @@ impl TileBatchDecodeDevice for Codec {
             backend,
         )?
         .wait()
+    }
+}
+
+impl TileBatchDecodeManyDevice for Codec {
+    type Context = CpuJ2kContext;
+    type DeviceSurface = Surface;
+
+    fn decode_tiles_to_device(
+        ctx: &mut signinum_core::DecoderContext<Self::Context>,
+        pool: &mut Self::Pool,
+        inputs: &[&[u8]],
+        fmt: PixelFormat,
+        backend: BackendRequest,
+    ) -> Result<Vec<Self::DeviceSurface>, Self::Error> {
+        validate_surface_request(backend)?;
+        let mut session = CudaSession::default();
+        inputs
+            .iter()
+            .map(|input| {
+                Self::decode_tile_to_surface_impl(ctx, &mut session, pool, input, fmt, backend)
+            })
+            .collect()
     }
 }
 

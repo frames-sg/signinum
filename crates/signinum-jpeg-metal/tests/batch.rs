@@ -10,6 +10,7 @@ const BASELINE_420_RESTART: &[u8] =
     include_bytes!("../fixtures/jpeg/baseline_420_restart_32x16.jpg");
 const GRAYSCALE: &[u8] = include_bytes!("../fixtures/jpeg/grayscale_8x8.jpg");
 
+#[cfg(target_os = "macos")]
 #[test]
 fn tile_device_decode_matches_host_tile_decode() {
     let mut ctx = DecoderContext::<JpegDecoderContext>::new();
@@ -31,6 +32,7 @@ fn tile_device_decode_matches_host_tile_decode() {
     assert_eq!(downloaded, surface.as_bytes());
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn tile_scaled_device_decode_has_expected_dimensions() {
     let mut ctx = DecoderContext::<JpegDecoderContext>::new();
@@ -47,6 +49,7 @@ fn tile_scaled_device_decode_has_expected_dimensions() {
     assert_eq!(surface.dimensions(), (4, 4));
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn tile_region_device_decode_has_expected_dimensions() {
     let mut ctx = DecoderContext::<JpegDecoderContext>::new();
@@ -69,6 +72,7 @@ fn tile_region_device_decode_has_expected_dimensions() {
     assert_eq!(surface.dimensions(), (8, 8));
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn compatible_tile_submits_flush_once() {
     let mut ctx = DecoderContext::<JpegDecoderContext>::new();
@@ -169,6 +173,7 @@ fn auto_restart_wsi_tile_batch_uses_metal_at_threshold() {
     assert_eq!(session.submissions(), 1);
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn compatible_region_scaled_tile_submits_flush_once() {
     let mut ctx = DecoderContext::<JpegDecoderContext>::new();
@@ -321,6 +326,26 @@ fn cuda_tile_request_remains_unsupported_backend() {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn non_macos_explicit_metal_tile_decode_is_unavailable() {
+    let mut ctx = DecoderContext::<JpegDecoderContext>::new();
+    let mut pool = ScratchPool::new();
+    let result = Codec::decode_tile_to_device(
+        &mut ctx,
+        &mut pool,
+        BASELINE_420,
+        PixelFormat::Rgb8,
+        BackendRequest::Metal,
+    );
+
+    assert!(matches!(
+        result,
+        Err(signinum_jpeg_metal::Error::MetalUnavailable)
+    ));
+}
+
+#[cfg(target_os = "macos")]
 #[test]
 fn incompatible_shapes_split_batches() {
     let mut ctx = DecoderContext::<JpegDecoderContext>::new();

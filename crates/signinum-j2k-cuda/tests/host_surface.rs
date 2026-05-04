@@ -1,6 +1,7 @@
 use signinum_core::{
     BackendRequest, CodecError, DecoderContext, DeviceSubmission, DeviceSurface, Downscale,
     ImageDecode, ImageDecodeDevice, ImageDecodeSubmit, PixelFormat, Rect, TileBatchDecodeDevice,
+    TileBatchDecodeManyDevice,
 };
 use signinum_j2k_cuda::{Codec, CudaSession, Error, J2kDecoder};
 use signinum_j2k_native::{encode, encode_htj2k, EncodeOptions};
@@ -383,4 +384,70 @@ fn tile_batch_region_scaled_cuda_surface_matches_host_when_runtime_required() {
         )
         .expect("host decode");
     assert_eq!(downloaded, expected);
+}
+
+#[test]
+fn decode_tiles_to_device_auto_preserves_order_and_matches_host_bytes() {
+    let bytes = fixture_ht_gray8();
+    let mut ctx = DecoderContext::<signinum_j2k_cuda::J2kContext>::new();
+    let mut pool = signinum_j2k_cuda::J2kScratchPool::new();
+    let inputs = [bytes.as_slice(), bytes.as_slice()];
+
+    let surfaces = Codec::decode_tiles_to_device(
+        &mut ctx,
+        &mut pool,
+        &inputs,
+        PixelFormat::Gray8,
+        BackendRequest::Auto,
+    )
+    .expect("batch surfaces");
+
+    assert_eq!(surfaces.len(), inputs.len());
+    let mut expected = [0u8; 16];
+    J2kDecoder::new(&bytes)
+        .expect("host decoder")
+        .decode_into(&mut expected, 4, PixelFormat::Gray8)
+        .expect("host decode");
+    for surface in surfaces {
+        assert_eq!(surface.dimensions(), (4, 4));
+        match surface.backend_kind() {
+            signinum_core::BackendKind::Cpu => {
+                assert_eq!(surface.as_host_bytes(), Some(expected.as_slice()));
+            }
+            signinum_core::BackendKind::Cuda => {
+                let mut downloaded = vec![0u8; surface.byte_len()];
+                surface
+                    .download_into(&mut downloaded, surface.pitch_bytes())
+                    .expect("download cuda surface");
+                assert_eq!(downloaded, expected);
+            }
+            signinum_core::BackendKind::Metal => panic!("J2K CUDA batch returned Metal surface"),
+        }
+    }
+}
+
+#[test]
+fn decode_tiles_to_device_explicit_cuda_returns_cuda_surfaces_or_clear_unavailable_error() {
+    let bytes = fixture_ht_gray8();
+    let mut ctx = DecoderContext::<signinum_j2k_cuda::J2kContext>::new();
+    let mut pool = signinum_j2k_cuda::J2kScratchPool::new();
+    let inputs = [bytes.as_slice(), bytes.as_slice()];
+
+    match Codec::decode_tiles_to_device(
+        &mut ctx,
+        &mut pool,
+        &inputs,
+        PixelFormat::Gray8,
+        BackendRequest::Cuda,
+    ) {
+        Ok(surfaces) => {
+            assert_eq!(surfaces.len(), inputs.len());
+            for surface in surfaces {
+                assert_eq!(surface.backend_kind(), signinum_core::BackendKind::Cuda);
+                assert_eq!(surface.as_host_bytes(), None);
+                assert_cuda_surface(&surface);
+            }
+        }
+        Err(error) => assert!(error.is_unsupported()),
+    }
 }

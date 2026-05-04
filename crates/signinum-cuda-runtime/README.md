@@ -9,6 +9,7 @@ copy bytes between host and device, launch bundled CUDA kernels, call nvJPEG
 when it is available, and report CUDA driver errors clearly.
 
 The runtime currently exposes full-frame RGB8 JPEG decode through NVIDIA
-nvJPEG for `signinum-jpeg-cuda`. JPEG 2000 / HTJ2K CUDA adapters still upload
+nvJPEG, including the legacy batched API used by `signinum-jpeg-cuda` for
+full-tile RGB8 batches. JPEG 2000 / HTJ2K CUDA adapters still upload
 CPU-decoded bytes into CUDA device memory and do not provide CUDA codestream
 decode kernels.

@@ -23,18 +23,35 @@ fn bench_device_upload(c: &mut Criterion) {
         b.iter(|| decoder.decode(PixelFormat::Rgb8).expect("cpu decode"));
     });
 
-    group.bench_function("metal_surface_rgb8", |b| {
-        b.iter(|| {
-            let mut decoder = MetalDecoder::new(&input).expect("metal decoder");
-            decoder
-                .decode_to_device(PixelFormat::Rgb8, BackendRequest::Metal)
-                .expect("device decode")
+    if metal_decode_available() {
+        group.bench_function("metal_surface_rgb8", |b| {
+            b.iter(|| {
+                let mut decoder = MetalDecoder::new(&input).expect("metal decoder");
+                decoder
+                    .decode_to_device(PixelFormat::Rgb8, BackendRequest::Metal)
+                    .expect("device decode")
+            });
         });
-    });
+    }
 
     group.finish();
 
     bench_batch_decode(c);
+}
+
+fn metal_decode_available() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        metal::Device::system_default().is_some()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        assert!(
+            std::env::var_os("SIGNINUM_REQUIRE_METAL_BENCH").is_none(),
+            "SIGNINUM_REQUIRE_METAL_BENCH is set but this is not a Metal host"
+        );
+        false
+    }
 }
 
 fn bench_input() -> Vec<u8> {
@@ -125,11 +142,13 @@ fn bench_batch_decode(c: &mut Criterion) {
         });
     });
 
-    group.bench_function(format!("metal_rgb8_batch{batch_size}_surfaces"), |b| {
-        b.iter(|| {
-            device_decode_tile_batch(&input, batch_size, BackendRequest::Metal);
+    if metal_decode_available() {
+        group.bench_function(format!("metal_rgb8_batch{batch_size}_surfaces"), |b| {
+            b.iter(|| {
+                device_decode_tile_batch(&input, batch_size, BackendRequest::Metal);
+            });
         });
-    });
+    }
 
     group.bench_function(format!("auto_rgb8_batch{batch_size}_surfaces"), |b| {
         b.iter(|| {

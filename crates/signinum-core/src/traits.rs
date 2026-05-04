@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use alloc::vec::Vec;
+
 use crate::{
     backend::{BackendKind, BackendRequest},
     context::{CodecContext, DecoderContext},
@@ -330,6 +332,23 @@ pub trait TileBatchDecodeDevice: ImageCodec {
         scale: Downscale,
         backend: BackendRequest,
     ) -> Result<Self::DeviceSurface, Self::Error>;
+}
+
+/// Full-tile batch helpers that decode many independent tiles to device surfaces.
+pub trait TileBatchDecodeManyDevice: ImageCodec {
+    /// Codec-specific context cached across tiles.
+    type Context: CodecContext;
+    /// Device surface returned by decode calls.
+    type DeviceSurface: DeviceSurface;
+
+    /// Decode many full tiles to the requested backend, preserving input order.
+    fn decode_tiles_to_device(
+        ctx: &mut DecoderContext<Self::Context>,
+        pool: &mut Self::Pool,
+        inputs: &[&[u8]],
+        fmt: PixelFormat,
+        backend: BackendRequest,
+    ) -> Result<Vec<Self::DeviceSurface>, Self::Error>;
 }
 
 /// Tile-batch helpers that queue device submissions.

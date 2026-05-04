@@ -31,6 +31,6 @@ pub use scratch::ScratchPool;
 pub use traits::{
     DecodeRowsError, DeviceSubmission, DeviceSurface, ImageCodec, ImageDecode, ImageDecodeDevice,
     ImageDecodeRows, ImageDecodeSubmit, ReadySubmission, TileBatchDecode, TileBatchDecodeDevice,
-    TileBatchDecodeSubmit, TileDecompress,
+    TileBatchDecodeManyDevice, TileBatchDecodeSubmit, TileDecompress,
 };
 pub use types::{CodedUnitLayout, Colorspace, DecodeOutcome, Info, Rect, TileLayout, WarningKind};

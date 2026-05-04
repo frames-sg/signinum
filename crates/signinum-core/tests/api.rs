@@ -1,6 +1,7 @@
 use signinum_core::{
-    BackendCapabilities, BackendKind, BackendRequest, CpuFeatures, DeviceSubmission, DeviceSurface,
-    Downscale, PixelFormat, PixelLayout, ReadySubmission, Rect, SampleType,
+    BackendCapabilities, BackendKind, BackendRequest, CodecContext, CodecError, CpuFeatures,
+    DecoderContext, DeviceSubmission, DeviceSurface, Downscale, ImageCodec, PixelFormat,
+    PixelLayout, ReadySubmission, Rect, SampleType, ScratchPool, TileBatchDecodeManyDevice,
 };
 
 #[test]
@@ -128,4 +129,105 @@ fn ready_submission_waits_immediate_success() {
 fn ready_submission_waits_immediate_error() {
     let submission = ReadySubmission::<u32, &'static str>::from_result(Err("nope"));
     assert_eq!(submission.wait().expect_err("error"), "nope");
+}
+
+#[derive(Default)]
+struct DummyPool;
+
+impl ScratchPool for DummyPool {
+    fn bytes_allocated(&self) -> usize {
+        0
+    }
+
+    fn reset(&mut self) {}
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("dummy decode error")]
+struct DummyError;
+
+impl CodecError for DummyError {
+    fn is_truncated(&self) -> bool {
+        false
+    }
+
+    fn is_not_implemented(&self) -> bool {
+        false
+    }
+
+    fn is_unsupported(&self) -> bool {
+        false
+    }
+
+    fn is_buffer_error(&self) -> bool {
+        false
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DummyCodec;
+
+#[derive(Default)]
+struct DummyContext;
+
+impl CodecContext for DummyContext {
+    fn clear(&mut self) {}
+}
+
+impl ImageCodec for DummyCodec {
+    type Error = DummyError;
+    type Warning = core::convert::Infallible;
+    type Pool = DummyPool;
+}
+
+impl TileBatchDecodeManyDevice for DummyCodec {
+    type Context = DummyContext;
+    type DeviceSurface = DummySurface;
+
+    fn decode_tiles_to_device(
+        _ctx: &mut DecoderContext<Self::Context>,
+        _pool: &mut Self::Pool,
+        inputs: &[&[u8]],
+        fmt: PixelFormat,
+        backend: BackendRequest,
+    ) -> Result<Vec<Self::DeviceSurface>, Self::Error> {
+        Ok(inputs
+            .iter()
+            .map(|input| DummySurface {
+                backend: match backend {
+                    BackendRequest::Cuda => BackendKind::Cuda,
+                    BackendRequest::Metal => BackendKind::Metal,
+                    BackendRequest::Auto | BackendRequest::Cpu => BackendKind::Cpu,
+                },
+                dims: (
+                    u32::try_from(input.len()).expect("dummy input length fits in u32"),
+                    1,
+                ),
+                fmt,
+                len: input.len() * fmt.bytes_per_pixel(),
+            })
+            .collect())
+    }
+}
+
+#[test]
+fn tile_batch_decode_many_device_returns_ordered_surfaces() {
+    let mut ctx = DecoderContext::<DummyContext>::new();
+    let mut pool = DummyPool;
+    let inputs: [&[u8]; 2] = [b"abc".as_slice(), b"abcdef".as_slice()];
+
+    let surfaces = DummyCodec::decode_tiles_to_device(
+        &mut ctx,
+        &mut pool,
+        &inputs,
+        PixelFormat::Rgb8,
+        BackendRequest::Cuda,
+    )
+    .expect("batch surfaces");
+
+    assert_eq!(surfaces.len(), 2);
+    assert_eq!(surfaces[0].backend_kind(), BackendKind::Cuda);
+    assert_eq!(surfaces[0].dimensions(), (3, 1));
+    assert_eq!(surfaces[1].dimensions(), (6, 1));
+    assert_eq!(surfaces[1].byte_len(), 18);
 }

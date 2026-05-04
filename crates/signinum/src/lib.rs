@@ -196,7 +196,7 @@ pub use core::{
     BackendCapabilities, BackendKind, BackendRequest, BufferError, CodecError, DecodeOutcome,
     DecodeRowsError, DecoderContext, DeviceSurface, Downscale, ImageCodec, ImageDecode,
     ImageDecodeDevice, ImageDecodeRows, PixelFormat, Rect, RowSink, TileBatchDecode,
-    TileDecompress,
+    TileBatchDecodeManyDevice, TileDecompress,
 };
 pub use j2k::{
     encode_j2k_lossless, encode_j2k_lossless_with_accelerator, j2k_lossless_decomposition_levels,

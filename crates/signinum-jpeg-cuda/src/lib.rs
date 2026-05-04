@@ -3,16 +3,18 @@
 //! CUDA-facing device-output adapter for `signinum-jpeg`.
 //!
 //! This crate intentionally exposes the same backend-selection surface as the
-//! Metal adapter. CPU and auto requests return host-backed surfaces, while
-//! explicit CUDA requests upload decoded output into CUDA device memory when
-//! the `cuda-runtime` feature and a CUDA driver are available.
+//! Metal adapter. CPU requests return host-backed surfaces. Scalar auto
+//! requests stay on CPU, while full-tile batch auto requests may use nvJPEG
+//! when the CUDA runtime and library are available. Explicit CUDA requests
+//! return CUDA-backed surfaces or a clear unavailable error.
 
 #![warn(unreachable_pub)]
 
 use signinum_core::{
     BackendKind, BackendRequest, BufferError, CodecError, DecodeOutcome, DeviceSubmission,
     DeviceSurface, Downscale, ImageCodec, ImageDecode, ImageDecodeDevice, ImageDecodeSubmit,
-    PixelFormat, ReadySubmission, Rect, TileBatchDecodeDevice, TileBatchDecodeSubmit,
+    PixelFormat, ReadySubmission, Rect, TileBatchDecodeDevice, TileBatchDecodeManyDevice,
+    TileBatchDecodeSubmit,
 };
 #[cfg(feature = "cuda-runtime")]
 use signinum_cuda_runtime::{CudaContext, CudaDeviceBuffer, CudaError};
@@ -295,6 +297,7 @@ impl<'a> Decoder<'a> {
     }
 
     #[cfg(not(feature = "cuda-runtime"))]
+    #[allow(clippy::unnecessary_wraps, clippy::unused_self)]
     fn try_decode_cuda_rgb8(
         &mut self,
         _session: &mut CudaSession,
@@ -867,6 +870,101 @@ impl TileBatchDecodeDevice for Codec {
         )?
         .wait()
     }
+}
+
+impl TileBatchDecodeManyDevice for Codec {
+    type Context = CpuDecoderContext;
+    type DeviceSurface = Surface;
+
+    fn decode_tiles_to_device(
+        ctx: &mut signinum_core::DecoderContext<Self::Context>,
+        pool: &mut Self::Pool,
+        inputs: &[&[u8]],
+        fmt: PixelFormat,
+        backend: BackendRequest,
+    ) -> Result<Vec<Self::DeviceSurface>, Self::Error> {
+        validate_surface_request(backend)?;
+        if inputs.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut session = CudaSession::default();
+        if let Some(surfaces) = try_decode_tiles_nvjpeg_batch(inputs, fmt, backend, &mut session)? {
+            return Ok(surfaces);
+        }
+
+        inputs
+            .iter()
+            .map(|input| {
+                Self::decode_tile_to_surface_impl(ctx, &mut session, pool, input, fmt, backend)
+            })
+            .collect()
+    }
+}
+
+#[cfg(feature = "cuda-runtime")]
+fn try_decode_tiles_nvjpeg_batch(
+    inputs: &[&[u8]],
+    fmt: PixelFormat,
+    backend: BackendRequest,
+    session: &mut CudaSession,
+) -> Result<Option<Vec<Surface>>, Error> {
+    if fmt != PixelFormat::Rgb8 || !matches!(backend, BackendRequest::Auto | BackendRequest::Cuda) {
+        return Ok(None);
+    }
+
+    let mut batch_inputs = Vec::with_capacity(inputs.len());
+    for input in inputs {
+        let dimensions = CpuDecoder::inspect(input)?.dimensions;
+        batch_inputs.push((*input, dimensions));
+    }
+
+    let context = match session.cuda_context() {
+        Ok(context) => context,
+        Err(_) if backend == BackendRequest::Auto => return Ok(None),
+        Err(error) => return Err(error),
+    };
+
+    match context.decode_jpeg_rgb8_batch_with_nvjpeg(&batch_inputs) {
+        Ok(outputs) => {
+            let mut surfaces = Vec::with_capacity(outputs.len());
+            for (output, (_, dimensions)) in outputs.into_iter().zip(batch_inputs) {
+                let pitch_bytes = dimensions.0 as usize * PixelFormat::Rgb8.bytes_per_pixel();
+                let (buffer, stats) = output.into_parts();
+                surfaces.push(Surface {
+                    backend: BackendKind::Cuda,
+                    dimensions,
+                    fmt: PixelFormat::Rgb8,
+                    pitch_bytes,
+                    stats: CudaSurfaceStats {
+                        kernel_dispatches: stats.kernel_dispatches(),
+                        copy_kernel_dispatches: stats.copy_kernel_dispatches(),
+                        decode_kernel_dispatches: stats.decode_kernel_dispatches(),
+                        hardware_decode: stats.used_hardware_decode(),
+                    },
+                    storage: Storage::Cuda(buffer),
+                });
+            }
+            Ok(Some(surfaces))
+        }
+        Err(
+            CudaError::NvjpegUnavailable { .. }
+            | CudaError::Nvjpeg { .. }
+            | CudaError::NvjpegDimensions { .. },
+        ) => Ok(None),
+        Err(error) => Err(cuda_error(error)),
+    }
+}
+
+#[cfg(not(feature = "cuda-runtime"))]
+#[allow(clippy::unnecessary_wraps)]
+fn try_decode_tiles_nvjpeg_batch(
+    _inputs: &[&[u8]],
+    _fmt: PixelFormat,
+    _backend: BackendRequest,
+    _session: &mut CudaSession,
+) -> Result<Option<Vec<Surface>>, Error> {
+    Ok(None)
 }
 
 fn convert_info(info: &signinum_jpeg::Info) -> signinum_core::Info {

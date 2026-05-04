@@ -74,9 +74,10 @@ fn metal_encode_available() -> bool {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        if std::env::var_os("SIGNINUM_REQUIRE_METAL_BENCH").is_some() {
-            panic!("SIGNINUM_REQUIRE_METAL_BENCH is set but this is not a Metal host");
-        }
+        assert!(
+            std::env::var_os("SIGNINUM_REQUIRE_METAL_BENCH").is_none(),
+            "SIGNINUM_REQUIRE_METAL_BENCH is set but this is not a Metal host"
+        );
         false
     }
 }

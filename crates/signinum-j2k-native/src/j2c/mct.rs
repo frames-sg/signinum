@@ -4,7 +4,7 @@
 use super::codestream::{Header, WaveletTransform};
 use super::decode::TileDecodeContext;
 use crate::error::{bail, err, ColorError, Result};
-use crate::math::{dispatch, f32x8, Level, Simd};
+use crate::math::{dispatch, f32x8, floor_f32, Level, Simd};
 use crate::{HtCodeBlockDecoder, J2kInverseMctJob, J2kWaveletTransform};
 
 /// Apply the inverse multi-component transform, as specified in G.2 and G.3.
@@ -154,7 +154,7 @@ fn apply_inner_impl<S: Simd>(
                 let src0 = *y0;
                 let src1 = *y1;
                 let src2 = *y2;
-                let i1 = src0 - ((src2 + src1) * 0.25).floor();
+                let i1 = src0 - floor_f32((src2 + src1) * 0.25);
                 *y0 = src2 + i1;
                 *y1 = i1;
                 *y2 = src1 + i1;

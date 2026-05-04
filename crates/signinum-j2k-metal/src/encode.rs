@@ -527,15 +527,16 @@ mod tests {
     use super::MetalEncodeStageAccelerator;
     #[cfg(target_os = "macos")]
     use crate::compute;
+    #[cfg(target_os = "macos")]
     use signinum_core::{BackendKind, PixelFormat};
+    #[cfg(target_os = "macos")]
     use signinum_j2k::{
         encode_j2k_lossless_with_accelerator, EncodeBackendPreference, J2kBlockCodingMode,
         J2kLosslessEncodeOptions, J2kLosslessSamples,
     };
-    use signinum_j2k_native::{
-        encode_with_accelerator, DecodeSettings, EncodeOptions, Image, J2kCodeBlockStyle,
-        J2kEncodeStageAccelerator, J2kForwardDwt53Job,
-    };
+    use signinum_j2k_native::{encode_with_accelerator, DecodeSettings, EncodeOptions, Image};
+    #[cfg(target_os = "macos")]
+    use signinum_j2k_native::{J2kCodeBlockStyle, J2kEncodeStageAccelerator, J2kForwardDwt53Job};
 
     #[cfg(target_os = "macos")]
     #[test]

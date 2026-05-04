@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use signinum::{
-    j2k::{
-        encode_j2k_lossless, EncodeBackendPreference, J2kLosslessEncodeOptions, J2kLosslessSamples,
-    },
+    j2k::{encode_j2k_lossless, J2kLosslessEncodeOptions, J2kLosslessSamples},
     tilecodec::UncompressedCodec,
     BackendKind, BackendRequest, TileDecompress,
 };
@@ -47,7 +45,7 @@ fn facade_auto_j2k_lossless_encode_uses_device_when_available() {
             let required = encode_j2k_lossless(
                 samples,
                 &J2kLosslessEncodeOptions {
-                    backend: EncodeBackendPreference::RequireDevice,
+                    backend: signinum::EncodeBackendPreference::RequireDevice,
                     ..J2kLosslessEncodeOptions::default()
                 },
             );

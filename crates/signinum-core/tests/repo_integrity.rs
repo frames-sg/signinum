@@ -310,8 +310,8 @@ fn crates_io_publish_policy_is_explicit() {
         .expect("read publish workflow");
 
     assert!(
-        workspace.contains("version      = \"1.0.0\""),
-        "workspace package version must be the CPU-first 1.0 release version"
+        workspace.contains("version      = \"1.0.1\""),
+        "workspace package version must match the current staged release version"
     );
 
     for package in [

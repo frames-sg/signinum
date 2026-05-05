@@ -10,15 +10,16 @@ use crate::{
         decode_region_scaled_from_info, decode_scaled_from_info, validate_buffer, validate_region,
         validate_supported_format, J2kDecodeOutcome,
     },
-    parse::parse_info,
+    parse::{parse_image_info, parse_info},
     scratch::J2kScratchPool,
     J2kError,
 };
 use alloc::vec::Vec;
 use core::convert::Infallible;
 use signinum_core::{
-    DecodeRowsError, DecoderContext, Downscale, ImageCodec, ImageDecode, ImageDecodeRows, Info,
-    PixelFormat, Rect, RowSink, TileBatchDecode,
+    CompressedPayloadKind, CompressedTransferSyntax, DecodeRowsError, DecoderContext, Downscale,
+    ImageCodec, ImageDecode, ImageDecodeRows, Info, PassthroughCandidate, PixelFormat, Rect,
+    RowSink, TileBatchDecode,
 };
 
 /// Borrowed parse result for a JP2 or raw JPEG 2000 / HTJ2K codestream.
@@ -29,6 +30,7 @@ pub struct J2kView<'a> {
     bytes: &'a [u8],
     info: Info,
     image: Option<Image<'a>>,
+    passthrough: Option<(CompressedTransferSyntax, CompressedPayloadKind)>,
 }
 
 impl<'a> J2kView<'a> {
@@ -38,9 +40,12 @@ impl<'a> J2kView<'a> {
     /// Returns [`J2kError`] when the input is not a supported JP2/J2C/HTJ2K
     /// stream or when backend inspection rejects the codestream.
     pub fn parse(input: &'a [u8]) -> Result<Self, J2kError> {
-        let info = match parse_info(input) {
-            Ok(info) => info,
-            Err(error) if should_retry_with_backend(&error) => inspect_info(input)?,
+        let (info, passthrough) = match parse_image_info(input) {
+            Ok(parsed) => (
+                parsed.info,
+                Some((parsed.transfer_syntax, parsed.payload_kind)),
+            ),
+            Err(error) if should_retry_with_backend(&error) => (inspect_info(input)?, None),
             Err(error) => return Err(error),
         };
         let image = Some(backend_image(input, DecodeSettings::default())?);
@@ -48,6 +53,7 @@ impl<'a> J2kView<'a> {
             bytes: input,
             info,
             image,
+            passthrough,
         })
     }
 
@@ -59,6 +65,14 @@ impl<'a> J2kView<'a> {
     /// Original compressed bytes backing this view.
     pub fn bytes(&self) -> &'a [u8] {
         self.bytes
+    }
+
+    /// Return a byte-preserving passthrough candidate when the native parser
+    /// classified the compressed syntax and payload shape.
+    pub fn passthrough_candidate(&self) -> Option<PassthroughCandidate<'a>> {
+        self.passthrough.map(|(transfer_syntax, payload_kind)| {
+            PassthroughCandidate::new(self.bytes, transfer_syntax, payload_kind, self.info.clone())
+        })
     }
 }
 
@@ -72,6 +86,7 @@ pub struct J2kDecoder<'a> {
     info: Info,
     image: Option<Image<'a>>,
     native_context: signinum_j2k_native::DecoderContext<'a>,
+    passthrough: Option<(CompressedTransferSyntax, CompressedPayloadKind)>,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -110,6 +125,7 @@ impl<'a> J2kDecoder<'a> {
             info: view.info,
             image: view.image,
             native_context: signinum_j2k_native::DecoderContext::default(),
+            passthrough: view.passthrough,
         })
     }
 
@@ -121,6 +137,14 @@ impl<'a> J2kDecoder<'a> {
     /// Original compressed bytes backing this decoder.
     pub fn bytes(&self) -> &'a [u8] {
         self.bytes
+    }
+
+    /// Return a byte-preserving passthrough candidate when the native parser
+    /// classified the compressed syntax and payload shape.
+    pub fn passthrough_candidate(&self) -> Option<PassthroughCandidate<'a>> {
+        self.passthrough.map(|(transfer_syntax, payload_kind)| {
+            PassthroughCandidate::new(self.bytes, transfer_syntax, payload_kind, self.info.clone())
+        })
     }
 
     /// Decode the full image into `out` using `stride` bytes per output row.

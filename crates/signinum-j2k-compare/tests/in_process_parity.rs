@@ -41,6 +41,10 @@ fn openjpeg_in_process_region_matches_signinum_rgb_fixture() {
 #[test]
 fn grok_in_process_matches_signinum_rgb_fixture() {
     if !signinum_j2k_compare::grok::is_available() {
+        assert!(
+            !require_grok(),
+            "SIGNINUM_REQUIRE_GROK is set but in-process Grok is unavailable"
+        );
         return;
     }
     let Some(input) = bench_fixture_rgb() else {
@@ -54,6 +58,10 @@ fn grok_in_process_matches_signinum_rgb_fixture() {
 #[test]
 fn grok_in_process_scaled_matches_signinum_rgb_fixture() {
     if !signinum_j2k_compare::grok::is_available() {
+        assert!(
+            !require_grok(),
+            "SIGNINUM_REQUIRE_GROK is set but in-process Grok is unavailable"
+        );
         return;
     }
     let Some(input) = bench_fixture_rgb() else {
@@ -124,7 +132,13 @@ fn gradient_u8(width: u32, height: u32, channels: usize) -> Vec<u8> {
 }
 
 fn openjpeg_encode_jp2(name: &str, pixels: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
-    let bin = openjpeg_compress_bin()?;
+    let Some(bin) = openjpeg_compress_bin() else {
+        assert!(
+            !require_openjpeg(),
+            "SIGNINUM_REQUIRE_OPENJPEG is set but opj_compress was not found"
+        );
+        return None;
+    };
     let dir = openjpeg_temp_dir();
     let unique = next_temp_suffix();
     let src_path = dir.join(format!("{name}-{unique}.ppm"));
@@ -138,6 +152,10 @@ fn openjpeg_encode_jp2(name: &str, pixels: &[u8], width: u32, height: u32) -> Op
         .status()
         .ok()?;
     if !status.success() {
+        assert!(
+            !require_openjpeg(),
+            "SIGNINUM_REQUIRE_OPENJPEG is set but opj_compress failed"
+        );
         return None;
     }
     fs::read(out_path).ok()
@@ -162,6 +180,14 @@ fn openjpeg_compress_bin() -> Option<PathBuf> {
             default.exists().then_some(default)
         })
         .clone()
+}
+
+fn require_openjpeg() -> bool {
+    std::env::var_os("SIGNINUM_REQUIRE_OPENJPEG").is_some()
+}
+
+fn require_grok() -> bool {
+    std::env::var_os("SIGNINUM_REQUIRE_GROK").is_some()
 }
 
 fn openjpeg_temp_dir() -> PathBuf {

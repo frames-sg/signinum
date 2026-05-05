@@ -70,6 +70,12 @@ pub struct J2kLosslessEncodeOptions {
     pub backend: EncodeBackendPreference,
     pub block_coding_mode: J2kBlockCodingMode,
     pub progression: J2kProgressionOrder,
+    /// Optional upper bound on the default lossless decomposition level policy.
+    ///
+    /// This is primarily for container profiles that need a shallower DWT than
+    /// the facade's normal RPCL default, while preserving the zero-level policy
+    /// for very small images.
+    pub max_decomposition_levels: Option<u8>,
     pub reversible_transform: ReversibleTransform,
     pub validation: J2kEncodeValidation,
 }
@@ -80,6 +86,7 @@ impl Default for J2kLosslessEncodeOptions {
             backend: EncodeBackendPreference::Auto,
             block_coding_mode: J2kBlockCodingMode::Classic,
             progression: J2kProgressionOrder::Lrcp,
+            max_decomposition_levels: None,
             reversible_transform: ReversibleTransform::Rct53,
             validation: J2kEncodeValidation::CpuRoundTrip,
         }
@@ -286,10 +293,7 @@ fn native_lossless_options(
     let progression_order = native_progression_order(options.progression);
     EncodeOptions {
         reversible: true,
-        num_decomposition_levels: j2k_lossless_decomposition_levels_for_progression(
-            samples,
-            options.progression,
-        ),
+        num_decomposition_levels: j2k_lossless_decomposition_levels_for_options(samples, options),
         use_ht_block_coding: options.block_coding_mode == J2kBlockCodingMode::HighThroughput,
         progression_order,
         write_tlm: options.progression == J2kProgressionOrder::Rpcl,
@@ -325,6 +329,17 @@ pub fn j2k_lossless_decomposition_levels_for_progression(
     }
 
     1
+}
+
+/// Return the effective lossless decomposition level policy for encode options.
+pub fn j2k_lossless_decomposition_levels_for_options(
+    samples: J2kLosslessSamples<'_>,
+    options: J2kLosslessEncodeOptions,
+) -> u8 {
+    let levels = j2k_lossless_decomposition_levels_for_progression(samples, options.progression);
+    options
+        .max_decomposition_levels
+        .map_or(levels, |max_levels| levels.min(max_levels))
 }
 
 fn j2k_rpcl_lossless_decomposition_levels(samples: J2kLosslessSamples<'_>) -> u8 {
@@ -415,8 +430,7 @@ fn required_encode_stages(
     samples: J2kLosslessSamples<'_>,
     options: J2kLosslessEncodeOptions,
 ) -> RequiredEncodeStages {
-    let decomposition_levels =
-        j2k_lossless_decomposition_levels_for_progression(samples, options.progression);
+    let decomposition_levels = j2k_lossless_decomposition_levels_for_options(samples, options);
     let high_throughput = options.block_coding_mode == J2kBlockCodingMode::HighThroughput;
 
     let mut bits = RequiredEncodeStages::PACKETIZATION;

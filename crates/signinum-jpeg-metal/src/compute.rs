@@ -1091,9 +1091,9 @@ impl PlaneStage {
         fmt: PixelFormat,
     ) -> Result<Surface, Error> {
         match (self.mode, fmt) {
-            (PlaneMode::Gray | PlaneMode::YCbCr, PixelFormat::Gray8) => {
-                Ok(Surface::from_metal_buffer(self.plane0, self.dims, fmt))
-            }
+            (PlaneMode::Gray | PlaneMode::YCbCr, PixelFormat::Gray8) => Ok(
+                Surface::from_cpu_staged_metal_buffer(self.plane0, self.dims, fmt),
+            ),
             (
                 PlaneMode::Gray | PlaneMode::YCbCr | PlaneMode::Rgb,
                 PixelFormat::Rgb8 | PixelFormat::Rgba8,
@@ -1146,7 +1146,7 @@ impl PlaneStage {
         command_buffer.commit();
         command_buffer.wait_until_completed();
 
-        Surface::from_metal_buffer(out_buffer, self.dims, fmt)
+        Surface::from_cpu_staged_metal_buffer(out_buffer, self.dims, fmt)
     }
 }
 

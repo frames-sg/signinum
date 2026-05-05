@@ -12,6 +12,7 @@ extern crate alloc;
 pub mod backend;
 pub mod context;
 pub mod error;
+pub mod passthrough;
 pub mod pixel;
 pub mod row_sink;
 pub mod sample;
@@ -23,6 +24,10 @@ pub mod types;
 pub use backend::{BackendCapabilities, BackendKind, BackendRequest, CpuFeatures};
 pub use context::{CacheStats, CodecContext, DecoderContext};
 pub use error::{BufferError, CodecError, InputError, NotImplemented, Unsupported};
+pub use passthrough::{
+    CompressedPayloadKind, CompressedTransferSyntax, PassthroughCandidate, PassthroughDecision,
+    PassthroughRejectReason, PassthroughRequirements,
+};
 pub use pixel::{PixelFormat, PixelLayout};
 pub use row_sink::RowSink;
 pub use sample::{Sample, SampleType};

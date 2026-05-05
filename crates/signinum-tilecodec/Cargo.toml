@@ -15,7 +15,7 @@ name = "signinum_tilecodec"
 path = "src/lib.rs"
 
 [dependencies]
-signinum-core = { path = "../signinum-core", version = "=1.0.0" }
+signinum-core = { path = "../signinum-core", version = "=1.0.1" }
 thiserror = { workspace = true }
 flate2 = { workspace = true }
 zstd = { workspace = true }

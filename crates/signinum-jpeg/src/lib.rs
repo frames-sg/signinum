@@ -20,8 +20,10 @@ pub use info::{
     RestartSegment, SamplingFactors, SofKind,
 };
 pub use signinum_core::{
-    CacheStats, CodecContext, DecodeRowsError, Downscale, ImageCodec, ImageDecode, ImageDecodeRows,
-    PixelFormat, PixelLayout, RowSink, Sample, SampleType, TileBatchDecode, TileDecompress,
+    CacheStats, CodecContext, CompressedPayloadKind, CompressedTransferSyntax, DecodeRowsError,
+    Downscale, ImageCodec, ImageDecode, ImageDecodeRows, PassthroughCandidate, PassthroughDecision,
+    PassthroughRejectReason, PassthroughRequirements, PixelFormat, PixelLayout, RowSink, Sample,
+    SampleType, TileBatchDecode, TileDecompress,
 };
 
 pub mod context;

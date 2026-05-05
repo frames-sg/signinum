@@ -2517,6 +2517,39 @@ mod tests {
     }
 
     #[test]
+    fn grayscale_direct_plan_honors_target_resolution() {
+        let bytes = fixture_ht_gray();
+        let image = Image::new(
+            &bytes,
+            &DecodeSettings {
+                target_resolution: Some((2, 2)),
+                ..DecodeSettings::default()
+            },
+        )
+        .expect("scaled image");
+        let mut context = DecoderContext::default();
+
+        let plan = image
+            .build_direct_grayscale_plan_with_context(&mut context)
+            .expect("build scaled direct plan");
+
+        assert_eq!(plan.dimensions, (2, 2));
+        assert!(plan.steps.iter().any(|step| matches!(
+            step,
+            J2kDirectGrayscaleStep::HtSubBand(plan) if !plan.jobs.is_empty()
+        )));
+        assert!(plan.steps.iter().any(|step| matches!(
+            step,
+            J2kDirectGrayscaleStep::Store(store)
+                if store.output_width == 2 && store.output_height == 2
+        )));
+        assert!(
+            context.tile_decode_context.channel_data.is_empty(),
+            "building a scaled direct plan must not materialize host component planes"
+        );
+    }
+
+    #[test]
     fn htj2k_grayscale_direct_plan_contains_ht_sub_band_steps() {
         let bytes = fixture_ht_gray();
         let image = Image::new(&bytes, &DecodeSettings::default()).expect("image");

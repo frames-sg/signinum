@@ -134,19 +134,32 @@ struct OpenJpegPaths {
 
 impl OpenJpegPaths {
     fn discover() -> Option<Self> {
-        let compress = std::env::var_os("SIGNINUM_OPENJPEG_COMPRESS_BIN")
-            .map(PathBuf::from)
-            .or_else(|| Some(PathBuf::from("/opt/homebrew/bin/opj_compress")))
-            .filter(|path| path.exists())?;
-        let decompress = std::env::var_os("SIGNINUM_OPENJPEG_BIN")
-            .map(PathBuf::from)
-            .or_else(|| Some(PathBuf::from("/opt/homebrew/bin/opj_decompress")))
-            .filter(|path| path.exists())?;
-        Some(Self {
-            compress,
-            decompress,
-        })
+        let paths = discover_openjpeg_paths();
+        assert!(
+            paths.is_some() || !require_openjpeg(),
+            "SIGNINUM_REQUIRE_OPENJPEG is set but opj_compress/opj_decompress were not found"
+        );
+        paths
     }
+}
+
+fn discover_openjpeg_paths() -> Option<OpenJpegPaths> {
+    let compress = std::env::var_os("SIGNINUM_OPENJPEG_COMPRESS_BIN")
+        .map(PathBuf::from)
+        .or_else(|| Some(PathBuf::from("/opt/homebrew/bin/opj_compress")))
+        .filter(|path| path.exists())?;
+    let decompress = std::env::var_os("SIGNINUM_OPENJPEG_BIN")
+        .map(PathBuf::from)
+        .or_else(|| Some(PathBuf::from("/opt/homebrew/bin/opj_decompress")))
+        .filter(|path| path.exists())?;
+    Some(OpenJpegPaths {
+        compress,
+        decompress,
+    })
+}
+
+fn require_openjpeg() -> bool {
+    std::env::var_os("SIGNINUM_REQUIRE_OPENJPEG").is_some()
 }
 
 fn encode_with_openjpeg(

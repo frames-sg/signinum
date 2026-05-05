@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use super::codestream::parse_codestream;
+use super::{codestream::parse_codestream, ParsedImageInfo};
 use crate::J2kError;
-use signinum_core::{Colorspace, InputError};
+use signinum_core::{Colorspace, CompressedPayloadKind, InputError};
 
 const JP2_SIGNATURE: [u8; 12] = [0, 0, 0, 12, b'j', b'P', b' ', b' ', 0x0D, 0x0A, 0x87, 0x0A];
 const JP2_SIGNATURE_PREFIX: [u8; 8] = [0, 0, 0, 12, b'j', b'P', b' ', b' '];
@@ -11,7 +11,7 @@ pub(crate) fn looks_like_jp2(input: &[u8]) -> bool {
     input.starts_with(&JP2_SIGNATURE_PREFIX)
 }
 
-pub(crate) fn parse_jp2(input: &[u8]) -> Result<signinum_core::Info, J2kError> {
+pub(crate) fn parse_jp2(input: &[u8]) -> Result<ParsedImageInfo, J2kError> {
     if input.len() < JP2_SIGNATURE.len() {
         return Err(InputError::TooShort {
             need: JP2_SIGNATURE.len(),
@@ -108,7 +108,12 @@ pub(crate) fn parse_jp2(input: &[u8]) -> Result<signinum_core::Info, J2kError> {
         return Err(J2kError::MissingRequiredBox { box_type: "ihdr" });
     }
     let codestream = codestream.ok_or(J2kError::MissingRequiredBox { box_type: "jp2c" })?;
-    Ok(parse_codestream(codestream)?.into_info(colorspace))
+    let parsed = parse_codestream(codestream)?;
+    Ok(ParsedImageInfo {
+        info: parsed.into_info(colorspace),
+        transfer_syntax: parsed.transfer_syntax(),
+        payload_kind: CompressedPayloadKind::Jp2File,
+    })
 }
 
 fn parse_jp2h(payload: &[u8], base_offset: usize) -> Result<(bool, Option<Colorspace>), J2kError> {

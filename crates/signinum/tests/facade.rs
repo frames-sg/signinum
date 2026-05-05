@@ -3,7 +3,8 @@
 use signinum::{
     j2k::{encode_j2k_lossless, J2kLosslessEncodeOptions, J2kLosslessSamples},
     tilecodec::UncompressedCodec,
-    BackendKind, BackendRequest, TileDecompress,
+    BackendKind, BackendRequest, CompressedPayloadKind, CompressedTransferSyntax,
+    PassthroughCandidate, PassthroughRequirements, TileDecompress,
 };
 
 #[test]
@@ -72,4 +73,36 @@ fn facade_exports_tilecodec_contracts() {
 
     assert_eq!(written, input.len());
     assert_eq!(output, input);
+}
+
+#[test]
+fn facade_exports_passthrough_contracts() {
+    let info = signinum::core::Info {
+        dimensions: (1, 1),
+        components: 1,
+        colorspace: signinum::core::Colorspace::SGray,
+        bit_depth: 8,
+        tile_layout: None,
+        coded_unit_layout: None,
+        restart_interval: None,
+        resolution_levels: 1,
+    };
+    let bytes = [0xff, 0x4f, 0xff, 0xd9];
+    let candidate = PassthroughCandidate::new(
+        &bytes,
+        CompressedTransferSyntax::Jpeg2000Lossless,
+        CompressedPayloadKind::Jpeg2000Codestream,
+        info,
+    );
+    let requirements = PassthroughRequirements::new(
+        CompressedTransferSyntax::Jpeg2000Lossless,
+        CompressedPayloadKind::Jpeg2000Codestream,
+    );
+
+    assert_eq!(
+        candidate
+            .copy_bytes_if_eligible(&requirements)
+            .expect("facade passthrough bytes"),
+        bytes
+    );
 }

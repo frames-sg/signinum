@@ -49,14 +49,15 @@ constant uint J2K_HT_STATUS_OK = 0u;
 constant uint J2K_HT_STATUS_FAIL = 1u;
 constant uint J2K_HT_STATUS_UNSUPPORTED = 2u;
 
-constant uint J2K_HT_MAX_WIDTH = 64u;
-constant uint J2K_HT_MAX_HEIGHT = 64u;
-constant uint J2K_HT_MAX_SSTR = 72u;
-constant uint J2K_HT_MAX_SCRATCH = 2376u;
-constant uint J2K_HT_MAX_VN = 34u;
-constant uint J2K_HT_MAX_MSTR = 24u;
-constant uint J2K_HT_MAX_SIGMA = 408u;
-constant uint J2K_HT_MAX_PREV_ROW_SIG = 24u;
+constant uint J2K_HT_MAX_WIDTH = 256u;
+constant uint J2K_HT_MAX_HEIGHT = 256u;
+constant uint J2K_HT_MAX_COEFFICIENTS = 4096u;
+constant uint J2K_HT_MAX_SSTR = 264u;
+constant uint J2K_HT_MAX_SCRATCH = 3096u;
+constant uint J2K_HT_MAX_VN = 130u;
+constant uint J2K_HT_MAX_MSTR = 72u;
+constant uint J2K_HT_MAX_SIGMA = 528u;
+constant uint J2K_HT_MAX_PREV_ROW_SIG = 72u;
 
 inline void set_ht_status(device J2kHtStatus *status, uint code, uint detail) {
     status->code = code;
@@ -349,7 +350,8 @@ inline void decode_ht_cleanup_impl(
     if (params.width == 0u || params.height == 0u) {
         return;
     }
-    if (params.width > J2K_HT_MAX_WIDTH || params.height > J2K_HT_MAX_HEIGHT) {
+    if (params.width > J2K_HT_MAX_WIDTH || params.height > J2K_HT_MAX_HEIGHT ||
+        params.width * params.height > J2K_HT_MAX_COEFFICIENTS) {
         set_ht_status(status, J2K_HT_STATUS_UNSUPPORTED, 1u);
         return;
     }

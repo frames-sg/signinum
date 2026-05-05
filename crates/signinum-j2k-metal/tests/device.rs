@@ -10,6 +10,7 @@ use signinum_core::{
 use signinum_j2k::J2kContext;
 use signinum_j2k_metal::{
     Codec, Error, J2kDecoder, J2kScratchPool, MetalBackendSession, MetalSession, MetalTileBatch,
+    SurfaceResidency,
 };
 use signinum_j2k_native::{encode, encode_htj2k, EncodeOptions};
 
@@ -49,6 +50,42 @@ fn fixture_gray8_sized(width: u32, height: u32) -> Vec<u8> {
     encode(&pixels, width, height, 1, 8, false, &options).expect("encode sized gray8")
 }
 
+fn fixture_ht_gray8_sized(width: u32, height: u32) -> Vec<u8> {
+    let mut pixels = Vec::with_capacity(width as usize * height as usize);
+    for y in 0..height {
+        for x in 0..width {
+            pixels.push(((x * 3 + y * 5) & 0xFF) as u8);
+        }
+    }
+    let options = EncodeOptions {
+        reversible: true,
+        num_decomposition_levels: 3,
+        guard_bits: 2,
+        ..EncodeOptions::default()
+    };
+    encode_htj2k(&pixels, width, height, 1, 8, false, &options).expect("encode sized ht gray8")
+}
+
+fn fixture_ht_gray8_unsupported_direct_width() -> Vec<u8> {
+    let width = 512u32;
+    let height = 8u32;
+    let mut pixels = Vec::with_capacity(width as usize * height as usize);
+    for y in 0..height {
+        for x in 0..width {
+            pixels.push(((x * 7 + y * 11 + x / 3) & 0xFF) as u8);
+        }
+    }
+    let options = EncodeOptions {
+        reversible: true,
+        num_decomposition_levels: 0,
+        code_block_width_exp: 7,
+        code_block_height_exp: 1,
+        guard_bits: 2,
+        ..EncodeOptions::default()
+    };
+    encode_htj2k(&pixels, width, height, 1, 8, false, &options).expect("encode wide ht gray8")
+}
+
 fn fixture_gray8_reversed() -> Vec<u8> {
     let pixels: Vec<u8> = (0..16).rev().collect();
     let options = EncodeOptions {
@@ -70,6 +107,22 @@ fn fixture_gray12() -> Vec<u8> {
         ..EncodeOptions::default()
     };
     encode(&pixels, 2, 2, 1, 12, false, &options).expect("encode gray12")
+}
+
+fn fixture_ht_gray12_offset(offset: u16) -> Vec<u8> {
+    let mut pixels = Vec::with_capacity(4 * 4 * 2);
+    for y in 0..4_u16 {
+        for x in 0..4_u16 {
+            let sample = (offset + x * 193 + y * 257) & 0x0FFF;
+            pixels.extend_from_slice(&sample.to_le_bytes());
+        }
+    }
+    let options = EncodeOptions {
+        reversible: true,
+        num_decomposition_levels: 1,
+        ..EncodeOptions::default()
+    };
+    encode_htj2k(&pixels, 4, 4, 1, 12, false, &options).expect("encode ht gray12")
 }
 
 fn fixture_gray8_irreversible() -> Vec<u8> {
@@ -103,6 +156,16 @@ fn fixture_ht_gray8() -> Vec<u8> {
         ..EncodeOptions::default()
     };
     encode_htj2k(&pixels, 4, 4, 1, 8, false, &options).expect("encode ht gray8")
+}
+
+fn fixture_ht_gray8_reversed() -> Vec<u8> {
+    let pixels: Vec<u8> = (0..16).rev().collect();
+    let options = EncodeOptions {
+        reversible: true,
+        num_decomposition_levels: 1,
+        ..EncodeOptions::default()
+    };
+    encode_htj2k(&pixels, 4, 4, 1, 8, false, &options).expect("encode reversed ht gray8")
 }
 
 fn fixture_direct_rgb8() -> Vec<u8> {
@@ -316,7 +379,34 @@ fn decode_to_device_with_session_uses_session_device() {
         .expect("session decode");
 
     assert_eq!(surface.backend_kind(), BackendKind::Metal);
+    assert_eq!(surface.residency(), SurfaceResidency::MetalResidentDecode);
     let (buffer, _) = surface.metal_buffer().expect("metal buffer");
+    assert_eq!(buffer.device().as_ptr(), session.device().as_ptr());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn explicit_cpu_staged_metal_api_uses_session_device_and_marks_residency() {
+    use metal::foreign_types::ForeignTypeRef;
+
+    let bytes = fixture_rgb8();
+    let session = MetalBackendSession::system_default().expect("Metal backend session");
+    let mut decoder = J2kDecoder::new(&bytes).expect("decoder");
+    let mut host_decoder = J2kDecoder::new(&bytes).expect("host decoder");
+    let mut host = [0u8; 12];
+    host_decoder
+        .decode_into(&mut host, 6, PixelFormat::Rgb8)
+        .expect("host decode");
+
+    let surface = decoder
+        .decode_to_cpu_staged_metal_surface_with_session(PixelFormat::Rgb8, &session)
+        .expect("CPU-staged Metal surface");
+
+    assert_eq!(surface.backend_kind(), BackendKind::Metal);
+    assert_eq!(surface.residency(), SurfaceResidency::CpuStagedMetalUpload);
+    assert_eq!(surface.as_bytes(), host.as_slice());
+    let (buffer, byte_offset) = surface.metal_buffer().expect("Metal buffer");
+    assert_eq!(byte_offset, 0);
     assert_eq!(buffer.device().as_ptr(), session.device().as_ptr());
 }
 
@@ -377,6 +467,7 @@ fn submitted_full_grayscale_tiles_flush_as_one_device_batch() {
     for submission in submissions {
         let surface = submission.wait().expect("surface");
         assert_eq!(surface.backend_kind(), BackendKind::Metal);
+        assert_eq!(surface.residency(), SurfaceResidency::MetalResidentDecode);
         assert_eq!(surface.as_bytes(), host.as_slice());
     }
     assert_eq!(
@@ -530,7 +621,7 @@ fn submitted_full_rgb_tiles_flush_as_one_device_batch() {
 }
 
 #[test]
-fn submitted_distinct_full_rgb_tiles_flush_as_one_device_batch() {
+fn submitted_distinct_full_rgb_tiles_stay_resident_when_batch_route_falls_back() {
     let rgb_tiles = [
         fixture_direct_rgb8_variant(0),
         fixture_direct_rgb8_variant(5),
@@ -580,30 +671,18 @@ fn submitted_distinct_full_rgb_tiles_flush_as_one_device_batch() {
     for (submission, host) in submissions.into_iter().zip(expected) {
         let surface = submission.wait().expect("surface");
         assert_eq!(surface.backend_kind(), BackendKind::Metal);
+        assert_eq!(surface.residency(), SurfaceResidency::MetalResidentDecode);
         assert_eq!(surface.as_bytes(), host.as_slice());
         surfaces.push(surface);
     }
-    assert_eq!(
-        session.submissions(),
-        1,
-        "distinct queued RGB tiles should flush through one Metal command buffer"
+    assert!(
+        session.submissions() >= 1,
+        "queued RGB tiles should submit at least one resident Metal decode"
     );
-
-    let surface_bytes = surfaces[0].byte_len();
-    let offsets = surfaces
-        .iter()
-        .map(|surface| {
-            let (_buffer, offset) = surface.metal_buffer().expect("RGB batch Metal buffer");
-            offset
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        offsets,
-        (0..surfaces.len())
-            .map(|index| index * surface_bytes)
-            .collect::<Vec<_>>(),
-        "distinct queued RGB tiles should be packed as one stacked Metal batch output"
-    );
+    for surface in surfaces {
+        assert!(surface.metal_buffer().is_some());
+        assert_eq!(surface.residency(), SurfaceResidency::MetalResidentDecode);
+    }
 }
 
 #[test]
@@ -721,6 +800,400 @@ fn metal_tile_batch_supports_region_scaled_requests() {
     assert_eq!(surfaces.len(), 1);
     assert_eq!(surfaces[0].dimensions(), (scaled.w, scaled.h));
     assert_eq!(surfaces[0].backend_kind(), BackendKind::Metal);
+}
+
+#[test]
+fn submitted_distinct_region_scaled_htj2k_grayscale_tiles_flush_as_one_device_batch() {
+    let ht_bytes = fixture_ht_gray8();
+    let reversed_bytes = fixture_ht_gray8_reversed();
+    assert_ne!(ht_bytes, reversed_bytes, "HTJ2K batch fixtures must differ");
+    let roi = Rect {
+        x: 1,
+        y: 0,
+        w: 2,
+        h: 3,
+    };
+    let scale = Downscale::Half;
+    let scaled = roi.scaled_covering(scale);
+    let mut ctx = signinum_core::DecoderContext::<J2kContext>::new();
+    let mut session = MetalSession::default();
+    let mut pool = J2kScratchPool::new();
+
+    let ht_submission = Codec::submit_tile_region_scaled_to_device(
+        &mut ctx,
+        &mut session,
+        &mut pool,
+        &ht_bytes,
+        PixelFormat::Gray8,
+        roi,
+        scale,
+        BackendRequest::Metal,
+    )
+    .expect("submit ht region-scaled tile");
+    let reversed_submission = Codec::submit_tile_region_scaled_to_device(
+        &mut ctx,
+        &mut session,
+        &mut pool,
+        &reversed_bytes,
+        PixelFormat::Gray8,
+        roi,
+        scale,
+        BackendRequest::Metal,
+    )
+    .expect("submit reversed ht region-scaled tile");
+
+    assert_eq!(
+        session.submissions(),
+        0,
+        "region-scaled submitted tile surfaces should stay queued until wait"
+    );
+
+    let expected = [&ht_bytes, &reversed_bytes]
+        .into_iter()
+        .map(|bytes| {
+            let mut decoder = J2kDecoder::new(bytes).expect("host decoder");
+            let stride = scaled.w as usize;
+            let mut host = vec![0u8; stride * scaled.h as usize];
+            decoder
+                .decode_region_scaled_into(
+                    &mut J2kScratchPool::new(),
+                    &mut host,
+                    stride,
+                    PixelFormat::Gray8,
+                    roi,
+                    scale,
+                )
+                .expect("host region-scaled decode");
+            host
+        })
+        .collect::<Vec<_>>();
+
+    let ht_surface = ht_submission.wait().expect("ht region-scaled surface");
+    let reversed_surface = reversed_submission
+        .wait()
+        .expect("reversed ht region-scaled surface");
+    assert_eq!(ht_surface.backend_kind(), BackendKind::Metal);
+    assert_eq!(reversed_surface.backend_kind(), BackendKind::Metal);
+    assert_eq!(ht_surface.dimensions(), (scaled.w, scaled.h));
+    assert_eq!(reversed_surface.dimensions(), (scaled.w, scaled.h));
+    assert_eq!(ht_surface.as_bytes(), expected[0].as_slice());
+    assert_eq!(reversed_surface.as_bytes(), expected[1].as_slice());
+    assert_eq!(
+        session.submissions(),
+        1,
+        "distinct queued HTJ2K region-scaled grayscale tiles should flush through one Metal command buffer"
+    );
+}
+
+#[test]
+fn submitted_distinct_region_scaled_htj2k_gray16_tiles_flush_as_one_device_batch() {
+    let first_bytes = fixture_ht_gray12_offset(0);
+    let second_bytes = fixture_ht_gray12_offset(37);
+    assert_ne!(
+        first_bytes, second_bytes,
+        "HTJ2K Gray16 batch fixtures must differ"
+    );
+    let roi = Rect {
+        x: 1,
+        y: 0,
+        w: 2,
+        h: 3,
+    };
+    let scale = Downscale::Half;
+    let scaled = roi.scaled_covering(scale);
+    let mut ctx = signinum_core::DecoderContext::<J2kContext>::new();
+    let mut session = MetalSession::default();
+    let mut pool = J2kScratchPool::new();
+
+    let first_submission = Codec::submit_tile_region_scaled_to_device(
+        &mut ctx,
+        &mut session,
+        &mut pool,
+        &first_bytes,
+        PixelFormat::Gray16,
+        roi,
+        scale,
+        BackendRequest::Metal,
+    )
+    .expect("submit first ht gray16 region-scaled tile");
+    let second_submission = Codec::submit_tile_region_scaled_to_device(
+        &mut ctx,
+        &mut session,
+        &mut pool,
+        &second_bytes,
+        PixelFormat::Gray16,
+        roi,
+        scale,
+        BackendRequest::Metal,
+    )
+    .expect("submit second ht gray16 region-scaled tile");
+
+    let expected = [&first_bytes, &second_bytes]
+        .into_iter()
+        .map(|bytes| {
+            let mut decoder = J2kDecoder::new(bytes).expect("host decoder");
+            let stride = scaled.w as usize * PixelFormat::Gray16.bytes_per_pixel();
+            let mut host = vec![0u8; stride * scaled.h as usize];
+            decoder
+                .decode_region_scaled_into(
+                    &mut J2kScratchPool::new(),
+                    &mut host,
+                    stride,
+                    PixelFormat::Gray16,
+                    roi,
+                    scale,
+                )
+                .expect("host region-scaled gray16 decode");
+            host
+        })
+        .collect::<Vec<_>>();
+
+    let first_surface = first_submission.wait().expect("first gray16 surface");
+    let second_surface = second_submission.wait().expect("second gray16 surface");
+    assert_eq!(first_surface.backend_kind(), BackendKind::Metal);
+    assert_eq!(second_surface.backend_kind(), BackendKind::Metal);
+    assert_eq!(first_surface.dimensions(), (scaled.w, scaled.h));
+    assert_eq!(second_surface.dimensions(), (scaled.w, scaled.h));
+    assert_eq!(first_surface.as_bytes(), expected[0].as_slice());
+    assert_eq!(second_surface.as_bytes(), expected[1].as_slice());
+    assert_eq!(
+        session.submissions(),
+        1,
+        "distinct queued HTJ2K region-scaled Gray16 tiles should flush through one Metal command buffer"
+    );
+}
+
+#[test]
+fn submitted_auto_region_scaled_grayscale_keeps_short_batch_on_cpu() {
+    let bytes = fixture_gray8_sized(512, 512);
+    let roi = Rect {
+        x: 128,
+        y: 128,
+        w: 256,
+        h: 256,
+    };
+    let scale = Downscale::Quarter;
+    let mut ctx = signinum_core::DecoderContext::<J2kContext>::new();
+    let mut session = MetalSession::default();
+    let mut pool = J2kScratchPool::new();
+    let submissions = (0..16)
+        .map(|_| {
+            Codec::submit_tile_region_scaled_to_device(
+                &mut ctx,
+                &mut session,
+                &mut pool,
+                &bytes,
+                PixelFormat::Gray8,
+                roi,
+                scale,
+                BackendRequest::Auto,
+            )
+            .expect("submit auto region-scaled tile")
+        })
+        .collect::<Vec<_>>();
+
+    for submission in submissions {
+        let surface = submission.wait().expect("auto region-scaled surface");
+        assert_eq!(surface.backend_kind(), BackendKind::Cpu);
+    }
+}
+
+#[test]
+fn submitted_auto_region_scaled_grayscale_batch64_uses_one_metal_batch() {
+    let bytes = fixture_gray8_sized(512, 512);
+    let roi = Rect {
+        x: 128,
+        y: 128,
+        w: 256,
+        h: 256,
+    };
+    let scale = Downscale::Quarter;
+    let scaled = roi.scaled_covering(scale);
+    let mut ctx = signinum_core::DecoderContext::<J2kContext>::new();
+    let mut session = MetalSession::default();
+    let mut pool = J2kScratchPool::new();
+    let submissions = (0..64)
+        .map(|_| {
+            Codec::submit_tile_region_scaled_to_device(
+                &mut ctx,
+                &mut session,
+                &mut pool,
+                &bytes,
+                PixelFormat::Gray8,
+                roi,
+                scale,
+                BackendRequest::Auto,
+            )
+            .expect("submit auto region-scaled tile")
+        })
+        .collect::<Vec<_>>();
+
+    let mut host_decoder = J2kDecoder::new(&bytes).expect("host decoder");
+    let stride = scaled.w as usize;
+    let mut host = vec![0u8; stride * scaled.h as usize];
+    host_decoder
+        .decode_region_scaled_into(
+            &mut J2kScratchPool::new(),
+            &mut host,
+            stride,
+            PixelFormat::Gray8,
+            roi,
+            scale,
+        )
+        .expect("host region-scaled decode");
+
+    for submission in submissions {
+        let surface = submission.wait().expect("auto region-scaled surface");
+        assert_eq!(surface.backend_kind(), BackendKind::Metal);
+        assert_eq!(surface.dimensions(), (scaled.w, scaled.h));
+        assert_eq!(surface.as_bytes(), host.as_slice());
+    }
+    assert_eq!(
+        session.submissions(),
+        1,
+        "large auto ROI+scaled grayscale tile batches should use one Metal batch"
+    );
+}
+
+#[test]
+fn submitted_auto_region_scaled_ht_grayscale_1024_batch16_uses_one_metal_batch() {
+    let bytes = fixture_ht_gray8_sized(1024, 1024);
+    let roi = Rect {
+        x: 128,
+        y: 128,
+        w: 512,
+        h: 256,
+    };
+    let scale = Downscale::Quarter;
+    let scaled = roi.scaled_covering(scale);
+    let mut ctx = signinum_core::DecoderContext::<J2kContext>::new();
+    let mut session = MetalSession::default();
+    let mut pool = J2kScratchPool::new();
+    let submissions = (0..16)
+        .map(|_| {
+            Codec::submit_tile_region_scaled_to_device(
+                &mut ctx,
+                &mut session,
+                &mut pool,
+                &bytes,
+                PixelFormat::Gray8,
+                roi,
+                scale,
+                BackendRequest::Auto,
+            )
+            .expect("submit auto region-scaled HT tile")
+        })
+        .collect::<Vec<_>>();
+
+    let mut host_decoder = J2kDecoder::new(&bytes).expect("host decoder");
+    let stride = scaled.w as usize;
+    let mut host = vec![0u8; stride * scaled.h as usize];
+    host_decoder
+        .decode_region_scaled_into(
+            &mut J2kScratchPool::new(),
+            &mut host,
+            stride,
+            PixelFormat::Gray8,
+            roi,
+            scale,
+        )
+        .expect("host region-scaled decode");
+
+    for submission in submissions {
+        let surface = submission.wait().expect("auto region-scaled surface");
+        assert_eq!(surface.backend_kind(), BackendKind::Metal);
+        assert_eq!(surface.dimensions(), (scaled.w, scaled.h));
+        assert_eq!(surface.as_bytes(), host.as_slice());
+    }
+    assert_eq!(
+        session.submissions(),
+        1,
+        "1024-class auto HT ROI+scaled grayscale tile batches should use one Metal batch"
+    );
+}
+
+#[test]
+fn submitted_auto_region_scaled_ht_grayscale_batch16_is_not_order_dependent() {
+    let small_bytes = fixture_ht_gray8_sized(64, 64);
+    let large_bytes = fixture_ht_gray8_sized(1024, 1024);
+    let small_roi = Rect {
+        x: 8,
+        y: 8,
+        w: 32,
+        h: 32,
+    };
+    let large_roi = Rect {
+        x: 128,
+        y: 128,
+        w: 512,
+        h: 256,
+    };
+    let scale = Downscale::Quarter;
+    let large_scaled = large_roi.scaled_covering(scale);
+    let mut ctx = signinum_core::DecoderContext::<J2kContext>::new();
+    let mut session = MetalSession::default();
+    let mut pool = J2kScratchPool::new();
+
+    let mut submissions = Vec::with_capacity(17);
+    submissions.push(
+        Codec::submit_tile_region_scaled_to_device(
+            &mut ctx,
+            &mut session,
+            &mut pool,
+            &small_bytes,
+            PixelFormat::Gray8,
+            small_roi,
+            scale,
+            BackendRequest::Auto,
+        )
+        .expect("submit small leading auto region-scaled tile"),
+    );
+    for _ in 0..16 {
+        submissions.push(
+            Codec::submit_tile_region_scaled_to_device(
+                &mut ctx,
+                &mut session,
+                &mut pool,
+                &large_bytes,
+                PixelFormat::Gray8,
+                large_roi,
+                scale,
+                BackendRequest::Auto,
+            )
+            .expect("submit large auto region-scaled tile"),
+        );
+    }
+
+    let mut host_decoder = J2kDecoder::new(&large_bytes).expect("host decoder");
+    let stride = large_scaled.w as usize;
+    let mut host = vec![0u8; stride * large_scaled.h as usize];
+    host_decoder
+        .decode_region_scaled_into(
+            &mut J2kScratchPool::new(),
+            &mut host,
+            stride,
+            PixelFormat::Gray8,
+            large_roi,
+            scale,
+        )
+        .expect("host region-scaled decode");
+
+    let mut surfaces = Vec::with_capacity(submissions.len());
+    for submission in submissions {
+        surfaces.push(submission.wait().expect("auto region-scaled surface"));
+    }
+    assert_eq!(
+        surfaces[1].backend_kind(),
+        BackendKind::Metal,
+        "large 1024-class tiles should not be routed to CPU just because a small tile was submitted first"
+    );
+    assert_eq!(surfaces[1].dimensions(), (large_scaled.w, large_scaled.h));
+    assert_eq!(surfaces[1].as_bytes(), host.as_slice());
+    assert_eq!(
+        session.submissions(),
+        2,
+        "auto ROI+scaled should use one Metal batch for the sixteen qualifying 1024-class tiles and leave the leading small tile on CPU"
+    );
 }
 
 #[test]
@@ -1034,6 +1507,65 @@ fn explicit_metal_region_scaled_htj2k_grayscale_matches_host_decode() {
     assert_eq!(surface.backend_kind(), BackendKind::Metal);
     assert_eq!(surface.dimensions(), (scaled.w, scaled.h));
     assert_eq!(surface.as_bytes(), host.as_slice());
+}
+
+#[test]
+fn explicit_metal_region_scaled_htj2k_falls_back_when_direct_width_is_unsupported() {
+    let bytes = fixture_ht_gray8_unsupported_direct_width();
+    let roi = Rect {
+        x: 48,
+        y: 2,
+        w: 96,
+        h: 4,
+    };
+    let scale = Downscale::None;
+    let scaled = roi.scaled_covering(scale);
+
+    let mut host_decoder = J2kDecoder::new(&bytes).expect("host decoder");
+    let mut host = vec![0u8; scaled.w as usize * scaled.h as usize];
+    host_decoder
+        .decode_region_scaled_into(
+            &mut J2kScratchPool::new(),
+            &mut host,
+            scaled.w as usize,
+            PixelFormat::Gray8,
+            roi,
+            scale,
+        )
+        .expect("host region scaled decode");
+
+    let mut decoder = J2kDecoder::new(&bytes).expect("decoder");
+    let surface = decoder
+        .decode_region_scaled_to_device(PixelFormat::Gray8, roi, scale, BackendRequest::Metal)
+        .expect("explicit Metal should fall back after unsupported direct HT geometry");
+    assert_eq!(surface.backend_kind(), BackendKind::Metal);
+    assert_eq!(surface.dimensions(), (scaled.w, scaled.h));
+    assert_eq!(surface.as_bytes(), host.as_slice());
+}
+
+#[test]
+fn explicit_metal_region_scaled_rgb_is_rejected_instead_of_cpu_staging() {
+    let bytes = fixture_rgb8();
+    let roi = Rect {
+        x: 0,
+        y: 0,
+        w: 1,
+        h: 1,
+    };
+    let mut decoder = J2kDecoder::new(&bytes).expect("decoder");
+    let Err(error) = decoder.decode_region_scaled_to_device(
+        PixelFormat::Rgb8,
+        roi,
+        Downscale::None,
+        BackendRequest::Metal,
+    ) else {
+        panic!("explicit Metal RGB ROI+scaled should not hide a CPU-staged path")
+    };
+    assert!(matches!(
+        error,
+        Error::UnsupportedMetalRequest { reason }
+            if reason.contains("ROI+scaled") && reason.contains("Gray8/Gray16")
+    ));
 }
 
 #[test]

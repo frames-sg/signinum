@@ -171,6 +171,11 @@ fn fuzz_build() -> Result<(), String> {
     run_cargo(&[
         "check",
         "--manifest-path",
+        "crates/signinum-jpeg/fuzz/Cargo.toml",
+    ])?;
+    run_cargo(&[
+        "check",
+        "--manifest-path",
         "crates/signinum-tilecodec/fuzz/Cargo.toml",
     ])
 }

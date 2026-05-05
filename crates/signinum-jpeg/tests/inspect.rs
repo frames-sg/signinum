@@ -6,6 +6,9 @@ use signinum_jpeg::{
     ColorSpace, ColorTransform, DecodeOptions, Decoder, JpegError, JpegView, McuGeometry,
     RestartSegment, SofKind,
 };
+use signinum_jpeg::{
+    CompressedPayloadKind, CompressedTransferSyntax, PassthroughDecision, PassthroughRequirements,
+};
 
 mod fixtures;
 use fixtures::progressive_8x8_jpeg;
@@ -295,4 +298,44 @@ fn restart_index_is_none_without_dri() {
     let bytes = minimal_baseline_jpeg();
     let view = JpegView::parse(&bytes).expect("view");
     assert_eq!(view.restart_index().expect("restart index"), None);
+}
+
+#[test]
+fn jpeg_view_exposes_baseline_passthrough_candidate_with_original_bytes() {
+    let bytes = minimal_baseline_jpeg();
+    let view = JpegView::parse(&bytes).expect("view");
+    let candidate = view
+        .passthrough_candidate()
+        .expect("baseline JPEG passthrough candidate");
+    let requirements = PassthroughRequirements::new(
+        CompressedTransferSyntax::JpegBaseline8,
+        CompressedPayloadKind::JpegInterchange,
+    )
+    .with_dimensions((16, 16))
+    .with_components(3)
+    .with_bit_depth(8);
+
+    assert_eq!(view.bytes(), bytes.as_slice());
+    assert_eq!(
+        candidate.transfer_syntax(),
+        CompressedTransferSyntax::JpegBaseline8
+    );
+    assert_eq!(
+        candidate.payload_kind(),
+        CompressedPayloadKind::JpegInterchange
+    );
+    assert_eq!(
+        candidate.evaluate(&requirements),
+        PassthroughDecision::Copy {
+            bytes: bytes.as_slice()
+        }
+    );
+}
+
+#[test]
+fn jpeg_progressive_is_not_offered_as_active_passthrough_candidate() {
+    let bytes = progressive_8x8_jpeg();
+    let view = JpegView::parse(&bytes).expect("progressive view");
+
+    assert!(view.passthrough_candidate().is_none());
 }

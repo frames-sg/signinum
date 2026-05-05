@@ -3,14 +3,24 @@
 struct J2kIdwtSingleDecompositionParams {
     uint x0;
     uint y0;
+    uint output_x;
+    uint output_y;
     uint width;
     uint height;
+    uint ll_x;
+    uint ll_y;
     uint ll_width;
     uint ll_height;
+    uint hl_x;
+    uint hl_y;
     uint hl_width;
     uint hl_height;
+    uint lh_x;
+    uint lh_y;
     uint lh_width;
     uint lh_height;
+    uint hh_x;
+    uint hh_y;
     uint hh_width;
     uint hh_height;
 };
@@ -18,14 +28,24 @@ struct J2kIdwtSingleDecompositionParams {
 struct J2kRepeatedIdwtSingleDecompositionParams {
     uint x0;
     uint y0;
+    uint output_x;
+    uint output_y;
     uint width;
     uint height;
+    uint ll_x;
+    uint ll_y;
     uint ll_width;
     uint ll_height;
+    uint hl_x;
+    uint hl_y;
     uint hl_width;
     uint hl_height;
+    uint lh_x;
+    uint lh_y;
     uint lh_width;
     uint lh_height;
+    uint hh_x;
+    uint hh_y;
     uint hh_width;
     uint hh_height;
     uint ll_instance_stride;
@@ -116,23 +136,31 @@ kernel void j2k_idwt_interleave(
         return;
     }
 
-    const uint global_x = params.x0 + gid.x;
-    const uint global_y = params.y0 + gid.y;
+    const uint global_x = params.x0 + params.output_x + gid.x;
+    const uint global_y = params.y0 + params.output_y + gid.y;
     const uint low_x_parity = params.x0 & 1u;
     const uint low_y_parity = params.y0 & 1u;
     const bool low_x = (global_x & 1u) == low_x_parity;
     const bool low_y = (global_y & 1u) == low_y_parity;
-    const uint band_x = low_x ? low_index(global_x, params.x0) : high_index(global_x, params.x0);
-    const uint band_y = low_y ? low_index(global_y, params.y0) : high_index(global_y, params.y0);
+    const uint full_band_x = low_x ? low_index(global_x, params.x0) : high_index(global_x, params.x0);
+    const uint full_band_y = low_y ? low_index(global_y, params.y0) : high_index(global_y, params.y0);
     const uint out_idx = gid.y * params.width + gid.x;
 
     if (low_y && low_x) {
+        const uint band_x = full_band_x - params.ll_x;
+        const uint band_y = full_band_y - params.ll_y;
         out[out_idx] = ll[band_y * params.ll_width + band_x];
     } else if (low_y) {
+        const uint band_x = full_band_x - params.hl_x;
+        const uint band_y = full_band_y - params.hl_y;
         out[out_idx] = hl[band_y * params.hl_width + band_x];
     } else if (low_x) {
+        const uint band_x = full_band_x - params.lh_x;
+        const uint band_y = full_band_y - params.lh_y;
         out[out_idx] = lh[band_y * params.lh_width + band_x];
     } else {
+        const uint band_x = full_band_x - params.hh_x;
+        const uint band_y = full_band_y - params.hh_y;
         out[out_idx] = hh[band_y * params.hh_width + band_x];
     }
 }
@@ -150,24 +178,32 @@ kernel void j2k_idwt_interleave_batched(
         return;
     }
 
-    const uint global_x = params.x0 + gid.x;
-    const uint global_y = params.y0 + gid.y;
+    const uint global_x = params.x0 + params.output_x + gid.x;
+    const uint global_y = params.y0 + params.output_y + gid.y;
     const uint low_x_parity = params.x0 & 1u;
     const uint low_y_parity = params.y0 & 1u;
     const bool low_x = (global_x & 1u) == low_x_parity;
     const bool low_y = (global_y & 1u) == low_y_parity;
-    const uint band_x = low_x ? low_index(global_x, params.x0) : high_index(global_x, params.x0);
-    const uint band_y = low_y ? low_index(global_y, params.y0) : high_index(global_y, params.y0);
+    const uint full_band_x = low_x ? low_index(global_x, params.x0) : high_index(global_x, params.x0);
+    const uint full_band_y = low_y ? low_index(global_y, params.y0) : high_index(global_y, params.y0);
     const uint out_plane_len = params.width * params.height;
     const uint out_idx = gid.z * out_plane_len + gid.y * params.width + gid.x;
 
     if (low_y && low_x) {
+        const uint band_x = full_band_x - params.ll_x;
+        const uint band_y = full_band_y - params.ll_y;
         out[out_idx] = ll[gid.z * params.ll_instance_stride + band_y * params.ll_width + band_x];
     } else if (low_y) {
+        const uint band_x = full_band_x - params.hl_x;
+        const uint band_y = full_band_y - params.hl_y;
         out[out_idx] = hl[gid.z * params.hl_instance_stride + band_y * params.hl_width + band_x];
     } else if (low_x) {
+        const uint band_x = full_band_x - params.lh_x;
+        const uint band_y = full_band_y - params.lh_y;
         out[out_idx] = lh[gid.z * params.lh_instance_stride + band_y * params.lh_width + band_x];
     } else {
+        const uint band_x = full_band_x - params.hh_x;
+        const uint band_y = full_band_y - params.hh_y;
         out[out_idx] = hh[gid.z * params.hh_instance_stride + band_y * params.hh_width + band_x];
     }
 }
@@ -184,13 +220,13 @@ kernel void j2k_idwt_reversible53_horizontal_pass(
     device float *row_ptr = out + gid * params.width;
 
     if (params.width == 1u) {
-        if ((params.x0 & 1u) != 0u) {
+        if (((params.x0 + params.output_x) & 1u) != 0u) {
             row_ptr[0] *= 0.5f;
         }
         return;
     }
 
-    const uint first_even_x = params.x0 & 1u;
+    const uint first_even_x = (params.x0 + params.output_x) & 1u;
     const uint first_odd_x = 1u - first_even_x;
 
     if (first_even_x == 0u) {
@@ -243,13 +279,13 @@ kernel void j2k_idwt_reversible53_horizontal_pass_batched(
     device float *row_ptr = out + gid.y * plane_len + gid.x * params.width;
 
     if (params.width == 1u) {
-        if ((params.x0 & 1u) != 0u) {
+        if (((params.x0 + params.output_x) & 1u) != 0u) {
             row_ptr[0] *= 0.5f;
         }
         return;
     }
 
-    const uint first_even_x = params.x0 & 1u;
+    const uint first_even_x = (params.x0 + params.output_x) & 1u;
     const uint first_odd_x = 1u - first_even_x;
 
     if (first_even_x == 0u) {
@@ -299,13 +335,13 @@ kernel void j2k_idwt_reversible53_vertical_pass(
     }
 
     if (params.height == 1u) {
-        if ((params.y0 & 1u) != 0u) {
+        if (((params.y0 + params.output_y) & 1u) != 0u) {
             out[gid] *= 0.5f;
         }
         return;
     }
 
-    const uint first_even_y = params.y0 & 1u;
+    const uint first_even_y = (params.y0 + params.output_y) & 1u;
     const uint first_odd_y = 1u - first_even_y;
 
     for (uint row = first_even_y; row < params.height; row += 2u) {
@@ -344,13 +380,13 @@ kernel void j2k_idwt_reversible53_vertical_pass_batched(
     device float *plane = out + gid.y * plane_len;
 
     if (params.height == 1u) {
-        if ((params.y0 & 1u) != 0u) {
+        if (((params.y0 + params.output_y) & 1u) != 0u) {
             plane[gid.x] *= 0.5f;
         }
         return;
     }
 
-    const uint first_even_y = params.y0 & 1u;
+    const uint first_even_y = (params.y0 + params.output_y) & 1u;
     const uint first_odd_y = 1u - first_even_y;
 
     for (uint row = first_even_y; row < params.height; row += 2u) {
@@ -405,17 +441,19 @@ kernel void j2k_idwt_reversible53_single_decomposition(
     const uint low_y_parity = params.y0 & 1u;
 
     for (uint local_y = 0u; local_y < params.height; ++local_y) {
-        const uint global_y = params.y0 + local_y;
+        const uint global_y = params.y0 + params.output_y + local_y;
         const bool low_y = (global_y & 1u) == low_y_parity;
-        const uint band_y = low_y ? low_index(global_y, params.y0) : high_index(global_y, params.y0);
+        const uint full_band_y = low_y ? low_index(global_y, params.y0) : high_index(global_y, params.y0);
 
         for (uint local_x = 0u; local_x < params.width; ++local_x) {
-            const uint global_x = params.x0 + local_x;
+            const uint global_x = params.x0 + params.output_x + local_x;
             const bool low_x = (global_x & 1u) == low_x_parity;
-            const uint band_x = low_x ? low_index(global_x, params.x0) : high_index(global_x, params.x0);
+            const uint full_band_x = low_x ? low_index(global_x, params.x0) : high_index(global_x, params.x0);
             const uint out_idx = local_y * params.width + local_x;
 
             if (low_y && low_x) {
+                const uint band_x = full_band_x - params.ll_x;
+                const uint band_y = full_band_y - params.ll_y;
                 if (band_x >= params.ll_width || band_y >= params.ll_height) {
                     status->code = J2K_IDWT_STATUS_FAIL;
                     status->detail = 2u;
@@ -423,6 +461,8 @@ kernel void j2k_idwt_reversible53_single_decomposition(
                 }
                 out[out_idx] = ll[band_y * params.ll_width + band_x];
             } else if (low_y) {
+                const uint band_x = full_band_x - params.hl_x;
+                const uint band_y = full_band_y - params.hl_y;
                 if (band_x >= params.hl_width || band_y >= params.hl_height) {
                     status->code = J2K_IDWT_STATUS_FAIL;
                     status->detail = 3u;
@@ -430,6 +470,8 @@ kernel void j2k_idwt_reversible53_single_decomposition(
                 }
                 out[out_idx] = hl[band_y * params.hl_width + band_x];
             } else if (low_x) {
+                const uint band_x = full_band_x - params.lh_x;
+                const uint band_y = full_band_y - params.lh_y;
                 if (band_x >= params.lh_width || band_y >= params.lh_height) {
                     status->code = J2K_IDWT_STATUS_FAIL;
                     status->detail = 4u;
@@ -437,6 +479,8 @@ kernel void j2k_idwt_reversible53_single_decomposition(
                 }
                 out[out_idx] = lh[band_y * params.lh_width + band_x];
             } else {
+                const uint band_x = full_band_x - params.hh_x;
+                const uint band_y = full_band_y - params.hh_y;
                 if (band_x >= params.hh_width || band_y >= params.hh_height) {
                     status->code = J2K_IDWT_STATUS_FAIL;
                     status->detail = 5u;
@@ -448,13 +492,13 @@ kernel void j2k_idwt_reversible53_single_decomposition(
     }
 
     if (params.width == 1u) {
-        if ((params.x0 & 1u) != 0u) {
+        if (((params.x0 + params.output_x) & 1u) != 0u) {
             for (uint row = 0u; row < params.height; ++row) {
                 out[row * params.width] *= 0.5f;
             }
         }
     } else {
-        const uint first_even_x = params.x0 & 1u;
+        const uint first_even_x = (params.x0 + params.output_x) & 1u;
         const uint first_odd_x = 1u - first_even_x;
 
         for (uint row = 0u; row < params.height; ++row) {
@@ -499,7 +543,7 @@ kernel void j2k_idwt_reversible53_single_decomposition(
     }
 
     if (params.height == 1u) {
-        if ((params.y0 & 1u) != 0u) {
+        if (((params.y0 + params.output_y) & 1u) != 0u) {
             for (uint col = 0u; col < params.width; ++col) {
                 out[col] *= 0.5f;
             }
@@ -507,7 +551,7 @@ kernel void j2k_idwt_reversible53_single_decomposition(
         return;
     }
 
-    const uint first_even_y = params.y0 & 1u;
+    const uint first_even_y = (params.y0 + params.output_y) & 1u;
     const uint first_odd_y = 1u - first_even_y;
 
     for (uint row = first_even_y; row < params.height; row += 2u) {
@@ -573,17 +617,19 @@ kernel void j2k_idwt_irreversible97_single_decomposition(
     const uint low_y_parity = params.y0 & 1u;
 
     for (uint local_y = 0u; local_y < params.height; ++local_y) {
-        const uint global_y = params.y0 + local_y;
+        const uint global_y = params.y0 + params.output_y + local_y;
         const bool low_y = (global_y & 1u) == low_y_parity;
-        const uint band_y = low_y ? low_index(global_y, params.y0) : high_index(global_y, params.y0);
+        const uint full_band_y = low_y ? low_index(global_y, params.y0) : high_index(global_y, params.y0);
 
         for (uint local_x = 0u; local_x < params.width; ++local_x) {
-            const uint global_x = params.x0 + local_x;
+            const uint global_x = params.x0 + params.output_x + local_x;
             const bool low_x = (global_x & 1u) == low_x_parity;
-            const uint band_x = low_x ? low_index(global_x, params.x0) : high_index(global_x, params.x0);
+            const uint full_band_x = low_x ? low_index(global_x, params.x0) : high_index(global_x, params.x0);
             const uint out_idx = local_y * params.width + local_x;
 
             if (low_y && low_x) {
+                const uint band_x = full_band_x - params.ll_x;
+                const uint band_y = full_band_y - params.ll_y;
                 if (band_x >= params.ll_width || band_y >= params.ll_height) {
                     status->code = J2K_IDWT_STATUS_FAIL;
                     status->detail = 2u;
@@ -591,6 +637,8 @@ kernel void j2k_idwt_irreversible97_single_decomposition(
                 }
                 out[out_idx] = ll[band_y * params.ll_width + band_x];
             } else if (low_y) {
+                const uint band_x = full_band_x - params.hl_x;
+                const uint band_y = full_band_y - params.hl_y;
                 if (band_x >= params.hl_width || band_y >= params.hl_height) {
                     status->code = J2K_IDWT_STATUS_FAIL;
                     status->detail = 3u;
@@ -598,6 +646,8 @@ kernel void j2k_idwt_irreversible97_single_decomposition(
                 }
                 out[out_idx] = hl[band_y * params.hl_width + band_x];
             } else if (low_x) {
+                const uint band_x = full_band_x - params.lh_x;
+                const uint band_y = full_band_y - params.lh_y;
                 if (band_x >= params.lh_width || band_y >= params.lh_height) {
                     status->code = J2K_IDWT_STATUS_FAIL;
                     status->detail = 4u;
@@ -605,6 +655,8 @@ kernel void j2k_idwt_irreversible97_single_decomposition(
                 }
                 out[out_idx] = lh[band_y * params.lh_width + band_x];
             } else {
+                const uint band_x = full_band_x - params.hh_x;
+                const uint band_y = full_band_y - params.hh_y;
                 if (band_x >= params.hh_width || band_y >= params.hh_height) {
                     status->code = J2K_IDWT_STATUS_FAIL;
                     status->detail = 5u;
@@ -616,13 +668,13 @@ kernel void j2k_idwt_irreversible97_single_decomposition(
     }
 
     if (params.width == 1u) {
-        if ((params.x0 & 1u) != 0u) {
+        if (((params.x0 + params.output_x) & 1u) != 0u) {
             for (uint row = 0u; row < params.height; ++row) {
                 out[row * params.width] *= 0.5f;
             }
         }
     } else {
-        const uint first_even_x = params.x0 & 1u;
+        const uint first_even_x = (params.x0 + params.output_x) & 1u;
         const uint first_odd_x = 1u - first_even_x;
         const float k0 = first_even_x == 0u ? KAPPA : INV_KAPPA;
         const float k1 = first_even_x == 0u ? INV_KAPPA : KAPPA;
@@ -646,7 +698,7 @@ kernel void j2k_idwt_irreversible97_single_decomposition(
     }
 
     if (params.height == 1u) {
-        if ((params.y0 & 1u) != 0u) {
+        if (((params.y0 + params.output_y) & 1u) != 0u) {
             for (uint col = 0u; col < params.width; ++col) {
                 out[col] *= 0.5f;
             }
@@ -654,7 +706,7 @@ kernel void j2k_idwt_irreversible97_single_decomposition(
         return;
     }
 
-    const uint first_even_y = params.y0 & 1u;
+    const uint first_even_y = (params.y0 + params.output_y) & 1u;
     const uint first_odd_y = 1u - first_even_y;
     const float k0 = first_even_y == 0u ? KAPPA : INV_KAPPA;
     const float k1 = first_even_y == 0u ? INV_KAPPA : KAPPA;

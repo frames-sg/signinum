@@ -130,12 +130,6 @@ pub(crate) fn build_direct_grayscale_plan<'a>(
             "direct grayscale plan only supports single-component codestreams"
         ));
     }
-    if header.skipped_resolution_levels != 0 {
-        bail!(DecodingError::UnsupportedFeature(
-            "direct grayscale plan only supports full-resolution decode"
-        ));
-    }
-
     ctx.tile_decode_context.channel_data.clear();
     ctx.tile_decode_context.output_region = None;
     ctx.storage.reset();
@@ -327,6 +321,9 @@ fn build_component_plan_from_storage(
     let mut current_ll_band_id = sub_band_ids[tile_decompositions.first_ll_sub_band]
         .ok_or(DecodingError::CodeBlockDecodeFailure)?;
     let decompositions = &storage.decompositions[tile_decompositions.decompositions.clone()];
+    let decompositions = &decompositions[..decompositions
+        .len()
+        .saturating_sub(header.skipped_resolution_levels as usize)];
     for decomposition in decompositions {
         let hl = &storage.sub_bands[decomposition.sub_bands[0]];
         let lh = &storage.sub_bands[decomposition.sub_bands[1]];

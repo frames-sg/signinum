@@ -3,20 +3,26 @@
 mod common;
 
 use common::{
-    bench_inputs, distinct_rgb_tile_batch_inputs, metal_available, signinum_adaptive_decode,
-    signinum_adaptive_decode_region, signinum_adaptive_decode_region_scaled,
-    signinum_adaptive_decode_scaled, signinum_adaptive_decode_tile_batch,
-    signinum_adaptive_decode_tile_batch_region_scaled, signinum_decode, signinum_decode_region,
+    bench_inputs, distinct_gray_tile_batch_inputs, distinct_rgb_tile_batch_inputs,
+    external_wsi_tile_batches, metal_available, signinum_adaptive_decode,
+    signinum_adaptive_decode_external_tile_batch_region_scaled, signinum_adaptive_decode_region,
+    signinum_adaptive_decode_region_scaled, signinum_adaptive_decode_scaled,
+    signinum_adaptive_decode_tile_batch, signinum_adaptive_decode_tile_batch_region_scaled,
+    signinum_adaptive_decode_tile_batch_region_scaled_distinct, signinum_decode,
+    signinum_decode_external_tile_batch_region_scaled, signinum_decode_region,
     signinum_decode_region_scaled, signinum_decode_scaled, signinum_decode_tile_batch,
     signinum_decode_tile_batch_distinct, signinum_decode_tile_batch_region_scaled,
-    signinum_inspect, signinum_metal_decode, signinum_metal_decode_region,
+    signinum_decode_tile_batch_region_scaled_distinct, signinum_inspect, signinum_metal_decode,
+    signinum_metal_decode_external_tile_batch_region_scaled, signinum_metal_decode_region,
     signinum_metal_decode_region_scaled, signinum_metal_decode_scaled,
     signinum_metal_decode_tile_batch, signinum_metal_decode_tile_batch_distinct,
-    signinum_metal_decode_tile_batch_region_scaled, signinum_metal_supports_decode,
-    signinum_metal_supports_region, signinum_metal_supports_region_scaled,
-    signinum_metal_supports_scaled, signinum_metal_supports_tile_batch,
-    signinum_metal_supports_tile_batch_distinct, signinum_metal_supports_tile_batch_region_scaled,
-    DecodeMode,
+    signinum_metal_decode_tile_batch_region_scaled,
+    signinum_metal_decode_tile_batch_region_scaled_distinct, signinum_metal_supports_decode,
+    signinum_metal_supports_external_tile_batch_region_scaled, signinum_metal_supports_region,
+    signinum_metal_supports_region_scaled, signinum_metal_supports_scaled,
+    signinum_metal_supports_tile_batch, signinum_metal_supports_tile_batch_distinct,
+    signinum_metal_supports_tile_batch_region_scaled,
+    signinum_metal_supports_tile_batch_region_scaled_distinct, DecodeMode,
 };
 use criterion::{criterion_group, criterion_main, Criterion};
 use signinum_j2k::Downscale;
@@ -224,6 +230,128 @@ fn bench_compare(c: &mut Criterion) {
         }
     }
     wsi_tile_batch_region_scaled.finish();
+
+    let mut wsi_tile_batch_region_scaled_distinct =
+        c.benchmark_group("wsi_tile_batch_region_scaled_gray_distinct_q4");
+    for input in inputs
+        .iter()
+        .filter(|input| input.mode == DecodeMode::Gray8)
+    {
+        for &count in &[16_usize, 64] {
+            let distinct_inputs = distinct_gray_tile_batch_inputs(input, count);
+            wsi_tile_batch_region_scaled_distinct.bench_function(
+                format!("signinum/{}/batch_{count}", input.name),
+                |b| {
+                    b.iter(|| {
+                        signinum_decode_tile_batch_region_scaled_distinct(
+                            &distinct_inputs,
+                            input.mode,
+                            256,
+                            Downscale::Quarter,
+                        );
+                    });
+                },
+            );
+            wsi_tile_batch_region_scaled_distinct.bench_function(
+                format!("signinum-adaptive/{}/batch_{count}", input.name),
+                |b| {
+                    b.iter(|| {
+                        signinum_adaptive_decode_tile_batch_region_scaled_distinct(
+                            &distinct_inputs,
+                            input.mode,
+                            256,
+                            Downscale::Quarter,
+                        );
+                    });
+                },
+            );
+            if metal_available()
+                && signinum_metal_supports_tile_batch_region_scaled_distinct(
+                    &distinct_inputs,
+                    input.mode,
+                    256,
+                    Downscale::Quarter,
+                )
+            {
+                wsi_tile_batch_region_scaled_distinct.bench_function(
+                    format!("signinum-metal/{}/batch_{count}", input.name),
+                    |b| {
+                        b.iter(|| {
+                            signinum_metal_decode_tile_batch_region_scaled_distinct(
+                                &distinct_inputs,
+                                input.mode,
+                                256,
+                                Downscale::Quarter,
+                            );
+                        });
+                    },
+                );
+            }
+        }
+    }
+    wsi_tile_batch_region_scaled_distinct.finish();
+
+    let external_batches = external_wsi_tile_batches(64);
+    if !external_batches.is_empty() {
+        let mut external_wsi_region_scaled =
+            c.benchmark_group("external_wsi_tile_batch_region_scaled_q4");
+        for batch in &external_batches {
+            for &count in &[16_usize, 64] {
+                if batch.inputs.len() < count {
+                    continue;
+                }
+                external_wsi_region_scaled.bench_function(
+                    format!("signinum/{}/batch_{count}", batch.name),
+                    |b| {
+                        b.iter(|| {
+                            signinum_decode_external_tile_batch_region_scaled(
+                                batch,
+                                count,
+                                256,
+                                Downscale::Quarter,
+                            );
+                        });
+                    },
+                );
+                external_wsi_region_scaled.bench_function(
+                    format!("signinum-adaptive/{}/batch_{count}", batch.name),
+                    |b| {
+                        b.iter(|| {
+                            signinum_adaptive_decode_external_tile_batch_region_scaled(
+                                batch,
+                                count,
+                                256,
+                                Downscale::Quarter,
+                            );
+                        });
+                    },
+                );
+                if metal_available()
+                    && signinum_metal_supports_external_tile_batch_region_scaled(
+                        batch,
+                        count,
+                        256,
+                        Downscale::Quarter,
+                    )
+                {
+                    external_wsi_region_scaled.bench_function(
+                        format!("signinum-metal/{}/batch_{count}", batch.name),
+                        |b| {
+                            b.iter(|| {
+                                signinum_metal_decode_external_tile_batch_region_scaled(
+                                    batch,
+                                    count,
+                                    256,
+                                    Downscale::Quarter,
+                                );
+                            });
+                        },
+                    );
+                }
+            }
+        }
+        external_wsi_region_scaled.finish();
+    }
 
     let mut wsi_tile_batch_32 = c.benchmark_group("wsi_tile_batch_gray_32");
     for input in inputs

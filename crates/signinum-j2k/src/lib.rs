@@ -24,6 +24,7 @@ pub use view::{J2kCodec, J2kDecoder, J2kView};
 
 pub use encode::{
     encode_j2k_lossless, encode_j2k_lossless_with_accelerator, j2k_lossless_decomposition_levels,
+    j2k_lossless_decomposition_levels_for_options,
     j2k_lossless_decomposition_levels_for_progression, EncodeBackendPreference, EncodedJ2k,
     J2kBlockCodingMode, J2kEncodeValidation, J2kLosslessEncodeOptions, J2kLosslessSamples,
     J2kProgressionOrder, ReversibleTransform,
@@ -39,9 +40,10 @@ pub use signinum_j2k_native::{
 };
 
 pub use signinum_core::{
-    BackendKind, BackendRequest, BufferError, CodecError, DecodeOutcome, DecodeRowsError,
-    DecoderContext, Downscale, ImageCodec, ImageDecode, ImageDecodeRows, PixelFormat, Rect,
-    RowSink, TileBatchDecode,
+    BackendKind, BackendRequest, BufferError, CodecError, CompressedPayloadKind,
+    CompressedTransferSyntax, DecodeOutcome, DecodeRowsError, DecoderContext, Downscale,
+    ImageCodec, ImageDecode, ImageDecodeRows, PassthroughCandidate, PassthroughDecision,
+    PassthroughRejectReason, PassthroughRequirements, PixelFormat, Rect, RowSink, TileBatchDecode,
 };
 
 pub(crate) mod parse;

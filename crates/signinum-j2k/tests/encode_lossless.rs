@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use signinum_core::{BackendKind, CodecError};
 use signinum_j2k::{
     encode_j2k_lossless, encode_j2k_lossless_with_accelerator, j2k_lossless_decomposition_levels,
+    j2k_lossless_decomposition_levels_for_options,
     j2k_lossless_decomposition_levels_for_progression, EncodeBackendPreference,
     EncodedHtJ2kCodeBlock, J2kBlockCodingMode, J2kEncodeDispatchReport, J2kEncodeStageAccelerator,
     J2kEncodeValidation, J2kHtCodeBlockEncodeJob, J2kLosslessEncodeOptions, J2kLosslessSamples,
@@ -26,6 +27,7 @@ fn default_lossless_options_use_auto_cpu_safe_profile() {
     assert_eq!(options.backend, EncodeBackendPreference::Auto);
     assert_eq!(options.block_coding_mode, J2kBlockCodingMode::Classic);
     assert_eq!(options.progression, J2kProgressionOrder::Lrcp);
+    assert_eq!(options.max_decomposition_levels, None);
     assert_eq!(options.reversible_transform, ReversibleTransform::Rct53);
     assert_eq!(options.validation, J2kEncodeValidation::CpuRoundTrip);
 }
@@ -128,6 +130,39 @@ fn rpcl_lossless_policy_reduces_base_resolution_to_64_or_less() {
             expected_levels
         );
     }
+}
+
+#[test]
+fn max_decomposition_level_option_caps_rpcl_without_forcing_small_tiles() {
+    let large_pixels = vec![0; 256 * 256];
+    let large =
+        J2kLosslessSamples::new(&large_pixels, 256, 256, 1, 8, false).expect("valid large tile");
+    assert_eq!(
+        j2k_lossless_decomposition_levels_for_options(
+            large,
+            J2kLosslessEncodeOptions {
+                progression: J2kProgressionOrder::Rpcl,
+                max_decomposition_levels: Some(1),
+                ..J2kLosslessEncodeOptions::default()
+            }
+        ),
+        1
+    );
+
+    let small_pixels = vec![0; 8 * 8];
+    let small =
+        J2kLosslessSamples::new(&small_pixels, 8, 8, 1, 8, false).expect("valid small tile");
+    assert_eq!(
+        j2k_lossless_decomposition_levels_for_options(
+            small,
+            J2kLosslessEncodeOptions {
+                progression: J2kProgressionOrder::Rpcl,
+                max_decomposition_levels: Some(1),
+                ..J2kLosslessEncodeOptions::default()
+            }
+        ),
+        0
+    );
 }
 
 #[test]

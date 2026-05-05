@@ -93,9 +93,17 @@ pub(crate) enum Storage {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SurfaceResidency {
+    Host,
+    MetalResidentDecode,
+    CpuStagedMetalUpload,
+}
+
 #[derive(Clone)]
 pub struct Surface {
     backend: BackendKind,
+    residency: SurfaceResidency,
     dimensions: (u32, u32),
     fmt: PixelFormat,
     pitch_bytes: usize,
@@ -105,6 +113,10 @@ pub struct Surface {
 impl Surface {
     pub fn pitch_bytes(&self) -> usize {
         self.pitch_bytes
+    }
+
+    pub fn residency(&self) -> SurfaceResidency {
+        self.residency
     }
 
     pub fn as_bytes(&self) -> &[u8] {
@@ -150,6 +162,33 @@ impl Surface {
     ) -> Self {
         Self {
             backend: BackendKind::Metal,
+            residency: SurfaceResidency::MetalResidentDecode,
+            dimensions,
+            fmt,
+            pitch_bytes: dimensions.0 as usize * fmt.bytes_per_pixel(),
+            storage: Storage::Metal { buffer, offset },
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn from_cpu_staged_metal_buffer(
+        buffer: Buffer,
+        dimensions: (u32, u32),
+        fmt: PixelFormat,
+    ) -> Self {
+        Self::from_cpu_staged_metal_buffer_offset(buffer, dimensions, fmt, 0)
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn from_cpu_staged_metal_buffer_offset(
+        buffer: Buffer,
+        dimensions: (u32, u32),
+        fmt: PixelFormat,
+        offset: usize,
+    ) -> Self {
+        Self {
+            backend: BackendKind::Metal,
+            residency: SurfaceResidency::CpuStagedMetalUpload,
             dimensions,
             fmt,
             pitch_bytes: dimensions.0 as usize * fmt.bytes_per_pixel(),
@@ -336,15 +375,17 @@ impl<'a> Decoder<'a> {
                 return Err(err);
             }
             match decision {
-                routing::RouteDecision::MetalKernel => compute::decode_to_surface_with_session(
-                    &self.inner,
-                    &mut pool,
-                    fmt,
-                    self.fast444_packet.as_deref(),
-                    self.fast422_packet.as_deref(),
-                    self.fast420_packet.as_deref(),
-                    session,
-                ),
+                routing::RouteDecision::MetalKernel => {
+                    reject_cpu_staged_metal_upload(compute::decode_to_surface_with_session(
+                        &self.inner,
+                        &mut pool,
+                        fmt,
+                        self.fast444_packet.as_deref(),
+                        self.fast422_packet.as_deref(),
+                        self.fast420_packet.as_deref(),
+                        session,
+                    )?)
+                }
                 routing::RouteDecision::CpuHost
                 | routing::RouteDecision::RejectExplicitMetal { .. }
                 | routing::RouteDecision::RejectUnsupportedBackend { .. }
@@ -1059,14 +1100,14 @@ fn decode_surface_from_decoder(
                     routing::RouteDecision::MetalKernel => {
                         #[cfg(target_os = "macos")]
                         {
-                            compute::decode_to_surface(
+                            reject_cpu_staged_metal_upload(compute::decode_to_surface(
                                 decoder,
                                 pool,
                                 fmt,
                                 fast444_packet,
                                 fast422_packet,
                                 fast420_packet,
-                            )
+                            )?)
                         }
                         #[cfg(not(target_os = "macos"))]
                         {
@@ -1110,7 +1151,7 @@ fn decode_surface_from_decoder(
                     routing::RouteDecision::MetalKernel => {
                         #[cfg(target_os = "macos")]
                         {
-                            compute::decode_region_to_surface(
+                            reject_cpu_staged_metal_upload(compute::decode_region_to_surface(
                                 decoder,
                                 pool,
                                 fmt,
@@ -1118,7 +1159,7 @@ fn decode_surface_from_decoder(
                                 fast444_packet,
                                 fast422_packet,
                                 fast420_packet,
-                            )
+                            )?)
                         }
                         #[cfg(not(target_os = "macos"))]
                         {
@@ -1163,7 +1204,7 @@ fn decode_surface_from_decoder(
                     routing::RouteDecision::MetalKernel => {
                         #[cfg(target_os = "macos")]
                         {
-                            compute::decode_scaled_to_surface(
+                            reject_cpu_staged_metal_upload(compute::decode_scaled_to_surface(
                                 decoder,
                                 pool,
                                 fmt,
@@ -1171,7 +1212,7 @@ fn decode_surface_from_decoder(
                                 fast444_packet,
                                 fast422_packet,
                                 fast420_packet,
-                            )
+                            )?)
                         }
                         #[cfg(not(target_os = "macos"))]
                         {
@@ -1287,7 +1328,7 @@ fn decode_region_scaled_surface_from_decoder(
                 routing::RouteDecision::MetalKernel => {
                     #[cfg(target_os = "macos")]
                     {
-                        compute::decode_region_scaled_to_surface(
+                        reject_cpu_staged_metal_upload(compute::decode_region_scaled_to_surface(
                             decoder,
                             pool,
                             fmt,
@@ -1296,7 +1337,7 @@ fn decode_region_scaled_surface_from_decoder(
                             fast444_packet,
                             fast422_packet,
                             fast420_packet,
-                        )
+                        )?)
                     }
                     #[cfg(not(target_os = "macos"))]
                     {
@@ -1320,6 +1361,15 @@ fn decode_region_scaled_surface_from_decoder(
         }
         BackendRequest::Cuda => Err(Error::UnsupportedBackend { request: backend }),
     }
+}
+
+fn reject_cpu_staged_metal_upload(surface: Surface) -> Result<Surface, Error> {
+    if surface.residency() == SurfaceResidency::CpuStagedMetalUpload {
+        return Err(Error::UnsupportedMetalRequest {
+            reason: "JPEG Metal explicit device decode requires a direct resident Metal decode; use the CPU path for CPU-staged output",
+        });
+    }
+    Ok(surface)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1448,6 +1498,7 @@ pub(crate) fn upload_surface(
     match backend {
         BackendRequest::Cpu => Ok(Surface {
             backend: BackendKind::Cpu,
+            residency: SurfaceResidency::Host,
             dimensions,
             fmt,
             pitch_bytes,
@@ -1464,6 +1515,7 @@ pub(crate) fn upload_surface(
                 );
                 Ok(Surface {
                     backend: BackendKind::Metal,
+                    residency: SurfaceResidency::CpuStagedMetalUpload,
                     dimensions,
                     fmt,
                     pitch_bytes,
@@ -1475,6 +1527,7 @@ pub(crate) fn upload_surface(
                 if matches!(backend, BackendRequest::Auto) {
                     Ok(Surface {
                         backend: BackendKind::Cpu,
+                        residency: SurfaceResidency::Host,
                         dimensions,
                         fmt,
                         pitch_bytes,
@@ -1615,9 +1668,13 @@ mod tests {
         assert!(session.runtime.get().is_none());
 
         let mut first = Decoder::new(BASELINE_420).expect("first decoder");
-        first
+        let first_surface = first
             .decode_to_device_with_session(PixelFormat::Rgb8, &session)
             .expect("first session decode");
+        assert_eq!(
+            first_surface.residency(),
+            SurfaceResidency::MetalResidentDecode
+        );
         let first_runtime = session
             .runtime
             .get()
@@ -1637,6 +1694,20 @@ mod tests {
             .expect("session runtime after second decode");
 
         assert_eq!(first_runtime, second_runtime);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn uploaded_metal_surface_is_marked_cpu_staged() {
+        let surface = upload_surface(
+            vec![1, 2, 3],
+            (1, 1),
+            PixelFormat::Rgb8,
+            BackendRequest::Metal,
+        )
+        .expect("CPU staged Metal upload");
+
+        assert_eq!(surface.residency(), SurfaceResidency::CpuStagedMetalUpload);
     }
 
     #[test]

@@ -15,6 +15,10 @@ const GRAYSCALE: &[u8] = include_bytes!("../fixtures/jpeg/grayscale_8x8.jpg");
 fn tile_device_decode_matches_host_tile_decode() {
     let mut ctx = DecoderContext::<JpegDecoderContext>::new();
     let mut pool = ScratchPool::new();
+    let (expected, _) = CpuDecoder::new(BASELINE_420)
+        .expect("cpu decoder")
+        .decode(PixelFormat::Rgb8)
+        .expect("cpu decode");
     let surface = Codec::decode_tile_to_device(
         &mut ctx,
         &mut pool,
@@ -30,6 +34,7 @@ fn tile_device_decode_matches_host_tile_decode() {
         .download_into(&mut downloaded, surface.pitch_bytes())
         .expect("download");
     assert_eq!(downloaded, surface.as_bytes());
+    assert_eq!(downloaded, expected);
 }
 
 #[cfg(target_os = "macos")]
@@ -37,6 +42,10 @@ fn tile_device_decode_matches_host_tile_decode() {
 fn tile_scaled_device_decode_has_expected_dimensions() {
     let mut ctx = DecoderContext::<JpegDecoderContext>::new();
     let mut pool = ScratchPool::new();
+    let (expected, _) = CpuDecoder::new(BASELINE_420)
+        .expect("cpu decoder")
+        .decode_scaled(PixelFormat::Rgb8, Downscale::Quarter)
+        .expect("cpu scaled decode");
     let surface = Codec::decode_tile_scaled_to_device(
         &mut ctx,
         &mut pool,
@@ -46,7 +55,9 @@ fn tile_scaled_device_decode_has_expected_dimensions() {
         BackendRequest::Metal,
     )
     .expect("tile scaled device decode");
+    assert_eq!(surface.backend_kind(), BackendKind::Metal);
     assert_eq!(surface.dimensions(), (4, 4));
+    assert_eq!(surface.as_bytes(), expected.as_slice());
 }
 
 #[cfg(target_os = "macos")]
@@ -60,6 +71,19 @@ fn tile_region_device_decode_has_expected_dimensions() {
         w: 8,
         h: 8,
     };
+    let (expected, _) = CpuDecoder::new(BASELINE_420)
+        .expect("cpu decoder")
+        .decode_region_scaled(
+            PixelFormat::Rgb8,
+            signinum_jpeg::Rect {
+                x: roi.x,
+                y: roi.y,
+                w: roi.w,
+                h: roi.h,
+            },
+            Downscale::None,
+        )
+        .expect("cpu region decode");
     let surface = Codec::decode_tile_region_to_device(
         &mut ctx,
         &mut pool,
@@ -69,7 +93,9 @@ fn tile_region_device_decode_has_expected_dimensions() {
         BackendRequest::Metal,
     )
     .expect("tile region device decode");
+    assert_eq!(surface.backend_kind(), BackendKind::Metal);
     assert_eq!(surface.dimensions(), (8, 8));
+    assert_eq!(surface.as_bytes(), expected.as_slice());
 }
 
 #[cfg(target_os = "macos")]

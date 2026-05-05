@@ -27,9 +27,10 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 use signinum_core::{
-    Colorspace as CoreColorspace, DecodeOutcome as CoreDecodeOutcome, DecodeRowsError,
-    DecoderContext as CoreDecoderContext, Downscale, ImageCodec, ImageDecode, ImageDecodeRows,
-    PixelFormat, RowSink, TileBatchDecode,
+    Colorspace as CoreColorspace, CompressedPayloadKind, CompressedTransferSyntax,
+    DecodeOutcome as CoreDecodeOutcome, DecodeRowsError, DecoderContext as CoreDecoderContext,
+    Downscale, ImageCodec, ImageDecode, ImageDecodeRows, PassthroughCandidate, PixelFormat,
+    RowSink, TileBatchDecode,
 };
 use std::sync::Mutex;
 
@@ -114,6 +115,28 @@ impl<'a> JpegView<'a> {
     /// Header-derived metadata for the parsed stream.
     pub fn info(&self) -> &Info {
         &self.info
+    }
+
+    /// Original compressed bytes backing this view.
+    pub fn bytes(&self) -> &'a [u8] {
+        self.bytes
+    }
+
+    /// Return a byte-preserving passthrough candidate for active DICOM/WSI
+    /// transfer syntaxes.
+    ///
+    /// Progressive JPEG is intentionally not exposed here because the active
+    /// conversion path should transcode it rather than introduce a retired or
+    /// unsupported destination syntax.
+    pub fn passthrough_candidate(&self) -> Option<PassthroughCandidate<'a>> {
+        jpeg_passthrough_syntax(&self.info).map(|transfer_syntax| {
+            PassthroughCandidate::new(
+                self.bytes,
+                transfer_syntax,
+                CompressedPayloadKind::JpegInterchange,
+                core_info(&self.info),
+            )
+        })
     }
 
     /// Build a restart-marker byte-offset index for the first scan.
@@ -320,6 +343,18 @@ impl<'a> Decoder<'a> {
     /// The parsed header as a public [`Info`].
     pub fn info(&self) -> &Info {
         &self.info
+    }
+
+    /// Return a byte-preserving passthrough candidate for this decoded stream.
+    pub fn passthrough_candidate(&self) -> Option<PassthroughCandidate<'a>> {
+        jpeg_passthrough_syntax(&self.info).map(|transfer_syntax| {
+            PassthroughCandidate::new(
+                self.bytes,
+                transfer_syntax,
+                CompressedPayloadKind::JpegInterchange,
+                core_info(&self.info),
+            )
+        })
     }
 
     /// Build a restart-marker byte-offset index for the first scan.
@@ -1218,6 +1253,18 @@ fn core_colorspace(color_space: ColorSpace) -> CoreColorspace {
         ColorSpace::Rgb => CoreColorspace::Rgb,
         ColorSpace::Cmyk => CoreColorspace::Cmyk,
         ColorSpace::Ycck => CoreColorspace::Ycck,
+    }
+}
+
+fn jpeg_passthrough_syntax(info: &Info) -> Option<CompressedTransferSyntax> {
+    match info.sof_kind {
+        SofKind::Baseline8 if info.bit_depth == 8 => Some(CompressedTransferSyntax::JpegBaseline8),
+        SofKind::Extended8 | SofKind::Extended12 => {
+            Some(CompressedTransferSyntax::JpegExtendedSequential)
+        }
+        SofKind::Baseline8 | SofKind::Progressive8 | SofKind::Progressive12 | SofKind::Lossless => {
+            None
+        }
     }
 }
 

@@ -2040,12 +2040,46 @@ struct J2kPacketBlock {
     uint reserved0;
 };
 
+struct J2kResidentPacketBlock {
+    uint tier1_job_index;
+    uint previously_included;
+    uint l_block;
+    uint block_coding_mode;
+};
+
+struct J2kResidentPacketBlockParams {
+    uint block_count;
+    uint tier1_job_count;
+};
+
 struct J2kPacketStateBlock {
     uint previously_included;
     uint l_block;
 };
 
 struct J2kPacketEncodeStatus {
+    uint code;
+    uint detail;
+    uint data_len;
+    uint reserved0;
+};
+
+struct J2kLosslessCodestreamAssemblyParams {
+    uint width;
+    uint height;
+    uint num_components;
+    uint bit_depth;
+    uint signed_samples;
+    uint num_decomposition_levels;
+    uint use_mct;
+    uint guard_bits;
+    uint progression_order;
+    uint write_tlm;
+    uint high_throughput;
+    uint output_capacity;
+};
+
+struct J2kCodestreamAssemblyStatus {
     uint code;
     uint detail;
     uint data_len;
@@ -2067,6 +2101,266 @@ inline void j2k_set_packet_status(device J2kPacketEncodeStatus *status, uint cod
     status->detail = detail;
     status->data_len = len;
     status->reserved0 = 0u;
+}
+
+inline void j2k_set_codestream_status(
+    device J2kCodestreamAssemblyStatus *status,
+    uint code,
+    uint detail,
+    uint len
+) {
+    status->code = code;
+    status->detail = detail;
+    status->data_len = len;
+    status->reserved0 = 0u;
+}
+
+inline bool j2k_codestream_write_u8(
+    device uchar *out,
+    uint capacity,
+    thread uint &cursor,
+    uint value
+) {
+    if (cursor >= capacity) {
+        return false;
+    }
+    out[cursor] = uchar(value & 0xFFu);
+    cursor += 1u;
+    return true;
+}
+
+inline bool j2k_codestream_write_u16(
+    device uchar *out,
+    uint capacity,
+    thread uint &cursor,
+    uint value
+) {
+    return j2k_codestream_write_u8(out, capacity, cursor, value >> 8u) &&
+        j2k_codestream_write_u8(out, capacity, cursor, value);
+}
+
+inline bool j2k_codestream_write_u32(
+    device uchar *out,
+    uint capacity,
+    thread uint &cursor,
+    uint value
+) {
+    return j2k_codestream_write_u8(out, capacity, cursor, value >> 24u) &&
+        j2k_codestream_write_u8(out, capacity, cursor, value >> 16u) &&
+        j2k_codestream_write_u8(out, capacity, cursor, value >> 8u) &&
+        j2k_codestream_write_u8(out, capacity, cursor, value);
+}
+
+inline bool j2k_codestream_write_marker(
+    device uchar *out,
+    uint capacity,
+    thread uint &cursor,
+    uint marker
+) {
+    return j2k_codestream_write_u8(out, capacity, cursor, 0xFFu) &&
+        j2k_codestream_write_u8(out, capacity, cursor, marker);
+}
+
+kernel void j2k_assemble_lossless_classic_codestream(
+    device const uchar *tile_data [[buffer(0)]],
+    device const J2kPacketEncodeStatus *tile_status [[buffer(1)]],
+    device uchar *out [[buffer(2)]],
+    constant J2kLosslessCodestreamAssemblyParams &params [[buffer(3)]],
+    device J2kCodestreamAssemblyStatus *status [[buffer(4)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid != 0u) {
+        return;
+    }
+
+    j2k_set_codestream_status(status, J2K_ENCODE_STATUS_FAIL, 0u, 0u);
+    const J2kPacketEncodeStatus packet_status = tile_status[0];
+    if (packet_status.code != J2K_ENCODE_STATUS_OK) {
+        j2k_set_codestream_status(status, J2K_ENCODE_STATUS_FAIL, packet_status.detail, 0u);
+        return;
+    }
+    if (params.num_components == 0u || params.num_components > 255u ||
+        params.bit_depth == 0u || params.bit_depth > 16u ||
+        params.num_decomposition_levels > 31u) {
+        j2k_set_codestream_status(status, J2K_ENCODE_STATUS_UNSUPPORTED, 1u, 0u);
+        return;
+    }
+
+    const uint tile_len = packet_status.data_len;
+    const uint tile_part_len = 14u + tile_len;
+    uint cursor = 0u;
+    bool ok = true;
+
+    ok = ok && j2k_codestream_write_marker(out, params.output_capacity, cursor, 0x4Fu);
+
+    ok = ok && j2k_codestream_write_marker(out, params.output_capacity, cursor, 0x51u);
+    const uint siz_len = 38u + 3u * params.num_components;
+    ok = ok && j2k_codestream_write_u16(out, params.output_capacity, cursor, siz_len);
+    ok = ok && j2k_codestream_write_u16(out, params.output_capacity, cursor, 0u);
+    ok = ok && j2k_codestream_write_u32(out, params.output_capacity, cursor, params.width);
+    ok = ok && j2k_codestream_write_u32(out, params.output_capacity, cursor, params.height);
+    ok = ok && j2k_codestream_write_u32(out, params.output_capacity, cursor, 0u);
+    ok = ok && j2k_codestream_write_u32(out, params.output_capacity, cursor, 0u);
+    ok = ok && j2k_codestream_write_u32(out, params.output_capacity, cursor, params.width);
+    ok = ok && j2k_codestream_write_u32(out, params.output_capacity, cursor, params.height);
+    ok = ok && j2k_codestream_write_u32(out, params.output_capacity, cursor, 0u);
+    ok = ok && j2k_codestream_write_u32(out, params.output_capacity, cursor, 0u);
+    ok = ok && j2k_codestream_write_u16(out, params.output_capacity, cursor, params.num_components);
+    const uint ssiz = (params.bit_depth - 1u) | (params.signed_samples != 0u ? 0x80u : 0u);
+    for (uint comp = 0u; comp < params.num_components && ok; ++comp) {
+        ok = ok && j2k_codestream_write_u8(out, params.output_capacity, cursor, ssiz);
+        ok = ok && j2k_codestream_write_u8(out, params.output_capacity, cursor, 1u);
+        ok = ok && j2k_codestream_write_u8(out, params.output_capacity, cursor, 1u);
+    }
+
+    if (params.high_throughput != 0u) {
+        const uint magnitude_bits = params.bit_depth - 1u;
+        const uint bp = magnitude_bits <= 8u ? 0u :
+            (magnitude_bits < 28u ? magnitude_bits - 8u : 13u + (magnitude_bits >> 2u));
+        ok = ok && j2k_codestream_write_marker(out, params.output_capacity, cursor, 0x50u);
+        ok = ok && j2k_codestream_write_u16(out, params.output_capacity, cursor, 8u);
+        ok = ok && j2k_codestream_write_u32(out, params.output_capacity, cursor, 0x00020000u);
+        ok = ok && j2k_codestream_write_u16(out, params.output_capacity, cursor, bp);
+    }
+
+    ok = ok && j2k_codestream_write_marker(out, params.output_capacity, cursor, 0x52u);
+    ok = ok && j2k_codestream_write_u16(out, params.output_capacity, cursor, 12u);
+    ok = ok && j2k_codestream_write_u8(out, params.output_capacity, cursor, 0u);
+    ok = ok && j2k_codestream_write_u8(out, params.output_capacity, cursor, params.progression_order);
+    ok = ok && j2k_codestream_write_u16(out, params.output_capacity, cursor, 1u);
+    ok = ok && j2k_codestream_write_u8(out, params.output_capacity, cursor, params.use_mct != 0u ? 1u : 0u);
+    ok = ok && j2k_codestream_write_u8(out, params.output_capacity, cursor, params.num_decomposition_levels);
+    ok = ok && j2k_codestream_write_u8(out, params.output_capacity, cursor, 4u);
+    ok = ok && j2k_codestream_write_u8(out, params.output_capacity, cursor, 4u);
+    ok = ok && j2k_codestream_write_u8(out, params.output_capacity, cursor, params.high_throughput != 0u ? 0x40u : 0u);
+    ok = ok && j2k_codestream_write_u8(out, params.output_capacity, cursor, 1u);
+
+    ok = ok && j2k_codestream_write_marker(out, params.output_capacity, cursor, 0x5Cu);
+    const uint qcd_steps = 1u + 3u * params.num_decomposition_levels;
+    ok = ok && j2k_codestream_write_u16(out, params.output_capacity, cursor, 3u + qcd_steps);
+    ok = ok && j2k_codestream_write_u8(out, params.output_capacity, cursor, params.guard_bits << 5u);
+    ok = ok && j2k_codestream_write_u8(out, params.output_capacity, cursor, params.bit_depth << 3u);
+    for (uint level = 0u; level < params.num_decomposition_levels && ok; ++level) {
+        ok = ok && j2k_codestream_write_u8(out, params.output_capacity, cursor, (params.bit_depth + 1u) << 3u);
+        ok = ok && j2k_codestream_write_u8(out, params.output_capacity, cursor, (params.bit_depth + 1u) << 3u);
+        ok = ok && j2k_codestream_write_u8(out, params.output_capacity, cursor, (params.bit_depth + 2u) << 3u);
+    }
+
+    if (params.write_tlm != 0u) {
+        ok = ok && j2k_codestream_write_marker(out, params.output_capacity, cursor, 0x55u);
+        ok = ok && j2k_codestream_write_u16(out, params.output_capacity, cursor, 10u);
+        ok = ok && j2k_codestream_write_u8(out, params.output_capacity, cursor, 0u);
+        ok = ok && j2k_codestream_write_u8(out, params.output_capacity, cursor, 0x22u);
+        ok = ok && j2k_codestream_write_u16(out, params.output_capacity, cursor, 0u);
+        ok = ok && j2k_codestream_write_u32(out, params.output_capacity, cursor, tile_part_len);
+    }
+
+    ok = ok && j2k_codestream_write_marker(out, params.output_capacity, cursor, 0x90u);
+    ok = ok && j2k_codestream_write_u16(out, params.output_capacity, cursor, 10u);
+    ok = ok && j2k_codestream_write_u16(out, params.output_capacity, cursor, 0u);
+    ok = ok && j2k_codestream_write_u32(out, params.output_capacity, cursor, tile_part_len);
+    ok = ok && j2k_codestream_write_u8(out, params.output_capacity, cursor, 0u);
+    ok = ok && j2k_codestream_write_u8(out, params.output_capacity, cursor, 1u);
+    ok = ok && j2k_codestream_write_marker(out, params.output_capacity, cursor, 0x93u);
+
+    if (!ok || cursor + tile_len + 2u > params.output_capacity) {
+        j2k_set_codestream_status(status, J2K_ENCODE_STATUS_FAIL, 2u, cursor);
+        return;
+    }
+    for (uint idx = 0u; idx < tile_len; ++idx) {
+        out[cursor + idx] = tile_data[idx];
+    }
+    cursor += tile_len;
+    ok = ok && j2k_codestream_write_marker(out, params.output_capacity, cursor, 0xD9u);
+    if (!ok) {
+        j2k_set_codestream_status(status, J2K_ENCODE_STATUS_FAIL, 3u, cursor);
+        return;
+    }
+
+    j2k_set_codestream_status(status, J2K_ENCODE_STATUS_OK, 0u, cursor);
+}
+
+kernel void j2k_prepare_packet_blocks_from_classic_status(
+    device const J2kResidentPacketBlock *resident_blocks [[buffer(0)]],
+    device const J2kClassicEncodeBatchJob *tier1_jobs [[buffer(1)]],
+    device const J2kClassicEncodeStatus *tier1_statuses [[buffer(2)]],
+    device J2kPacketBlock *packet_blocks [[buffer(3)]],
+    constant J2kResidentPacketBlockParams &params [[buffer(4)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= params.block_count) {
+        return;
+    }
+
+    const J2kResidentPacketBlock resident = resident_blocks[gid];
+    J2kPacketBlock packet;
+    packet.data_offset = 0u;
+    packet.data_len = 0u;
+    packet.num_coding_passes = 1u;
+    packet.num_zero_bitplanes = 0u;
+    packet.previously_included = resident.previously_included;
+    packet.l_block = resident.l_block;
+    packet.block_coding_mode = 0xFFFFFFFFu;
+    packet.reserved0 = 0u;
+
+    if (resident.tier1_job_index < params.tier1_job_count) {
+        const J2kClassicEncodeBatchJob job = tier1_jobs[resident.tier1_job_index];
+        const J2kClassicEncodeStatus tier1_status = tier1_statuses[resident.tier1_job_index];
+        if (tier1_status.code == J2K_ENCODE_STATUS_OK &&
+            tier1_status.data_len <= job.output_capacity &&
+            tier1_status.segment_count <= job.segment_capacity) {
+            packet.data_offset = job.output_offset;
+            packet.data_len = tier1_status.data_len;
+            packet.num_coding_passes = tier1_status.number_of_coding_passes;
+            packet.num_zero_bitplanes = tier1_status.missing_bit_planes;
+            packet.block_coding_mode = resident.block_coding_mode;
+        } else {
+            packet.reserved0 = tier1_status.detail;
+        }
+    }
+
+    packet_blocks[gid] = packet;
+}
+
+kernel void j2k_prepare_packet_blocks_from_ht_status(
+    device const J2kResidentPacketBlock *resident_blocks [[buffer(0)]],
+    device const J2kHtEncodeBatchJob *tier1_jobs [[buffer(1)]],
+    device const J2kHtEncodeStatus *tier1_statuses [[buffer(2)]],
+    device J2kPacketBlock *packet_blocks [[buffer(3)]],
+    constant J2kResidentPacketBlockParams &params [[buffer(4)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= params.block_count) {
+        return;
+    }
+
+    const J2kResidentPacketBlock resident = resident_blocks[gid];
+    J2kPacketBlock packet;
+    packet.data_offset = 0u;
+    packet.data_len = 0u;
+    packet.num_coding_passes = 1u;
+    packet.num_zero_bitplanes = 0u;
+    packet.previously_included = resident.previously_included;
+    packet.l_block = resident.l_block;
+    packet.block_coding_mode = 0xFFFFFFFFu;
+    packet.reserved0 = 0u;
+
+    if (resident.tier1_job_index < params.tier1_job_count) {
+        const J2kHtEncodeBatchJob job = tier1_jobs[resident.tier1_job_index];
+        const J2kHtEncodeStatus tier1_status = tier1_statuses[resident.tier1_job_index];
+        if (tier1_status.code == J2K_ENCODE_STATUS_OK &&
+            tier1_status.data_len <= job.output_capacity) {
+            packet.data_offset = job.output_offset;
+            packet.data_len = tier1_status.data_len;
+            packet.num_coding_passes = tier1_status.num_coding_passes;
+            packet.num_zero_bitplanes = tier1_status.num_zero_bitplanes;
+            packet.block_coding_mode = resident.block_coding_mode;
+        } else {
+            packet.reserved0 = tier1_status.detail;
+        }
+    }
+
+    packet_blocks[gid] = packet;
 }
 
 inline void j2k_packet_writer_init(thread J2kPacketBitWriter &writer, device uchar *data, uint capacity) {
@@ -2494,11 +2788,14 @@ kernel void j2k_encode_packetization(
                             j2k_packet_bits_for_length(local_l_block, block.num_coding_passes);
                         j2k_packet_encode_num_passes(block.num_coding_passes, writer);
                         j2k_packet_encode_length(block.data_len, local_l_block, num_bits, writer);
-                    } else {
+                    } else if (block.block_coding_mode == 1u) {
                         const uint num_bits =
                             j2k_packet_bits_for_ht_length(local_l_block, block.num_coding_passes);
                         j2k_packet_encode_num_ht_passes(block.num_coding_passes, writer);
                         j2k_packet_encode_length(block.data_len, local_l_block, num_bits, writer);
+                    } else {
+                        j2k_set_packet_status(status, J2K_ENCODE_STATUS_FAIL, 7u, block.reserved0);
+                        return;
                     }
                     if (has_descriptor) {
                         state_blocks[state_block_index].previously_included = 1u;

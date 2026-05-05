@@ -14,6 +14,10 @@ The current benchmark contract is native-only: run and compare on `x86_64`
 and `aarch64` hosts. wasm and `no_std` builds are no longer part of the
 performance signoff path.
 
+Baseline JPEG encode benchmarks are fallback diagnostics only. WSI/DICOM
+storage signoff should first prove compressed-tile passthrough eligibility and
+then measure lossless J2K/HTJ2K encode paths for cases that must transcode.
+
 ## Host setup
 
 The in-tree correctness tests do not require system codec libraries. Comparator
@@ -275,7 +279,7 @@ available without a checked-in J2K corpus:
 
 - classic grayscale J2K
 - classic RGB J2K
-- HTJ2K grayscale
+- HTJ2K grayscale at 1024 and 512 tile sizes
 
 Bench groups:
 
@@ -287,6 +291,14 @@ Bench groups:
 - `wsi_region_scaled_gray_q4`
 - `wsi_tile_batch_gray`
 - `wsi_tile_batch_region_scaled_gray_q4`
+- `wsi_tile_batch_region_scaled_gray_distinct_q4`
+- `external_wsi_tile_batch_region_scaled_q4` when
+  `SIGNINUM_J2K_METAL_WSI_TILE_DIR` points at JP2/J2K/JPH/JHC tiles or DICOM
+  WSI files
+- `wsi_tile_batch_gray_32`
+- `wsi_tile_batch_gray_64`
+- `wsi_tile_batch_rgb`
+- `wsi_tile_batch_rgb_distinct`
 
 Comparator policy:
 
@@ -313,7 +325,9 @@ Region and scale mapping:
   decode
 - region+scaled decode projects the source-coordinate ROI onto the
   reduced-resolution grid with floor-start/ceil-end coverage
-- tile-batch decode is modeled as repeated decode invocations on the same tile
+- tile-batch decode includes repeated-tile groups and generated distinct-tile
+  groups; the external WSI group loads distinct JP2/J2K/JPH/JHC files or
+  encapsulated J2K frames from DICOM files when a local corpus is configured
 
 Compile the J2K compare bench:
 
@@ -369,12 +383,25 @@ Current v1 scope is explicit:
   throughput instead of duplicate-input reuse. Unsupported shapes fall back
   through CPU decode plus device-surface upload according to the requested
   backend
-- J2K: CPU codestream/decode still reconstructs component planes, then Metal
-  compute performs interleave/clamp/pack into the requested surface; ROI
-  staging is still done on CPU for the current region path
+- J2K: grayscale full-tile and ROI+scaled MetalDirect paths keep marker parsing
+  and plan construction on CPU, then dispatch supported classic Tier-1 or
+  HTJ2K cleanup jobs, grouped sub-band work, IDWT, and store/pack in a resident
+  Metal command sequence. Distinct grayscale ROI+scaled tile batches are
+  coalesced across separate codestreams. Cropped ROI+scaled plans prune
+  irrelevant code-block jobs, compact retained HTJ2K coded payloads, and crop
+  every required IDWT output level, carrying input-window origins through the
+  resident band graph so intermediate IDWT levels can feed later cropped levels
+  safely. RGB ROI+scaled and unsupported codestream features still fall back
+  through CPU reconstruction plus device-surface upload
+- J2K `signinum-adaptive` ROI+scaled batch benches submit through
+  `BackendRequest::Auto`; the batching layer chooses CPU for short/small
+  batches and Metal for measured grayscale batch thresholds
 - these benches measure complete codec-device tasks, including surface
   production; they do not include WSI container parsing, tile lookup, caching,
   or prefetch policy
+- JPEG baseline encode benches, where present, are compatibility/fallback
+  measurements and must not be used as evidence for the diagnostic storage
+  conversion path
 
 `signinum-jpeg-metal` compare bench names:
 

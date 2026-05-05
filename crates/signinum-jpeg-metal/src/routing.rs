@@ -8,8 +8,6 @@ use signinum_jpeg::{
 
 use crate::{batch::BatchOp, Error};
 
-const AUTO_METAL_MIN_SINGLE_EDGE: u32 = 512;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RouteDecision {
     CpuHost,
@@ -28,29 +26,24 @@ pub(crate) enum RouteDecision {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct JpegMetalCapabilities {
     has_fast_packet: bool,
-    auto_allows_metal: bool,
     supports_output_format: bool,
 }
 
 impl JpegMetalCapabilities {
     pub(crate) fn for_request(
-        decoder: &CpuDecoder<'_>,
+        _decoder: &CpuDecoder<'_>,
         fmt: PixelFormat,
-        op: BatchOp,
+        _op: BatchOp,
         fast444_packet: Option<&JpegMetalFast444PacketV1>,
         fast422_packet: Option<&JpegMetalFast422PacketV1>,
         fast420_packet: Option<&JpegMetalFast420PacketV1>,
     ) -> Self {
         let has_fast_packet =
             fast444_packet.is_some() || fast422_packet.is_some() || fast420_packet.is_some();
-        let auto_allows_metal = has_fast_packet
-            && decoder.info().restart_interval.is_some()
-            && auto_work_is_large_enough(decoder.info().dimensions, op);
         let supports_output_format = supports_metal_output_format(fmt);
 
         Self {
             has_fast_packet,
-            auto_allows_metal,
             supports_output_format,
         }
     }
@@ -63,19 +56,8 @@ pub(crate) fn decide_route(
     match backend {
         BackendRequest::Cpu => RouteDecision::CpuHost,
         BackendRequest::Auto => {
-            #[cfg(not(target_os = "macos"))]
-            {
-                let _ = capabilities;
-                RouteDecision::CpuHost
-            }
-            #[cfg(target_os = "macos")]
-            {
-                if capabilities.auto_allows_metal && capabilities.supports_output_format {
-                    RouteDecision::MetalKernel
-                } else {
-                    RouteDecision::CpuHost
-                }
-            }
+            let _ = capabilities;
+            RouteDecision::CpuHost
         }
         BackendRequest::Metal => {
             if !capabilities.has_fast_packet {
@@ -111,15 +93,6 @@ fn supports_metal_output_format(fmt: PixelFormat) -> bool {
     )
 }
 
-fn auto_work_is_large_enough(full: (u32, u32), op: BatchOp) -> bool {
-    let dims = match op {
-        BatchOp::Full | BatchOp::Scaled(_) => full,
-        BatchOp::Region(roi) => (roi.w, roi.h),
-        BatchOp::RegionScaled { .. } => return false,
-    };
-    dims.0 >= AUTO_METAL_MIN_SINGLE_EDGE && dims.1 >= AUTO_METAL_MIN_SINGLE_EDGE
-}
-
 pub(crate) fn decision_error(decision: RouteDecision) -> Option<Error> {
     match decision {
         RouteDecision::RejectExplicitMetal { reason } => {
@@ -141,7 +114,6 @@ mod tests {
     fn cuda_route_reports_unsupported_backend() {
         let capabilities = JpegMetalCapabilities {
             has_fast_packet: true,
-            auto_allows_metal: true,
             supports_output_format: true,
         };
 
@@ -163,7 +135,6 @@ mod tests {
     fn explicit_metal_unsupported_output_format_is_rejected_before_launch() {
         let capabilities = JpegMetalCapabilities {
             has_fast_packet: true,
-            auto_allows_metal: true,
             supports_output_format: false,
         };
 
@@ -174,18 +145,16 @@ mod tests {
         ));
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
-    fn auto_routes_to_metal_when_capabilities_allow_large_restart_work() {
+    fn auto_routes_single_request_to_cpu_even_when_metal_capabilities_match() {
         let capabilities = JpegMetalCapabilities {
             has_fast_packet: true,
-            auto_allows_metal: true,
             supports_output_format: true,
         };
 
         assert_eq!(
             decide_route(BackendRequest::Auto, capabilities),
-            RouteDecision::MetalKernel
+            RouteDecision::CpuHost
         );
     }
 
@@ -194,7 +163,6 @@ mod tests {
     fn auto_routes_to_cpu_host_on_non_macos_even_when_metal_would_be_preferred() {
         let capabilities = JpegMetalCapabilities {
             has_fast_packet: true,
-            auto_allows_metal: true,
             supports_output_format: true,
         };
 
@@ -209,7 +177,6 @@ mod tests {
     fn explicit_metal_unsupported_shape_is_rejected_before_host_unavailability() {
         let capabilities = JpegMetalCapabilities {
             has_fast_packet: false,
-            auto_allows_metal: false,
             supports_output_format: true,
         };
 

@@ -126,12 +126,21 @@ fn force_full_frame_policy_disables_large_rgb_skip() {
 
 #[test]
 fn extracted_wsi_jpegs_decode_when_local_corpus_is_available() {
+    let require_corpus = std::env::var_os("SIGNINUM_REQUIRE_WSI_ROOT").is_some();
     let Some(root) = std::env::var_os("SIGNINUM_WSI_ROOT") else {
+        assert!(
+            !require_corpus,
+            "SIGNINUM_REQUIRE_WSI_ROOT is set but SIGNINUM_WSI_ROOT is not configured"
+        );
         return;
     };
     let mut files = Vec::new();
     collect_jpegs(Path::new(&root), &mut files);
     files.sort();
+    assert!(
+        !require_corpus || !files.is_empty(),
+        "SIGNINUM_REQUIRE_WSI_ROOT is set but SIGNINUM_WSI_ROOT did not contain any JPEG files"
+    );
 
     for path in files {
         eprintln!("decoding {}", path.display());

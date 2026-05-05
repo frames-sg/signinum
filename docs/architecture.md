@@ -19,6 +19,8 @@ design notes that an agent can reach without leaving the repo.
 - [`docs/parity.md`](parity.md) — parity expectations against reference decoders.
 - [`docs/release.md`](release.md) — release staging notes.
 - [`docs/wsi-decode-api.md`](wsi-decode-api.md) — public WSI decode API guide.
+- [`docs/wsi-dicom-passthrough.md`](wsi-dicom-passthrough.md) — passthrough-first
+  policy for WSI/DICOM conversion layers built on these codec primitives.
 - [`HANDOFF-2026-04-23-adaptive-codec-runtime.md`](private-docs/HANDOFF-2026-04-23-adaptive-codec-runtime.md)
   — most recent in-flight design handoff (adaptive backend routing).
 - Crate-level `README.md` files where present — crate-scoped contracts and
@@ -36,9 +38,9 @@ backend APIs are still hardening.
 |-------|-------|------|
 | `signinum-core` | foundation | Shared traits, pixel/sample types, backend capability metadata, device-surface contracts, scratch/context contracts. No image-format logic. |
 | `signinum-tilecodec` | codec | Tile decompression primitives: Deflate, Zstd, LZW, Uncompressed. Implements `TileDecompress` from `core`. |
-| `signinum-jpeg` | codec | Native pure-Rust JPEG decode for WSI tiles. CPU-first. Owns SIMD backends and fused entropy/IDCT/upsample paths. |
+| `signinum-jpeg` | codec | Native pure-Rust JPEG inspect/decode for WSI tiles. CPU-first. Owns SIMD backends and fused entropy/IDCT/upsample paths. Its baseline JPEG encoder is a compatibility/fallback utility, not the diagnostic WSI/DICOM encode path. |
 | `signinum-j2k-native` | codec engine | Published implementation dependency for `signinum-j2k`; not the stable user-facing API. Lives under `#![forbid(unsafe_code)]` and uses `fearless_simd`. |
-| `signinum-j2k` | codec | Public JPEG 2000 / HTJ2K crate. Wraps `j2k-native` with the signinum-core trait surface (inspect, decode, ROI, scaled, row-bounded, tile-batch). |
+| `signinum-j2k` | codec | Public JPEG 2000 / HTJ2K crate. Wraps `j2k-native` with the signinum-core trait surface (inspect, decode, ROI, scaled, row-bounded, tile-batch, and lossless encode). |
 | `signinum-j2k-compare` | dev-only | OpenJPEG FFI bindings used as a reference decoder for conformance and parity testing. Unpublished. |
 | `signinum-jpeg-metal` | adapter | Apple Metal device-output adapter for `signinum-jpeg`. Hosts compute kernels for color conversion, interleave/pack, and `MTLBuffer` production. |
 | `signinum-j2k-metal` | adapter | Apple Metal device-output adapter for `signinum-j2k`. Same shape as the JPEG adapter. |
@@ -221,26 +223,51 @@ and the fast 4:2:0 path live together in
 regresses WSI tile-batch performance. Splitting that module is planned but
 gated on stable benchmark and parity coverage.
 
-J2K parses boxes (COD, QCD, etc.) and the codestream, then drives
-`signinum-j2k-native` (DWT, context modeling, arithmetic decode) before
-filling the caller-owned output buffer. ROI and reduced-resolution requests
-share the same core contract: the ROI is expressed in source coordinates, and
-the returned decoded rectangle covers the floor-start/ceil-end projection onto
-the requested reduced-resolution grid.
+J2K parses boxes (COD, QCD, QCC, etc.) and codestream structure on CPU, then
+drives either the native CPU reconstruction path or a MetalDirect plan. ROI and
+reduced-resolution requests share the same core contract: the ROI is expressed
+in source coordinates, and the returned decoded rectangle covers the
+floor-start/ceil-end projection onto the requested reduced-resolution grid.
 
-The Metal v1 path keeps parse and entropy decode on CPU and hands decoded
-component rows or planes to compute kernels for color conversion, interleave,
-clamp, and pack where a kernel path exists. J2K Metal exposes full, ROI,
-scaled, and combined ROI+scaled device surfaces; explicit Metal requests return
-Metal-backed surfaces on macOS, while unsupported host or platform shapes fail
-through the adapter error path.
+The current MetalDirect path is first-class for grayscale J2K/HTJ2K full-tile
+decode and grayscale ROI+scaled tile batches. Marker parsing and plan building
+stay on CPU; supported classic Tier-1 or HT cleanup block jobs, grouped
+sub-band decode, IDWT, and final store/pack run as one Metal command sequence
+and return resident Metal surfaces. Distinct grayscale WSI-style ROI+scaled
+batches are coalesced across separate codestreams. Cropped ROI+scaled plans
+prune code-block jobs outside the requested store windows, compact retained
+HTJ2K coded payloads, and crop every required IDWT output level. Cropped IDWT
+outputs carry input-window origins and strides through the resident band graph,
+so intermediate levels can feed later cropped levels without returning to broad
+intermediate buffers.
+
+Unsupported formats, unsupported codestream features, RGB ROI+scaled paths, and
+non-macOS hosts fall back through the CPU reconstruction and device-surface
+upload path according to the requested backend. Explicit Metal requests fail
+for unsupported Metal shapes; `Auto` is intentionally limited to measured
+grayscale batch cases.
+
+## WSI/DICOM conversion policy
+
+WSI/DICOM container readers and writers live outside this codec workspace. They
+should inspect compressed tile payloads and pass them through unchanged whenever
+the destination transfer syntax and frame metadata make that legal. The shared
+contract is `signinum-core::PassthroughCandidate` plus
+`PassthroughRequirements`; codec views build candidates from borrowed source
+bytes, and the container layer remains responsible for DICOM-specific frame
+ordering and fragment writing. If a new diagnostic codestream is required, use
+the lossless J2K/HTJ2K encode surfaces. Baseline JPEG encode is reserved for
+explicit fallback, generated fixtures, or non-diagnostic derived output.
 
 Metal adapter routing is explicit after the facade release.
 `BackendRequest::Cpu` returns host-backed CPU surfaces. `BackendRequest::Auto`
 may select Metal only for validated adapter-supported shapes; otherwise it
 falls back to a host-backed CPU surface. `BackendRequest::Metal` is strict: it
-returns a Metal-backed surface for supported shapes or a clear
-unsupported/unavailable error. It does not silently return CPU output.
+returns a resident Metal decode surface for supported shapes or a clear
+unsupported/unavailable error. It does not silently return CPU output or
+CPU-staged Metal upload. Adapters that expose staged upload do so as a separate
+API, and resident-capable surfaces report residency so downstream WSI code can
+reject CPU-staged buffers when end-to-end GPU residency is required.
 
 ## Backend story
 
@@ -284,9 +311,10 @@ signinum deliberately externalizes anything that resembles a runtime.
 
 | Change | Crate |
 |--------|-------|
-| New shared trait, pixel format, or backend kind | `signinum-core` |
+| New shared trait, pixel format, passthrough contract, or backend kind | `signinum-core` |
 | New JPEG decode shape, marker, or CPU optimization | `signinum-jpeg` |
 | New JPEG GPU shape | `signinum-jpeg-metal` (or `-cuda`) |
+| New diagnostic encode/transcode path | Prefer passthrough in the caller/container layer; otherwise `signinum-j2k-native`, surfaced through `signinum-j2k` |
 | New J2K codestream feature, ROI/scaled support | `signinum-j2k-native`, surfaced through `signinum-j2k` |
 | New tile decompression codec (e.g. LZ4) | `signinum-tilecodec` |
 | New CLI subcommand | `signinum-cli` |

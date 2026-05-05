@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use signinum_core::Colorspace;
+use signinum_core::{
+    Colorspace, CompressedPayloadKind, CompressedTransferSyntax, PassthroughDecision,
+    PassthroughRequirements,
+};
 use signinum_j2k::{J2kDecoder, J2kError, J2kView};
-use signinum_j2k_native::{encode_htj2k, EncodeOptions};
+use signinum_j2k_native::{encode, encode_htj2k, EncodeOptions};
 
 fn minimal_codestream() -> Vec<u8> {
     let mut bytes = vec![0xFF, 0x4F];
@@ -94,8 +97,37 @@ fn ht_codestream() -> Vec<u8> {
     encode_htj2k(&pixels, 2, 2, 1, 8, false, &EncodeOptions::default()).expect("encode ht")
 }
 
+fn classic_lossless_codestream() -> Vec<u8> {
+    let pixels = [10_u8, 20, 30, 40];
+    let options = EncodeOptions {
+        reversible: true,
+        num_decomposition_levels: 1,
+        ..EncodeOptions::default()
+    };
+    encode(&pixels, 2, 2, 1, 8, false, &options).expect("encode classic j2k")
+}
+
 fn ht_jp2() -> Vec<u8> {
     let codestream = ht_codestream();
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&[0, 0, 0, 12, b'j', b'P', b' ', b' ', 0x0D, 0x0A, 0x87, 0x0A]);
+    bytes.extend_from_slice(&[
+        0, 0, 0, 20, b'f', b't', b'y', b'p', b'j', b'p', b'2', b' ', 0, 0, 0, 0, b'j', b'p', b'2',
+        b' ',
+    ]);
+    bytes.extend_from_slice(&[
+        0, 0, 0, 45, b'j', b'p', b'2', b'h', 0, 0, 0, 22, b'i', b'h', b'd', b'r', 0, 0, 0, 2, 0, 0,
+        0, 2, 0, 1, 7, 7, 0, 0, 0, 0, 0, 15, b'c', b'o', b'l', b'r', 1, 0, 0, 0, 0, 0, 17,
+    ]);
+    let len = (8 + codestream.len()) as u32;
+    bytes.extend_from_slice(&len.to_be_bytes());
+    bytes.extend_from_slice(b"jp2c");
+    bytes.extend_from_slice(&codestream);
+    bytes
+}
+
+fn classic_lossless_jp2() -> Vec<u8> {
+    let codestream = classic_lossless_codestream();
     let mut bytes = Vec::new();
     bytes.extend_from_slice(&[0, 0, 0, 12, b'j', b'P', b' ', b' ', 0x0D, 0x0A, 0x87, 0x0A]);
     bytes.extend_from_slice(&[
@@ -227,4 +259,70 @@ fn inspect_ht_jp2_reports_core_info() {
     assert_eq!(info.dimensions, (2, 2));
     assert_eq!(info.components, 1);
     assert_eq!(info.colorspace, Colorspace::SGray);
+}
+
+#[test]
+fn j2k_view_exposes_classic_lossless_codestream_passthrough_candidate() {
+    let bytes = classic_lossless_codestream();
+    let view = J2kView::parse(&bytes).expect("classic j2k view");
+    let candidate = view
+        .passthrough_candidate()
+        .expect("classic j2k passthrough candidate");
+    let requirements = PassthroughRequirements::new(
+        CompressedTransferSyntax::Jpeg2000Lossless,
+        CompressedPayloadKind::Jpeg2000Codestream,
+    )
+    .with_dimensions((2, 2))
+    .with_components(1)
+    .with_bit_depth(8);
+
+    assert_eq!(
+        candidate.evaluate(&requirements),
+        PassthroughDecision::Copy {
+            bytes: bytes.as_slice()
+        }
+    );
+    assert_eq!(
+        candidate.transfer_syntax(),
+        CompressedTransferSyntax::Jpeg2000Lossless
+    );
+    assert_eq!(
+        candidate.payload_kind(),
+        CompressedPayloadKind::Jpeg2000Codestream
+    );
+}
+
+#[test]
+fn j2k_view_exposes_ht_lossless_codestream_passthrough_candidate() {
+    let bytes = ht_codestream();
+    let view = J2kView::parse(&bytes).expect("htj2k view");
+
+    assert_eq!(
+        view.passthrough_candidate()
+            .expect("htj2k passthrough candidate")
+            .transfer_syntax(),
+        CompressedTransferSyntax::HtJpeg2000Lossless
+    );
+}
+
+#[test]
+fn jp2_file_is_not_eligible_for_raw_dicom_codestream_copy() {
+    let bytes = classic_lossless_jp2();
+    let view = J2kView::parse(&bytes).expect("jp2 view");
+    let requirements = PassthroughRequirements::new(
+        CompressedTransferSyntax::Jpeg2000Lossless,
+        CompressedPayloadKind::Jpeg2000Codestream,
+    );
+
+    assert_eq!(
+        view.passthrough_candidate()
+            .expect("jp2 passthrough candidate")
+            .copy_bytes_if_eligible(&requirements),
+        Err(
+            signinum_core::PassthroughRejectReason::PayloadKindMismatch {
+                source: CompressedPayloadKind::Jp2File,
+                destination: CompressedPayloadKind::Jpeg2000Codestream,
+            }
+        )
+    );
 }

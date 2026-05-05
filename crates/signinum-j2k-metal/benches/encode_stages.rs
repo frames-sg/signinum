@@ -1,10 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use signinum_j2k_metal::MetalEncodeStageAccelerator;
+use signinum_core::PixelFormat;
+use signinum_j2k::{
+    encode_j2k_lossless, EncodeBackendPreference, J2kEncodeValidation, J2kLosslessEncodeOptions,
+    J2kLosslessSamples,
+};
+use signinum_j2k_metal::{
+    encode_lossless_from_padded_metal_buffer_with_report, MetalBackendSession,
+    MetalEncodeStageAccelerator, MetalLosslessEncodeTile,
+};
 use signinum_j2k_native::{J2kEncodeStageAccelerator, J2kForwardDwt53Job, J2kForwardRctJob};
 
 const BENCH_DIMS: &[u32] = &[512, 1024, 2048];
+const ENCODE_BENCH_DIMS: &[u32] = &[512, 1024];
 
 fn bench_encode_stages(c: &mut Criterion) {
     let mut rct = c.benchmark_group("j2k_metal_forward_rct");
@@ -65,6 +74,58 @@ fn bench_encode_stages(c: &mut Criterion) {
         }
     }
     dwt.finish();
+
+    let mut encode = c.benchmark_group("j2k_metal_lossless_rgb8_encode");
+    for &dim in ENCODE_BENCH_DIMS {
+        let pixels = generate_rgb8_pixels(dim, dim);
+        let cpu_options = J2kLosslessEncodeOptions {
+            backend: EncodeBackendPreference::CpuOnly,
+            validation: J2kEncodeValidation::External,
+            ..J2kLosslessEncodeOptions::default()
+        };
+        encode.bench_with_input(BenchmarkId::new("cpu", dim), &pixels, |b, pixels| {
+            b.iter(|| {
+                let samples = J2kLosslessSamples::new(pixels, dim, dim, 3, 8, false)
+                    .expect("valid RGB8 samples");
+                encode_j2k_lossless(samples, &cpu_options).expect("CPU J2K lossless encode")
+            });
+        });
+
+        #[cfg(target_os = "macos")]
+        if metal_encode_available() {
+            let session = MetalBackendSession::system_default().expect("Metal session");
+            let buffer = private_buffer_with_bytes(&session, &pixels);
+            let metal_options = J2kLosslessEncodeOptions {
+                backend: EncodeBackendPreference::RequireDevice,
+                validation: J2kEncodeValidation::External,
+                ..J2kLosslessEncodeOptions::default()
+            };
+            encode.bench_with_input(BenchmarkId::new("resident_metal", dim), &pixels, |b, _| {
+                b.iter(|| {
+                    let encoded = encode_lossless_from_padded_metal_buffer_with_report(
+                        MetalLosslessEncodeTile {
+                            buffer: &buffer,
+                            byte_offset: 0,
+                            width: dim,
+                            height: dim,
+                            pitch_bytes: dim as usize * 3,
+                            output_width: dim,
+                            output_height: dim,
+                            format: PixelFormat::Rgb8,
+                        },
+                        &metal_options,
+                        &session,
+                    )
+                    .expect("resident Metal J2K lossless encode");
+                    assert!(encoded.resident.coefficient_prep_used);
+                    assert!(encoded.resident.packetization_used);
+                    assert!(encoded.resident.codestream_assembly_used);
+                    encoded.encoded
+                });
+            });
+        }
+    }
+    encode.finish();
 }
 
 fn metal_encode_available() -> bool {
@@ -106,6 +167,40 @@ fn generate_gray_plane(width: u32, height: u32) -> Vec<f32> {
         }
     }
     samples
+}
+
+fn generate_rgb8_pixels(width: u32, height: u32) -> Vec<u8> {
+    let len = width as usize * height as usize * 3;
+    let mut pixels = Vec::with_capacity(len);
+    for y in 0..height {
+        for x in 0..width {
+            pixels.push(((x * 3 + y * 5) & 0xff) as u8);
+            pixels.push(((x * 7 + y * 11 + (x ^ y)) & 0xff) as u8);
+            pixels.push(((x * 13 + y * 17 + x.wrapping_mul(y) / 31) & 0xff) as u8);
+        }
+    }
+    pixels
+}
+
+#[cfg(target_os = "macos")]
+fn private_buffer_with_bytes(session: &MetalBackendSession, bytes: &[u8]) -> metal::Buffer {
+    let upload = session.device().new_buffer_with_data(
+        bytes.as_ptr().cast(),
+        bytes.len() as u64,
+        metal::MTLResourceOptions::StorageModeShared,
+    );
+    let private = session.device().new_buffer(
+        bytes.len() as u64,
+        metal::MTLResourceOptions::StorageModePrivate,
+    );
+    let queue = session.device().new_command_queue();
+    let command_buffer = queue.new_command_buffer();
+    let blit = command_buffer.new_blit_command_encoder();
+    blit.copy_from_buffer(&upload, 0, &private, 0, bytes.len() as u64);
+    blit.end_encoding();
+    command_buffer.commit();
+    command_buffer.wait_until_completed();
+    private
 }
 
 fn centered_sample(value: u32) -> f32 {

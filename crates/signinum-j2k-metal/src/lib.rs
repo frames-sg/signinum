@@ -7,6 +7,7 @@ mod batch;
 mod classic;
 #[cfg(target_os = "macos")]
 mod compute;
+mod dicom;
 #[cfg(target_os = "macos")]
 mod direct;
 mod encode;
@@ -44,14 +45,30 @@ use signinum_j2k_native::{
 #[cfg(target_os = "macos")]
 use metal::{Buffer, Device, MTLResourceOptions};
 
+#[doc(hidden)]
+pub use dicom::{
+    extract_dicom_encapsulated_frames, extract_dicom_encapsulated_frames_with_limit,
+    DicomFrameExtractError,
+};
 pub use encode::{
-    encode_lossless_from_metal_buffer, encode_lossless_from_metal_buffer_with_report,
-    encode_lossless_from_metal_buffers, encode_lossless_from_metal_buffers_with_report,
-    encode_lossless_from_padded_metal_buffer, encode_lossless_from_padded_metal_buffer_with_report,
-    encode_lossless_from_padded_metal_buffers,
-    encode_lossless_from_padded_metal_buffers_with_report, validate_lossless_roundtrip_on_metal,
+    encode_lossless_from_metal_buffer, encode_lossless_from_metal_buffer_to_metal,
+    encode_lossless_from_metal_buffer_to_metal_with_report,
+    encode_lossless_from_metal_buffer_with_report, encode_lossless_from_metal_buffers,
+    encode_lossless_from_metal_buffers_to_metal,
+    encode_lossless_from_metal_buffers_to_metal_with_report,
+    encode_lossless_from_metal_buffers_with_report, encode_lossless_from_padded_metal_buffer,
+    encode_lossless_from_padded_metal_buffer_to_metal,
+    encode_lossless_from_padded_metal_buffer_to_metal_with_report,
+    encode_lossless_from_padded_metal_buffer_with_report,
+    encode_lossless_from_padded_metal_buffers, encode_lossless_from_padded_metal_buffers_to_metal,
+    encode_lossless_from_padded_metal_buffers_to_metal_with_report,
+    encode_lossless_from_padded_metal_buffers_with_report, submit_lossless_from_metal_buffer,
+    submit_lossless_from_metal_buffers, submit_lossless_from_padded_metal_buffer,
+    submit_lossless_from_padded_metal_buffers, validate_lossless_roundtrip_on_metal,
     validate_lossless_roundtrip_on_metal_with_session, MetalEncodeStageAccelerator,
-    MetalLosslessEncodeOutcome, MetalLosslessEncodeTile,
+    MetalEncodedJ2k, MetalLosslessBufferEncodeOutcome, MetalLosslessEncodeOutcome,
+    MetalLosslessEncodeResidency, MetalLosslessEncodeTile, SubmittedJ2kLosslessMetalEncode,
+    SubmittedJ2kLosslessMetalEncodeBatch,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -132,6 +149,7 @@ const AUTO_REPEATED_GRAYSCALE_MIN_COUNT: usize = 16;
 #[derive(Clone)]
 pub struct Surface {
     backend: BackendKind,
+    residency: SurfaceResidency,
     dimensions: (u32, u32),
     fmt: PixelFormat,
     pitch_bytes: usize,
@@ -139,7 +157,21 @@ pub struct Surface {
     storage: Storage,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SurfaceResidency {
+    Host,
+    MetalResidentDecode,
+    CpuStagedMetalUpload,
+}
+
+const CPU_STAGED_METAL_REQUIRES_EXPLICIT_API: &str =
+    "CPU-staged Metal upload requires the explicit CPU-staged API; BackendRequest::Metal only accepts resident Metal decode";
+
 impl Surface {
+    pub fn residency(&self) -> SurfaceResidency {
+        self.residency
+    }
+
     pub fn pitch_bytes(&self) -> usize {
         self.pitch_bytes
     }
@@ -183,6 +215,7 @@ impl Surface {
     ) -> Self {
         Self {
             backend: BackendKind::Metal,
+            residency: SurfaceResidency::MetalResidentDecode,
             dimensions,
             fmt,
             pitch_bytes: dimensions.0 as usize * fmt.bytes_per_pixel(),
@@ -200,6 +233,7 @@ impl Surface {
     ) -> Self {
         Self {
             backend: BackendKind::Metal,
+            residency: SurfaceResidency::MetalResidentDecode,
             dimensions,
             fmt,
             pitch_bytes: dimensions.0 as usize * fmt.bytes_per_pixel(),
@@ -565,6 +599,178 @@ impl<'a> J2kDecoder<'a> {
         }
     }
 
+    pub fn decode_to_host_surface(&mut self, fmt: PixelFormat) -> Result<Surface, Error> {
+        self.decode_to_cpu_surface(fmt)
+    }
+
+    pub fn decode_region_to_host_surface(
+        &mut self,
+        fmt: PixelFormat,
+        roi: Rect,
+    ) -> Result<Surface, Error> {
+        let plan = DeviceDecodePlan::for_image(
+            self.inner.info().dimensions,
+            DeviceDecodeRequest::Region { roi },
+        )?;
+        self.decode_region_to_cpu_surface(fmt, plan)
+    }
+
+    pub fn decode_scaled_to_host_surface(
+        &mut self,
+        fmt: PixelFormat,
+        scale: Downscale,
+    ) -> Result<Surface, Error> {
+        let plan = DeviceDecodePlan::for_image(
+            self.inner.info().dimensions,
+            DeviceDecodeRequest::Scaled { scale },
+        )?;
+        self.decode_scaled_to_cpu_surface(fmt, scale, plan)
+    }
+
+    pub fn decode_region_scaled_to_host_surface(
+        &mut self,
+        fmt: PixelFormat,
+        roi: Rect,
+        scale: Downscale,
+    ) -> Result<Surface, Error> {
+        let plan = DeviceDecodePlan::for_image(
+            self.inner.info().dimensions,
+            DeviceDecodeRequest::RegionScaled { roi, scale },
+        )?;
+        self.decode_region_scaled_to_cpu_surface(fmt, roi, scale, plan)
+    }
+
+    pub fn decode_to_cpu_staged_metal_surface_with_session(
+        &mut self,
+        fmt: PixelFormat,
+        session: &MetalBackendSession,
+    ) -> Result<Surface, Error> {
+        #[cfg(target_os = "macos")]
+        {
+            let dims = self.inner.info().dimensions;
+            let stride = dims.0 as usize * fmt.bytes_per_pixel();
+            let mut out = vec![0u8; stride * dims.1 as usize];
+            self.inner
+                .decode_into_with_scratch(&mut self.pool, &mut out, stride, fmt)?;
+            Ok(upload_surface_to_metal_with_device(
+                &out,
+                dims,
+                fmt,
+                session.device(),
+            ))
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (fmt, session);
+            Err(Error::MetalUnavailable)
+        }
+    }
+
+    pub fn decode_region_to_cpu_staged_metal_surface_with_session(
+        &mut self,
+        fmt: PixelFormat,
+        roi: Rect,
+        session: &MetalBackendSession,
+    ) -> Result<Surface, Error> {
+        #[cfg(target_os = "macos")]
+        {
+            let plan = DeviceDecodePlan::for_image(
+                self.inner.info().dimensions,
+                DeviceDecodeRequest::Region { roi },
+            )?;
+            let dims = plan.output_dims();
+            let stride = dims.0 as usize * fmt.bytes_per_pixel();
+            let mut out = vec![0u8; stride * dims.1 as usize];
+            self.inner.decode_region_into(
+                &mut self.pool,
+                &mut out,
+                stride,
+                fmt,
+                plan.source_rect(),
+            )?;
+            Ok(upload_surface_to_metal_with_device(
+                &out,
+                dims,
+                fmt,
+                session.device(),
+            ))
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (fmt, roi, session);
+            Err(Error::MetalUnavailable)
+        }
+    }
+
+    pub fn decode_scaled_to_cpu_staged_metal_surface_with_session(
+        &mut self,
+        fmt: PixelFormat,
+        scale: Downscale,
+        session: &MetalBackendSession,
+    ) -> Result<Surface, Error> {
+        #[cfg(target_os = "macos")]
+        {
+            let plan = DeviceDecodePlan::for_image(
+                self.inner.info().dimensions,
+                DeviceDecodeRequest::Scaled { scale },
+            )?;
+            let dims = plan.output_dims();
+            let stride = dims.0 as usize * fmt.bytes_per_pixel();
+            let mut out = vec![0u8; stride * dims.1 as usize];
+            self.inner
+                .decode_scaled_into(&mut self.pool, &mut out, stride, fmt, scale)?;
+            Ok(upload_surface_to_metal_with_device(
+                &out,
+                dims,
+                fmt,
+                session.device(),
+            ))
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (fmt, scale, session);
+            Err(Error::MetalUnavailable)
+        }
+    }
+
+    pub fn decode_region_scaled_to_cpu_staged_metal_surface_with_session(
+        &mut self,
+        fmt: PixelFormat,
+        roi: Rect,
+        scale: Downscale,
+        session: &MetalBackendSession,
+    ) -> Result<Surface, Error> {
+        #[cfg(target_os = "macos")]
+        {
+            let plan = DeviceDecodePlan::for_image(
+                self.inner.info().dimensions,
+                DeviceDecodeRequest::RegionScaled { roi, scale },
+            )?;
+            let dims = plan.output_dims();
+            let stride = dims.0 as usize * fmt.bytes_per_pixel();
+            let mut out = vec![0u8; stride * dims.1 as usize];
+            self.inner.decode_region_scaled_into(
+                &mut self.pool,
+                &mut out,
+                stride,
+                fmt,
+                roi,
+                scale,
+            )?;
+            Ok(upload_surface_to_metal_with_device(
+                &out,
+                dims,
+                fmt,
+                session.device(),
+            ))
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (fmt, roi, scale, session);
+            Err(Error::MetalUnavailable)
+        }
+    }
+
     #[cfg(target_os = "macos")]
     fn ensure_native_image(&mut self) -> Result<(), Error> {
         if self.native_image.is_none() {
@@ -720,6 +926,59 @@ impl<'a> J2kDecoder<'a> {
         }
 
         Ok(None)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn decode_region_scaled_direct_to_surface(
+        &mut self,
+        fmt: PixelFormat,
+        roi: Rect,
+        scale: Downscale,
+    ) -> Result<Option<Surface>, Error> {
+        if !matches!(fmt, PixelFormat::Gray8 | PixelFormat::Gray16) {
+            return Ok(None);
+        }
+        let prepared = match build_region_scaled_direct_gray_plan(self.inner.bytes(), roi, scale) {
+            Ok(prepared) => prepared,
+            Err(error) if is_direct_region_scaled_runtime_fallback_error(&error) => {
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+        match crate::compute::execute_prepared_direct_grayscale_plan(&Arc::new(prepared), fmt) {
+            Ok(surface) => Ok(Some(surface)),
+            Err(error) if is_direct_region_scaled_runtime_fallback_error(&error) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn decode_region_scaled_direct_to_surface_with_device(
+        &mut self,
+        fmt: PixelFormat,
+        roi: Rect,
+        scale: Downscale,
+        device: &Device,
+    ) -> Result<Option<Surface>, Error> {
+        if !matches!(fmt, PixelFormat::Gray8 | PixelFormat::Gray16) {
+            return Ok(None);
+        }
+        let prepared = match build_region_scaled_direct_gray_plan(self.inner.bytes(), roi, scale) {
+            Ok(prepared) => prepared,
+            Err(error) if is_direct_region_scaled_runtime_fallback_error(&error) => {
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+        match crate::compute::execute_prepared_direct_grayscale_plan_with_device(
+            &Arc::new(prepared),
+            fmt,
+            device,
+        ) {
+            Ok(surface) => Ok(Some(surface)),
+            Err(error) if is_direct_region_scaled_runtime_fallback_error(&error) => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -979,6 +1238,9 @@ impl<'a> J2kDecoder<'a> {
         scale: Downscale,
         plan: DeviceDecodePlan,
     ) -> Result<Surface, Error> {
+        if let Some(surface) = self.decode_region_scaled_direct_to_surface(fmt, roi, scale)? {
+            return Ok(surface);
+        }
         crate::compute::decode_region_scaled_to_surface(
             self.inner.bytes(),
             plan.source_dims(),
@@ -1037,6 +1299,11 @@ impl<'a> J2kDecoder<'a> {
         plan: DeviceDecodePlan,
         device: &Device,
     ) -> Result<Surface, Error> {
+        if let Some(surface) =
+            self.decode_region_scaled_direct_to_surface_with_device(fmt, roi, scale, device)?
+        {
+            return Ok(surface);
+        }
         crate::compute::decode_region_scaled_to_surface_with_device(
             self.inner.bytes(),
             plan.source_dims(),
@@ -1183,6 +1450,13 @@ impl<'a> J2kDecoder<'a> {
         if let Some(error) = routing::decision_error(route) {
             return Err(error);
         }
+        if matches!(route, routing::RouteDecision::MetalKernel)
+            && !matches!(fmt, PixelFormat::Gray8 | PixelFormat::Gray16)
+        {
+            return Err(Error::UnsupportedMetalRequest {
+                reason: "J2K Metal ROI+scaled direct decode currently supports Gray8/Gray16 only",
+            });
+        }
 
         let plan = DeviceDecodePlan::for_image(
             self.inner.info().dimensions,
@@ -1218,6 +1492,11 @@ impl<'a> J2kDecoder<'a> {
             routing::decision_error(routing::decide_route(BackendRequest::Metal, fmt))
         {
             return Err(error);
+        }
+        if !matches!(fmt, PixelFormat::Gray8 | PixelFormat::Gray16) {
+            return Err(Error::UnsupportedMetalRequest {
+                reason: "J2K Metal ROI+scaled direct decode currently supports Gray8/Gray16 only",
+            });
         }
 
         #[cfg(target_os = "macos")]
@@ -1360,12 +1639,24 @@ fn evict_one_direct_plan_if_needed<T>(cache: &mut HashMap<u64, T>) {
 
 #[cfg(target_os = "macos")]
 fn is_direct_color_runtime_fallback_error(error: &Error) -> bool {
+    is_direct_runtime_fallback_error(error)
+}
+
+#[cfg(target_os = "macos")]
+fn is_direct_runtime_fallback_error(error: &Error) -> bool {
     matches!(
         error,
         Error::MetalKernel { message }
             if message.contains("unsupported classic kernel input")
+                || message.contains("unsupported HT kernel input")
                 || message.contains("direct component plan")
+                || message.contains("currently supports grayscale direct plans only")
     )
+}
+
+#[cfg(target_os = "macos")]
+fn is_direct_region_scaled_runtime_fallback_error(error: &Error) -> bool {
+    is_direct_runtime_fallback_error(error)
 }
 
 #[cfg(target_os = "macos")]
@@ -1395,6 +1686,72 @@ pub(crate) fn decode_full_grayscale_batch_direct_to_device(
         plans.push(plan);
     }
     crate::compute::execute_prepared_direct_grayscale_plan_batch(&plans, fmt)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn decode_region_scaled_grayscale_batch_direct_to_device(
+    requests: &[(Arc<[u8]>, Rect, Downscale)],
+    fmt: PixelFormat,
+) -> Result<Vec<Surface>, Error> {
+    if requests.is_empty() {
+        return Ok(Vec::new());
+    }
+    if !matches!(fmt, PixelFormat::Gray8 | PixelFormat::Gray16) {
+        return Err(Error::MetalKernel {
+            message: format!(
+                "J2K MetalDirect region-scaled grayscale batch does not support {fmt:?}"
+            ),
+        });
+    }
+
+    let mut plans = Vec::with_capacity(requests.len());
+    for (input, roi, scale) in requests {
+        let plan = build_region_scaled_direct_gray_plan(input.as_ref(), *roi, *scale)?;
+        plans.push(Arc::new(plan));
+    }
+    crate::compute::execute_prepared_direct_grayscale_plan_batch(&plans, fmt)
+}
+
+#[cfg(target_os = "macos")]
+fn build_region_scaled_direct_gray_plan(
+    input: &[u8],
+    roi: Rect,
+    scale: Downscale,
+) -> Result<crate::compute::PreparedDirectGrayscalePlan, Error> {
+    let decoder = J2kDecoder::new(input)?;
+    let dims = decoder.inner.info().dimensions;
+    let target_dims = (
+        dims.0.div_ceil(scale.denominator()),
+        dims.1.div_ceil(scale.denominator()),
+    );
+    let settings = NativeDecodeSettings {
+        target_resolution: Some(target_dims),
+        ..NativeDecodeSettings::default()
+    };
+    let image =
+        NativeImage::new(input, &settings).map_err(|error| J2kError::Backend(error.to_string()))?;
+    let mut context = NativeDecoderContext::default();
+    let plan = match image.build_direct_grayscale_plan_with_context(&mut context) {
+        Ok(plan) => plan,
+        Err(error) if direct::is_unsupported_direct_plan_error(&error.to_string()) => {
+            return Err(Error::MetalKernel {
+                message: format!(
+                    "explicit J2K MetalDirect region-scaled batch currently supports grayscale direct plans only: {error}"
+                ),
+            });
+        }
+        Err(error) => {
+            return Err(Error::Decode(J2kError::Backend(format!(
+                "failed to build J2K MetalDirect region-scaled grayscale plan: {error}"
+            ))));
+        }
+    };
+    let mut prepared = crate::compute::prepare_direct_grayscale_plan(&plan)?;
+    crate::compute::crop_prepared_direct_grayscale_plan_to_output_region(
+        &mut prepared,
+        roi.scaled_covering(scale),
+    )?;
+    Ok(prepared)
 }
 
 #[cfg(target_os = "macos")]
@@ -1429,104 +1786,12 @@ pub(crate) fn decode_full_color_batch_direct_to_device(
     match crate::compute::execute_prepared_direct_color_plan_batch(&plans, fmt) {
         Ok(surfaces) => Ok(surfaces),
         Err(error) if is_direct_color_runtime_fallback_error(&error) => {
-            decode_full_color_batch_cpu_to_stacked_metal(inputs, fmt)
+            Err(Error::UnsupportedMetalRequest {
+                reason: CPU_STAGED_METAL_REQUIRES_EXPLICIT_API,
+            })
         }
         Err(error) => Err(error),
     }
-}
-
-#[cfg(target_os = "macos")]
-fn decode_full_color_batch_cpu_to_stacked_metal(
-    inputs: &[Arc<[u8]>],
-    fmt: PixelFormat,
-) -> Result<Vec<Surface>, Error> {
-    let mut stacked = Vec::new();
-    let mut dimensions = None;
-    let mut surface_bytes = None;
-
-    let worker_count = std::thread::available_parallelism()
-        .map(usize::from)
-        .unwrap_or(1)
-        .min(inputs.len())
-        .max(1);
-    let chunk_size = inputs.len().div_ceil(worker_count);
-    let decoded = std::thread::scope(|scope| {
-        let handles = inputs
-            .chunks(chunk_size)
-            .map(|chunk| {
-                scope.spawn(move || {
-                    chunk
-                        .iter()
-                        .map(|input| {
-                            let mut decoder = J2kDecoder::new(input.as_ref())?;
-                            let surface = decoder.decode_to_cpu_surface(fmt)?;
-                            Ok::<_, Error>((surface.dimensions, surface.as_bytes().to_vec()))
-                        })
-                        .collect::<Result<Vec<_>, Error>>()
-                })
-            })
-            .collect::<Vec<_>>();
-
-        let mut decoded = Vec::with_capacity(inputs.len());
-        for handle in handles {
-            decoded.extend(handle.join().map_err(|_| Error::MetalKernel {
-                message: "J2K Metal color fallback worker panicked".to_string(),
-            })??);
-        }
-        Ok::<_, Error>(decoded)
-    })?;
-
-    for (surface_dimensions, bytes) in decoded {
-        if dimensions.is_some_and(|dims| dims != surface_dimensions) {
-            return Err(Error::MetalKernel {
-                message: "J2K MetalDirect color fallback batch requires matching dimensions"
-                    .to_string(),
-            });
-        }
-        dimensions = Some(surface_dimensions);
-        surface_bytes = Some(bytes.len());
-        stacked.extend_from_slice(&bytes);
-    }
-
-    let dimensions = dimensions.unwrap_or((0, 0));
-    let surface_bytes = surface_bytes.unwrap_or(0);
-    upload_stacked_metal_surfaces(&stacked, dimensions, fmt, inputs.len(), surface_bytes)
-}
-
-#[cfg(target_os = "macos")]
-fn upload_stacked_metal_surfaces(
-    bytes: &[u8],
-    dimensions: (u32, u32),
-    fmt: PixelFormat,
-    count: usize,
-    surface_bytes: usize,
-) -> Result<Vec<Surface>, Error> {
-    let expected = surface_bytes
-        .checked_mul(count)
-        .ok_or_else(|| Error::MetalKernel {
-            message: "J2K Metal stacked color surface size overflow".to_string(),
-        })?;
-    if bytes.len() != expected {
-        return Err(Error::MetalKernel {
-            message: "J2K Metal stacked color surface byte length mismatch".to_string(),
-        });
-    }
-    let device = Device::system_default().ok_or(Error::MetalUnavailable)?;
-    let buffer = device.new_buffer_with_data(
-        bytes.as_ptr().cast(),
-        bytes.len().max(1) as u64,
-        MTLResourceOptions::StorageModeShared,
-    );
-    Ok((0..count)
-        .map(|index| Surface {
-            backend: BackendKind::Metal,
-            dimensions,
-            fmt,
-            pitch_bytes: dimensions.0 as usize * fmt.bytes_per_pixel(),
-            byte_offset: index * surface_bytes,
-            storage: Storage::Metal(buffer.clone()),
-        })
-        .collect())
 }
 
 impl ImageCodec for J2kDecoder<'_> {
@@ -1923,49 +2188,54 @@ fn upload_surface(
 ) -> Result<Surface, Error> {
     let pitch_bytes = dimensions.0 as usize * fmt.bytes_per_pixel();
     match backend {
-        BackendRequest::Cpu => Ok(Surface {
+        BackendRequest::Cpu | BackendRequest::Auto => Ok(Surface {
             backend: BackendKind::Cpu,
+            residency: SurfaceResidency::Host,
             dimensions,
             fmt,
             pitch_bytes,
             byte_offset: 0,
             storage: Storage::Host(bytes),
         }),
-        BackendRequest::Auto | BackendRequest::Metal => {
+        BackendRequest::Metal => {
             #[cfg(target_os = "macos")]
             {
-                let device = Device::system_default().ok_or(Error::MetalUnavailable)?;
-                let buffer = device.new_buffer_with_data(
-                    bytes.as_ptr().cast(),
-                    bytes.len() as u64,
-                    MTLResourceOptions::StorageModeShared,
-                );
-                Ok(Surface {
-                    backend: BackendKind::Metal,
-                    dimensions,
-                    fmt,
-                    pitch_bytes,
-                    byte_offset: 0,
-                    storage: Storage::Metal(buffer),
+                let _ = bytes;
+                Err(Error::UnsupportedMetalRequest {
+                    reason: CPU_STAGED_METAL_REQUIRES_EXPLICIT_API,
                 })
             }
             #[cfg(not(target_os = "macos"))]
             {
-                if matches!(backend, BackendRequest::Auto) {
-                    Ok(Surface {
-                        backend: BackendKind::Cpu,
-                        dimensions,
-                        fmt,
-                        pitch_bytes,
-                        byte_offset: 0,
-                        storage: Storage::Host(bytes),
-                    })
-                } else {
-                    Err(Error::MetalUnavailable)
-                }
+                let _ = bytes;
+                Err(Error::MetalUnavailable)
             }
         }
         BackendRequest::Cuda => Err(Error::UnsupportedBackend { request: backend }),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn upload_surface_to_metal_with_device(
+    bytes: &[u8],
+    dimensions: (u32, u32),
+    fmt: PixelFormat,
+    device: &metal::DeviceRef,
+) -> Surface {
+    let pitch_bytes = dimensions.0 as usize * fmt.bytes_per_pixel();
+    let buffer = device.new_buffer_with_data(
+        bytes.as_ptr().cast(),
+        bytes.len() as u64,
+        MTLResourceOptions::StorageModeShared,
+    );
+    Surface {
+        backend: BackendKind::Metal,
+        residency: SurfaceResidency::CpuStagedMetalUpload,
+        dimensions,
+        fmt,
+        pitch_bytes,
+        byte_offset: 0,
+        storage: Storage::Metal(buffer),
     }
 }
 
@@ -2003,3 +2273,48 @@ fn copy_into_output(
 }
 
 pub use signinum_j2k::{J2kContext, J2kScratchPool};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cpu_uploaded_surface_reports_host_residency() {
+        let surface = upload_surface(
+            vec![1, 2, 3],
+            (1, 1),
+            PixelFormat::Rgb8,
+            BackendRequest::Cpu,
+        )
+        .expect("create CPU surface");
+
+        assert_eq!(surface.backend_kind(), BackendKind::Cpu);
+        assert_eq!(surface.residency(), SurfaceResidency::Host);
+        #[cfg(target_os = "macos")]
+        assert!(surface.metal_buffer().is_none());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn explicit_metal_request_does_not_stage_cpu_pixels() {
+        if Device::system_default().is_none() {
+            eprintln!("skipping surface residency test: no Metal device");
+            return;
+        }
+
+        let result = upload_surface(
+            vec![1, 2, 3],
+            (1, 1),
+            PixelFormat::Rgb8,
+            BackendRequest::Metal,
+        );
+
+        assert!(matches!(
+            result,
+            Err(Error::UnsupportedMetalRequest { reason })
+                if reason.contains("CPU-staged")
+                    && reason.contains("explicit")
+                    && reason.contains("Metal")
+        ));
+    }
+}

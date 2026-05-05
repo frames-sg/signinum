@@ -1,7 +1,11 @@
 use signinum_core::{
     BackendCapabilities, BackendKind, BackendRequest, CodecContext, CodecError, CpuFeatures,
-    DecoderContext, DeviceSubmission, DeviceSurface, Downscale, ImageCodec, PixelFormat,
+    DecoderContext, DeviceSubmission, DeviceSurface, Downscale, ImageCodec, PassthroughCandidate,
+    PassthroughDecision, PassthroughRejectReason, PassthroughRequirements, PixelFormat,
     PixelLayout, ReadySubmission, Rect, SampleType, ScratchPool, TileBatchDecodeManyDevice,
+};
+use signinum_core::{
+    CodedUnitLayout, Colorspace, CompressedPayloadKind, CompressedTransferSyntax, Info, TileLayout,
 };
 
 #[test]
@@ -230,4 +234,107 @@ fn tile_batch_decode_many_device_returns_ordered_surfaces() {
     assert_eq!(surfaces[0].dimensions(), (3, 1));
     assert_eq!(surfaces[1].dimensions(), (6, 1));
     assert_eq!(surfaces[1].byte_len(), 18);
+}
+
+fn passthrough_info() -> Info {
+    Info {
+        dimensions: (512, 512),
+        components: 3,
+        colorspace: Colorspace::SRgb,
+        bit_depth: 8,
+        tile_layout: Some(TileLayout {
+            tile_width: 512,
+            tile_height: 512,
+            tiles_x: 1,
+            tiles_y: 1,
+        }),
+        coded_unit_layout: Some(CodedUnitLayout {
+            unit_width: 512,
+            unit_height: 512,
+            units_x: 1,
+            units_y: 1,
+        }),
+        restart_interval: None,
+        resolution_levels: 1,
+    }
+}
+
+#[test]
+fn passthrough_candidate_copies_when_syntax_payload_and_metadata_match() {
+    let bytes = [0xff, 0x4f, 0xff, 0xd9];
+    let candidate = PassthroughCandidate::new(
+        &bytes,
+        CompressedTransferSyntax::Jpeg2000Lossless,
+        CompressedPayloadKind::Jpeg2000Codestream,
+        passthrough_info(),
+    );
+    let requirements = PassthroughRequirements::new(
+        CompressedTransferSyntax::Jpeg2000Lossless,
+        CompressedPayloadKind::Jpeg2000Codestream,
+    )
+    .with_dimensions((512, 512))
+    .with_components(3)
+    .with_bit_depth(8)
+    .with_colorspace(Colorspace::SRgb);
+
+    assert_eq!(
+        candidate.evaluate(&requirements),
+        PassthroughDecision::Copy { bytes: &bytes }
+    );
+    assert!(core::ptr::eq(
+        candidate
+            .copy_bytes_if_eligible(&requirements)
+            .expect("eligible bytes")
+            .as_ptr(),
+        bytes.as_ptr()
+    ));
+}
+
+#[test]
+fn passthrough_candidate_rejects_transfer_syntax_mismatch_before_metadata() {
+    let bytes = [0xff, 0x4f, 0xff, 0xd9];
+    let candidate = PassthroughCandidate::new(
+        &bytes,
+        CompressedTransferSyntax::Jpeg2000Lossless,
+        CompressedPayloadKind::Jpeg2000Codestream,
+        passthrough_info(),
+    );
+    let requirements = PassthroughRequirements::new(
+        CompressedTransferSyntax::HtJpeg2000Lossless,
+        CompressedPayloadKind::Jpeg2000Codestream,
+    )
+    .with_dimensions((256, 256));
+
+    assert_eq!(
+        candidate.evaluate(&requirements),
+        PassthroughDecision::Transcode {
+            reason: PassthroughRejectReason::TransferSyntaxMismatch {
+                source: CompressedTransferSyntax::Jpeg2000Lossless,
+                destination: CompressedTransferSyntax::HtJpeg2000Lossless,
+            }
+        }
+    );
+}
+
+#[test]
+fn passthrough_candidate_rejects_jp2_container_for_dicom_codestream_payload() {
+    let bytes = [0, 0, 0, 12, b'j', b'P', b' ', b' '];
+    let candidate = PassthroughCandidate::new(
+        &bytes,
+        CompressedTransferSyntax::Jpeg2000Lossless,
+        CompressedPayloadKind::Jp2File,
+        passthrough_info(),
+    );
+    let requirements = PassthroughRequirements::new(
+        CompressedTransferSyntax::Jpeg2000Lossless,
+        CompressedPayloadKind::Jpeg2000Codestream,
+    );
+
+    assert_eq!(
+        candidate.copy_bytes_if_eligible(&requirements),
+        Err(PassthroughRejectReason::PayloadKindMismatch {
+            source: CompressedPayloadKind::Jp2File,
+            destination: CompressedPayloadKind::Jpeg2000Codestream,
+        })
+    );
 }

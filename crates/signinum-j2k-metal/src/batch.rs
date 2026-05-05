@@ -6,6 +6,11 @@ use signinum_core::{BackendRequest, DeviceSubmission, Downscale, PixelFormat, Re
 
 use crate::{Error, J2kDecoder, MetalSession, Surface};
 
+const AUTO_REGION_SCALED_GRAYSCALE_BATCH64_MIN_DIM: u32 = 512;
+const AUTO_REGION_SCALED_GRAYSCALE_BATCH64_MIN_COUNT: usize = 64;
+const AUTO_REGION_SCALED_GRAYSCALE_BATCH16_MIN_DIM: u32 = 1024;
+const AUTO_REGION_SCALED_GRAYSCALE_BATCH16_MIN_COUNT: usize = 16;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BatchOp {
     Full,
@@ -21,6 +26,14 @@ struct QueuedRequest {
     backend: BackendRequest,
     op: BatchOp,
     output_slot: usize,
+}
+
+impl QueuedRequest {
+    fn max_image_dim(&self) -> Option<u32> {
+        let decoder = J2kDecoder::new(self.input.as_ref()).ok()?;
+        let dims = decoder.inner.info().dimensions;
+        Some(dims.0.max(dims.1))
+    }
 }
 
 #[derive(Default)]
@@ -87,15 +100,19 @@ fn flush_if_needed(session: &mut SessionState) {
         return;
     }
 
-    for batch in group_full_metal_requests(std::mem::take(&mut session.queued)) {
+    for batch in group_metal_requests(std::mem::take(&mut session.queued)) {
         process_batch(session, batch);
     }
 }
 
-fn group_full_metal_requests(queued: Vec<QueuedRequest>) -> Vec<Vec<QueuedRequest>> {
-    coalesce_distinct_full_color_metal_requests(coalesce_distinct_full_grayscale_metal_requests(
-        group_repeated_full_metal_requests(queued),
-    ))
+fn group_metal_requests(queued: Vec<QueuedRequest>) -> Vec<Vec<QueuedRequest>> {
+    coalesce_distinct_region_scaled_grayscale_metal_requests(
+        coalesce_distinct_full_color_metal_requests(
+            coalesce_distinct_full_grayscale_metal_requests(group_repeated_full_metal_requests(
+                queued,
+            )),
+        ),
+    )
 }
 
 fn group_repeated_full_metal_requests(queued: Vec<QueuedRequest>) -> Vec<Vec<QueuedRequest>> {
@@ -141,6 +158,40 @@ fn coalesce_distinct_full_grayscale_metal_requests(
     batches
 }
 
+fn coalesce_distinct_region_scaled_grayscale_metal_requests(
+    repeated_batches: Vec<Vec<QueuedRequest>>,
+) -> Vec<Vec<QueuedRequest>> {
+    let mut batches = Vec::new();
+    let mut metal_gray8 = Vec::new();
+    let mut metal_gray16 = Vec::new();
+    let mut auto_gray8 = Vec::new();
+    let mut auto_gray16 = Vec::new();
+
+    for batch in repeated_batches {
+        if batch.len() == 1 && is_region_scaled_grayscale_batch_candidate(&batch[0]) {
+            let request = batch
+                .into_iter()
+                .next()
+                .expect("single-entry batch has request");
+            match (request.backend, request.fmt) {
+                (BackendRequest::Metal, PixelFormat::Gray8) => metal_gray8.push(request),
+                (BackendRequest::Metal, PixelFormat::Gray16) => metal_gray16.push(request),
+                (BackendRequest::Auto, PixelFormat::Gray8) => auto_gray8.push(request),
+                (BackendRequest::Auto, PixelFormat::Gray16) => auto_gray16.push(request),
+                _ => unreachable!("candidate backend and pixel format are restricted above"),
+            }
+        } else {
+            batches.push(batch);
+        }
+    }
+
+    push_coalesced_or_single(&mut batches, metal_gray8);
+    push_coalesced_or_single(&mut batches, metal_gray16);
+    push_auto_region_scaled_grayscale_batches(&mut batches, auto_gray8);
+    push_auto_region_scaled_grayscale_batches(&mut batches, auto_gray16);
+    batches
+}
+
 fn push_coalesced_or_single(batches: &mut Vec<Vec<QueuedRequest>>, requests: Vec<QueuedRequest>) {
     if requests.is_empty() {
         return;
@@ -150,6 +201,31 @@ fn push_coalesced_or_single(batches: &mut Vec<Vec<QueuedRequest>>, requests: Vec
     } else {
         batches.push(requests);
     }
+}
+
+fn push_auto_region_scaled_grayscale_batches(
+    batches: &mut Vec<Vec<QueuedRequest>>,
+    requests: Vec<QueuedRequest>,
+) {
+    let Some(min_dim) = auto_region_scaled_grayscale_metal_min_dim(&requests) else {
+        push_coalesced_or_single(batches, requests);
+        return;
+    };
+
+    let mut metal_requests = Vec::new();
+    let mut cpu_requests = Vec::new();
+    for request in requests {
+        if request
+            .max_image_dim()
+            .is_some_and(|max_dim| max_dim >= min_dim)
+        {
+            metal_requests.push(request);
+        } else {
+            cpu_requests.push(request);
+        }
+    }
+    push_coalesced_or_single(batches, metal_requests);
+    push_coalesced_or_single(batches, cpu_requests);
 }
 
 #[allow(clippy::similar_names)]
@@ -241,6 +317,43 @@ fn is_distinct_full_color_metal_candidate(request: &QueuedRequest) -> bool {
         && request.backend == BackendRequest::Metal
 }
 
+fn is_region_scaled_grayscale_batch_candidate(request: &QueuedRequest) -> bool {
+    matches!(request.op, BatchOp::RegionScaled { .. })
+        && matches!(request.fmt, PixelFormat::Gray8 | PixelFormat::Gray16)
+        && matches!(
+            request.backend,
+            BackendRequest::Auto | BackendRequest::Metal
+        )
+}
+
+fn should_auto_use_metal_for_region_scaled_grayscale_batch(requests: &[QueuedRequest]) -> bool {
+    auto_region_scaled_grayscale_metal_min_dim(requests).is_some()
+}
+
+fn auto_region_scaled_grayscale_metal_min_dim(requests: &[QueuedRequest]) -> Option<u32> {
+    let mut count_512_class = 0usize;
+    let mut count_1024_class = 0usize;
+    for request in requests {
+        let Some(max_dim) = request.max_image_dim() else {
+            continue;
+        };
+        if max_dim >= AUTO_REGION_SCALED_GRAYSCALE_BATCH64_MIN_DIM {
+            count_512_class += 1;
+        }
+        if max_dim >= AUTO_REGION_SCALED_GRAYSCALE_BATCH16_MIN_DIM {
+            count_1024_class += 1;
+        }
+    }
+
+    if count_512_class >= AUTO_REGION_SCALED_GRAYSCALE_BATCH64_MIN_COUNT {
+        Some(AUTO_REGION_SCALED_GRAYSCALE_BATCH64_MIN_DIM)
+    } else if count_1024_class >= AUTO_REGION_SCALED_GRAYSCALE_BATCH16_MIN_COUNT {
+        Some(AUTO_REGION_SCALED_GRAYSCALE_BATCH16_MIN_DIM)
+    } else {
+        None
+    }
+}
+
 fn can_decode_requests_as_repeated_full_grayscale_batch(requests: &[QueuedRequest]) -> bool {
     let Some((first, rest)) = requests.split_first() else {
         return false;
@@ -309,6 +422,18 @@ fn process_batch(session: &mut SessionState, requests: Vec<QueuedRequest>) {
                     return;
                 }
                 Ok(_) | Err(_) => {}
+            }
+        }
+    }
+
+    if requests.len() > 1 {
+        if let Some(Ok(surfaces)) = decode_distinct_region_scaled_grayscale_batch(&requests) {
+            if surfaces.len() == requests.len() {
+                session.submissions = session.submissions.saturating_add(1);
+                for (request, surface) in requests.into_iter().zip(surfaces) {
+                    session.completed[request.output_slot] = Some(Ok(surface));
+                }
+                return;
             }
         }
     }
@@ -420,6 +545,45 @@ fn decode_distinct_full_color_batch(
         Some(crate::decode_full_color_batch_direct_to_device(
             &inputs, first.fmt,
         ))
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+fn decode_distinct_region_scaled_grayscale_batch(
+    requests: &[QueuedRequest],
+) -> Option<Result<Vec<Surface>, Error>> {
+    let first = requests.first()?;
+    if requests.len() <= 1
+        || !requests.iter().all(|request| {
+            is_region_scaled_grayscale_batch_candidate(request)
+                && request.fmt == first.fmt
+                && request.backend == first.backend
+        })
+    {
+        return None;
+    }
+    if first.backend == BackendRequest::Auto
+        && !should_auto_use_metal_for_region_scaled_grayscale_batch(requests)
+    {
+        return None;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let request_specs = requests
+            .iter()
+            .map(|request| match request.op {
+                BatchOp::RegionScaled { roi, scale } => (request.input.clone(), roi, scale),
+                _ => unreachable!("candidate op is restricted above"),
+            })
+            .collect::<Vec<_>>();
+        Some(
+            crate::decode_region_scaled_grayscale_batch_direct_to_device(&request_specs, first.fmt),
+        )
     }
 
     #[cfg(not(target_os = "macos"))]

@@ -12,8 +12,10 @@ cargo add signinum-j2k-metal
 The adapter exposes full, ROI, reduced-resolution, and combined
 ROI+reduced-resolution device surfaces. `BackendRequest::Auto` may choose a
 validated Metal path for supported shapes and otherwise returns host-backed CPU
-output. `BackendRequest::Metal` is strict and reports unsupported or
-unavailable Metal requests as errors.
+output. `BackendRequest::Metal` is strict: it returns resident Metal decode
+surfaces only, and reports unsupported or unavailable Metal requests as errors.
+Use the explicit `decode_*_cpu_staged_metal_surface_with_session` APIs when
+CPU-decoded bytes need to be uploaded into a Metal buffer.
 
 The stable CPU decode API lives in `signinum-j2k`. This adapter remains
 pre-1.0 while runtime validation and routing policies continue to harden.

@@ -85,7 +85,7 @@ fn supports_metal_ht_kernel(job: &HtCodeBlockDecodeJob<'_>) -> bool {
     if job.width == 0 || job.height == 0 {
         return false;
     }
-    if job.width > 64 || job.height > 64 {
+    if !supports_metal_ht_geometry(job.width, job.height) {
         return false;
     }
     if job.num_bitplanes == 0 || job.num_bitplanes > 31 || job.missing_bit_planes >= 30 {
@@ -111,6 +111,57 @@ fn supports_metal_ht_kernel(job: &HtCodeBlockDecodeJob<'_>) -> bool {
     }
 
     true
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn supports_metal_ht_geometry(width: u32, height: u32) -> bool {
+    const MAX_WIDTH: u32 = 256;
+    const MAX_HEIGHT: u32 = 256;
+    const MAX_COEFFICIENTS: u32 = 4096;
+    const MAX_SSTR: u32 = 264;
+    const MAX_SCRATCH: u32 = 3096;
+    const MAX_VN: u32 = 130;
+    const MAX_MSTR: u32 = 72;
+    const MAX_SIGMA: u32 = 528;
+    const MAX_PREV_ROW_SIG: u32 = 72;
+
+    if width > MAX_WIDTH || height > MAX_HEIGHT {
+        return false;
+    }
+    if width
+        .checked_mul(height)
+        .is_none_or(|area| area > MAX_COEFFICIENTS)
+    {
+        return false;
+    }
+
+    let quad_rows = height.div_ceil(2);
+    let sstr = (width + 9) & !7;
+    if sstr > MAX_SSTR
+        || sstr
+            .checked_mul(quad_rows + 1)
+            .is_none_or(|scratch| scratch > MAX_SCRATCH)
+    {
+        return false;
+    }
+
+    let vn_width = width.div_ceil(2) + 2;
+    if vn_width > MAX_VN {
+        return false;
+    }
+
+    let sigma_rows = height.div_ceil(4) + 1;
+    let mstr = (width.div_ceil(4) + 9) & !7;
+    if mstr > MAX_MSTR
+        || sigma_rows
+            .checked_mul(mstr)
+            .is_none_or(|sigma| sigma > MAX_SIGMA)
+    {
+        return false;
+    }
+
+    let prev_row_len = width.div_ceil(4) + 8;
+    prev_row_len <= MAX_PREV_ROW_SIG
 }
 
 #[cfg(test)]
@@ -218,6 +269,40 @@ mod tests {
         encode_htj2k(&pixels, 8, 8, 1, 8, false, &options).expect("encode multi-block ht gray8")
     }
 
+    fn fixture_ht_gray8_wide_code_block() -> Vec<u8> {
+        let width = 128u32;
+        let height = 32u32;
+        let pixels: Vec<u8> = (0..(width * height))
+            .map(|idx| ((idx * 17 + idx / 7) & 0xFF) as u8)
+            .collect();
+        let options = EncodeOptions {
+            reversible: true,
+            num_decomposition_levels: 0,
+            code_block_width_exp: 5,
+            code_block_height_exp: 3,
+            ..EncodeOptions::default()
+        };
+        encode_htj2k(&pixels, width, height, 1, 8, false, &options)
+            .expect("encode wide-code-block ht gray8")
+    }
+
+    fn fixture_ht_gray8_very_wide_code_block() -> Vec<u8> {
+        let width = 256u32;
+        let height = 16u32;
+        let pixels: Vec<u8> = (0..(width * height))
+            .map(|idx| ((idx * 13 + idx / 5) & 0xFF) as u8)
+            .collect();
+        let options = EncodeOptions {
+            reversible: true,
+            num_decomposition_levels: 0,
+            code_block_width_exp: 6,
+            code_block_height_exp: 2,
+            ..EncodeOptions::default()
+        };
+        encode_htj2k(&pixels, width, height, 1, 8, false, &options)
+            .expect("encode very-wide-code-block ht gray8")
+    }
+
     fn synthetic_refinement_job(number_of_coding_passes: u8) -> OwnedHtJob {
         let bytes = fixture_ht_gray8();
         let image = Image::new(&bytes, &DecodeSettings::default()).expect("image");
@@ -306,6 +391,62 @@ mod tests {
         for (hooked_plane, baseline_plane) in hooked.planes().iter().zip(baseline.planes()) {
             assert_eq!(hooked_plane.samples(), baseline_plane.samples());
         }
+    }
+
+    #[test]
+    fn metal_ht_decoder_handles_wide_code_blocks() {
+        let bytes = fixture_ht_gray8_wide_code_block();
+        let image = Image::new(&bytes, &DecodeSettings::default()).expect("image");
+
+        let mut baseline_context = DecoderContext::default();
+        let baseline = image
+            .decode_components_with_context(&mut baseline_context)
+            .expect("baseline decode");
+
+        let mut hooked_context = DecoderContext::default();
+        let mut decoder = MetalHtBlockDecoder::default();
+        let hooked = image
+            .decode_components_with_ht_decoder(&mut hooked_context, &mut decoder)
+            .expect("hooked decode");
+
+        assert_eq!(hooked.dimensions(), baseline.dimensions());
+        assert_eq!(hooked.planes().len(), baseline.planes().len());
+        for (hooked_plane, baseline_plane) in hooked.planes().iter().zip(baseline.planes()) {
+            assert_eq!(hooked_plane.samples(), baseline_plane.samples());
+        }
+        #[cfg(target_os = "macos")]
+        assert!(
+            decoder.kernel_dispatches() > 0 || decoder.sub_band_batches() > 0,
+            "valid wide HTJ2K code-blocks should stay on the Metal decode path"
+        );
+    }
+
+    #[test]
+    fn metal_ht_decoder_handles_very_wide_code_blocks() {
+        let bytes = fixture_ht_gray8_very_wide_code_block();
+        let image = Image::new(&bytes, &DecodeSettings::default()).expect("image");
+
+        let mut baseline_context = DecoderContext::default();
+        let baseline = image
+            .decode_components_with_context(&mut baseline_context)
+            .expect("baseline decode");
+
+        let mut hooked_context = DecoderContext::default();
+        let mut decoder = MetalHtBlockDecoder::default();
+        let hooked = image
+            .decode_components_with_ht_decoder(&mut hooked_context, &mut decoder)
+            .expect("hooked decode");
+
+        assert_eq!(hooked.dimensions(), baseline.dimensions());
+        assert_eq!(hooked.planes().len(), baseline.planes().len());
+        for (hooked_plane, baseline_plane) in hooked.planes().iter().zip(baseline.planes()) {
+            assert_eq!(hooked_plane.samples(), baseline_plane.samples());
+        }
+        #[cfg(target_os = "macos")]
+        assert!(
+            decoder.kernel_dispatches() > 0 || decoder.sub_band_batches() > 0,
+            "valid 256x16 HTJ2K code-blocks should stay on the Metal decode path"
+        );
     }
 
     #[cfg(target_os = "macos")]

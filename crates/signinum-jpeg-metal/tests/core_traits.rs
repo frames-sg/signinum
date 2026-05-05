@@ -4,7 +4,9 @@ use signinum_core::{
     BackendKind, BackendRequest, CodecError, DeviceSubmission, DeviceSurface, Downscale,
     ImageDecode, ImageDecodeDevice, ImageDecodeSubmit, PixelFormat, Rect,
 };
-use signinum_jpeg_metal::{Decoder, Error, MetalBackendSession, MetalSession, ScratchPool};
+use signinum_jpeg_metal::{
+    Decoder, Error, MetalBackendSession, MetalSession, ScratchPool, SurfaceResidency,
+};
 
 const BASELINE_420: &[u8] = include_bytes!("../fixtures/jpeg/baseline_420_16x16.jpg");
 const BASELINE_422: &[u8] = include_bytes!("../fixtures/jpeg/baseline_422_16x8.jpg");
@@ -75,6 +77,7 @@ fn decode_to_device_with_session_uses_session_device() {
         .expect("session decode");
 
     assert_eq!(surface.backend_kind(), BackendKind::Metal);
+    assert_eq!(surface.residency(), SurfaceResidency::MetalResidentDecode);
     let (buffer, _) = surface.metal_buffer().expect("metal buffer");
     assert_eq!(buffer.device().as_ptr(), session.device().as_ptr());
 }

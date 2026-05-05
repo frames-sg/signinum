@@ -1,6 +1,10 @@
 # signinum-jpeg
 
 JPEG tile inspect and CPU decode for whole-slide imaging workloads.
+The baseline JPEG encoder is kept for generated fixtures and explicit fallback
+or derived-output use. WSI/DICOM storage conversion should prefer compressed
+tile passthrough, or lossless JPEG 2000 / HTJ2K encode when a new diagnostic
+codestream is required.
 
 Install:
 
@@ -26,6 +30,13 @@ println!(
 );
 
 let view = JpegView::parse(bytes)?;
+if let Some(candidate) = view.passthrough_candidate() {
+    println!(
+        "passthrough syntax={:?} payload={:?}",
+        candidate.transfer_syntax(),
+        candidate.payload_kind()
+    );
+}
 if let Some(index) = view.restart_index()? {
     println!("restart segments={}", index.segments.len());
 }

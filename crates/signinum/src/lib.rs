@@ -81,12 +81,14 @@ pub mod j2k {
     pub use signinum_j2k::{
         adapter, context, encode_j2k_lossless as encode_j2k_lossless_cpu,
         encode_j2k_lossless_with_accelerator, error, j2k_lossless_decomposition_levels, scratch,
-        view, BackendKind, BackendRequest, BufferError, CodecError, DecodeOutcome, DecodeRowsError,
-        DecoderContext, Downscale, EncodeBackendPreference, EncodedJ2k, ImageCodec, ImageDecode,
-        ImageDecodeRows, J2kBlockCodingMode, J2kCodec, J2kContext, J2kDecoder,
-        J2kEncodeDispatchReport, J2kEncodeStageAccelerator, J2kEncodeValidation, J2kError,
-        J2kLosslessEncodeOptions, J2kLosslessSamples, J2kProgressionOrder, J2kScratchPool, J2kView,
-        PixelFormat, Rect, ReversibleTransform, RowSink, TileBatchDecode,
+        view, BackendKind, BackendRequest, BufferError, CodecError, CompressedPayloadKind,
+        CompressedTransferSyntax, DecodeOutcome, DecodeRowsError, DecoderContext, Downscale,
+        EncodeBackendPreference, EncodedJ2k, ImageCodec, ImageDecode, ImageDecodeRows,
+        J2kBlockCodingMode, J2kCodec, J2kContext, J2kDecoder, J2kEncodeDispatchReport,
+        J2kEncodeStageAccelerator, J2kEncodeValidation, J2kError, J2kLosslessEncodeOptions,
+        J2kLosslessSamples, J2kProgressionOrder, J2kScratchPool, J2kView, PassthroughCandidate,
+        PassthroughDecision, PassthroughRejectReason, PassthroughRequirements, PixelFormat, Rect,
+        ReversibleTransform, RowSink, TileBatchDecode,
     };
 
     #[cfg(feature = "cuda")]
@@ -197,6 +199,10 @@ pub use core::{
     DecodeRowsError, DecoderContext, DeviceSurface, Downscale, ImageCodec, ImageDecode,
     ImageDecodeDevice, ImageDecodeRows, PixelFormat, Rect, RowSink, TileBatchDecode,
     TileBatchDecodeManyDevice, TileDecompress,
+};
+pub use core::{
+    CompressedPayloadKind, CompressedTransferSyntax, PassthroughCandidate, PassthroughDecision,
+    PassthroughRejectReason, PassthroughRequirements,
 };
 pub use j2k::{
     encode_j2k_lossless, encode_j2k_lossless_with_accelerator, j2k_lossless_decomposition_levels,

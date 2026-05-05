@@ -8,18 +8,24 @@ use signinum_core::{
     TileBatchDecodeSubmit,
 };
 use signinum_j2k::{
-    DecoderContext, Downscale, J2kCodec, J2kContext, J2kDecoder, J2kScratchPool, PixelFormat, Rect,
-    TileBatchDecode,
+    CompressedTransferSyntax, DecoderContext, Downscale, J2kCodec, J2kContext, J2kDecoder,
+    J2kScratchPool, PixelFormat, Rect, TileBatchDecode,
 };
 use signinum_j2k_metal::{
-    Codec as MetalJ2kCodec, J2kDecoder as MetalJ2kDecoder, J2kScratchPool as MetalJ2kScratchPool,
-    MetalSession,
+    extract_dicom_encapsulated_frames_with_limit, Codec as MetalJ2kCodec,
+    J2kDecoder as MetalJ2kDecoder, J2kScratchPool as MetalJ2kScratchPool, MetalSession,
 };
 use signinum_j2k_native::{encode, encode_htj2k, EncodeOptions};
+use std::{
+    collections::BTreeSet,
+    env, fs,
+    path::{Path, PathBuf},
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DecodeMode {
     Gray8,
+    Gray16,
     Rgb8,
 }
 
@@ -32,8 +38,24 @@ pub(crate) struct BenchInput {
     pub is_ht: bool,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct ExternalTileBatch {
+    pub name: String,
+    pub inputs: Vec<Vec<u8>>,
+    pub dimensions: Vec<(u32, u32)>,
+    pub mode: DecodeMode,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExternalCodecFamily {
+    J2k,
+    Htj2k,
+    Unknown,
+}
+
 const AUTO_REPEATED_GRAYSCALE_MIN_DIM: u32 = 512;
 const AUTO_REPEATED_GRAYSCALE_MIN_COUNT: usize = 16;
+const EXTERNAL_WSI_TILE_DIR_ENV: &str = "SIGNINUM_J2K_METAL_WSI_TILE_DIR";
 
 pub(crate) fn bench_inputs() -> Vec<BenchInput> {
     let mut inputs = vec![
@@ -91,42 +113,283 @@ pub(crate) fn bench_inputs() -> Vec<BenchInput> {
         },
     ];
 
-    match ht_bench_input() {
-        Ok(input) => inputs.push(input),
-        Err(error) => eprintln!("skipping HTJ2K bench input: {error}"),
-    }
+    inputs.extend(ht_bench_inputs());
 
     inputs
 }
 
-fn ht_bench_input() -> Result<BenchInput, String> {
-    let candidates = [
-        ("htj2k_gray_1024", 1024_u32, 1024_u32),
-        ("htj2k_gray_512", 512_u32, 512_u32),
-        ("htj2k_gray_256", 256_u32, 256_u32),
-        ("htj2k_gray_128", 128_u32, 128_u32),
-        ("htj2k_gray_64", 64_u32, 64_u32),
-        ("htj2k_gray_8", 8_u32, 8_u32),
-    ];
+pub(crate) fn external_wsi_tile_batches(max_count: usize) -> Vec<ExternalTileBatch> {
+    let Some(root) = external_tile_root() else {
+        eprintln!(
+            "skipping external WSI J2K tile benchmarks: set {EXTERNAL_WSI_TILE_DIR_ENV} to a directory of JP2/J2K/JPH/JHC tiles or DICOM WSI files"
+        );
+        return Vec::new();
+    };
 
-    let mut last_error = None;
-    for (name, width, height) in candidates {
-        let pixels = ht_bench_pixels(width, height, 1);
-        match try_encode_ht(&pixels, width, height, 1, 8) {
-            Ok(codestream) => {
-                return Ok(BenchInput {
-                    name,
-                    bytes: wrap_codestream_jp2(&codestream, width, height, 1, 8, 17),
-                    dimensions: (width, height),
-                    mode: DecodeMode::Gray8,
-                    is_ht: true,
-                })
+    let mut paths = collect_external_tile_paths(&root);
+    if paths.is_empty() {
+        eprintln!(
+            "skipping external WSI J2K tile benchmarks: no JP2/J2K/JPH/JHC tiles or DICOM WSI files found under {}",
+            root.display()
+        );
+        return Vec::new();
+    }
+    paths.sort();
+
+    let mut j2k_gray8 = Vec::new();
+    let mut j2k_gray16 = Vec::new();
+    let mut j2k_rgb8 = Vec::new();
+    let mut htj2k_gray8 = Vec::new();
+    let mut htj2k_gray16 = Vec::new();
+    let mut htj2k_rgb8 = Vec::new();
+    let mut unknown_gray8 = Vec::new();
+    let mut unknown_gray16 = Vec::new();
+    let mut unknown_rgb8 = Vec::new();
+    for path in paths {
+        let Ok(source_bytes) = fs::read(&path) else {
+            eprintln!(
+                "skipping unreadable external WSI source: {}",
+                path.display()
+            );
+            continue;
+        };
+        let frames = external_source_frames(&path, source_bytes, max_count);
+        for bytes in frames {
+            let Ok(info) = J2kDecoder::inspect(&bytes) else {
+                eprintln!(
+                    "skipping unsupported external J2K tile/frame: {}",
+                    path.display()
+                );
+                continue;
+            };
+            let Some(mode) = external_decode_mode(info.components, info.bit_depth) else {
+                continue;
+            };
+            let family = external_codec_family(&bytes);
+            let entry = (bytes, info.dimensions);
+            match (family, mode) {
+                (ExternalCodecFamily::J2k, DecodeMode::Gray8) => j2k_gray8.push(entry),
+                (ExternalCodecFamily::J2k, DecodeMode::Gray16) => j2k_gray16.push(entry),
+                (ExternalCodecFamily::J2k, DecodeMode::Rgb8) => j2k_rgb8.push(entry),
+                (ExternalCodecFamily::Htj2k, DecodeMode::Gray8) => htj2k_gray8.push(entry),
+                (ExternalCodecFamily::Htj2k, DecodeMode::Gray16) => htj2k_gray16.push(entry),
+                (ExternalCodecFamily::Htj2k, DecodeMode::Rgb8) => htj2k_rgb8.push(entry),
+                (ExternalCodecFamily::Unknown, DecodeMode::Gray8) => unknown_gray8.push(entry),
+                (ExternalCodecFamily::Unknown, DecodeMode::Gray16) => unknown_gray16.push(entry),
+                (ExternalCodecFamily::Unknown, DecodeMode::Rgb8) => unknown_rgb8.push(entry),
             }
-            Err(error) => last_error = Some(format!("{name}: {error}")),
         }
     }
 
-    Err(last_error.unwrap_or_else(|| "no HTJ2K benchmark candidate succeeded".to_string()))
+    [
+        external_tile_batch(&root, "j2k_gray8", DecodeMode::Gray8, j2k_gray8, max_count),
+        external_tile_batch(
+            &root,
+            "j2k_gray16",
+            DecodeMode::Gray16,
+            j2k_gray16,
+            max_count,
+        ),
+        external_tile_batch(&root, "j2k_rgb8", DecodeMode::Rgb8, j2k_rgb8, max_count),
+        external_tile_batch(
+            &root,
+            "htj2k_gray8",
+            DecodeMode::Gray8,
+            htj2k_gray8,
+            max_count,
+        ),
+        external_tile_batch(
+            &root,
+            "htj2k_gray16",
+            DecodeMode::Gray16,
+            htj2k_gray16,
+            max_count,
+        ),
+        external_tile_batch(&root, "htj2k_rgb8", DecodeMode::Rgb8, htj2k_rgb8, max_count),
+        external_tile_batch(
+            &root,
+            "j2k_unknown_gray8",
+            DecodeMode::Gray8,
+            unknown_gray8,
+            max_count,
+        ),
+        external_tile_batch(
+            &root,
+            "j2k_unknown_gray16",
+            DecodeMode::Gray16,
+            unknown_gray16,
+            max_count,
+        ),
+        external_tile_batch(
+            &root,
+            "j2k_unknown_rgb8",
+            DecodeMode::Rgb8,
+            unknown_rgb8,
+            max_count,
+        ),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+fn external_tile_root() -> Option<PathBuf> {
+    let raw = env::var_os(EXTERNAL_WSI_TILE_DIR_ENV)?;
+    if raw.is_empty() {
+        return None;
+    }
+    let root = PathBuf::from(raw);
+    if root.is_dir() {
+        Some(root)
+    } else {
+        eprintln!(
+            "skipping external WSI J2K tile benchmarks: {} is not a directory",
+            root.display()
+        );
+        None
+    }
+}
+
+fn collect_external_tile_paths(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            eprintln!(
+                "skipping unreadable external tile directory: {}",
+                dir.display()
+            );
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if is_external_wsi_source_path(&path) {
+                out.push(path);
+            }
+        }
+    }
+    out
+}
+
+fn is_external_wsi_source_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| {
+            matches!(
+                ext.to_ascii_lowercase().as_str(),
+                "jp2" | "j2k" | "j2c" | "jpc" | "jph" | "jhc" | "dcm" | "dicom"
+            )
+        })
+}
+
+fn external_source_frames(path: &Path, bytes: Vec<u8>, max_count: usize) -> Vec<Vec<u8>> {
+    if is_dicom_path(path) {
+        match extract_dicom_encapsulated_frames_with_limit(&bytes, max_count) {
+            Ok(frames) => frames,
+            Err(error) => {
+                eprintln!(
+                    "skipping external DICOM WSI source {}: {error}",
+                    path.display()
+                );
+                Vec::new()
+            }
+        }
+    } else {
+        vec![bytes]
+    }
+}
+
+fn is_dicom_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| matches!(ext.to_ascii_lowercase().as_str(), "dcm" | "dicom"))
+}
+
+fn external_decode_mode(components: u8, bit_depth: u8) -> Option<DecodeMode> {
+    match (components, bit_depth) {
+        (1, 1..=8) => Some(DecodeMode::Gray8),
+        (1, 9..=16) => Some(DecodeMode::Gray16),
+        (3, 1..=8) => Some(DecodeMode::Rgb8),
+        _ => None,
+    }
+}
+
+fn external_codec_family(bytes: &[u8]) -> ExternalCodecFamily {
+    let Ok(decoder) = J2kDecoder::new(bytes) else {
+        return ExternalCodecFamily::Unknown;
+    };
+    let Some(candidate) = decoder.passthrough_candidate() else {
+        return ExternalCodecFamily::Unknown;
+    };
+    match candidate.transfer_syntax() {
+        CompressedTransferSyntax::Jpeg2000Lossless | CompressedTransferSyntax::Jpeg2000Lossy => {
+            ExternalCodecFamily::J2k
+        }
+        CompressedTransferSyntax::HtJpeg2000Lossless
+        | CompressedTransferSyntax::HtJpeg2000Lossy => ExternalCodecFamily::Htj2k,
+        _ => ExternalCodecFamily::Unknown,
+    }
+}
+
+fn external_tile_batch(
+    root: &Path,
+    label: &str,
+    mode: DecodeMode,
+    entries: Vec<(Vec<u8>, (u32, u32))>,
+    max_count: usize,
+) -> Option<ExternalTileBatch> {
+    if entries.is_empty() || max_count == 0 {
+        return None;
+    }
+
+    let count = entries.len().min(max_count);
+    let (inputs, dimensions): (Vec<_>, Vec<_>) = entries.into_iter().take(count).unzip();
+    let distinct_dims = dimensions.iter().copied().collect::<BTreeSet<_>>().len();
+    let root_name = root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("external_wsi");
+    Some(ExternalTileBatch {
+        name: format!("{root_name}_{label}_{count}tiles_{distinct_dims}dims"),
+        inputs,
+        dimensions,
+        mode,
+    })
+}
+
+fn ht_bench_inputs() -> Vec<BenchInput> {
+    let candidates = [
+        ("htj2k_gray_1024", 1024_u32, 1024_u32),
+        ("htj2k_gray_512", 512_u32, 512_u32),
+    ];
+
+    let mut inputs = Vec::with_capacity(candidates.len());
+    let mut errors = Vec::new();
+    for (name, width, height) in candidates {
+        let pixels = ht_bench_pixels(width, height, 1);
+        match try_encode_ht(&pixels, width, height, 1, 8) {
+            Ok(codestream) => inputs.push(BenchInput {
+                name,
+                bytes: wrap_codestream_jp2(&codestream, width, height, 1, 8, 17),
+                dimensions: (width, height),
+                mode: DecodeMode::Gray8,
+                is_ht: true,
+            }),
+            Err(error) => errors.push(format!("{name}: {error}")),
+        }
+    }
+
+    if inputs.is_empty() {
+        eprintln!(
+            "skipping HTJ2K bench inputs: {}",
+            errors
+                .last()
+                .map_or("no HTJ2K benchmark candidate succeeded", String::as_str)
+        );
+    }
+    inputs
 }
 
 fn ht_bench_pixels(width: u32, height: u32, channels: usize) -> Vec<u8> {
@@ -259,6 +522,36 @@ pub(crate) fn distinct_rgb_tile_batch_inputs(input: &BenchInput, count: usize) -
         .collect()
 }
 
+pub(crate) fn distinct_gray_tile_batch_inputs(input: &BenchInput, count: usize) -> Vec<Vec<u8>> {
+    assert_eq!(input.mode, DecodeMode::Gray8);
+    (0..count)
+        .map(|index| {
+            let pixels =
+                gradient_variant_u8(input.dimensions.0, input.dimensions.1, 1, index as u32);
+            if input.is_ht {
+                wrap_codestream_jp2(
+                    &try_encode_ht(&pixels, input.dimensions.0, input.dimensions.1, 1, 8)
+                        .expect("encode distinct HTJ2K grayscale benchmark tile"),
+                    input.dimensions.0,
+                    input.dimensions.1,
+                    1,
+                    8,
+                    17,
+                )
+            } else {
+                let name = format!("{}_distinct_{index}", input.name);
+                classic_bench_bytes(
+                    &name,
+                    &pixels,
+                    input.dimensions.0,
+                    input.dimensions.1,
+                    input.mode,
+                )
+            }
+        })
+        .collect()
+}
+
 pub(crate) fn signinum_decode_tile_batch_distinct(inputs: &[Vec<u8>], mode: DecodeMode) {
     let Some(first) = inputs.first() else {
         return;
@@ -272,6 +565,57 @@ pub(crate) fn signinum_decode_tile_batch_distinct(inputs: &[Vec<u8>], mode: Deco
     for bytes in inputs {
         J2kCodec::decode_tile(&mut ctx, &mut pool, bytes, &mut out, stride, fmt)
             .expect("tile decode");
+    }
+    black_box(out);
+}
+
+pub(crate) fn signinum_decode_tile_batch_region_scaled_distinct(
+    inputs: &[Vec<u8>],
+    mode: DecodeMode,
+    edge: u32,
+    scale: Downscale,
+) {
+    let Some(first) = inputs.first() else {
+        return;
+    };
+    let mut ctx = DecoderContext::<J2kContext>::new();
+    let mut pool = J2kScratchPool::new();
+    let decoder = J2kDecoder::new(first).expect("signinum decoder");
+    let roi = centered_roi(decoder.info().dimensions, edge);
+    let scaled = roi.scaled_covering(scale);
+    let fmt = mode_format(mode);
+    let stride = scaled.w as usize * fmt.bytes_per_pixel();
+    let mut out = vec![0_u8; stride * scaled.h as usize];
+    for bytes in inputs {
+        J2kCodec::decode_tile_region_scaled(
+            &mut ctx, &mut pool, bytes, &mut out, stride, fmt, roi, scale,
+        )
+        .expect("tile region scaled decode");
+    }
+    black_box(out);
+}
+
+pub(crate) fn signinum_decode_external_tile_batch_region_scaled(
+    batch: &ExternalTileBatch,
+    count: usize,
+    edge: u32,
+    scale: Downscale,
+) {
+    let count = count.min(batch.inputs.len());
+    if count == 0 {
+        return;
+    }
+
+    let mut ctx = DecoderContext::<J2kContext>::new();
+    let mut pool = J2kScratchPool::new();
+    let fmt = mode_format(batch.mode);
+    let (rois, stride, height) = external_batch_output_geometry(batch, count, edge, scale, fmt);
+    let mut out = vec![0_u8; stride * height as usize];
+    for (bytes, roi) in batch.inputs.iter().zip(rois.iter()).take(count) {
+        J2kCodec::decode_tile_region_scaled(
+            &mut ctx, &mut pool, bytes, &mut out, stride, fmt, *roi, scale,
+        )
+        .expect("external tile region scaled decode");
     }
     black_box(out);
 }
@@ -375,6 +719,9 @@ pub(crate) fn signinum_metal_supports_region_scaled(
     edge: u32,
     scale: Downscale,
 ) -> bool {
+    if !supports_metal_region_scaled_mode(mode) {
+        return false;
+    }
     let cpu_decoder = J2kDecoder::new(bytes).expect("signinum decoder");
     let roi = centered_roi(cpu_decoder.info().dimensions, edge);
     let mut decoder = MetalJ2kDecoder::new(bytes).expect("signinum metal decoder");
@@ -470,6 +817,93 @@ pub(crate) fn signinum_metal_decode_tile_batch_distinct(inputs: &[Vec<u8>], mode
     black_box(surfaces);
 }
 
+pub(crate) fn signinum_metal_decode_tile_batch_region_scaled_distinct(
+    inputs: &[Vec<u8>],
+    mode: DecodeMode,
+    edge: u32,
+    scale: Downscale,
+) {
+    let Some(first) = inputs.first() else {
+        return;
+    };
+    let cpu_decoder = J2kDecoder::new(first).expect("signinum decoder");
+    let roi = centered_roi(cpu_decoder.info().dimensions, edge);
+    let mut ctx = DecoderContext::<J2kContext>::new();
+    let mut session = MetalSession::default();
+    let mut pool = MetalJ2kScratchPool::new();
+    let submissions = inputs
+        .iter()
+        .map(|bytes| {
+            MetalJ2kCodec::submit_tile_region_scaled_to_device(
+                &mut ctx,
+                &mut session,
+                &mut pool,
+                bytes,
+                mode_format(mode),
+                roi,
+                scale,
+                BackendRequest::Metal,
+            )
+            .expect("signinum metal tile region scaled submit")
+        })
+        .collect::<Vec<_>>();
+    let surfaces = submissions
+        .into_iter()
+        .map(|submission| {
+            submission
+                .wait()
+                .expect("signinum metal tile region scaled decode")
+        })
+        .collect::<Vec<_>>();
+    black_box(surfaces);
+}
+
+pub(crate) fn signinum_metal_decode_external_tile_batch_region_scaled(
+    batch: &ExternalTileBatch,
+    count: usize,
+    edge: u32,
+    scale: Downscale,
+) {
+    let count = count.min(batch.inputs.len());
+    if count == 0 {
+        return;
+    }
+
+    let fmt = mode_format(batch.mode);
+    let (rois, _, _) = external_batch_output_geometry(batch, count, edge, scale, fmt);
+    let mut ctx = DecoderContext::<J2kContext>::new();
+    let mut session = MetalSession::default();
+    let mut pool = MetalJ2kScratchPool::new();
+    let submissions = batch
+        .inputs
+        .iter()
+        .zip(rois.iter())
+        .take(count)
+        .map(|(bytes, roi)| {
+            MetalJ2kCodec::submit_tile_region_scaled_to_device(
+                &mut ctx,
+                &mut session,
+                &mut pool,
+                bytes,
+                fmt,
+                *roi,
+                scale,
+                BackendRequest::Metal,
+            )
+            .expect("signinum metal external tile region scaled submit")
+        })
+        .collect::<Vec<_>>();
+    let surfaces = submissions
+        .into_iter()
+        .map(|submission| {
+            submission
+                .wait()
+                .expect("signinum metal external tile region scaled decode")
+        })
+        .collect::<Vec<_>>();
+    black_box(surfaces);
+}
+
 fn signinum_adaptive_decode_tile_batch_to_device(input: &BenchInput, count: usize) {
     let mut ctx = DecoderContext::<J2kContext>::new();
     let mut session = MetalSession::default();
@@ -494,6 +928,43 @@ fn signinum_adaptive_decode_tile_batch_to_device(input: &BenchInput, count: usiz
     black_box(surfaces);
 }
 
+fn signinum_adaptive_decode_tile_batch_region_scaled_to_device(
+    input: &BenchInput,
+    edge: u32,
+    scale: Downscale,
+    count: usize,
+) {
+    let decoder = J2kDecoder::new(&input.bytes).expect("signinum decoder");
+    let roi = centered_roi(decoder.info().dimensions, edge);
+    let mut ctx = DecoderContext::<J2kContext>::new();
+    let mut session = MetalSession::default();
+    let mut pool = MetalJ2kScratchPool::new();
+    let submissions = (0..count)
+        .map(|_| {
+            MetalJ2kCodec::submit_tile_region_scaled_to_device(
+                &mut ctx,
+                &mut session,
+                &mut pool,
+                &input.bytes,
+                mode_format(input.mode),
+                roi,
+                scale,
+                BackendRequest::Auto,
+            )
+            .expect("signinum auto tile region scaled submit")
+        })
+        .collect::<Vec<_>>();
+    let surfaces = submissions
+        .into_iter()
+        .map(|submission| {
+            submission
+                .wait()
+                .expect("signinum auto tile region scaled decode")
+        })
+        .collect::<Vec<_>>();
+    black_box(surfaces);
+}
+
 pub(crate) fn signinum_adaptive_decode_tile_batch(input: &BenchInput, count: usize) {
     #[cfg(target_os = "macos")]
     if should_auto_use_direct_grayscale_input(input, count) {
@@ -510,11 +981,98 @@ pub(crate) fn signinum_adaptive_decode_tile_batch_region_scaled(
     scale: Downscale,
     count: usize,
 ) {
-    signinum_decode_tile_batch_region_scaled(&input.bytes, input.mode, edge, scale, count);
+    signinum_adaptive_decode_tile_batch_region_scaled_to_device(input, edge, scale, count);
+}
+
+pub(crate) fn signinum_adaptive_decode_tile_batch_region_scaled_distinct(
+    inputs: &[Vec<u8>],
+    mode: DecodeMode,
+    edge: u32,
+    scale: Downscale,
+) {
+    let Some(first) = inputs.first() else {
+        return;
+    };
+    let decoder = J2kDecoder::new(first).expect("signinum decoder");
+    let roi = centered_roi(decoder.info().dimensions, edge);
+    let mut ctx = DecoderContext::<J2kContext>::new();
+    let mut session = MetalSession::default();
+    let mut pool = MetalJ2kScratchPool::new();
+    let submissions = inputs
+        .iter()
+        .map(|bytes| {
+            MetalJ2kCodec::submit_tile_region_scaled_to_device(
+                &mut ctx,
+                &mut session,
+                &mut pool,
+                bytes,
+                mode_format(mode),
+                roi,
+                scale,
+                BackendRequest::Auto,
+            )
+            .expect("signinum auto distinct tile region scaled submit")
+        })
+        .collect::<Vec<_>>();
+    let surfaces = submissions
+        .into_iter()
+        .map(|submission| {
+            submission
+                .wait()
+                .expect("signinum auto distinct tile region scaled decode")
+        })
+        .collect::<Vec<_>>();
+    black_box(surfaces);
+}
+
+pub(crate) fn signinum_adaptive_decode_external_tile_batch_region_scaled(
+    batch: &ExternalTileBatch,
+    count: usize,
+    edge: u32,
+    scale: Downscale,
+) {
+    let count = count.min(batch.inputs.len());
+    if count == 0 {
+        return;
+    }
+
+    let fmt = mode_format(batch.mode);
+    let (rois, _, _) = external_batch_output_geometry(batch, count, edge, scale, fmt);
+    let mut ctx = DecoderContext::<J2kContext>::new();
+    let mut session = MetalSession::default();
+    let mut pool = MetalJ2kScratchPool::new();
+    let submissions = batch
+        .inputs
+        .iter()
+        .zip(rois.iter())
+        .take(count)
+        .map(|(bytes, roi)| {
+            MetalJ2kCodec::submit_tile_region_scaled_to_device(
+                &mut ctx,
+                &mut session,
+                &mut pool,
+                bytes,
+                fmt,
+                *roi,
+                scale,
+                BackendRequest::Auto,
+            )
+            .expect("signinum auto external tile region scaled submit")
+        })
+        .collect::<Vec<_>>();
+    let surfaces = submissions
+        .into_iter()
+        .map(|submission| {
+            submission
+                .wait()
+                .expect("signinum auto external tile region scaled decode")
+        })
+        .collect::<Vec<_>>();
+    black_box(surfaces);
 }
 
 fn should_auto_use_direct_grayscale_input(input: &BenchInput, count: usize) -> bool {
-    if input.mode != DecodeMode::Gray8 || count == 0 {
+    if !matches!(input.mode, DecodeMode::Gray8 | DecodeMode::Gray16) || count == 0 {
         return false;
     }
     if input.dimensions.0.max(input.dimensions.1) < AUTO_REPEATED_GRAYSCALE_MIN_DIM {
@@ -567,6 +1125,73 @@ pub(crate) fn signinum_metal_supports_tile_batch_distinct(
         .all(|bytes| signinum_metal_supports_tile_batch(bytes, mode))
 }
 
+pub(crate) fn signinum_metal_supports_tile_batch_region_scaled_distinct(
+    inputs: &[Vec<u8>],
+    mode: DecodeMode,
+    edge: u32,
+    scale: Downscale,
+) -> bool {
+    if !supports_metal_region_scaled_mode(mode) {
+        return false;
+    }
+    let Some(first) = inputs.first() else {
+        return true;
+    };
+    let cpu_decoder = J2kDecoder::new(first).expect("signinum decoder");
+    let roi = centered_roi(cpu_decoder.info().dimensions, edge);
+    let mut ctx = DecoderContext::<J2kContext>::new();
+    let mut pool = MetalJ2kScratchPool::new();
+    inputs.iter().all(|bytes| {
+        MetalJ2kCodec::decode_tile_region_scaled_to_device(
+            &mut ctx,
+            &mut pool,
+            bytes,
+            mode_format(mode),
+            roi,
+            scale,
+            BackendRequest::Metal,
+        )
+        .is_ok()
+    })
+}
+
+pub(crate) fn signinum_metal_supports_external_tile_batch_region_scaled(
+    batch: &ExternalTileBatch,
+    count: usize,
+    edge: u32,
+    scale: Downscale,
+) -> bool {
+    if !supports_metal_region_scaled_mode(batch.mode) {
+        return false;
+    }
+    let count = count.min(batch.inputs.len());
+    if count == 0 {
+        return true;
+    }
+
+    let fmt = mode_format(batch.mode);
+    let (rois, _, _) = external_batch_output_geometry(batch, count, edge, scale, fmt);
+    let mut ctx = DecoderContext::<J2kContext>::new();
+    let mut pool = MetalJ2kScratchPool::new();
+    batch
+        .inputs
+        .iter()
+        .zip(rois.iter())
+        .take(count)
+        .all(|(bytes, roi)| {
+            MetalJ2kCodec::decode_tile_region_scaled_to_device(
+                &mut ctx,
+                &mut pool,
+                bytes,
+                fmt,
+                *roi,
+                scale,
+                BackendRequest::Metal,
+            )
+            .is_ok()
+        })
+}
+
 fn encode_j2k(pixels: &[u8], width: u32, height: u32, components: u8, bit_depth: u8) -> Vec<u8> {
     let options = EncodeOptions {
         reversible: true,
@@ -607,7 +1232,7 @@ fn classic_bench_bytes(
     mode: DecodeMode,
 ) -> Vec<u8> {
     let (components, colorspace) = match mode {
-        DecodeMode::Gray8 => (1_u16, 17_u32),
+        DecodeMode::Gray8 | DecodeMode::Gray16 => (1_u16, 17_u32),
         DecodeMode::Rgb8 => (3_u16, 16_u32),
     };
     wrap_codestream_jp2(
@@ -680,11 +1305,41 @@ pub(crate) fn centered_roi(dims: (u32, u32), edge: u32) -> Rect {
     }
 }
 
+fn external_batch_output_geometry(
+    batch: &ExternalTileBatch,
+    count: usize,
+    edge: u32,
+    scale: Downscale,
+    fmt: PixelFormat,
+) -> (Vec<Rect>, usize, u32) {
+    let rois = batch
+        .dimensions
+        .iter()
+        .take(count)
+        .map(|&dims| centered_roi(dims, edge))
+        .collect::<Vec<_>>();
+    let (max_width, max_height) = rois
+        .iter()
+        .map(|roi| {
+            let scaled = roi.scaled_covering(scale);
+            (scaled.w, scaled.h)
+        })
+        .fold((0_u32, 0_u32), |(max_w, max_h), (w, h)| {
+            (max_w.max(w), max_h.max(h))
+        });
+    (rois, max_width as usize * fmt.bytes_per_pixel(), max_height)
+}
+
 fn mode_format(mode: DecodeMode) -> PixelFormat {
     match mode {
         DecodeMode::Gray8 => PixelFormat::Gray8,
+        DecodeMode::Gray16 => PixelFormat::Gray16,
         DecodeMode::Rgb8 => PixelFormat::Rgb8,
     }
+}
+
+fn supports_metal_region_scaled_mode(mode: DecodeMode) -> bool {
+    matches!(mode, DecodeMode::Gray8 | DecodeMode::Gray16)
 }
 
 fn mode_geometry(mode: DecodeMode, dims: (u32, u32)) -> (PixelFormat, usize) {

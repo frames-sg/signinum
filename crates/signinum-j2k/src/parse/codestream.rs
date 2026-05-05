@@ -5,6 +5,7 @@ use crate::J2kError;
 use signinum_core::{InputError, TileLayout};
 
 const MARKER_SOC: u8 = 0x4F;
+const MARKER_CAP: u8 = 0x50;
 const MARKER_SIZ: u8 = 0x51;
 const MARKER_COD: u8 = 0x52;
 const MARKER_SOT: u8 = 0x90;
@@ -39,6 +40,7 @@ pub(crate) fn parse_codestream(input: &[u8]) -> Result<CodestreamInfo, J2kError>
     let mut offset = 2usize;
     let mut siz = None;
     let mut cod = None;
+    let mut high_throughput_cap = false;
     let mut terminated = false;
 
     while offset < input.len() {
@@ -56,6 +58,10 @@ pub(crate) fn parse_codestream(input: &[u8]) -> Result<CodestreamInfo, J2kError>
                 let payload = read_segment_payload(input, &mut offset, "COD")?;
                 cod = Some(parse_cod(payload)?);
             }
+            MARKER_CAP => {
+                let _ = read_segment_payload(input, &mut offset, "CAP")?;
+                high_throughput_cap = true;
+            }
             _ => {
                 let _ = read_segment_payload(input, &mut offset, "segment")?;
             }
@@ -72,7 +78,9 @@ pub(crate) fn parse_codestream(input: &[u8]) -> Result<CodestreamInfo, J2kError>
 
     Ok(CodestreamInfo {
         siz: siz.ok_or(J2kError::MissingRequiredMarker { marker: "SIZ" })?,
-        cod: cod.ok_or(J2kError::MissingRequiredMarker { marker: "COD" })?,
+        cod: cod
+            .ok_or(J2kError::MissingRequiredMarker { marker: "COD" })?
+            .with_high_throughput_cap(high_throughput_cap),
     })
 }
 
@@ -209,7 +217,15 @@ fn parse_cod(payload: &[u8]) -> Result<ParsedCod, J2kError> {
         resolution_levels: payload[5].saturating_add(1),
         has_mct: payload[4] != 0,
         reversible: payload[9] == 1,
+        high_throughput: payload[8] & 0x40 != 0,
     })
+}
+
+impl ParsedCod {
+    const fn with_high_throughput_cap(mut self, high_throughput_cap: bool) -> Self {
+        self.high_throughput |= high_throughput_cap;
+        self
+    }
 }
 
 fn read_u16(bytes: &[u8], offset: usize) -> u16 {

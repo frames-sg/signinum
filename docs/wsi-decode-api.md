@@ -121,8 +121,10 @@ Backend selection uses `BackendRequest`:
 - `BackendRequest::Auto` lets the adapter choose CPU or a device path. Auto is
   conservative and may return CPU-backed surfaces when benchmarks or shape
   support do not justify device execution.
-- `BackendRequest::Metal` requires Metal execution or a Metal-backed upload on
-  macOS. Unsupported explicit Metal requests return an error.
+- `BackendRequest::Metal` requires resident Metal execution on macOS.
+  CPU-decoded bytes are not uploaded to satisfy this request. Call explicit
+  CPU-staged upload APIs where the adapter exposes them when a Metal buffer is
+  needed after CPU decode. Unsupported explicit Metal requests return an error.
 - `BackendRequest::Cuda` requires CUDA device memory output. When an adapter is
   built with `cuda-runtime` and a CUDA driver is available, explicit CUDA
   requests return CUDA-backed surfaces. `signinum-jpeg-cuda` uses nvJPEG for
@@ -133,8 +135,11 @@ Backend selection uses `BackendRequest`:
 For Metal adapters, `BackendRequest::Auto` is a routing hint and may fall back
 to host-backed CPU output when the request shape is not on the Metal-supported
 path. `BackendRequest::Metal` is a strict request: supported shapes return
-Metal-backed surfaces, unsupported shapes fail as unsupported, and hosts
-without Metal fail as unavailable.
+resident Metal-backed decode surfaces, unsupported shapes fail as unsupported,
+and hosts without Metal fail as unavailable.
+Adapters that expose `SurfaceResidency` mark true resident decode separately
+from CPU-staged Metal upload so WSI pipelines do not count upload buffers as GPU
+decode.
 
 Callers should use explicit device requests only when they need that backend.
 Use `Auto` for viewer paths where CPU fallback is acceptable.

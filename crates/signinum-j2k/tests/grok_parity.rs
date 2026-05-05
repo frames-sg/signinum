@@ -129,6 +129,10 @@ fn classic_jp2(pixels: &[u8], width: u32, height: u32, components: u8) -> Option
         .status()
         .ok()?;
     if !status.success() {
+        assert!(
+            !require_grok(),
+            "SIGNINUM_REQUIRE_GROK is set but grk_compress failed"
+        );
         return None;
     }
     fs::read(out_path).ok()
@@ -192,12 +196,26 @@ fn gradient_u8(width: u32, height: u32, channels: usize) -> Vec<u8> {
 
 fn grok_decompress_bin() -> Option<PathBuf> {
     static GROK: OnceLock<Option<PathBuf>> = OnceLock::new();
-    GROK.get_or_init(discover_grok_decompress_bin).clone()
+    let path = GROK.get_or_init(discover_grok_decompress_bin).clone();
+    assert!(
+        path.is_some() || !require_grok(),
+        "SIGNINUM_REQUIRE_GROK is set but grk_decompress was not found"
+    );
+    path
 }
 
 fn grok_compress_bin() -> Option<PathBuf> {
     static GROK: OnceLock<Option<PathBuf>> = OnceLock::new();
-    GROK.get_or_init(discover_grok_compress_bin).clone()
+    let path = GROK.get_or_init(discover_grok_compress_bin).clone();
+    assert!(
+        path.is_some() || !require_grok(),
+        "SIGNINUM_REQUIRE_GROK is set but grk_compress was not found"
+    );
+    path
+}
+
+fn require_grok() -> bool {
+    std::env::var_os("SIGNINUM_REQUIRE_GROK").is_some()
 }
 
 fn discover_grok_decompress_bin() -> Option<PathBuf> {

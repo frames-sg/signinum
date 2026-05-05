@@ -23,7 +23,7 @@ The core stack in this repository is:
   for unsupported shapes; pre-1.0
 - `signinum-j2k` — native in-repo JPEG 2000 / HTJ2K inspect and decode;
   includes WSI-native ROI, reduced-resolution, and combined ROI+reduced-
-  resolution decode surfaces
+  resolution decode surfaces plus lossless encode
 - `signinum-j2k-metal` — Apple Metal device-output adapter for JPEG 2000 /
   HTJ2K tiles; pre-1.0
 - `signinum-j2k-cuda` — CUDA-facing JPEG 2000 / HTJ2K device-output API
@@ -90,6 +90,12 @@ consumer-image decode:
 
 The public WSI decode surface is documented in
 [docs/wsi-decode-api.md](docs/wsi-decode-api.md).
+WSI/DICOM conversion layers should follow the passthrough-first policy in
+[docs/wsi-dicom-passthrough.md](docs/wsi-dicom-passthrough.md).
+The repo-local passthrough contract lives in `signinum-core`; JPEG and J2K
+views expose borrowed candidates so container writers can copy compressed
+frame/tile bytes unchanged only after syntax, payload kind, and metadata checks
+pass.
 
 The project is structured so WSI readers can compose their own threading,
 vendor/container parsing, pyramid policy, caching, and prefetch around codec
@@ -101,6 +107,11 @@ primitives instead of paying for a monolithic runtime.
 
 - Baseline JPEG support already present in the crate
 - ROI, scaled decode, row streaming, and tile-batch decode APIs
+- borrowed passthrough candidates for baseline and extended sequential JPEG
+  interchange streams
+- Baseline JPEG encode remains a small fallback/test/derived-output utility;
+  it is not the diagnostic WSI/DICOM storage path when compressed tile
+  passthrough or lossless J2K/HTJ2K output is available
 - WSI-focused benchmarking against `jpeg-decoder`, `zune-jpeg`, and direct
   `libjpeg-turbo` decode paths
 - Metal and CUDA adapter crates keep the core JPEG decoder pure-Rust CPU while
@@ -113,9 +124,14 @@ primitives instead of paying for a monolithic runtime.
 ### `signinum-j2k`
 
 - JP2 / raw codestream inspect
+- borrowed passthrough candidates for raw JPEG 2000 / HTJ2K codestreams and
+  JP2 files, with payload-kind rejection available for DICOM codestream-only
+  destinations
 - full-frame, region, scaled, combined region+scaled, row-bounded, and
   tile-batch decode
 - repo-local pure-Rust JPEG 2000 / HTJ2K decode engine
+- lossless JPEG 2000 / HTJ2K encode for new diagnostic codestreams when
+  compressed source payloads cannot be passed through legally
 - ROI+reduced-resolution performance coverage in the CPU and Metal benchmark
   harnesses
 - parity and benchmark coverage against Grok and OpenJPEG on CPU

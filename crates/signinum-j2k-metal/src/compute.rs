@@ -6,14 +6,16 @@ use std::{
     collections::HashMap,
     mem::{size_of, size_of_val},
     sync::{Arc, Mutex, OnceLock},
+    time::Duration,
 };
 
 #[cfg(target_os = "macos")]
 use metal::{
     foreign_types::ForeignType,
     objc::{runtime::Sel, Message},
-    Buffer, CommandBufferRef, CommandQueue, CompileOptions, ComputeCommandEncoderRef,
-    ComputePipelineState, Device, MTLCommandQueue, MTLResourceOptions, MTLSize,
+    Buffer, CommandBuffer, CommandBufferRef, CommandQueue, CompileOptions,
+    ComputeCommandEncoderRef, ComputePipelineState, Device, MTLCommandQueue, MTLResourceOptions,
+    MTLSize,
 };
 use signinum_core::{PixelFormat, Rect};
 #[cfg(target_os = "macos")]
@@ -21,13 +23,14 @@ use signinum_j2k_native::HtCodeBlockDecoder;
 use signinum_j2k_native::{
     ht_uvlc_encode_table, ht_uvlc_table0, ht_uvlc_table1, ht_vlc_encode_table0,
     ht_vlc_encode_table1, ht_vlc_table0, ht_vlc_table1, ColorSpace as NativeColorSpace,
-    DecodedComponents as NativeDecodedComponents, EncodedHtJ2kCodeBlock, EncodedJ2kCodeBlock,
-    HtCodeBlockDecodeJob, HtSubBandDecodeJob, J2kCodeBlockDecodeJob, J2kCodeBlockSegment,
-    J2kDirectBandId, J2kDirectColorPlan, J2kDirectGrayscalePlan, J2kDirectGrayscaleStep,
-    J2kDirectIdwtStep, J2kDirectStoreStep, J2kForwardDwt53Level, J2kForwardDwt53Output,
-    J2kHtCodeBlockEncodeJob, J2kInverseMctJob, J2kPacketizationBlockCodingMode,
-    J2kPacketizationEncodeJob, J2kSingleDecompositionIdwtJob, J2kStoreComponentJob,
-    J2kSubBandDecodeJob, J2kTier1CodeBlockEncodeJob, J2kWaveletTransform,
+    DecodedComponents as NativeDecodedComponents, EncodeProgressionOrder, EncodedHtJ2kCodeBlock,
+    EncodedJ2kCodeBlock, HtCodeBlockDecodeJob, HtSubBandDecodeJob, J2kCodeBlockDecodeJob,
+    J2kCodeBlockSegment, J2kDirectBandId, J2kDirectColorPlan, J2kDirectGrayscalePlan,
+    J2kDirectGrayscaleStep, J2kDirectIdwtStep, J2kDirectStoreStep, J2kForwardDwt53Level,
+    J2kForwardDwt53Output, J2kHtCodeBlockEncodeJob, J2kInverseMctJob,
+    J2kPacketizationBlockCodingMode, J2kPacketizationEncodeJob, J2kPacketizationPacketDescriptor,
+    J2kSingleDecompositionIdwtJob, J2kStoreComponentJob, J2kSubBandDecodeJob,
+    J2kTier1CodeBlockEncodeJob, J2kWaveletTransform,
 };
 #[cfg(target_os = "macos")]
 use signinum_j2k_native::{
@@ -193,6 +196,126 @@ kernel void j2k_copy_interleaved_padded(
     for (uint byte_idx = 0u; byte_idx < params.bytes_per_pixel; ++byte_idx) {
         dst[dst_idx + byte_idx] = inside_src ? src[src_idx + byte_idx] : uchar(0);
     }
+}
+
+struct J2kLosslessDeinterleaveParams {
+    uint src_width;
+    uint src_height;
+    uint src_stride;
+    uint dst_width;
+    uint dst_height;
+    uint components;
+    uint bytes_per_sample;
+    uint sample_offset;
+};
+
+inline float j2k_lossless_load_sample(
+    device const uchar *src,
+    uint base,
+    uint component,
+    uint components,
+    uint bytes_per_sample,
+    uint sample_offset,
+    bool inside_src
+) {
+    if (!inside_src) {
+        return -float(int(sample_offset));
+    }
+    if (bytes_per_sample == 1u) {
+        return float(int(src[base + component]) - int(sample_offset));
+    }
+    const uint byte_offset = base + component * 2u;
+    const uint raw = uint(src[byte_offset]) | (uint(src[byte_offset + 1u]) << 8u);
+    return float(int(raw) - int(sample_offset));
+}
+
+kernel void j2k_lossless_deinterleave_to_planes(
+    device const uchar *src [[buffer(0)]],
+    device float *plane0 [[buffer(1)]],
+    device float *plane1 [[buffer(2)]],
+    device float *plane2 [[buffer(3)]],
+    constant J2kLosslessDeinterleaveParams &params [[buffer(4)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= params.dst_width || gid.y >= params.dst_height) {
+        return;
+    }
+
+    const bool inside_src = gid.x < params.src_width && gid.y < params.src_height;
+    const uint src_base = gid.y * params.src_stride
+        + gid.x * params.components * params.bytes_per_sample;
+    const uint dst_idx = gid.y * params.dst_width + gid.x;
+    plane0[dst_idx] = j2k_lossless_load_sample(
+        src,
+        src_base,
+        0u,
+        params.components,
+        params.bytes_per_sample,
+        params.sample_offset,
+        inside_src
+    );
+    if (params.components >= 3u) {
+        plane1[dst_idx] = j2k_lossless_load_sample(
+            src,
+            src_base,
+            1u,
+            params.components,
+            params.bytes_per_sample,
+            params.sample_offset,
+            inside_src
+        );
+        plane2[dst_idx] = j2k_lossless_load_sample(
+            src,
+            src_base,
+            2u,
+            params.components,
+            params.bytes_per_sample,
+            params.sample_offset,
+            inside_src
+        );
+    }
+}
+
+struct J2kLosslessCoefficientJob {
+    uint coefficient_offset;
+    uint component;
+    uint subband_x;
+    uint subband_y;
+    uint block_x;
+    uint block_y;
+    uint block_width;
+    uint block_height;
+    uint full_width;
+};
+
+kernel void j2k_lossless_extract_coefficients(
+    device const float *plane0 [[buffer(0)]],
+    device const float *plane1 [[buffer(1)]],
+    device const float *plane2 [[buffer(2)]],
+    device int *coefficients [[buffer(3)]],
+    constant J2kLosslessCoefficientJob *jobs [[buffer(4)]],
+    constant uint &job_count [[buffer(5)]],
+    uint3 gid [[thread_position_in_grid]]
+) {
+    if (gid.z >= job_count) {
+        return;
+    }
+    constant J2kLosslessCoefficientJob &job = jobs[gid.z];
+    if (gid.x >= job.block_width || gid.y >= job.block_height) {
+        return;
+    }
+
+    device const float *plane = plane0;
+    if (job.component == 1u) {
+        plane = plane1;
+    } else if (job.component == 2u) {
+        plane = plane2;
+    }
+    const uint src_x = job.subband_x + job.block_x + gid.x;
+    const uint src_y = job.subband_y + job.block_y + gid.y;
+    const uint src_idx = src_y * job.full_width + src_x;
+    const uint dst_idx = job.coefficient_offset + gid.y * job.block_width + gid.x;
+    coefficients[dst_idx] = int(round(plane[src_idx]));
 }
 
 struct J2kPackParams {
@@ -583,6 +706,35 @@ struct J2kCopyInterleavedParams {
 #[cfg(target_os = "macos")]
 #[repr(C)]
 #[derive(Clone, Copy)]
+struct J2kLosslessDeinterleaveParams {
+    src_width: u32,
+    src_height: u32,
+    src_stride: u32,
+    dst_width: u32,
+    dst_height: u32,
+    components: u32,
+    bytes_per_sample: u32,
+    sample_offset: u32,
+}
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct J2kLosslessCoefficientJob {
+    coefficient_offset: u32,
+    component: u32,
+    subband_x: u32,
+    subband_y: u32,
+    block_x: u32,
+    block_y: u32,
+    block_width: u32,
+    block_height: u32,
+    full_width: u32,
+}
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Clone, Copy)]
 struct J2kPackParams {
     width: u32,
     height: u32,
@@ -754,14 +906,24 @@ const J2K_IDWT_STATUS_FAIL: u32 = 1;
 struct J2kIdwtSingleDecompositionParams {
     x0: u32,
     y0: u32,
+    output_x: u32,
+    output_y: u32,
     width: u32,
     height: u32,
+    ll_x: u32,
+    ll_y: u32,
     ll_width: u32,
     ll_height: u32,
+    hl_x: u32,
+    hl_y: u32,
     hl_width: u32,
     hl_height: u32,
+    lh_x: u32,
+    lh_y: u32,
     lh_width: u32,
     lh_height: u32,
+    hh_x: u32,
+    hh_y: u32,
     hh_width: u32,
     hh_height: u32,
 }
@@ -772,14 +934,24 @@ struct J2kIdwtSingleDecompositionParams {
 struct J2kRepeatedIdwtSingleDecompositionParams {
     x0: u32,
     y0: u32,
+    output_x: u32,
+    output_y: u32,
     width: u32,
     height: u32,
+    ll_x: u32,
+    ll_y: u32,
     ll_width: u32,
     ll_height: u32,
+    hl_x: u32,
+    hl_y: u32,
     hl_width: u32,
     hl_height: u32,
+    lh_x: u32,
+    lh_y: u32,
     lh_width: u32,
     lh_height: u32,
+    hh_x: u32,
+    hh_y: u32,
     hh_width: u32,
     hh_height: u32,
     ll_instance_stride: u32,
@@ -1149,6 +1321,24 @@ struct J2kPacketBlock {
 
 #[cfg(target_os = "macos")]
 #[repr(C)]
+#[derive(Clone, Copy)]
+struct J2kResidentPacketBlock {
+    tier1_job_index: u32,
+    previously_included: u32,
+    l_block: u32,
+    block_coding_mode: u32,
+}
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct J2kResidentPacketBlockParams {
+    block_count: u32,
+    tier1_job_count: u32,
+}
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct J2kPacketStateBlock {
     previously_included: u32,
@@ -1159,6 +1349,34 @@ struct J2kPacketStateBlock {
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct J2kPacketEncodeStatus {
+    code: u32,
+    detail: u32,
+    data_len: u32,
+    reserved0: u32,
+}
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct J2kLosslessCodestreamAssemblyParams {
+    width: u32,
+    height: u32,
+    num_components: u32,
+    bit_depth: u32,
+    signed_samples: u32,
+    num_decomposition_levels: u32,
+    use_mct: u32,
+    guard_bits: u32,
+    progression_order: u32,
+    write_tlm: u32,
+    high_throughput: u32,
+    output_capacity: u32,
+}
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct J2kCodestreamAssemblyStatus {
     code: u32,
     detail: u32,
     data_len: u32,
@@ -1186,6 +1404,8 @@ struct MetalRuntime {
     zero_u32_buffer: ComputePipelineState,
     validate_bytes_equal: ComputePipelineState,
     copy_interleaved_padded: ComputePipelineState,
+    lossless_deinterleave_to_planes: ComputePipelineState,
+    lossless_extract_coefficients: ComputePipelineState,
     pack_gray8: ComputePipelineState,
     pack_rgb8: ComputePipelineState,
     pack_mct_rgb8: ComputePipelineState,
@@ -1229,7 +1449,10 @@ struct MetalRuntime {
     classic_encode_code_blocks: ComputePipelineState,
     ht_encode_code_block: ComputePipelineState,
     ht_encode_code_blocks: ComputePipelineState,
+    packet_block_prepare_resident_classic: ComputePipelineState,
+    packet_block_prepare_resident_ht: ComputePipelineState,
     packet_encode: ComputePipelineState,
+    lossless_codestream_assemble: ComputePipelineState,
     ht_vlc_table0: Buffer,
     ht_vlc_table1: Buffer,
     ht_uvlc_table0: Buffer,
@@ -1373,6 +1596,8 @@ impl MetalRuntime {
             zero_u32_buffer: pipeline("j2k_zero_u32_buffer")?,
             validate_bytes_equal: pipeline("j2k_validate_bytes_equal")?,
             copy_interleaved_padded: pipeline("j2k_copy_interleaved_padded")?,
+            lossless_deinterleave_to_planes: pipeline("j2k_lossless_deinterleave_to_planes")?,
+            lossless_extract_coefficients: pipeline("j2k_lossless_extract_coefficients")?,
             pack_gray8: pipeline("j2k_pack_gray8")?,
             pack_rgb8: pipeline("j2k_pack_rgb8")?,
             pack_mct_rgb8: pipeline("j2k_pack_mct_rgb8")?,
@@ -1415,7 +1640,12 @@ impl MetalRuntime {
             classic_encode_code_blocks: pipeline("j2k_encode_classic_code_blocks")?,
             ht_encode_code_block: pipeline("j2k_encode_ht_code_block")?,
             ht_encode_code_blocks: pipeline("j2k_encode_ht_code_blocks")?,
+            packet_block_prepare_resident_classic: pipeline(
+                "j2k_prepare_packet_blocks_from_classic_status",
+            )?,
+            packet_block_prepare_resident_ht: pipeline("j2k_prepare_packet_blocks_from_ht_status")?,
             packet_encode: pipeline("j2k_encode_packetization")?,
+            lossless_codestream_assemble: pipeline("j2k_assemble_lossless_classic_codestream")?,
             ht_vlc_table0: device.new_buffer_with_data(
                 ht_vlc_table0().as_ptr().cast(),
                 size_of_val(ht_vlc_table0()) as u64,
@@ -1634,6 +1864,85 @@ pub(crate) fn validate_metal_buffer_matches_bytes(
 }
 
 #[cfg(target_os = "macos")]
+pub(crate) fn validate_metal_buffers_match(
+    expected_buffer: &Buffer,
+    expected_byte_offset: usize,
+    actual_buffer: &Buffer,
+    actual_byte_offset: usize,
+    byte_len: usize,
+    session: &crate::MetalBackendSession,
+) -> Result<(), Error> {
+    if byte_len == 0 {
+        return Ok(());
+    }
+    let byte_len_u32 = u32::try_from(byte_len).map_err(|_| Error::MetalKernel {
+        message: "J2K Metal validation buffer exceeds u32 byte length".to_string(),
+    })?;
+    let expected_offset = u64::try_from(expected_byte_offset).map_err(|_| Error::MetalKernel {
+        message: "J2K Metal validation expected buffer offset exceeds u64".to_string(),
+    })?;
+    let actual_offset = u64::try_from(actual_byte_offset).map_err(|_| Error::MetalKernel {
+        message: "J2K Metal validation actual buffer offset exceeds u64".to_string(),
+    })?;
+
+    with_runtime_for_device(&session.device, |runtime| {
+        let status = J2kValidateBytesStatus::default();
+        let status_buffer = runtime.device.new_buffer_with_data(
+            (&raw const status).cast(),
+            size_of::<J2kValidateBytesStatus>() as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let params = J2kValidateBytesParams {
+            byte_len: byte_len_u32,
+        };
+
+        let command_buffer = runtime.queue.new_command_buffer();
+        let encoder = command_buffer.new_compute_command_encoder();
+        encoder.set_compute_pipeline_state(&runtime.validate_bytes_equal);
+        encoder.set_buffer(0, Some(actual_buffer), actual_offset);
+        encoder.set_buffer(1, Some(expected_buffer), expected_offset);
+        encoder.set_buffer(2, Some(&status_buffer), 0);
+        encoder.set_bytes(
+            3,
+            size_of::<J2kValidateBytesParams>() as u64,
+            (&raw const params).cast(),
+        );
+        encoder.dispatch_threads(
+            MTLSize {
+                width: 1,
+                height: 1,
+                depth: 1,
+            },
+            MTLSize {
+                width: 1,
+                height: 1,
+                depth: 1,
+            },
+        );
+        encoder.end_encoding();
+        command_buffer.commit();
+        command_buffer.wait_until_completed();
+
+        let status = unsafe {
+            status_buffer
+                .contents()
+                .cast::<J2kValidateBytesStatus>()
+                .read()
+        };
+        if status.code == 0 {
+            return Ok(());
+        }
+
+        Err(Error::MetalKernel {
+            message: format!(
+                "J2K Metal validation mismatch at byte {}: expected {}, got {}",
+                status.index, status.expected, status.actual
+            ),
+        })
+    })
+}
+
+#[cfg(target_os = "macos")]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn copy_interleaved_padded_to_shared_buffer(
     src_buffer: &Buffer,
@@ -1773,8 +2082,15 @@ pub(crate) struct PreparedDirectColorPlan {
 enum PreparedDirectGrayscaleStep {
     ClassicSubBand(PreparedClassicSubBand),
     HtSubBand(PreparedHtSubBand),
-    Idwt(J2kDirectIdwtStep),
+    Idwt(PreparedDirectIdwt),
     Store(J2kDirectStoreStep),
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone)]
+struct PreparedDirectIdwt {
+    step: J2kDirectIdwtStep,
+    output_window: BandRequiredRegion,
 }
 
 #[cfg(target_os = "macos")]
@@ -1783,6 +2099,7 @@ struct PreparedClassicSubBand {
     band_id: J2kDirectBandId,
     width: u32,
     height: u32,
+    zero_fill: bool,
     coded_data: Vec<u8>,
     coded_buffer: Buffer,
     jobs: Vec<J2kClassicCleanupBatchJob>,
@@ -1797,6 +2114,7 @@ struct PreparedClassicSubBandGroup {
     start_step: usize,
     end_step: usize,
     total_coefficients: usize,
+    zero_fill: bool,
     coded_data: Vec<u8>,
     coded_buffer: Buffer,
     jobs: Vec<J2kClassicCleanupBatchJob>,
@@ -1811,6 +2129,7 @@ struct PreparedClassicSubBandGroup {
 struct PreparedClassicSubBandGroupMember {
     band_id: J2kDirectBandId,
     offset_elements: usize,
+    window: BandRequiredRegion,
 }
 
 #[cfg(target_os = "macos")]
@@ -1831,7 +2150,7 @@ struct PreparedHtSubBandGroup {
     start_step: usize,
     end_step: usize,
     total_coefficients: usize,
-    _coded_data: Vec<u8>,
+    coded_data: Vec<u8>,
     coded_buffer: Buffer,
     jobs: Vec<J2kHtCleanupBatchJob>,
     jobs_buffer: Buffer,
@@ -1843,6 +2162,7 @@ struct PreparedHtSubBandGroup {
 struct PreparedHtSubBandGroupMember {
     band_id: J2kDirectBandId,
     offset_elements: usize,
+    window: BandRequiredRegion,
 }
 
 #[cfg(target_os = "macos")]
@@ -2313,6 +2633,7 @@ fn prepare_classic_sub_band(
             band_id: job.band_id,
             width: job.width,
             height: job.height,
+            zero_fill: false,
             coded_data,
             coded_buffer,
             jobs,
@@ -2365,6 +2686,7 @@ fn prepare_classic_sub_band_group(
         members.push(PreparedClassicSubBandGroupMember {
             band_id: sub_band.band_id,
             offset_elements: output_base,
+            window: BandRequiredRegion::full(sub_band.width, sub_band.height),
         });
 
         let coded_base = u32::try_from(coded_data.len()).map_err(|_| Error::MetalKernel {
@@ -2438,6 +2760,7 @@ fn prepare_classic_sub_band_group(
             start_step,
             end_step,
             total_coefficients: output_base,
+            zero_fill: sub_bands.iter().any(|sub_band| sub_band.zero_fill),
             coded_data,
             coded_buffer,
             jobs,
@@ -2538,6 +2861,7 @@ fn prepare_ht_sub_band_group(
         members.push(PreparedHtSubBandGroupMember {
             band_id: sub_band.band_id,
             offset_elements: output_base,
+            window: BandRequiredRegion::full(sub_band.width, sub_band.height),
         });
 
         let coded_base = u32::try_from(coded_data.len()).map_err(|_| Error::MetalKernel {
@@ -2584,7 +2908,7 @@ fn prepare_ht_sub_band_group(
             start_step,
             end_step,
             total_coefficients: output_base,
-            _coded_data: coded_data,
+            coded_data,
             coded_buffer,
             jobs,
             jobs_buffer,
@@ -2611,7 +2935,10 @@ pub(crate) fn prepare_direct_grayscale_plan(
                 )?));
             }
             J2kDirectGrayscaleStep::Idwt(idwt) => {
-                steps.push(PreparedDirectGrayscaleStep::Idwt(*idwt));
+                steps.push(PreparedDirectGrayscaleStep::Idwt(PreparedDirectIdwt {
+                    step: *idwt,
+                    output_window: BandRequiredRegion::full(idwt.rect.width(), idwt.rect.height()),
+                }));
             }
             J2kDirectGrayscaleStep::Store(store) => {
                 steps.push(PreparedDirectGrayscaleStep::Store(*store));
@@ -2627,6 +2954,610 @@ pub(crate) fn prepare_direct_grayscale_plan(
         classic_groups,
         ht_groups,
     })
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn crop_prepared_direct_grayscale_plan_to_output_region(
+    plan: &mut PreparedDirectGrayscalePlan,
+    region: Rect,
+) -> Result<(), Error> {
+    if region.w == 0 || region.h == 0 {
+        return Err(Error::MetalKernel {
+            message: "J2K MetalDirect region-scaled grayscale plan has an empty output region"
+                .to_string(),
+        });
+    }
+    if region.x == 0
+        && region.y == 0
+        && region.w == plan.dimensions.0
+        && region.h == plan.dimensions.1
+    {
+        return Ok(());
+    }
+
+    let mut store_count = 0;
+    for step in &mut plan.steps {
+        if let PreparedDirectGrayscaleStep::Store(store) = step {
+            crop_direct_store_step_to_output_region(store, region)?;
+            store_count += 1;
+        }
+    }
+
+    if store_count == 0 {
+        return Err(Error::MetalKernel {
+            message: "J2K MetalDirect grayscale plan has no store step to crop".to_string(),
+        });
+    }
+
+    prune_prepared_direct_grayscale_plan_to_store_windows(plan)?;
+    plan.dimensions = (region.w, region.h);
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug)]
+struct BandRequiredRegion {
+    x0: u32,
+    y0: u32,
+    x1: u32,
+    y1: u32,
+}
+
+#[cfg(target_os = "macos")]
+impl BandRequiredRegion {
+    fn full(width: u32, height: u32) -> Self {
+        Self {
+            x0: 0,
+            y0: 0,
+            x1: width,
+            y1: height,
+        }
+    }
+
+    fn new(x0: u32, y0: u32, x1: u32, y1: u32) -> Option<Self> {
+        (x0 < x1 && y0 < y1).then_some(Self { x0, y0, x1, y1 })
+    }
+
+    fn width(self) -> u32 {
+        self.x1 - self.x0
+    }
+
+    fn height(self) -> u32 {
+        self.y1 - self.y0
+    }
+
+    fn expanded(self, margin: u32, width: u32, height: u32) -> Self {
+        Self {
+            x0: self.x0.saturating_sub(margin),
+            y0: self.y0.saturating_sub(margin),
+            x1: self.x1.saturating_add(margin).min(width),
+            y1: self.y1.saturating_add(margin).min(height),
+        }
+    }
+
+    fn union(self, other: Self) -> Self {
+        Self {
+            x0: self.x0.min(other.x0),
+            y0: self.y0.min(other.y0),
+            x1: self.x1.max(other.x1),
+            y1: self.y1.max(other.y1),
+        }
+    }
+
+    fn intersects(self, x0: u32, y0: u32, width: u32, height: u32) -> bool {
+        let x1 = x0.saturating_add(width);
+        let y1 = y0.saturating_add(height);
+        self.x0 < x1 && x0 < self.x1 && self.y0 < y1 && y0 < self.y1
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn prune_prepared_direct_grayscale_plan_to_store_windows(
+    plan: &mut PreparedDirectGrayscalePlan,
+) -> Result<(), Error> {
+    let mut required = HashMap::<J2kDirectBandId, BandRequiredRegion>::new();
+    for step in &plan.steps {
+        if let PreparedDirectGrayscaleStep::Store(store) = step {
+            let source_right = store
+                .source_x
+                .checked_add(store.copy_width)
+                .ok_or_else(|| Error::MetalKernel {
+                    message: "J2K MetalDirect ROI source width overflows u32".to_string(),
+                })?;
+            let source_bottom = store
+                .source_y
+                .checked_add(store.copy_height)
+                .ok_or_else(|| Error::MetalKernel {
+                    message: "J2K MetalDirect ROI source height overflows u32".to_string(),
+                })?;
+            if let Some(region) =
+                BandRequiredRegion::new(store.source_x, store.source_y, source_right, source_bottom)
+            {
+                add_required_region(&mut required, store.input_band_id, region);
+            }
+        }
+    }
+
+    let mut idwt_output_windows = HashMap::<J2kDirectBandId, BandRequiredRegion>::new();
+    for step in plan.steps.iter().rev() {
+        if let PreparedDirectGrayscaleStep::Idwt(idwt) = step {
+            let Some(output_region) = required.get(&idwt.step.output_band_id).copied() else {
+                continue;
+            };
+            let expanded = output_region.expanded(
+                idwt_required_output_margin(idwt.step.transform),
+                idwt.step.rect.width(),
+                idwt.step.rect.height(),
+            );
+            idwt_output_windows.insert(idwt.step.output_band_id, expanded);
+            add_idwt_input_required_regions(&mut required, &idwt.step, expanded);
+        }
+    }
+
+    for step in &mut plan.steps {
+        match step {
+            PreparedDirectGrayscaleStep::ClassicSubBand(sub_band) => {
+                let before = sub_band.jobs.len();
+                retain_classic_jobs_for_required_region(
+                    &mut sub_band.jobs,
+                    required.get(&sub_band.band_id).copied(),
+                );
+                if sub_band.jobs.len() != before {
+                    sub_band.zero_fill = true;
+                    with_runtime(|runtime| {
+                        sub_band.jobs_buffer = borrow_slice_buffer(&runtime.device, &sub_band.jobs);
+                        Ok(())
+                    })?;
+                }
+            }
+            PreparedDirectGrayscaleStep::HtSubBand(sub_band) => {
+                let before = sub_band.jobs.len();
+                retain_ht_jobs_for_required_region(
+                    &mut sub_band.jobs,
+                    required.get(&sub_band.band_id).copied(),
+                );
+                if sub_band.jobs.len() != before {
+                    compact_ht_sub_band_coded_data(sub_band)?;
+                }
+            }
+            PreparedDirectGrayscaleStep::Idwt(_) | PreparedDirectGrayscaleStep::Store(_) => {}
+        }
+    }
+
+    apply_prepared_direct_idwt_output_windows(plan, &idwt_output_windows)?;
+    plan.classic_groups = prepare_classic_sub_band_groups(&plan.steps)?;
+    plan.ht_groups = prepare_ht_sub_band_groups(&plan.steps)?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn apply_prepared_direct_idwt_output_windows(
+    plan: &mut PreparedDirectGrayscalePlan,
+    windows: &HashMap<J2kDirectBandId, BandRequiredRegion>,
+) -> Result<(), Error> {
+    for step in &mut plan.steps {
+        if let PreparedDirectGrayscaleStep::Idwt(idwt) = step {
+            idwt.output_window = windows
+                .get(&idwt.step.output_band_id)
+                .copied()
+                .unwrap_or_else(|| {
+                    BandRequiredRegion::full(idwt.step.rect.width(), idwt.step.rect.height())
+                });
+        }
+    }
+
+    for step in &mut plan.steps {
+        let PreparedDirectGrayscaleStep::Store(store) = step else {
+            continue;
+        };
+        let Some(window) = windows.get(&store.input_band_id).copied() else {
+            continue;
+        };
+
+        store.source_x =
+            store
+                .source_x
+                .checked_sub(window.x0)
+                .ok_or_else(|| Error::MetalKernel {
+                    message: "J2K MetalDirect cropped IDWT store source x underflow".to_string(),
+                })?;
+        store.source_y =
+            store
+                .source_y
+                .checked_sub(window.y0)
+                .ok_or_else(|| Error::MetalKernel {
+                    message: "J2K MetalDirect cropped IDWT store source y underflow".to_string(),
+                })?;
+        store.input_rect = signinum_j2k_native::J2kRect {
+            x0: store.input_rect.x0.saturating_add(window.x0),
+            y0: store.input_rect.y0.saturating_add(window.y0),
+            x1: store.input_rect.x0.saturating_add(window.x1),
+            y1: store.input_rect.y0.saturating_add(window.y1),
+        };
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn direct_idwt_params(idwt: &J2kDirectIdwtStep) -> J2kIdwtSingleDecompositionParams {
+    J2kIdwtSingleDecompositionParams {
+        x0: idwt.rect.x0,
+        y0: idwt.rect.y0,
+        output_x: 0,
+        output_y: 0,
+        width: idwt.rect.width(),
+        height: idwt.rect.height(),
+        ll_x: 0,
+        ll_y: 0,
+        ll_width: idwt.ll.width(),
+        ll_height: idwt.ll.height(),
+        hl_x: 0,
+        hl_y: 0,
+        hl_width: idwt.hl.width(),
+        hl_height: idwt.hl.height(),
+        lh_x: 0,
+        lh_y: 0,
+        lh_width: idwt.lh.width(),
+        lh_height: idwt.lh.height(),
+        hh_x: 0,
+        hh_y: 0,
+        hh_width: idwt.hh.width(),
+        hh_height: idwt.hh.height(),
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy)]
+struct PreparedIdwtInputWindows {
+    ll: BandRequiredRegion,
+    hl: BandRequiredRegion,
+    lh: BandRequiredRegion,
+    hh: BandRequiredRegion,
+}
+
+fn idwt_input_windows_from_slices(
+    ll: &DirectBandSlice,
+    hl: &DirectBandSlice,
+    lh: &DirectBandSlice,
+    hh: &DirectBandSlice,
+) -> PreparedIdwtInputWindows {
+    PreparedIdwtInputWindows {
+        ll: ll.window,
+        hl: hl.window,
+        lh: lh.window,
+        hh: hh.window,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn prepared_idwt_params(
+    idwt: &PreparedDirectIdwt,
+    inputs: PreparedIdwtInputWindows,
+) -> J2kIdwtSingleDecompositionParams {
+    J2kIdwtSingleDecompositionParams {
+        x0: idwt.step.rect.x0,
+        y0: idwt.step.rect.y0,
+        output_x: idwt.output_window.x0,
+        output_y: idwt.output_window.y0,
+        width: idwt.output_window.width(),
+        height: idwt.output_window.height(),
+        ll_x: inputs.ll.x0,
+        ll_y: inputs.ll.y0,
+        ll_width: inputs.ll.width(),
+        ll_height: inputs.ll.height(),
+        hl_x: inputs.hl.x0,
+        hl_y: inputs.hl.y0,
+        hl_width: inputs.hl.width(),
+        hl_height: inputs.hl.height(),
+        lh_x: inputs.lh.x0,
+        lh_y: inputs.lh.y0,
+        lh_width: inputs.lh.width(),
+        lh_height: inputs.lh.height(),
+        hh_x: inputs.hh.x0,
+        hh_y: inputs.hh.y0,
+        hh_width: inputs.hh.width(),
+        hh_height: inputs.hh.height(),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn repeated_idwt_params(
+    idwt: &PreparedDirectIdwt,
+    inputs: PreparedIdwtInputWindows,
+    strides: PreparedIdwtInputStrides,
+    batch_count: usize,
+    context: &'static str,
+) -> Result<J2kRepeatedIdwtSingleDecompositionParams, Error> {
+    Ok(J2kRepeatedIdwtSingleDecompositionParams {
+        x0: idwt.step.rect.x0,
+        y0: idwt.step.rect.y0,
+        output_x: idwt.output_window.x0,
+        output_y: idwt.output_window.y0,
+        width: idwt.output_window.width(),
+        height: idwt.output_window.height(),
+        ll_x: inputs.ll.x0,
+        ll_y: inputs.ll.y0,
+        ll_width: inputs.ll.width(),
+        ll_height: inputs.ll.height(),
+        hl_x: inputs.hl.x0,
+        hl_y: inputs.hl.y0,
+        hl_width: inputs.hl.width(),
+        hl_height: inputs.hl.height(),
+        lh_x: inputs.lh.x0,
+        lh_y: inputs.lh.y0,
+        lh_width: inputs.lh.width(),
+        lh_height: inputs.lh.height(),
+        hh_x: inputs.hh.x0,
+        hh_y: inputs.hh.y0,
+        hh_width: inputs.hh.width(),
+        hh_height: inputs.hh.height(),
+        ll_instance_stride: strides.ll,
+        hl_instance_stride: strides.hl,
+        lh_instance_stride: strides.lh,
+        hh_instance_stride: strides.hh,
+        batch_count: u32::try_from(batch_count).map_err(|_| Error::MetalKernel {
+            message: format!("J2K MetalDirect {context} IDWT batch count exceeds u32"),
+        })?,
+    })
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy)]
+struct PreparedIdwtInputStrides {
+    ll: u32,
+    hl: u32,
+    lh: u32,
+    hh: u32,
+}
+
+#[cfg(target_os = "macos")]
+fn prepared_idwt_output_len(idwt: &PreparedDirectIdwt) -> usize {
+    idwt.output_window.width() as usize * idwt.output_window.height() as usize
+}
+
+#[cfg(target_os = "macos")]
+fn add_required_region(
+    required: &mut HashMap<J2kDirectBandId, BandRequiredRegion>,
+    band_id: J2kDirectBandId,
+    region: BandRequiredRegion,
+) {
+    required
+        .entry(band_id)
+        .and_modify(|existing| *existing = existing.union(region))
+        .or_insert(region);
+}
+
+#[cfg(target_os = "macos")]
+fn idwt_required_output_margin(transform: J2kWaveletTransform) -> u32 {
+    match transform {
+        J2kWaveletTransform::Reversible53 => 4,
+        J2kWaveletTransform::Irreversible97 => 12,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn add_idwt_input_required_regions(
+    required: &mut HashMap<J2kDirectBandId, BandRequiredRegion>,
+    idwt: &J2kDirectIdwtStep,
+    output_region: BandRequiredRegion,
+) {
+    add_required_region(
+        required,
+        idwt.ll_band_id,
+        idwt_input_required_region(
+            output_region,
+            idwt.rect.x0,
+            idwt.rect.y0,
+            true,
+            true,
+            idwt.ll.width(),
+            idwt.ll.height(),
+        ),
+    );
+    add_required_region(
+        required,
+        idwt.hl_band_id,
+        idwt_input_required_region(
+            output_region,
+            idwt.rect.x0,
+            idwt.rect.y0,
+            false,
+            true,
+            idwt.hl.width(),
+            idwt.hl.height(),
+        ),
+    );
+    add_required_region(
+        required,
+        idwt.lh_band_id,
+        idwt_input_required_region(
+            output_region,
+            idwt.rect.x0,
+            idwt.rect.y0,
+            true,
+            false,
+            idwt.lh.width(),
+            idwt.lh.height(),
+        ),
+    );
+    add_required_region(
+        required,
+        idwt.hh_band_id,
+        idwt_input_required_region(
+            output_region,
+            idwt.rect.x0,
+            idwt.rect.y0,
+            false,
+            false,
+            idwt.hh.width(),
+            idwt.hh.height(),
+        ),
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[allow(clippy::fn_params_excessive_bools)]
+fn idwt_input_required_region(
+    output_region: BandRequiredRegion,
+    output_origin_x: u32,
+    output_origin_y: u32,
+    low_x: bool,
+    low_y: bool,
+    band_width: u32,
+    band_height: u32,
+) -> BandRequiredRegion {
+    let x0 = idwt_band_index(output_origin_x, output_region.x0, low_x);
+    let x1 = idwt_band_index(output_origin_x, output_region.x1 - 1, low_x).saturating_add(1);
+    let y0 = idwt_band_index(output_origin_y, output_region.y0, low_y);
+    let y1 = idwt_band_index(output_origin_y, output_region.y1 - 1, low_y).saturating_add(1);
+    BandRequiredRegion {
+        x0: x0.min(band_width),
+        y0: y0.min(band_height),
+        x1: x1.min(band_width),
+        y1: y1.min(band_height),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn idwt_band_index(origin: u32, local_coord: u32, low: bool) -> u32 {
+    let global = u64::from(origin) + u64::from(local_coord);
+    let origin = u64::from(origin);
+    let index = if low {
+        global.div_ceil(2).saturating_sub(origin.div_ceil(2))
+    } else {
+        (global / 2).saturating_sub(origin / 2)
+    };
+    u32::try_from(index).unwrap_or(u32::MAX)
+}
+
+#[cfg(target_os = "macos")]
+fn retain_classic_jobs_for_required_region(
+    jobs: &mut Vec<J2kClassicCleanupBatchJob>,
+    required: Option<BandRequiredRegion>,
+) {
+    let Some(required) = required else {
+        jobs.clear();
+        return;
+    };
+    jobs.retain(|job| {
+        let output_x = job.output_offset % job.output_stride;
+        let output_y = job.output_offset / job.output_stride;
+        required.intersects(output_x, output_y, job.width, job.height)
+    });
+}
+
+#[cfg(target_os = "macos")]
+fn retain_ht_jobs_for_required_region(
+    jobs: &mut Vec<J2kHtCleanupBatchJob>,
+    required: Option<BandRequiredRegion>,
+) {
+    let Some(required) = required else {
+        jobs.clear();
+        return;
+    };
+    jobs.retain(|job| {
+        let output_x = job.output_offset % job.output_stride;
+        let output_y = job.output_offset / job.output_stride;
+        required.intersects(output_x, output_y, job.width, job.height)
+    });
+}
+
+#[cfg(target_os = "macos")]
+fn compact_ht_sub_band_coded_data(sub_band: &mut PreparedHtSubBand) -> Result<(), Error> {
+    let previous = std::mem::take(&mut sub_band.coded_data);
+    let mut compacted = Vec::new();
+
+    for job in &mut sub_band.jobs {
+        let start = job.coded_offset as usize;
+        let len = job.coded_len as usize;
+        let end = start.checked_add(len).ok_or_else(|| Error::MetalKernel {
+            message: "HTJ2K MetalDirect cropped coded payload range overflow".to_string(),
+        })?;
+        if end > previous.len() {
+            return Err(Error::MetalKernel {
+                message: "HTJ2K MetalDirect cropped coded payload range out of bounds".to_string(),
+            });
+        }
+        job.coded_offset = u32::try_from(compacted.len()).map_err(|_| Error::MetalKernel {
+            message: "HTJ2K MetalDirect cropped coded payload exceeds u32".to_string(),
+        })?;
+        compacted.extend_from_slice(&previous[start..end]);
+    }
+
+    sub_band.coded_data = compacted;
+    with_runtime(|runtime| {
+        sub_band.coded_buffer = borrow_slice_buffer(&runtime.device, &sub_band.coded_data);
+        sub_band.jobs_buffer = borrow_slice_buffer(&runtime.device, &sub_band.jobs);
+        Ok(())
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn checked_rect_end(origin: u32, length: u32, label: &str) -> Result<u32, Error> {
+    origin
+        .checked_add(length)
+        .ok_or_else(|| Error::MetalKernel {
+            message: format!("J2K MetalDirect region-scaled {label} overflows u32"),
+        })
+}
+
+#[cfg(target_os = "macos")]
+fn crop_direct_store_step_to_output_region(
+    store: &mut J2kDirectStoreStep,
+    region: Rect,
+) -> Result<(), Error> {
+    let store_bounds = (
+        store.output_x,
+        store.output_y,
+        checked_rect_end(store.output_x, store.copy_width, "store width")?,
+        checked_rect_end(store.output_y, store.copy_height, "store height")?,
+    );
+    let region_bounds = (
+        region.x,
+        region.y,
+        checked_rect_end(region.x, region.w, "ROI width")?,
+        checked_rect_end(region.y, region.h, "ROI height")?,
+    );
+    let intersection = (
+        store_bounds.0.max(region_bounds.0),
+        store_bounds.1.max(region_bounds.1),
+        store_bounds.2.min(region_bounds.2),
+        store_bounds.3.min(region_bounds.3),
+    );
+    if intersection.0 >= intersection.2 || intersection.1 >= intersection.3 {
+        return Err(Error::MetalKernel {
+            message:
+                "J2K MetalDirect region-scaled ROI does not intersect the decoded store window"
+                    .to_string(),
+        });
+    }
+
+    let source_delta = (
+        intersection.0 - store_bounds.0,
+        intersection.1 - store_bounds.1,
+    );
+    store.source_x =
+        store
+            .source_x
+            .checked_add(source_delta.0)
+            .ok_or_else(|| Error::MetalKernel {
+                message: "J2K MetalDirect region-scaled source x overflows u32".to_string(),
+            })?;
+    store.source_y =
+        store
+            .source_y
+            .checked_add(source_delta.1)
+            .ok_or_else(|| Error::MetalKernel {
+                message: "J2K MetalDirect region-scaled source y overflows u32".to_string(),
+            })?;
+    store.copy_width = intersection.2 - intersection.0;
+    store.copy_height = intersection.3 - intersection.1;
+    store.output_width = region.w;
+    store.output_height = region.h;
+    store.output_x = intersection.0 - region_bounds.0;
+    store.output_y = intersection.1 - region_bounds.1;
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -2714,20 +3645,7 @@ fn encode_direct_grayscale_plan_in_command_buffer(
                 let hl = lookup_direct_band(&bands, idwt.hl_band_id, idwt.hl)?;
                 let lh = lookup_direct_band(&bands, idwt.lh_band_id, idwt.lh)?;
                 let hh = lookup_direct_band(&bands, idwt.hh_band_id, idwt.hh)?;
-                let params = J2kIdwtSingleDecompositionParams {
-                    x0: idwt.rect.x0,
-                    y0: idwt.rect.y0,
-                    width: idwt.rect.width(),
-                    height: idwt.rect.height(),
-                    ll_width: idwt.ll.width(),
-                    ll_height: idwt.ll.height(),
-                    hl_width: idwt.hl.width(),
-                    hl_height: idwt.hl.height(),
-                    lh_width: idwt.lh.width(),
-                    lh_height: idwt.lh.height(),
-                    hh_width: idwt.hh.width(),
-                    hh_height: idwt.hh.height(),
-                };
+                let params = direct_idwt_params(idwt);
                 let output = take_f32_scratch_buffer(
                     runtime,
                     idwt.rect.width() as usize * idwt.rect.height() as usize,
@@ -2945,6 +3863,7 @@ fn encode_prepared_direct_grayscale_plan_in_command_buffer(
                         band_id: member.band_id,
                         buffer: output.buffer.clone(),
                         offset_bytes: member.offset_elements * size_of::<f32>(),
+                        window: member.window,
                     });
                 }
                 scratch_buffers.push(output);
@@ -2968,6 +3887,7 @@ fn encode_prepared_direct_grayscale_plan_in_command_buffer(
                         band_id: member.band_id,
                         buffer: output.buffer.clone(),
                         offset_bytes: member.offset_elements * size_of::<f32>(),
+                        window: member.window,
                     });
                 }
                 scratch_buffers.push(output);
@@ -2996,6 +3916,7 @@ fn encode_prepared_direct_grayscale_plan_in_command_buffer(
                         band_id: sub_band.band_id,
                         buffer: output.buffer.clone(),
                         offset_bytes: 0,
+                        window: BandRequiredRegion::full(sub_band.width, sub_band.height),
                     });
                     scratch_buffers.push(output);
                 }
@@ -3016,49 +3937,37 @@ fn encode_prepared_direct_grayscale_plan_in_command_buffer(
                         band_id: sub_band.band_id,
                         buffer: output.buffer.clone(),
                         offset_bytes: 0,
+                        window: BandRequiredRegion::full(sub_band.width, sub_band.height),
                     });
                     scratch_buffers.push(output);
                 }
                 PreparedDirectGrayscaleStep::Idwt(idwt) => {
-                    let (ll, ll_offset) =
-                        lookup_direct_band_slice(&bands, idwt.ll_band_id, idwt.ll)?;
-                    let (hl, hl_offset) =
-                        lookup_direct_band_slice(&bands, idwt.hl_band_id, idwt.hl)?;
-                    let (lh, lh_offset) =
-                        lookup_direct_band_slice(&bands, idwt.lh_band_id, idwt.lh)?;
-                    let (hh, hh_offset) =
-                        lookup_direct_band_slice(&bands, idwt.hh_band_id, idwt.hh)?;
-                    let params = J2kIdwtSingleDecompositionParams {
-                        x0: idwt.rect.x0,
-                        y0: idwt.rect.y0,
-                        width: idwt.rect.width(),
-                        height: idwt.rect.height(),
-                        ll_width: idwt.ll.width(),
-                        ll_height: idwt.ll.height(),
-                        hl_width: idwt.hl.width(),
-                        hl_height: idwt.hl.height(),
-                        lh_width: idwt.lh.width(),
-                        lh_height: idwt.lh.height(),
-                        hh_width: idwt.hh.width(),
-                        hh_height: idwt.hh.height(),
-                    };
-                    let output = take_f32_scratch_buffer(
-                        runtime,
-                        idwt.rect.width() as usize * idwt.rect.height() as usize,
+                    let ll =
+                        lookup_direct_band_slice_entry(&bands, idwt.step.ll_band_id, idwt.step.ll)?;
+                    let hl =
+                        lookup_direct_band_slice_entry(&bands, idwt.step.hl_band_id, idwt.step.hl)?;
+                    let lh =
+                        lookup_direct_band_slice_entry(&bands, idwt.step.lh_band_id, idwt.step.lh)?;
+                    let hh =
+                        lookup_direct_band_slice_entry(&bands, idwt.step.hh_band_id, idwt.step.hh)?;
+                    let params = prepared_idwt_params(
+                        idwt,
+                        idwt_input_windows_from_slices(&ll, &hl, &lh, &hh),
                     );
-                    match idwt.transform {
+                    let output = take_f32_scratch_buffer(runtime, prepared_idwt_output_len(idwt));
+                    match idwt.step.transform {
                         J2kWaveletTransform::Reversible53 => {
                             dispatch_reversible53_single_decomposition_buffers_in_encoder_with_offsets(
                                 runtime,
                                 encoder,
-                                &ll,
-                                ll_offset,
-                                &hl,
-                                hl_offset,
-                                &lh,
-                                lh_offset,
-                                &hh,
-                                hh_offset,
+                                &ll.buffer,
+                                ll.offset_bytes,
+                                &hl.buffer,
+                                hl.offset_bytes,
+                                &lh.buffer,
+                                lh.offset_bytes,
+                                &hh.buffer,
+                                hh.offset_bytes,
                                 params,
                                 &output.buffer,
                                 0,
@@ -3069,14 +3978,14 @@ fn encode_prepared_direct_grayscale_plan_in_command_buffer(
                                 dispatch_irreversible97_single_decomposition_buffers_in_encoder_with_offsets(
                                     runtime,
                                     encoder,
-                                    &ll,
-                                    ll_offset,
-                                    &hl,
-                                    hl_offset,
-                                    &lh,
-                                    lh_offset,
-                                    &hh,
-                                    hh_offset,
+                                    &ll.buffer,
+                                    ll.offset_bytes,
+                                    &hl.buffer,
+                                    hl.offset_bytes,
+                                    &lh.buffer,
+                                    lh.offset_bytes,
+                                    &hh.buffer,
+                                    hh.offset_bytes,
                                     params,
                                     &output.buffer,
                                     0,
@@ -3085,9 +3994,10 @@ fn encode_prepared_direct_grayscale_plan_in_command_buffer(
                         }
                     }
                     bands.push(DirectBandSlice {
-                        band_id: idwt.output_band_id,
+                        band_id: idwt.step.output_band_id,
                         buffer: output.buffer.clone(),
                         offset_bytes: 0,
+                        window: idwt.output_window,
                     });
                     scratch_buffers.push(output);
                 }
@@ -3201,6 +4111,7 @@ fn encode_prepared_direct_component_plane_in_command_buffer(
                         band_id: member.band_id,
                         buffer: output.buffer.clone(),
                         offset_bytes: member.offset_elements * size_of::<f32>(),
+                        window: member.window,
                     });
                 }
                 scratch_buffers.push(output);
@@ -3224,6 +4135,7 @@ fn encode_prepared_direct_component_plane_in_command_buffer(
                         band_id: member.band_id,
                         buffer: output.buffer.clone(),
                         offset_bytes: member.offset_elements * size_of::<f32>(),
+                        window: member.window,
                     });
                 }
                 scratch_buffers.push(output);
@@ -3251,6 +4163,7 @@ fn encode_prepared_direct_component_plane_in_command_buffer(
                         band_id: sub_band.band_id,
                         buffer: output.buffer.clone(),
                         offset_bytes: 0,
+                        window: BandRequiredRegion::full(sub_band.width, sub_band.height),
                     });
                     scratch_buffers.push(output);
                 }
@@ -3271,49 +4184,37 @@ fn encode_prepared_direct_component_plane_in_command_buffer(
                         band_id: sub_band.band_id,
                         buffer: output.buffer.clone(),
                         offset_bytes: 0,
+                        window: BandRequiredRegion::full(sub_band.width, sub_band.height),
                     });
                     scratch_buffers.push(output);
                 }
                 PreparedDirectGrayscaleStep::Idwt(idwt) => {
-                    let (ll, ll_offset) =
-                        lookup_direct_band_slice(&bands, idwt.ll_band_id, idwt.ll)?;
-                    let (hl, hl_offset) =
-                        lookup_direct_band_slice(&bands, idwt.hl_band_id, idwt.hl)?;
-                    let (lh, lh_offset) =
-                        lookup_direct_band_slice(&bands, idwt.lh_band_id, idwt.lh)?;
-                    let (hh, hh_offset) =
-                        lookup_direct_band_slice(&bands, idwt.hh_band_id, idwt.hh)?;
-                    let params = J2kIdwtSingleDecompositionParams {
-                        x0: idwt.rect.x0,
-                        y0: idwt.rect.y0,
-                        width: idwt.rect.width(),
-                        height: idwt.rect.height(),
-                        ll_width: idwt.ll.width(),
-                        ll_height: idwt.ll.height(),
-                        hl_width: idwt.hl.width(),
-                        hl_height: idwt.hl.height(),
-                        lh_width: idwt.lh.width(),
-                        lh_height: idwt.lh.height(),
-                        hh_width: idwt.hh.width(),
-                        hh_height: idwt.hh.height(),
-                    };
-                    let output = take_f32_scratch_buffer(
-                        runtime,
-                        idwt.rect.width() as usize * idwt.rect.height() as usize,
+                    let ll =
+                        lookup_direct_band_slice_entry(&bands, idwt.step.ll_band_id, idwt.step.ll)?;
+                    let hl =
+                        lookup_direct_band_slice_entry(&bands, idwt.step.hl_band_id, idwt.step.hl)?;
+                    let lh =
+                        lookup_direct_band_slice_entry(&bands, idwt.step.lh_band_id, idwt.step.lh)?;
+                    let hh =
+                        lookup_direct_band_slice_entry(&bands, idwt.step.hh_band_id, idwt.step.hh)?;
+                    let params = prepared_idwt_params(
+                        idwt,
+                        idwt_input_windows_from_slices(&ll, &hl, &lh, &hh),
                     );
-                    match idwt.transform {
+                    let output = take_f32_scratch_buffer(runtime, prepared_idwt_output_len(idwt));
+                    match idwt.step.transform {
                         J2kWaveletTransform::Reversible53 => {
                             dispatch_reversible53_single_decomposition_buffers_in_encoder_with_offsets(
                                 runtime,
                                 encoder,
-                                &ll,
-                                ll_offset,
-                                &hl,
-                                hl_offset,
-                                &lh,
-                                lh_offset,
-                                &hh,
-                                hh_offset,
+                                &ll.buffer,
+                                ll.offset_bytes,
+                                &hl.buffer,
+                                hl.offset_bytes,
+                                &lh.buffer,
+                                lh.offset_bytes,
+                                &hh.buffer,
+                                hh.offset_bytes,
                                 params,
                                 &output.buffer,
                                 0,
@@ -3324,14 +4225,14 @@ fn encode_prepared_direct_component_plane_in_command_buffer(
                                 dispatch_irreversible97_single_decomposition_buffers_in_encoder_with_offsets(
                                     runtime,
                                     encoder,
-                                    &ll,
-                                    ll_offset,
-                                    &hl,
-                                    hl_offset,
-                                    &lh,
-                                    lh_offset,
-                                    &hh,
-                                    hh_offset,
+                                    &ll.buffer,
+                                    ll.offset_bytes,
+                                    &hl.buffer,
+                                    hl.offset_bytes,
+                                    &lh.buffer,
+                                    lh.offset_bytes,
+                                    &hh.buffer,
+                                    hh.offset_bytes,
                                     params,
                                     &output.buffer,
                                     0,
@@ -3340,9 +4241,10 @@ fn encode_prepared_direct_component_plane_in_command_buffer(
                         }
                     }
                     bands.push(DirectBandSlice {
-                        band_id: idwt.output_band_id,
+                        band_id: idwt.step.output_band_id,
                         buffer: output.buffer.clone(),
                         offset_bytes: 0,
+                        window: idwt.output_window,
                     });
                     scratch_buffers.push(output);
                 }
@@ -3479,7 +4381,34 @@ pub(crate) fn execute_prepared_direct_grayscale_plan_batch(
         let mut scratch_buffers = Vec::new();
         let mut surfaces = Vec::with_capacity(plans.len());
 
+        let component_plan_refs = plans.iter().map(Arc::as_ref).collect::<Vec<_>>();
+        if plans.len() > 1 && supports_stacked_direct_component_plane_batch(&component_plan_refs) {
+            let stacked_plane = encode_stacked_direct_component_plane_batch(
+                runtime,
+                command_buffer,
+                &component_plan_refs,
+                &mut retained_buffers,
+                &mut status_checks,
+                &mut scratch_buffers,
+            )?;
+            let first = plans.first().expect("plans is not empty");
+            if stacked_plane.dimensions == first.dimensions && stacked_plane.count == plans.len() {
+                surfaces = encode_repeated_gray_plane_to_surfaces_in_command_buffer(
+                    runtime,
+                    command_buffer,
+                    &stacked_plane.buffer,
+                    first.dimensions,
+                    first.bit_depth,
+                    fmt,
+                    plans.len(),
+                )?;
+            }
+        }
+
         for plan in plans {
+            if !surfaces.is_empty() {
+                break;
+            }
             surfaces.push(encode_prepared_direct_grayscale_plan_in_command_buffer(
                 runtime,
                 command_buffer,
@@ -3682,18 +4611,19 @@ struct DirectBandSlice {
     band_id: J2kDirectBandId,
     buffer: Buffer,
     offset_bytes: usize,
+    window: BandRequiredRegion,
 }
 
 #[cfg(target_os = "macos")]
-fn lookup_direct_band_slice(
+fn lookup_direct_band_slice_entry(
     bands: &[DirectBandSlice],
     band_id: J2kDirectBandId,
     rect: signinum_j2k_native::J2kRect,
-) -> Result<(Buffer, usize), Error> {
+) -> Result<DirectBandSlice, Error> {
     bands
         .iter()
         .find(|existing| existing.band_id == band_id)
-        .map(|existing| (existing.buffer.clone(), existing.offset_bytes))
+        .cloned()
         .ok_or_else(|| Error::MetalKernel {
             message: format!(
                 "missing J2K MetalDirect device band {} for rect ({}, {}, {}, {})",
@@ -3703,24 +4633,34 @@ fn lookup_direct_band_slice(
 }
 
 #[cfg(target_os = "macos")]
-fn lookup_repeated_direct_band_layout(
+fn lookup_direct_band_slice(
+    bands: &[DirectBandSlice],
+    band_id: J2kDirectBandId,
+    rect: signinum_j2k_native::J2kRect,
+) -> Result<(Buffer, usize), Error> {
+    let entry = lookup_direct_band_slice_entry(bands, band_id, rect)?;
+    Ok((entry.buffer, entry.offset_bytes))
+}
+
+#[cfg(target_os = "macos")]
+fn lookup_repeated_direct_band_layout_entry(
     band_sets: &[Vec<DirectBandSlice>],
     band_id: J2kDirectBandId,
     rect: signinum_j2k_native::J2kRect,
-) -> Result<(Buffer, usize, u32), Error> {
+) -> Result<(DirectBandSlice, u32), Error> {
     let first_bands = band_sets.first().ok_or_else(|| Error::MetalKernel {
         message: "missing J2K MetalDirect repeated band set".to_string(),
     })?;
-    let (buffer, offset_bytes) = lookup_direct_band_slice(first_bands, band_id, rect)?;
+    let entry = lookup_direct_band_slice_entry(first_bands, band_id, rect)?;
     let stride_bytes = if let Some(second_bands) = band_sets.get(1) {
-        let (_, next_offset_bytes) = lookup_direct_band_slice(second_bands, band_id, rect)?;
-        next_offset_bytes
-            .checked_sub(offset_bytes)
+        let next = lookup_direct_band_slice_entry(second_bands, band_id, rect)?;
+        next.offset_bytes
+            .checked_sub(entry.offset_bytes)
             .ok_or_else(|| Error::MetalKernel {
                 message: "J2K MetalDirect repeated band offsets are not monotonic".to_string(),
             })?
     } else {
-        rect.width() as usize * rect.height() as usize * size_of::<f32>()
+        entry.window.width() as usize * entry.window.height() as usize * size_of::<f32>()
     };
     if stride_bytes % size_of::<f32>() != 0 {
         return Err(Error::MetalKernel {
@@ -3731,7 +4671,7 @@ fn lookup_repeated_direct_band_layout(
         u32::try_from(stride_bytes / size_of::<f32>()).map_err(|_| Error::MetalKernel {
             message: "J2K MetalDirect repeated band stride exceeds u32".to_string(),
         })?;
-    Ok((buffer, offset_bytes, stride_elements))
+    Ok((entry, stride_elements))
 }
 
 #[cfg(target_os = "macos")]
@@ -3836,8 +4776,17 @@ fn supports_stacked_direct_component_plane_batch(plans: &[&PreparedDirectGraysca
             step_idx = group.end_step;
             continue;
         }
-        if first.ht_group_starting_at(step_idx).is_some() {
-            return false;
+        if let Some(group) = first.ht_group_starting_at(step_idx) {
+            if group.end_step <= step_idx
+                || !plans.iter().all(|plan| {
+                    plan.ht_group_starting_at(step_idx)
+                        .is_some_and(|other| ht_group_shapes_match(group, other))
+                })
+            {
+                return false;
+            }
+            step_idx = group.end_step;
+            continue;
         }
 
         match &first.steps[step_idx] {
@@ -3852,7 +4801,17 @@ fn supports_stacked_direct_component_plane_batch(plans: &[&PreparedDirectGraysca
                     return false;
                 }
             }
-            PreparedDirectGrayscaleStep::HtSubBand(_) => return false,
+            PreparedDirectGrayscaleStep::HtSubBand(sub_band) => {
+                if !plans.iter().all(|plan| {
+                    matches!(
+                        &plan.steps[step_idx],
+                        PreparedDirectGrayscaleStep::HtSubBand(other)
+                            if ht_sub_band_shapes_match(sub_band, other)
+                    )
+                }) {
+                    return false;
+                }
+            }
             PreparedDirectGrayscaleStep::Idwt(idwt) => {
                 if !plans.iter().all(|plan| {
                     matches!(
@@ -3904,15 +4863,19 @@ fn prepared_direct_component_plan_supports_runtime(plan: &PreparedDirectGrayscal
             .jobs
             .iter()
             .all(|job| classic_prepared_job_supports_runtime(job, &sub_band.segments)),
-        PreparedDirectGrayscaleStep::HtSubBand(_)
-        | PreparedDirectGrayscaleStep::Idwt(_)
-        | PreparedDirectGrayscaleStep::Store(_) => true,
+        PreparedDirectGrayscaleStep::HtSubBand(sub_band) => {
+            sub_band.jobs.iter().all(ht_prepared_job_supports_runtime)
+        }
+        PreparedDirectGrayscaleStep::Idwt(_) | PreparedDirectGrayscaleStep::Store(_) => true,
     }) && plan.classic_groups.iter().all(|group| {
         group
             .jobs
             .iter()
             .all(|job| classic_prepared_job_supports_runtime(job, &group.segments))
-    })
+    }) && plan
+        .ht_groups
+        .iter()
+        .all(|group| group.jobs.iter().all(ht_prepared_job_supports_runtime))
 }
 
 #[cfg(target_os = "macos")]
@@ -4017,10 +4980,27 @@ fn classic_group_shapes_match(
 }
 
 #[cfg(target_os = "macos")]
+fn ht_group_shapes_match(first: &PreparedHtSubBandGroup, other: &PreparedHtSubBandGroup) -> bool {
+    first.end_step == other.end_step
+        && first.total_coefficients == other.total_coefficients
+        && first.members.len() == other.members.len()
+        && first
+            .members
+            .iter()
+            .zip(&other.members)
+            .all(|(left, right)| left.offset_elements == right.offset_elements)
+}
+
+#[cfg(target_os = "macos")]
 fn classic_sub_band_shapes_match(
     first: &PreparedClassicSubBand,
     other: &PreparedClassicSubBand,
 ) -> bool {
+    first.width == other.width && first.height == other.height
+}
+
+#[cfg(target_os = "macos")]
+fn ht_sub_band_shapes_match(first: &PreparedHtSubBand, other: &PreparedHtSubBand) -> bool {
     first.width == other.width && first.height == other.height
 }
 
@@ -4033,13 +5013,17 @@ fn rect_shapes_match(
 }
 
 #[cfg(target_os = "macos")]
-fn idwt_shapes_match(first: &J2kDirectIdwtStep, other: &J2kDirectIdwtStep) -> bool {
-    first.transform == other.transform
-        && rect_shapes_match(first.rect, other.rect)
-        && rect_shapes_match(first.ll, other.ll)
-        && rect_shapes_match(first.hl, other.hl)
-        && rect_shapes_match(first.lh, other.lh)
-        && rect_shapes_match(first.hh, other.hh)
+fn idwt_shapes_match(first: &PreparedDirectIdwt, other: &PreparedDirectIdwt) -> bool {
+    first.step.transform == other.step.transform
+        && rect_shapes_match(first.step.rect, other.step.rect)
+        && first.output_window.x0 == other.output_window.x0
+        && first.output_window.y0 == other.output_window.y0
+        && first.output_window.x1 == other.output_window.x1
+        && first.output_window.y1 == other.output_window.y1
+        && rect_shapes_match(first.step.ll, other.step.ll)
+        && rect_shapes_match(first.step.hl, other.step.hl)
+        && rect_shapes_match(first.step.lh, other.step.lh)
+        && rect_shapes_match(first.step.hh, other.step.hh)
 }
 
 #[cfg(target_os = "macos")]
@@ -4104,6 +5088,42 @@ fn encode_stacked_direct_component_plane_batch(
                         buffer: output.buffer.clone(),
                         offset_bytes: instance_idx * stride_bytes
                             + member.offset_elements * size_of::<f32>(),
+                        window: member.window,
+                    });
+                }
+            }
+            scratch_buffers.push(output);
+            step_idx = group.end_step;
+            continue;
+        }
+
+        if let Some(group) = first.ht_group_starting_at(step_idx) {
+            let groups = plans
+                .iter()
+                .map(|plan| {
+                    plan.ht_group_starting_at(step_idx)
+                        .expect("preflight validated HT group")
+                })
+                .collect::<Vec<_>>();
+            let output = take_f32_scratch_buffer(runtime, group.total_coefficients * count);
+            let (buffers, status_check) =
+                encode_distinct_ht_sub_band_groups_to_buffer_in_command_buffer(
+                    runtime,
+                    command_buffer,
+                    &groups,
+                    &output.buffer,
+                )?;
+            retained_buffers.extend(buffers);
+            status_checks.push(status_check);
+            let stride_bytes = group.total_coefficients * size_of::<f32>();
+            for (instance_idx, bands) in band_sets.iter_mut().enumerate() {
+                for member in &groups[instance_idx].members {
+                    bands.push(DirectBandSlice {
+                        band_id: member.band_id,
+                        buffer: output.buffer.clone(),
+                        offset_bytes: instance_idx * stride_bytes
+                            + member.offset_elements * size_of::<f32>(),
+                        window: member.window,
                     });
                 }
             }
@@ -4139,72 +5159,96 @@ fn encode_stacked_direct_component_plane_batch(
                         band_id: sub_bands[instance_idx].band_id,
                         buffer: output.buffer.clone(),
                         offset_bytes: instance_idx * stride_bytes,
+                        window: BandRequiredRegion::full(
+                            sub_bands[instance_idx].width,
+                            sub_bands[instance_idx].height,
+                        ),
                     });
                 }
                 scratch_buffers.push(output);
             }
-            PreparedDirectGrayscaleStep::HtSubBand(_) => unreachable!("preflight rejected HT"),
-            PreparedDirectGrayscaleStep::Idwt(idwt) => {
-                let per_instance_len = idwt.rect.width() as usize * idwt.rect.height() as usize;
+            PreparedDirectGrayscaleStep::HtSubBand(sub_band) => {
+                let sub_bands = plans
+                    .iter()
+                    .map(|plan| match &plan.steps[step_idx] {
+                        PreparedDirectGrayscaleStep::HtSubBand(other) => other,
+                        _ => unreachable!("preflight validated HT sub-band"),
+                    })
+                    .collect::<Vec<_>>();
+                let per_instance_len = sub_band.width as usize * sub_band.height as usize;
                 let output = take_f32_scratch_buffer(runtime, per_instance_len * count);
-                match idwt.transform {
+                let (buffers, status_check) =
+                    encode_distinct_ht_sub_bands_to_buffer_in_command_buffer(
+                        runtime,
+                        command_buffer,
+                        &sub_bands,
+                        &output.buffer,
+                    )?;
+                retained_buffers.extend(buffers);
+                status_checks.push(status_check);
+                let stride_bytes = per_instance_len * size_of::<f32>();
+                for (instance_idx, bands) in band_sets.iter_mut().enumerate() {
+                    bands.push(DirectBandSlice {
+                        band_id: sub_bands[instance_idx].band_id,
+                        buffer: output.buffer.clone(),
+                        offset_bytes: instance_idx * stride_bytes,
+                        window: BandRequiredRegion::full(
+                            sub_bands[instance_idx].width,
+                            sub_bands[instance_idx].height,
+                        ),
+                    });
+                }
+                scratch_buffers.push(output);
+            }
+            PreparedDirectGrayscaleStep::Idwt(idwt) => {
+                let per_instance_len = prepared_idwt_output_len(idwt);
+                let output = take_f32_scratch_buffer(runtime, per_instance_len * count);
+                match idwt.step.transform {
                     J2kWaveletTransform::Reversible53 => {
-                        let (ll, ll_offset, low_low_stride) = lookup_repeated_direct_band_layout(
+                        let (ll, low_low_stride) = lookup_repeated_direct_band_layout_entry(
                             &band_sets,
-                            idwt.ll_band_id,
-                            idwt.ll,
+                            idwt.step.ll_band_id,
+                            idwt.step.ll,
                         )?;
-                        let (hl, hl_offset, high_low_stride) = lookup_repeated_direct_band_layout(
+                        let (hl, high_low_stride) = lookup_repeated_direct_band_layout_entry(
                             &band_sets,
-                            idwt.hl_band_id,
-                            idwt.hl,
+                            idwt.step.hl_band_id,
+                            idwt.step.hl,
                         )?;
-                        let (lh, lh_offset, low_high_stride) = lookup_repeated_direct_band_layout(
+                        let (lh, low_high_stride) = lookup_repeated_direct_band_layout_entry(
                             &band_sets,
-                            idwt.lh_band_id,
-                            idwt.lh,
+                            idwt.step.lh_band_id,
+                            idwt.step.lh,
                         )?;
-                        let (hh, hh_offset, high_high_stride) = lookup_repeated_direct_band_layout(
+                        let (hh, high_high_stride) = lookup_repeated_direct_band_layout_entry(
                             &band_sets,
-                            idwt.hh_band_id,
-                            idwt.hh,
+                            idwt.step.hh_band_id,
+                            idwt.step.hh,
+                        )?;
+                        let params = repeated_idwt_params(
+                            idwt,
+                            idwt_input_windows_from_slices(&ll, &hl, &lh, &hh),
+                            PreparedIdwtInputStrides {
+                                ll: low_low_stride,
+                                hl: high_low_stride,
+                                lh: low_high_stride,
+                                hh: high_high_stride,
+                            },
+                            count,
+                            "color",
                         )?;
                         dispatch_reversible53_repeated_buffers_in_command_buffer_with_offsets(
                             runtime,
                             command_buffer,
-                            &ll,
-                            ll_offset,
-                            &hl,
-                            hl_offset,
-                            &lh,
-                            lh_offset,
-                            &hh,
-                            hh_offset,
-                            J2kRepeatedIdwtSingleDecompositionParams {
-                                x0: idwt.rect.x0,
-                                y0: idwt.rect.y0,
-                                width: idwt.rect.width(),
-                                height: idwt.rect.height(),
-                                ll_width: idwt.ll.width(),
-                                ll_height: idwt.ll.height(),
-                                hl_width: idwt.hl.width(),
-                                hl_height: idwt.hl.height(),
-                                lh_width: idwt.lh.width(),
-                                lh_height: idwt.lh.height(),
-                                hh_width: idwt.hh.width(),
-                                hh_height: idwt.hh.height(),
-                                ll_instance_stride: low_low_stride,
-                                hl_instance_stride: high_low_stride,
-                                lh_instance_stride: low_high_stride,
-                                hh_instance_stride: high_high_stride,
-                                batch_count: u32::try_from(count).map_err(|_| {
-                                    Error::MetalKernel {
-                                        message:
-                                            "J2K MetalDirect color IDWT batch count exceeds u32"
-                                                .to_string(),
-                                    }
-                                })?,
-                            },
+                            &ll.buffer,
+                            ll.offset_bytes,
+                            &hl.buffer,
+                            hl.offset_bytes,
+                            &lh.buffer,
+                            lh.offset_bytes,
+                            &hh.buffer,
+                            hh.offset_bytes,
+                            params,
                             &output.buffer,
                         );
                     }
@@ -4215,40 +5259,43 @@ fn encode_stacked_direct_component_plane_batch(
                             else {
                                 unreachable!("preflight validated IDWT")
                             };
-                            let (ll, ll_offset) =
-                                lookup_direct_band_slice(bands, step.ll_band_id, step.ll)?;
-                            let (hl, hl_offset) =
-                                lookup_direct_band_slice(bands, step.hl_band_id, step.hl)?;
-                            let (lh, lh_offset) =
-                                lookup_direct_band_slice(bands, step.lh_band_id, step.lh)?;
-                            let (hh, hh_offset) =
-                                lookup_direct_band_slice(bands, step.hh_band_id, step.hh)?;
+                            let ll = lookup_direct_band_slice_entry(
+                                bands,
+                                step.step.ll_band_id,
+                                step.step.ll,
+                            )?;
+                            let hl = lookup_direct_band_slice_entry(
+                                bands,
+                                step.step.hl_band_id,
+                                step.step.hl,
+                            )?;
+                            let lh = lookup_direct_band_slice_entry(
+                                bands,
+                                step.step.lh_band_id,
+                                step.step.lh,
+                            )?;
+                            let hh = lookup_direct_band_slice_entry(
+                                bands,
+                                step.step.hh_band_id,
+                                step.step.hh,
+                            )?;
+                            let params = prepared_idwt_params(
+                                step,
+                                idwt_input_windows_from_slices(&ll, &hl, &lh, &hh),
+                            );
                             status_checks.push(
                                 dispatch_irreversible97_single_decomposition_buffers_in_command_buffer_with_offsets(
                                     runtime,
                                     command_buffer,
-                                    &ll,
-                                    ll_offset,
-                                    &hl,
-                                    hl_offset,
-                                    &lh,
-                                    lh_offset,
-                                    &hh,
-                                    hh_offset,
-                                    J2kIdwtSingleDecompositionParams {
-                                        x0: step.rect.x0,
-                                        y0: step.rect.y0,
-                                        width: step.rect.width(),
-                                        height: step.rect.height(),
-                                        ll_width: step.ll.width(),
-                                        ll_height: step.ll.height(),
-                                        hl_width: step.hl.width(),
-                                        hl_height: step.hl.height(),
-                                        lh_width: step.lh.width(),
-                                        lh_height: step.lh.height(),
-                                        hh_width: step.hh.width(),
-                                        hh_height: step.hh.height(),
-                                    },
+                                    &ll.buffer,
+                                    ll.offset_bytes,
+                                    &hl.buffer,
+                                    hl.offset_bytes,
+                                    &lh.buffer,
+                                    lh.offset_bytes,
+                                    &hh.buffer,
+                                    hh.offset_bytes,
+                                    params,
                                     &output.buffer,
                                     instance_idx * per_instance_len * size_of::<f32>(),
                                 ),
@@ -4264,9 +5311,10 @@ fn encode_stacked_direct_component_plane_batch(
                         unreachable!("preflight validated IDWT")
                     };
                     bands.push(DirectBandSlice {
-                        band_id: step.output_band_id,
+                        band_id: step.step.output_band_id,
                         buffer: output.buffer.clone(),
                         offset_bytes: instance_idx * stride_bytes,
+                        window: step.output_window,
                     });
                 }
                 scratch_buffers.push(output);
@@ -4317,6 +5365,14 @@ fn encode_stacked_direct_component_plane_batch(
 }
 
 #[cfg(target_os = "macos")]
+fn ht_prepared_job_supports_runtime(job: &J2kHtCleanupBatchJob) -> bool {
+    if job.width == 0 || job.height == 0 {
+        return true;
+    }
+    job.output_stride >= job.width && crate::ht::supports_metal_ht_geometry(job.width, job.height)
+}
+
+#[cfg(target_os = "macos")]
 #[allow(clippy::too_many_arguments)]
 fn encode_repeated_direct_grayscale_plan_in_command_buffer(
     runtime: &MetalRuntime,
@@ -4358,6 +5414,7 @@ fn encode_repeated_direct_grayscale_plan_in_command_buffer(
                         buffer: output.buffer.clone(),
                         offset_bytes: instance_idx * stride_bytes
                             + member.offset_elements * size_of::<f32>(),
+                        window: member.window,
                     });
                 }
             }
@@ -4388,6 +5445,7 @@ fn encode_repeated_direct_grayscale_plan_in_command_buffer(
                         buffer: output.buffer.clone(),
                         offset_bytes: instance_idx * stride_bytes
                             + member.offset_elements * size_of::<f32>(),
+                        window: member.window,
                     });
                 }
             }
@@ -4419,6 +5477,7 @@ fn encode_repeated_direct_grayscale_plan_in_command_buffer(
                         band_id: sub_band.band_id,
                         buffer: output.buffer.clone(),
                         offset_bytes: instance_idx * stride_bytes,
+                        window: BandRequiredRegion::full(sub_band.width, sub_band.height),
                     });
                 }
                 scratch_buffers.push(output);
@@ -4443,126 +5502,114 @@ fn encode_repeated_direct_grayscale_plan_in_command_buffer(
                         band_id: sub_band.band_id,
                         buffer: output.buffer.clone(),
                         offset_bytes: instance_idx * stride_bytes,
+                        window: BandRequiredRegion::full(sub_band.width, sub_band.height),
                     });
                 }
                 scratch_buffers.push(output);
             }
-            PreparedDirectGrayscaleStep::Idwt(idwt) => {
-                let params = J2kIdwtSingleDecompositionParams {
-                    x0: idwt.rect.x0,
-                    y0: idwt.rect.y0,
-                    width: idwt.rect.width(),
-                    height: idwt.rect.height(),
-                    ll_width: idwt.ll.width(),
-                    ll_height: idwt.ll.height(),
-                    hl_width: idwt.hl.width(),
-                    hl_height: idwt.hl.height(),
-                    lh_width: idwt.lh.width(),
-                    lh_height: idwt.lh.height(),
-                    hh_width: idwt.hh.width(),
-                    hh_height: idwt.hh.height(),
-                };
-                match idwt.transform {
-                    J2kWaveletTransform::Reversible53 if stacked_outputs => {
-                        let (ll, ll_offset, low_low_stride) = lookup_repeated_direct_band_layout(
-                            &band_sets,
-                            idwt.ll_band_id,
-                            idwt.ll,
-                        )?;
-                        let (hl, hl_offset, high_low_stride) = lookup_repeated_direct_band_layout(
-                            &band_sets,
-                            idwt.hl_band_id,
-                            idwt.hl,
-                        )?;
-                        let (lh, lh_offset, low_high_stride) = lookup_repeated_direct_band_layout(
-                            &band_sets,
-                            idwt.lh_band_id,
-                            idwt.lh,
-                        )?;
-                        let (hh, hh_offset, high_high_stride) = lookup_repeated_direct_band_layout(
-                            &band_sets,
-                            idwt.hh_band_id,
-                            idwt.hh,
-                        )?;
-                        let per_instance_len =
-                            idwt.rect.width() as usize * idwt.rect.height() as usize;
-                        let output = take_f32_scratch_buffer(runtime, per_instance_len * count);
-                        dispatch_reversible53_repeated_buffers_in_command_buffer_with_offsets(
-                            runtime,
-                            command_buffer,
-                            &ll,
-                            ll_offset,
-                            &hl,
-                            hl_offset,
-                            &lh,
-                            lh_offset,
-                            &hh,
-                            hh_offset,
-                            J2kRepeatedIdwtSingleDecompositionParams {
-                                x0: params.x0,
-                                y0: params.y0,
-                                width: params.width,
-                                height: params.height,
-                                ll_width: params.ll_width,
-                                ll_height: params.ll_height,
-                                hl_width: params.hl_width,
-                                hl_height: params.hl_height,
-                                lh_width: params.lh_width,
-                                lh_height: params.lh_height,
-                                hh_width: params.hh_width,
-                                hh_height: params.hh_height,
-                                ll_instance_stride: low_low_stride,
-                                hl_instance_stride: high_low_stride,
-                                lh_instance_stride: low_high_stride,
-                                hh_instance_stride: high_high_stride,
-                                batch_count: u32::try_from(count).map_err(|_| {
-                                    Error::MetalKernel {
-                                        message:
-                                            "J2K MetalDirect repeated IDWT batch count exceeds u32"
-                                                .to_string(),
-                                    }
-                                })?,
-                            },
-                            &output.buffer,
-                        );
-                        let stride_bytes = per_instance_len * size_of::<f32>();
-                        for (instance_idx, bands) in band_sets.iter_mut().enumerate() {
-                            bands.push(DirectBandSlice {
-                                band_id: idwt.output_band_id,
-                                buffer: output.buffer.clone(),
-                                offset_bytes: instance_idx * stride_bytes,
-                            });
-                        }
-                        scratch_buffers.push(output);
+            PreparedDirectGrayscaleStep::Idwt(idwt) => match idwt.step.transform {
+                J2kWaveletTransform::Reversible53 if stacked_outputs => {
+                    let (ll, low_low_stride) = lookup_repeated_direct_band_layout_entry(
+                        &band_sets,
+                        idwt.step.ll_band_id,
+                        idwt.step.ll,
+                    )?;
+                    let (hl, high_low_stride) = lookup_repeated_direct_band_layout_entry(
+                        &band_sets,
+                        idwt.step.hl_band_id,
+                        idwt.step.hl,
+                    )?;
+                    let (lh, low_high_stride) = lookup_repeated_direct_band_layout_entry(
+                        &band_sets,
+                        idwt.step.lh_band_id,
+                        idwt.step.lh,
+                    )?;
+                    let (hh, high_high_stride) = lookup_repeated_direct_band_layout_entry(
+                        &band_sets,
+                        idwt.step.hh_band_id,
+                        idwt.step.hh,
+                    )?;
+                    let params = repeated_idwt_params(
+                        idwt,
+                        idwt_input_windows_from_slices(&ll, &hl, &lh, &hh),
+                        PreparedIdwtInputStrides {
+                            ll: low_low_stride,
+                            hl: high_low_stride,
+                            lh: low_high_stride,
+                            hh: high_high_stride,
+                        },
+                        count,
+                        "repeated",
+                    )?;
+                    let per_instance_len = prepared_idwt_output_len(idwt);
+                    let output = take_f32_scratch_buffer(runtime, per_instance_len * count);
+                    dispatch_reversible53_repeated_buffers_in_command_buffer_with_offsets(
+                        runtime,
+                        command_buffer,
+                        &ll.buffer,
+                        ll.offset_bytes,
+                        &hl.buffer,
+                        hl.offset_bytes,
+                        &lh.buffer,
+                        lh.offset_bytes,
+                        &hh.buffer,
+                        hh.offset_bytes,
+                        params,
+                        &output.buffer,
+                    );
+                    let stride_bytes = per_instance_len * size_of::<f32>();
+                    for (instance_idx, bands) in band_sets.iter_mut().enumerate() {
+                        bands.push(DirectBandSlice {
+                            band_id: idwt.step.output_band_id,
+                            buffer: output.buffer.clone(),
+                            offset_bytes: instance_idx * stride_bytes,
+                            window: idwt.output_window,
+                        });
                     }
-                    _ => {
-                        stacked_outputs = false;
-                        for bands in &mut band_sets {
-                            let (ll, ll_offset) =
-                                lookup_direct_band_slice(bands, idwt.ll_band_id, idwt.ll)?;
-                            let (hl, hl_offset) =
-                                lookup_direct_band_slice(bands, idwt.hl_band_id, idwt.hl)?;
-                            let (lh, lh_offset) =
-                                lookup_direct_band_slice(bands, idwt.lh_band_id, idwt.lh)?;
-                            let (hh, hh_offset) =
-                                lookup_direct_band_slice(bands, idwt.hh_band_id, idwt.hh)?;
-                            let output = take_f32_scratch_buffer(
-                                runtime,
-                                idwt.rect.width() as usize * idwt.rect.height() as usize,
-                            );
-                            match idwt.transform {
+                    scratch_buffers.push(output);
+                }
+                _ => {
+                    stacked_outputs = false;
+                    for bands in &mut band_sets {
+                        let ll = lookup_direct_band_slice_entry(
+                            bands,
+                            idwt.step.ll_band_id,
+                            idwt.step.ll,
+                        )?;
+                        let hl = lookup_direct_band_slice_entry(
+                            bands,
+                            idwt.step.hl_band_id,
+                            idwt.step.hl,
+                        )?;
+                        let lh = lookup_direct_band_slice_entry(
+                            bands,
+                            idwt.step.lh_band_id,
+                            idwt.step.lh,
+                        )?;
+                        let hh = lookup_direct_band_slice_entry(
+                            bands,
+                            idwt.step.hh_band_id,
+                            idwt.step.hh,
+                        )?;
+                        let params = prepared_idwt_params(
+                            idwt,
+                            idwt_input_windows_from_slices(&ll, &hl, &lh, &hh),
+                        );
+                        let output =
+                            take_f32_scratch_buffer(runtime, prepared_idwt_output_len(idwt));
+                        match idwt.step.transform {
                                 J2kWaveletTransform::Reversible53 => {
                                     dispatch_reversible53_single_decomposition_buffers_in_command_buffer_with_offsets(
                                         runtime,
                                         command_buffer,
-                                        &ll,
-                                        ll_offset,
-                                        &hl,
-                                        hl_offset,
-                                        &lh,
-                                        lh_offset,
-                                        &hh,
-                                        hh_offset,
+                                        &ll.buffer,
+                                        ll.offset_bytes,
+                                        &hl.buffer,
+                                        hl.offset_bytes,
+                                        &lh.buffer,
+                                        lh.offset_bytes,
+                                        &hh.buffer,
+                                        hh.offset_bytes,
                                         params,
                                         &output.buffer,
                                         0,
@@ -4572,30 +5619,30 @@ fn encode_repeated_direct_grayscale_plan_in_command_buffer(
                                     dispatch_irreversible97_single_decomposition_buffers_in_command_buffer_with_offsets(
                                         runtime,
                                         command_buffer,
-                                        &ll,
-                                        ll_offset,
-                                        &hl,
-                                        hl_offset,
-                                        &lh,
-                                        lh_offset,
-                                        &hh,
-                                        hh_offset,
+                                        &ll.buffer,
+                                        ll.offset_bytes,
+                                        &hl.buffer,
+                                        hl.offset_bytes,
+                                        &lh.buffer,
+                                        lh.offset_bytes,
+                                        &hh.buffer,
+                                        hh.offset_bytes,
                                         params,
                                         &output.buffer,
                                         0,
                                     ),
                                 ),
                             }
-                            bands.push(DirectBandSlice {
-                                band_id: idwt.output_band_id,
-                                buffer: output.buffer.clone(),
-                                offset_bytes: 0,
-                            });
-                            scratch_buffers.push(output);
-                        }
+                        bands.push(DirectBandSlice {
+                            band_id: idwt.step.output_band_id,
+                            buffer: output.buffer.clone(),
+                            offset_bytes: 0,
+                            window: idwt.output_window,
+                        });
+                        scratch_buffers.push(output);
                     }
                 }
-            }
+            },
             PreparedDirectGrayscaleStep::Store(store) => {
                 if stacked_outputs {
                     let (input, _) = lookup_direct_band_slice(
@@ -5517,6 +6564,618 @@ fn extract_subband(
 }
 
 #[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct J2kLosslessDeviceCodeBlock {
+    pub(crate) coefficient_offset: u32,
+    pub(crate) component: u32,
+    pub(crate) subband_x: u32,
+    pub(crate) subband_y: u32,
+    pub(crate) block_x: u32,
+    pub(crate) block_y: u32,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) sub_band_type: signinum_j2k_native::J2kSubBandType,
+    pub(crate) total_bitplanes: u8,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct J2kLosslessDevicePrepareJob<'a> {
+    pub(crate) input: &'a Buffer,
+    pub(crate) input_byte_offset: usize,
+    pub(crate) input_width: u32,
+    pub(crate) input_height: u32,
+    pub(crate) input_pitch_bytes: usize,
+    pub(crate) output_width: u32,
+    pub(crate) output_height: u32,
+    pub(crate) components: u8,
+    pub(crate) bytes_per_sample: u8,
+    pub(crate) bit_depth: u8,
+    pub(crate) num_decomposition_levels: u8,
+    pub(crate) coefficient_count: usize,
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) struct J2kPreparedLosslessDeviceCodeBlocks {
+    coefficient_buffer: Buffer,
+    code_blocks: Vec<J2kLosslessDeviceCodeBlock>,
+    _prepare_command_buffer: CommandBuffer,
+    _deinterleave_status_buffer: Buffer,
+    _plane_buffers: Vec<Buffer>,
+    _scratch_buffers: Vec<Buffer>,
+    _coefficient_job_buffer: Buffer,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct J2kResidentPacketizationSubband {
+    pub(crate) code_block_start: u32,
+    pub(crate) code_block_count: u32,
+    pub(crate) num_cbs_x: u32,
+    pub(crate) num_cbs_y: u32,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Debug)]
+pub(crate) struct J2kResidentPacketizationResolution {
+    pub(crate) subbands: Vec<J2kResidentPacketizationSubband>,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy)]
+pub(crate) struct J2kResidentPacketizationEncodeJob<'a> {
+    pub(crate) resolution_count: u32,
+    pub(crate) num_layers: u8,
+    pub(crate) num_components: u8,
+    pub(crate) code_block_count: u32,
+    pub(crate) packet_descriptors: &'a [J2kPacketizationPacketDescriptor],
+    pub(crate) resolutions: &'a [J2kResidentPacketizationResolution],
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum J2kLosslessCodestreamBlockCodingMode {
+    Classic,
+    HighThroughput,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct J2kLosslessCodestreamAssemblyJob {
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) num_components: u8,
+    pub(crate) bit_depth: u8,
+    pub(crate) signed: bool,
+    pub(crate) num_decomposition_levels: u8,
+    pub(crate) use_mct: bool,
+    pub(crate) guard_bits: u8,
+    pub(crate) progression_order: EncodeProgressionOrder,
+    pub(crate) write_tlm: bool,
+    pub(crate) block_coding_mode: J2kLosslessCodestreamBlockCodingMode,
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) struct J2kResidentLosslessTier1CodeBlocks {
+    output_buffer: Buffer,
+    status_buffer: Buffer,
+    job_buffer: Buffer,
+    batch_jobs: Vec<J2kClassicEncodeBatchJob>,
+    code_blocks: Vec<J2kLosslessDeviceCodeBlock>,
+    output_capacity_total: usize,
+    _segment_buffer: Buffer,
+    tier1_command_buffer: CommandBuffer,
+    _coefficient_buffer: Buffer,
+    prepare_command_buffer: CommandBuffer,
+    _deinterleave_status_buffer: Buffer,
+    _plane_buffers: Vec<Buffer>,
+    _scratch_buffers: Vec<Buffer>,
+    _coefficient_job_buffer: Buffer,
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) struct J2kResidentLosslessHtCodeBlocks {
+    output_buffer: Buffer,
+    status_buffer: Buffer,
+    job_buffer: Buffer,
+    batch_jobs: Vec<J2kHtEncodeBatchJob>,
+    code_blocks: Vec<J2kLosslessDeviceCodeBlock>,
+    output_capacity_total: usize,
+    tier1_command_buffer: CommandBuffer,
+    _coefficient_buffer: Buffer,
+    prepare_command_buffer: CommandBuffer,
+    _deinterleave_status_buffer: Buffer,
+    _plane_buffers: Vec<Buffer>,
+    _scratch_buffers: Vec<Buffer>,
+    _coefficient_job_buffer: Buffer,
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) struct J2kResidentLosslessCodestream {
+    pub(crate) buffer: Buffer,
+    pub(crate) byte_len: usize,
+    pub(crate) capacity: usize,
+    pub(crate) gpu_duration: Option<Duration>,
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) struct J2kPendingResidentLosslessCodestream {
+    buffer: Buffer,
+    capacity: usize,
+    status_buffer: Buffer,
+    command_buffer: CommandBuffer,
+    retained_command_buffers: Vec<CommandBuffer>,
+    _retained_buffers: Vec<Buffer>,
+    status_stage: &'static str,
+    length_error: &'static str,
+    capacity_error: &'static str,
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn wait_resident_lossless_codestream(
+    pending: J2kPendingResidentLosslessCodestream,
+) -> Result<J2kResidentLosslessCodestream, Error> {
+    pending.command_buffer.wait_until_completed();
+    let gpu_duration = completed_command_buffers_gpu_duration(
+        &pending.retained_command_buffers,
+        &pending.command_buffer,
+    );
+    let status = unsafe {
+        pending
+            .status_buffer
+            .contents()
+            .cast::<J2kCodestreamAssemblyStatus>()
+            .read()
+    };
+    if status.code != J2K_ENCODE_STATUS_OK {
+        return Err(encode_status_error(
+            pending.status_stage,
+            status.code,
+            status.detail,
+        ));
+    }
+    let data_len = usize::try_from(status.data_len).map_err(|_| Error::MetalKernel {
+        message: pending.length_error.to_string(),
+    })?;
+    if data_len > pending.capacity {
+        return Err(Error::MetalKernel {
+            message: pending.capacity_error.to_string(),
+        });
+    }
+    Ok(J2kResidentLosslessCodestream {
+        buffer: pending.buffer,
+        byte_len: data_len,
+        capacity: pending.capacity,
+        gpu_duration,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn completed_command_buffers_gpu_duration(
+    retained: &[CommandBuffer],
+    final_buffer: &CommandBufferRef,
+) -> Option<Duration> {
+    let mut total = Duration::ZERO;
+    for command_buffer in retained {
+        total = total.saturating_add(completed_command_buffer_gpu_duration(command_buffer)?);
+    }
+    total = total.saturating_add(completed_command_buffer_gpu_duration(final_buffer)?);
+    Some(total)
+}
+
+#[cfg(target_os = "macos")]
+fn completed_command_buffer_gpu_duration(command_buffer: &CommandBufferRef) -> Option<Duration> {
+    let start: f64 = unsafe {
+        command_buffer
+            .send_message::<(), f64>(Sel::register("GPUStartTime"), ())
+            .ok()?
+    };
+    let end: f64 = unsafe {
+        command_buffer
+            .send_message::<(), f64>(Sel::register("GPUEndTime"), ())
+            .ok()?
+    };
+    if start.is_finite() && end.is_finite() && end > start {
+        Some(Duration::from_secs_f64(end - start))
+    } else {
+        None
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn dispatch_lossless_deinterleave(
+    runtime: &MetalRuntime,
+    command_buffer: &CommandBufferRef,
+    job: J2kLosslessDevicePrepareJob<'_>,
+    plane0: &Buffer,
+    plane1: &Buffer,
+    plane2: &Buffer,
+) -> Result<(), Error> {
+    let input_byte_offset =
+        u64::try_from(job.input_byte_offset).map_err(|_| Error::MetalKernel {
+            message: "J2K Metal resident encode input offset exceeds u64".to_string(),
+        })?;
+    let src_stride = u32::try_from(job.input_pitch_bytes).map_err(|_| Error::MetalKernel {
+        message: "J2K Metal resident encode input pitch exceeds u32".to_string(),
+    })?;
+    let sample_offset = if job.bit_depth == 0 || job.bit_depth > 16 {
+        return Err(Error::MetalKernel {
+            message: "J2K Metal resident encode bit depth must be 1-16".to_string(),
+        });
+    } else {
+        1u32 << (u32::from(job.bit_depth) - 1)
+    };
+    let params = J2kLosslessDeinterleaveParams {
+        src_width: job.input_width,
+        src_height: job.input_height,
+        src_stride,
+        dst_width: job.output_width,
+        dst_height: job.output_height,
+        components: u32::from(job.components),
+        bytes_per_sample: u32::from(job.bytes_per_sample),
+        sample_offset,
+    };
+    let encoder = command_buffer.new_compute_command_encoder();
+    encoder.set_compute_pipeline_state(&runtime.lossless_deinterleave_to_planes);
+    encoder.set_buffer(0, Some(job.input), input_byte_offset);
+    encoder.set_buffer(1, Some(plane0), 0);
+    encoder.set_buffer(2, Some(plane1), 0);
+    encoder.set_buffer(3, Some(plane2), 0);
+    encoder.set_bytes(
+        4,
+        size_of::<J2kLosslessDeinterleaveParams>() as u64,
+        (&raw const params).cast(),
+    );
+    let width = runtime
+        .lossless_deinterleave_to_planes
+        .thread_execution_width()
+        .max(1);
+    let max_threads = runtime
+        .lossless_deinterleave_to_planes
+        .max_total_threads_per_threadgroup()
+        .max(width);
+    let height = (max_threads / width).max(1);
+    encoder.dispatch_threads(
+        MTLSize {
+            width: u64::from(job.output_width),
+            height: u64::from(job.output_height),
+            depth: 1,
+        },
+        MTLSize {
+            width,
+            height,
+            depth: 1,
+        },
+    );
+    encoder.end_encoding();
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn dispatch_forward_rct_on_buffers(
+    runtime: &MetalRuntime,
+    command_buffer: &CommandBufferRef,
+    plane0: &Buffer,
+    plane1: &Buffer,
+    plane2: &Buffer,
+    len: usize,
+    status_buffer: &Buffer,
+) -> Result<(), Error> {
+    if len == 0 {
+        return Ok(());
+    }
+    let params = J2kForwardRctParams {
+        len: u32::try_from(len).map_err(|_| Error::MetalKernel {
+            message: "J2K Metal resident encode RCT length exceeds u32".to_string(),
+        })?,
+        reserved0: 0,
+        reserved1: 0,
+        reserved2: 0,
+    };
+    let encoder = command_buffer.new_compute_command_encoder();
+    encoder.set_compute_pipeline_state(&runtime.forward_rct);
+    encoder.set_buffer(0, Some(plane0), 0);
+    encoder.set_buffer(1, Some(plane1), 0);
+    encoder.set_buffer(2, Some(plane2), 0);
+    encoder.set_bytes(
+        3,
+        size_of::<J2kForwardRctParams>() as u64,
+        (&raw const params).cast(),
+    );
+    encoder.set_buffer(4, Some(status_buffer), 0);
+    let width = runtime
+        .forward_rct
+        .thread_execution_width()
+        .max(1)
+        .min(len as u64);
+    encoder.dispatch_threads(
+        MTLSize {
+            width: len as u64,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width,
+            height: 1,
+            depth: 1,
+        },
+    );
+    encoder.end_encoding();
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn dispatch_forward_dwt53_on_buffers(
+    runtime: &MetalRuntime,
+    command_buffer: &CommandBufferRef,
+    input: &Buffer,
+    scratch: &Buffer,
+    width: u32,
+    height: u32,
+    num_levels: u8,
+) -> Buffer {
+    let mut current_width = width;
+    let mut current_height = height;
+    let mut levels_run = 0u8;
+    let mut active_is_input = true;
+
+    while levels_run < num_levels && (current_width >= 2 || current_height >= 2) {
+        let low_width = current_width.div_ceil(2);
+        let low_height = current_height.div_ceil(2);
+        let params = J2kForwardDwt53Params {
+            full_width: width,
+            current_width,
+            current_height,
+            low_width,
+            low_height,
+        };
+
+        if current_height >= 2 {
+            let (src, dst) = active_forward_dwt53_buffers(input, scratch, active_is_input);
+            dispatch_forward_dwt53_pass(&runtime.fdwt53_vertical, command_buffer, src, dst, params);
+            active_is_input = !active_is_input;
+        }
+        if current_width >= 2 {
+            let (src, dst) = active_forward_dwt53_buffers(input, scratch, active_is_input);
+            dispatch_forward_dwt53_pass(
+                &runtime.fdwt53_horizontal,
+                command_buffer,
+                src,
+                dst,
+                params,
+            );
+            active_is_input = !active_is_input;
+        }
+
+        current_width = low_width;
+        current_height = low_height;
+        levels_run = levels_run.saturating_add(1);
+    }
+
+    if active_is_input {
+        input.to_owned()
+    } else {
+        scratch.to_owned()
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn dispatch_lossless_extract_coefficients(
+    runtime: &MetalRuntime,
+    command_buffer: &CommandBufferRef,
+    planes: &[Buffer],
+    coefficient_buffer: &Buffer,
+    coefficient_jobs: &[J2kLosslessCoefficientJob],
+    output_width: u32,
+) -> Result<Buffer, Error> {
+    let coefficient_job_buffer = copied_slice_buffer(&runtime.device, coefficient_jobs);
+    let job_count = u32::try_from(coefficient_jobs.len()).map_err(|_| Error::MetalKernel {
+        message: "J2K Metal resident encode coefficient job count exceeds u32".to_string(),
+    })?;
+    let max_block_width = coefficient_jobs
+        .iter()
+        .map(|job| job.block_width)
+        .max()
+        .unwrap_or(1);
+    let max_block_height = coefficient_jobs
+        .iter()
+        .map(|job| job.block_height)
+        .max()
+        .unwrap_or(1);
+    let encoder = command_buffer.new_compute_command_encoder();
+    encoder.set_compute_pipeline_state(&runtime.lossless_extract_coefficients);
+    encoder.set_buffer(0, planes.first().map(|buffer| &**buffer), 0);
+    encoder.set_buffer(
+        1,
+        planes
+            .get(1)
+            .or_else(|| planes.first())
+            .map(|buffer| &**buffer),
+        0,
+    );
+    encoder.set_buffer(
+        2,
+        planes
+            .get(2)
+            .or_else(|| planes.first())
+            .map(|buffer| &**buffer),
+        0,
+    );
+    encoder.set_buffer(3, Some(coefficient_buffer), 0);
+    encoder.set_buffer(4, Some(&coefficient_job_buffer), 0);
+    encoder.set_bytes(5, size_of::<u32>() as u64, (&raw const job_count).cast());
+    let width = runtime
+        .lossless_extract_coefficients
+        .thread_execution_width()
+        .max(1);
+    let max_threads = runtime
+        .lossless_extract_coefficients
+        .max_total_threads_per_threadgroup()
+        .max(width);
+    let height = (max_threads / width).max(1);
+    encoder.dispatch_threads(
+        MTLSize {
+            width: u64::from(max_block_width),
+            height: u64::from(max_block_height),
+            depth: u64::from(job_count),
+        },
+        MTLSize {
+            width,
+            height,
+            depth: 1,
+        },
+    );
+    encoder.end_encoding();
+    let _ = output_width;
+    Ok(coefficient_job_buffer)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn prepare_lossless_device_code_blocks(
+    session: &crate::MetalBackendSession,
+    job: J2kLosslessDevicePrepareJob<'_>,
+    code_blocks: Vec<J2kLosslessDeviceCodeBlock>,
+) -> Result<J2kPreparedLosslessDeviceCodeBlocks, Error> {
+    if job.components != 1 && job.components != 3 {
+        return Err(Error::UnsupportedMetalRequest {
+            reason: "J2K Metal resident encode supports grayscale or RGB input",
+        });
+    }
+    if job.bytes_per_sample != 1 && job.bytes_per_sample != 2 {
+        return Err(Error::UnsupportedMetalRequest {
+            reason: "J2K Metal resident encode supports 8-bit or 16-bit samples",
+        });
+    }
+    if job.num_decomposition_levels > 1 {
+        return Err(Error::UnsupportedMetalRequest {
+            reason: "J2K Metal resident encode currently supports up to one DWT level",
+        });
+    }
+    let plane_len = (job.output_width as usize)
+        .checked_mul(job.output_height as usize)
+        .ok_or_else(|| Error::MetalKernel {
+            message: "J2K Metal resident encode plane size overflow".to_string(),
+        })?;
+    let plane_bytes =
+        plane_len
+            .checked_mul(size_of::<f32>())
+            .ok_or_else(|| Error::MetalKernel {
+                message: "J2K Metal resident encode plane byte size overflow".to_string(),
+            })?;
+    let coefficient_bytes = job
+        .coefficient_count
+        .max(1)
+        .checked_mul(size_of::<i32>())
+        .ok_or_else(|| Error::MetalKernel {
+            message: "J2K Metal resident encode coefficient size overflow".to_string(),
+        })?;
+
+    with_runtime_for_device(&session.device, |runtime| {
+        let mut plane_buffers = Vec::with_capacity(3);
+        let mut scratch_buffers = Vec::with_capacity(usize::from(job.components));
+        for _ in 0..3 {
+            plane_buffers.push(
+                runtime
+                    .device
+                    .new_buffer(plane_bytes as u64, MTLResourceOptions::StorageModePrivate),
+            );
+        }
+        for _ in 0..job.components {
+            scratch_buffers.push(
+                runtime
+                    .device
+                    .new_buffer(plane_bytes as u64, MTLResourceOptions::StorageModePrivate),
+            );
+        }
+        let coefficient_buffer = runtime.device.new_buffer(
+            coefficient_bytes as u64,
+            MTLResourceOptions::StorageModePrivate,
+        );
+        let deinterleave_status = J2kMctStatus::default();
+        let status_buffer = runtime.device.new_buffer_with_data(
+            (&raw const deinterleave_status).cast(),
+            size_of::<J2kMctStatus>() as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let command_buffer = runtime.queue.new_command_buffer();
+
+        dispatch_lossless_deinterleave(
+            runtime,
+            command_buffer,
+            job,
+            &plane_buffers[0],
+            &plane_buffers[1],
+            &plane_buffers[2],
+        )?;
+        if job.components == 3 {
+            dispatch_forward_rct_on_buffers(
+                runtime,
+                command_buffer,
+                &plane_buffers[0],
+                &plane_buffers[1],
+                &plane_buffers[2],
+                plane_len,
+                &status_buffer,
+            )?;
+        }
+
+        let mut active_planes = Vec::with_capacity(usize::from(job.components));
+        for component in 0..usize::from(job.components) {
+            if job.num_decomposition_levels == 0 {
+                active_planes.push(plane_buffers[component].clone());
+            } else {
+                active_planes.push(dispatch_forward_dwt53_on_buffers(
+                    runtime,
+                    command_buffer,
+                    &plane_buffers[component],
+                    &scratch_buffers[component],
+                    job.output_width,
+                    job.output_height,
+                    job.num_decomposition_levels,
+                ));
+            }
+        }
+        while active_planes.len() < 3 {
+            active_planes.push(active_planes[0].clone());
+        }
+
+        let coefficient_jobs = code_blocks
+            .iter()
+            .map(|block| J2kLosslessCoefficientJob {
+                coefficient_offset: block.coefficient_offset,
+                component: block.component,
+                subband_x: block.subband_x,
+                subband_y: block.subband_y,
+                block_x: block.block_x,
+                block_y: block.block_y,
+                block_width: block.width,
+                block_height: block.height,
+                full_width: job.output_width,
+            })
+            .collect::<Vec<_>>();
+        let coefficient_job_buffer = dispatch_lossless_extract_coefficients(
+            runtime,
+            command_buffer,
+            &active_planes,
+            &coefficient_buffer,
+            &coefficient_jobs,
+            job.output_width,
+        )?;
+
+        command_buffer.commit();
+        Ok(J2kPreparedLosslessDeviceCodeBlocks {
+            coefficient_buffer,
+            code_blocks,
+            _prepare_command_buffer: command_buffer.to_owned(),
+            _deinterleave_status_buffer: status_buffer,
+            _plane_buffers: plane_buffers,
+            _scratch_buffers: scratch_buffers,
+            _coefficient_job_buffer: coefficient_job_buffer,
+        })
+    })
+}
+
+#[cfg(target_os = "macos")]
 #[allow(dead_code)]
 pub(crate) fn encode_forward_rct(
     plane0: &mut [f32],
@@ -6238,14 +7897,24 @@ pub(crate) fn decode_reversible53_single_decomposition_idwt(
         let params = J2kIdwtSingleDecompositionParams {
             x0: job.rect.x0,
             y0: job.rect.y0,
+            output_x: 0,
+            output_y: 0,
             width: job.rect.width(),
             height: job.rect.height(),
+            ll_x: 0,
+            ll_y: 0,
             ll_width: job.ll.rect.width(),
             ll_height: job.ll.rect.height(),
+            hl_x: 0,
+            hl_y: 0,
             hl_width: job.hl.rect.width(),
             hl_height: job.hl.rect.height(),
+            lh_x: 0,
+            lh_y: 0,
             lh_width: job.lh.rect.width(),
             lh_height: job.lh.rect.height(),
+            hh_x: 0,
+            hh_y: 0,
             hh_width: job.hh.rect.width(),
             hh_height: job.hh.rect.height(),
         };
@@ -6763,14 +8432,24 @@ pub(crate) fn decode_irreversible97_single_decomposition_idwt(
         let params = J2kIdwtSingleDecompositionParams {
             x0: job.rect.x0,
             y0: job.rect.y0,
+            output_x: 0,
+            output_y: 0,
             width: job.rect.width(),
             height: job.rect.height(),
+            ll_x: 0,
+            ll_y: 0,
             ll_width: job.ll.rect.width(),
             ll_height: job.ll.rect.height(),
+            hl_x: 0,
+            hl_y: 0,
             hl_width: job.hl.rect.width(),
             hl_height: job.hl.rect.height(),
+            lh_x: 0,
+            lh_y: 0,
             lh_width: job.lh.rect.width(),
             lh_height: job.lh.rect.height(),
+            hh_x: 0,
+            hh_y: 0,
             hh_width: job.hh.rect.width(),
             hh_height: job.hh.rect.height(),
         };
@@ -7890,6 +9569,150 @@ fn encode_distinct_classic_batches_to_buffer_in_command_buffer<'a>(
 }
 
 #[cfg(target_os = "macos")]
+fn encode_distinct_ht_sub_bands_to_buffer_in_command_buffer(
+    runtime: &MetalRuntime,
+    command_buffer: &CommandBufferRef,
+    sub_bands: &[&PreparedHtSubBand],
+    output: &Buffer,
+) -> Result<(Vec<Buffer>, DirectStatusCheck), Error> {
+    let Some(first) = sub_bands.first() else {
+        let empty = runtime
+            .device
+            .new_buffer(1, MTLResourceOptions::StorageModeShared);
+        return Ok((
+            vec![empty.clone()],
+            DirectStatusCheck::Ht {
+                buffer: empty,
+                len: 0,
+            },
+        ));
+    };
+    let per_instance_len = first.width as usize * first.height as usize;
+    encode_distinct_ht_batches_to_buffer_in_command_buffer(
+        runtime,
+        command_buffer,
+        sub_bands
+            .iter()
+            .enumerate()
+            .map(|(index, sub_band)| DistinctHtBatch {
+                coded_data: &sub_band.coded_data,
+                jobs: &sub_band.jobs,
+                output_base: index * per_instance_len,
+            }),
+        output,
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn encode_distinct_ht_sub_band_groups_to_buffer_in_command_buffer(
+    runtime: &MetalRuntime,
+    command_buffer: &CommandBufferRef,
+    groups: &[&PreparedHtSubBandGroup],
+    output: &Buffer,
+) -> Result<(Vec<Buffer>, DirectStatusCheck), Error> {
+    let Some(first) = groups.first() else {
+        let empty = runtime
+            .device
+            .new_buffer(1, MTLResourceOptions::StorageModeShared);
+        return Ok((
+            vec![empty.clone()],
+            DirectStatusCheck::Ht {
+                buffer: empty,
+                len: 0,
+            },
+        ));
+    };
+    let per_instance_len = first.total_coefficients;
+    encode_distinct_ht_batches_to_buffer_in_command_buffer(
+        runtime,
+        command_buffer,
+        groups
+            .iter()
+            .enumerate()
+            .map(|(index, group)| DistinctHtBatch {
+                coded_data: &group.coded_data,
+                jobs: &group.jobs,
+                output_base: index * per_instance_len,
+            }),
+        output,
+    )
+}
+
+#[cfg(target_os = "macos")]
+struct DistinctHtBatch<'a> {
+    coded_data: &'a [u8],
+    jobs: &'a [J2kHtCleanupBatchJob],
+    output_base: usize,
+}
+
+#[cfg(target_os = "macos")]
+fn encode_distinct_ht_batches_to_buffer_in_command_buffer<'a>(
+    runtime: &MetalRuntime,
+    command_buffer: &CommandBufferRef,
+    batches: impl IntoIterator<Item = DistinctHtBatch<'a>>,
+    output: &Buffer,
+) -> Result<(Vec<Buffer>, DirectStatusCheck), Error> {
+    let mut coded_data = Vec::new();
+    let mut jobs = Vec::new();
+
+    for batch in batches {
+        let coded_base = u32::try_from(coded_data.len()).map_err(|_| Error::MetalKernel {
+            message: "HTJ2K MetalDirect distinct grayscale coded payload exceeds u32".to_string(),
+        })?;
+        coded_data.extend_from_slice(batch.coded_data);
+        let output_base = u32::try_from(batch.output_base).map_err(|_| Error::MetalKernel {
+            message: "HTJ2K MetalDirect distinct grayscale output offset exceeds u32".to_string(),
+        })?;
+        for job in batch.jobs {
+            let mut adjusted = *job;
+            adjusted.coded_offset =
+                adjusted
+                    .coded_offset
+                    .checked_add(coded_base)
+                    .ok_or_else(|| Error::MetalKernel {
+                        message: "HTJ2K MetalDirect distinct grayscale job coded offset overflow"
+                            .to_string(),
+                    })?;
+            adjusted.output_offset =
+                adjusted
+                    .output_offset
+                    .checked_add(output_base)
+                    .ok_or_else(|| Error::MetalKernel {
+                        message: "HTJ2K MetalDirect distinct grayscale job output offset overflow"
+                            .to_string(),
+                    })?;
+            jobs.push(adjusted);
+        }
+    }
+
+    if jobs.is_empty() {
+        let empty = runtime
+            .device
+            .new_buffer(1, MTLResourceOptions::StorageModeShared);
+        return Ok((
+            vec![empty.clone()],
+            DirectStatusCheck::Ht {
+                buffer: empty,
+                len: 0,
+            },
+        ));
+    }
+
+    let coded_buffer = owned_slice_buffer(&runtime.device, &coded_data);
+    let jobs_buffer = owned_slice_buffer(&runtime.device, &jobs);
+    let status_check = dispatch_ht_cleanup_batched_in_command_buffer(
+        runtime,
+        command_buffer,
+        &coded_buffer,
+        &jobs_buffer,
+        jobs.len(),
+        output,
+        ht_batch_output_word_count(&jobs)?,
+    )?;
+    Ok((vec![coded_buffer, jobs_buffer], status_check))
+}
+
+#[cfg(target_os = "macos")]
 fn encode_repeated_classic_sub_band_to_buffer_in_command_buffer(
     runtime: &MetalRuntime,
     command_buffer: &CommandBufferRef,
@@ -8155,6 +9978,12 @@ fn encode_prepared_classic_sub_band_to_buffer_in_encoder(
     scratch_buffers: &mut Vec<DirectScratchBuffer>,
 ) -> Result<(Vec<Buffer>, DirectStatusCheck), Error> {
     if job.jobs.is_empty() {
+        dispatch_zero_u32_buffer_in_encoder(
+            runtime,
+            encoder,
+            output,
+            job.width as usize * job.height as usize,
+        )?;
         let empty = runtime
             .device
             .new_buffer(1, MTLResourceOptions::StorageModeShared);
@@ -8176,6 +10005,14 @@ fn encode_prepared_classic_sub_band_to_buffer_in_encoder(
             .max_total_threads_per_threadgroup()
             >= 32;
     let coefficients_scratch = take_classic_coefficients_scratch_buffer(runtime, job.jobs.len())?;
+    if job.zero_fill {
+        dispatch_zero_u32_buffer_in_encoder(
+            runtime,
+            encoder,
+            output,
+            job.width as usize * job.height as usize,
+        )?;
+    }
     let (status_check, states_scratch) = dispatch_classic_cleanup_batched_in_encoder(
         runtime,
         encoder,
@@ -8204,6 +10041,7 @@ fn encode_prepared_classic_sub_band_group_to_buffer_in_encoder(
     scratch_buffers: &mut Vec<DirectScratchBuffer>,
 ) -> Result<(Vec<Buffer>, DirectStatusCheck), Error> {
     if group.jobs.is_empty() {
+        dispatch_zero_u32_buffer_in_encoder(runtime, encoder, output, group.total_coefficients)?;
         let empty = runtime
             .device
             .new_buffer(1, MTLResourceOptions::StorageModeShared);
@@ -8225,6 +10063,9 @@ fn encode_prepared_classic_sub_band_group_to_buffer_in_encoder(
             .max_total_threads_per_threadgroup()
             >= 32;
     let coefficients_scratch = take_classic_coefficients_scratch_buffer(runtime, group.jobs.len())?;
+    if group.zero_fill {
+        dispatch_zero_u32_buffer_in_encoder(runtime, encoder, output, group.total_coefficients)?;
+    }
     let (status_check, states_scratch) = dispatch_classic_cleanup_batched_in_encoder(
         runtime,
         encoder,
@@ -8488,6 +10329,12 @@ fn encode_prepared_ht_sub_band_to_buffer_in_encoder(
     output: &Buffer,
 ) -> Result<(Vec<Buffer>, DirectStatusCheck), Error> {
     if job.jobs.is_empty() {
+        dispatch_zero_u32_buffer_in_encoder(
+            runtime,
+            encoder,
+            output,
+            job.width as usize * job.height as usize,
+        )?;
         let empty = runtime
             .device
             .new_buffer(1, MTLResourceOptions::StorageModeShared);
@@ -8537,6 +10384,7 @@ fn encode_prepared_ht_sub_band_group_to_buffer_in_encoder(
     output: &Buffer,
 ) -> Result<(Vec<Buffer>, DirectStatusCheck), Error> {
     if group.jobs.is_empty() {
+        dispatch_zero_u32_buffer_in_encoder(runtime, encoder, output, group.total_coefficients)?;
         let empty = runtime
             .device
             .new_buffer(1, MTLResourceOptions::StorageModeShared);
@@ -8930,6 +10778,302 @@ pub(crate) fn encode_classic_tier1_code_blocks(
         }
 
         Ok(results)
+    })
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn encode_classic_tier1_prepared_device_code_blocks_resident(
+    session: &crate::MetalBackendSession,
+    prepared: J2kPreparedLosslessDeviceCodeBlocks,
+) -> Result<J2kResidentLosslessTier1CodeBlocks, Error> {
+    let J2kPreparedLosslessDeviceCodeBlocks {
+        coefficient_buffer,
+        code_blocks,
+        _prepare_command_buffer: prepare_command_buffer,
+        _deinterleave_status_buffer: deinterleave_status_buffer,
+        _plane_buffers: plane_buffers,
+        _scratch_buffers: scratch_buffers,
+        _coefficient_job_buffer: coefficient_job_buffer,
+    } = prepared;
+    with_runtime_for_device(&session.device, |runtime| {
+        if code_blocks.is_empty() {
+            let output = runtime
+                .device
+                .new_buffer(1, MTLResourceOptions::StorageModePrivate);
+            let status_buffer = runtime
+                .device
+                .new_buffer(1, MTLResourceOptions::StorageModePrivate);
+            let segment_buffer = runtime
+                .device
+                .new_buffer(1, MTLResourceOptions::StorageModePrivate);
+            let job_buffer = runtime
+                .device
+                .new_buffer(1, MTLResourceOptions::StorageModeShared);
+            let command_buffer = runtime.queue.new_command_buffer();
+            command_buffer.commit();
+            return Ok(J2kResidentLosslessTier1CodeBlocks {
+                output_buffer: output,
+                status_buffer,
+                job_buffer,
+                batch_jobs: Vec::new(),
+                code_blocks,
+                output_capacity_total: 0,
+                _segment_buffer: segment_buffer,
+                tier1_command_buffer: command_buffer.to_owned(),
+                _coefficient_buffer: coefficient_buffer,
+                prepare_command_buffer,
+                _deinterleave_status_buffer: deinterleave_status_buffer,
+                _plane_buffers: plane_buffers,
+                _scratch_buffers: scratch_buffers,
+                _coefficient_job_buffer: coefficient_job_buffer,
+            });
+        }
+        let mut batch_jobs = Vec::<J2kClassicEncodeBatchJob>::with_capacity(code_blocks.len());
+        let mut output_capacity_total = 0usize;
+        let mut segment_capacity_total = 0usize;
+        let segment_capacity_per_job = 256usize;
+
+        for block in &code_blocks {
+            let output_capacity =
+                classic_encode_output_capacity(block.width, block.height, block.total_bitplanes)?;
+            let output_offset =
+                u32::try_from(output_capacity_total).map_err(|_| Error::MetalKernel {
+                    message: "classic J2K Metal resident encode output table exceeds u32"
+                        .to_string(),
+                })?;
+            let segment_offset =
+                u32::try_from(segment_capacity_total).map_err(|_| Error::MetalKernel {
+                    message: "classic J2K Metal resident encode segment table exceeds u32"
+                        .to_string(),
+                })?;
+            batch_jobs.push(J2kClassicEncodeBatchJob {
+                coefficient_offset: block.coefficient_offset,
+                output_offset,
+                segment_offset,
+                width: block.width,
+                height: block.height,
+                sub_band_type: classic_encode_sub_band_code(block.sub_band_type),
+                total_bitplanes: u32::from(block.total_bitplanes),
+                style_flags: 0,
+                output_capacity: u32::try_from(output_capacity).map_err(|_| {
+                    Error::MetalKernel {
+                        message: "classic J2K Metal resident encode output capacity exceeds u32"
+                            .to_string(),
+                    }
+                })?,
+                segment_capacity: u32::try_from(segment_capacity_per_job).map_err(|_| {
+                    Error::MetalKernel {
+                        message: "classic J2K Metal resident encode segment capacity exceeds u32"
+                            .to_string(),
+                    }
+                })?,
+            });
+            output_capacity_total = output_capacity_total
+                .checked_add(output_capacity)
+                .ok_or_else(|| Error::MetalKernel {
+                    message: "classic J2K Metal resident encode output buffer overflow".to_string(),
+                })?;
+            segment_capacity_total = segment_capacity_total
+                .checked_add(segment_capacity_per_job)
+                .ok_or_else(|| Error::MetalKernel {
+                    message: "classic J2K Metal resident encode segment buffer overflow"
+                        .to_string(),
+                })?;
+        }
+
+        let job_buffer = owned_slice_buffer(&runtime.device, &batch_jobs);
+        let output = runtime.device.new_buffer(
+            output_capacity_total.max(1) as u64,
+            MTLResourceOptions::StorageModePrivate,
+        );
+        let status_buffer = runtime.device.new_buffer(
+            (batch_jobs.len() * size_of::<J2kClassicEncodeStatus>()) as u64,
+            MTLResourceOptions::StorageModePrivate,
+        );
+        let segment_buffer = runtime.device.new_buffer(
+            (segment_capacity_total * size_of::<J2kClassicSegment>()) as u64,
+            MTLResourceOptions::StorageModePrivate,
+        );
+        let job_count = u32::try_from(batch_jobs.len()).map_err(|_| Error::MetalKernel {
+            message: "classic J2K Metal resident encode job count exceeds u32".to_string(),
+        })?;
+
+        let command_buffer = runtime.queue.new_command_buffer();
+        let encoder = command_buffer.new_compute_command_encoder();
+        encoder.set_compute_pipeline_state(&runtime.classic_encode_code_blocks);
+        encoder.set_buffer(0, Some(&coefficient_buffer), 0);
+        encoder.set_buffer(1, Some(&output), 0);
+        encoder.set_buffer(2, Some(&job_buffer), 0);
+        encoder.set_buffer(3, Some(&status_buffer), 0);
+        encoder.set_buffer(4, Some(&segment_buffer), 0);
+        encoder.set_bytes(5, size_of::<u32>() as u64, (&raw const job_count).cast());
+        encoder.dispatch_threads(
+            MTLSize {
+                width: u64::from(job_count),
+                height: 1,
+                depth: 1,
+            },
+            MTLSize {
+                width: runtime
+                    .classic_encode_code_blocks
+                    .thread_execution_width()
+                    .max(1),
+                height: 1,
+                depth: 1,
+            },
+        );
+        encoder.end_encoding();
+        command_buffer.commit();
+
+        Ok(J2kResidentLosslessTier1CodeBlocks {
+            output_buffer: output,
+            status_buffer,
+            job_buffer,
+            batch_jobs,
+            code_blocks,
+            output_capacity_total,
+            _segment_buffer: segment_buffer,
+            tier1_command_buffer: command_buffer.to_owned(),
+            _coefficient_buffer: coefficient_buffer,
+            prepare_command_buffer,
+            _deinterleave_status_buffer: deinterleave_status_buffer,
+            _plane_buffers: plane_buffers,
+            _scratch_buffers: scratch_buffers,
+            _coefficient_job_buffer: coefficient_job_buffer,
+        })
+    })
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn encode_ht_prepared_device_code_blocks_resident(
+    session: &crate::MetalBackendSession,
+    prepared: J2kPreparedLosslessDeviceCodeBlocks,
+) -> Result<J2kResidentLosslessHtCodeBlocks, Error> {
+    let J2kPreparedLosslessDeviceCodeBlocks {
+        coefficient_buffer,
+        code_blocks,
+        _prepare_command_buffer: prepare_command_buffer,
+        _deinterleave_status_buffer: deinterleave_status_buffer,
+        _plane_buffers: plane_buffers,
+        _scratch_buffers: scratch_buffers,
+        _coefficient_job_buffer: coefficient_job_buffer,
+    } = prepared;
+    with_runtime_for_device(&session.device, |runtime| {
+        if code_blocks.is_empty() {
+            let output = runtime
+                .device
+                .new_buffer(1, MTLResourceOptions::StorageModePrivate);
+            let status_buffer = runtime
+                .device
+                .new_buffer(1, MTLResourceOptions::StorageModePrivate);
+            let job_buffer = runtime
+                .device
+                .new_buffer(1, MTLResourceOptions::StorageModeShared);
+            let command_buffer = runtime.queue.new_command_buffer();
+            command_buffer.commit();
+            return Ok(J2kResidentLosslessHtCodeBlocks {
+                output_buffer: output,
+                status_buffer,
+                job_buffer,
+                batch_jobs: Vec::new(),
+                code_blocks,
+                output_capacity_total: 0,
+                tier1_command_buffer: command_buffer.to_owned(),
+                _coefficient_buffer: coefficient_buffer,
+                prepare_command_buffer,
+                _deinterleave_status_buffer: deinterleave_status_buffer,
+                _plane_buffers: plane_buffers,
+                _scratch_buffers: scratch_buffers,
+                _coefficient_job_buffer: coefficient_job_buffer,
+            });
+        }
+
+        let output_capacity =
+            J2K_HT_ENCODE_MS_SIZE + J2K_HT_ENCODE_MEL_SIZE + J2K_HT_ENCODE_VLC_SIZE;
+        let output_capacity_u32 =
+            u32::try_from(output_capacity).map_err(|_| Error::MetalKernel {
+                message: "HTJ2K Metal resident encode output capacity exceeds u32".to_string(),
+            })?;
+        let mut batch_jobs = Vec::<J2kHtEncodeBatchJob>::with_capacity(code_blocks.len());
+        let mut output_capacity_total = 0usize;
+
+        for block in &code_blocks {
+            let output_offset =
+                u32::try_from(output_capacity_total).map_err(|_| Error::MetalKernel {
+                    message: "HTJ2K Metal resident encode output table exceeds u32".to_string(),
+                })?;
+            batch_jobs.push(J2kHtEncodeBatchJob {
+                coefficient_offset: block.coefficient_offset,
+                output_offset,
+                width: block.width,
+                height: block.height,
+                total_bitplanes: u32::from(block.total_bitplanes),
+                output_capacity: output_capacity_u32,
+            });
+            output_capacity_total = output_capacity_total
+                .checked_add(output_capacity)
+                .ok_or_else(|| Error::MetalKernel {
+                    message: "HTJ2K Metal resident encode output buffer overflow".to_string(),
+                })?;
+        }
+
+        let job_buffer = owned_slice_buffer(&runtime.device, &batch_jobs);
+        let output = runtime.device.new_buffer(
+            output_capacity_total.max(1) as u64,
+            MTLResourceOptions::StorageModePrivate,
+        );
+        let status_buffer = runtime.device.new_buffer(
+            (batch_jobs.len() * size_of::<J2kHtEncodeStatus>()) as u64,
+            MTLResourceOptions::StorageModePrivate,
+        );
+        let job_count = u32::try_from(batch_jobs.len()).map_err(|_| Error::MetalKernel {
+            message: "HTJ2K Metal resident encode job count exceeds u32".to_string(),
+        })?;
+
+        let command_buffer = runtime.queue.new_command_buffer();
+        let encoder = command_buffer.new_compute_command_encoder();
+        encoder.set_compute_pipeline_state(&runtime.ht_encode_code_blocks);
+        encoder.set_buffer(0, Some(&coefficient_buffer), 0);
+        encoder.set_buffer(1, Some(&output), 0);
+        encoder.set_buffer(2, Some(&job_buffer), 0);
+        encoder.set_buffer(3, Some(&runtime.ht_vlc_encode_table0), 0);
+        encoder.set_buffer(4, Some(&runtime.ht_vlc_encode_table1), 0);
+        encoder.set_buffer(5, Some(&runtime.ht_uvlc_encode_table), 0);
+        encoder.set_buffer(6, Some(&status_buffer), 0);
+        encoder.set_bytes(7, size_of::<u32>() as u64, (&raw const job_count).cast());
+        encoder.dispatch_threads(
+            MTLSize {
+                width: u64::from(job_count),
+                height: 1,
+                depth: 1,
+            },
+            MTLSize {
+                width: runtime
+                    .ht_encode_code_blocks
+                    .thread_execution_width()
+                    .max(1),
+                height: 1,
+                depth: 1,
+            },
+        );
+        encoder.end_encoding();
+        command_buffer.commit();
+
+        Ok(J2kResidentLosslessHtCodeBlocks {
+            output_buffer: output,
+            status_buffer,
+            job_buffer,
+            batch_jobs,
+            code_blocks,
+            output_capacity_total,
+            tier1_command_buffer: command_buffer.to_owned(),
+            _coefficient_buffer: coefficient_buffer,
+            prepare_command_buffer,
+            _deinterleave_status_buffer: deinterleave_status_buffer,
+            _plane_buffers: plane_buffers,
+            _scratch_buffers: scratch_buffers,
+            _coefficient_job_buffer: coefficient_job_buffer,
+        })
     })
 }
 
@@ -9419,6 +11563,70 @@ fn packet_tree_node_count(width: u32, height: u32) -> Result<usize, Error> {
 }
 
 #[cfg(target_os = "macos")]
+fn lossless_codestream_assembly_capacity(
+    tile_capacity: usize,
+    job: J2kLosslessCodestreamAssemblyJob,
+) -> Result<usize, Error> {
+    let component_count = usize::from(job.num_components);
+    let qcd_steps = 1usize
+        .checked_add(
+            usize::from(job.num_decomposition_levels)
+                .checked_mul(3)
+                .ok_or_else(|| Error::MetalKernel {
+                    message: "J2K Metal codestream assembly QCD step count overflow".to_string(),
+                })?,
+        )
+        .ok_or_else(|| Error::MetalKernel {
+            message: "J2K Metal codestream assembly QCD step count overflow".to_string(),
+        })?;
+    let siz_total = 40usize
+        .checked_add(
+            component_count
+                .checked_mul(3)
+                .ok_or_else(|| Error::MetalKernel {
+                    message: "J2K Metal codestream assembly SIZ size overflow".to_string(),
+                })?,
+        )
+        .ok_or_else(|| Error::MetalKernel {
+            message: "J2K Metal codestream assembly SIZ size overflow".to_string(),
+        })?;
+    let qcd_total = 5usize
+        .checked_add(qcd_steps)
+        .ok_or_else(|| Error::MetalKernel {
+            message: "J2K Metal codestream assembly QCD size overflow".to_string(),
+        })?;
+    2usize
+        .checked_add(siz_total)
+        .and_then(|len| {
+            len.checked_add(
+                if job.block_coding_mode == J2kLosslessCodestreamBlockCodingMode::HighThroughput {
+                    10
+                } else {
+                    0
+                },
+            )
+        })
+        .and_then(|len| len.checked_add(14))
+        .and_then(|len| len.checked_add(qcd_total))
+        .and_then(|len| len.checked_add(if job.write_tlm { 12 } else { 0 }))
+        .and_then(|len| len.checked_add(12))
+        .and_then(|len| len.checked_add(2))
+        .and_then(|len| len.checked_add(tile_capacity))
+        .and_then(|len| len.checked_add(2))
+        .ok_or_else(|| Error::MetalKernel {
+            message: "J2K Metal codestream assembly capacity overflow".to_string(),
+        })
+}
+
+#[cfg(target_os = "macos")]
+fn codestream_progression_order_code(order: EncodeProgressionOrder) -> u32 {
+    match order {
+        EncodeProgressionOrder::Lrcp => 0x00,
+        EncodeProgressionOrder::Rpcl => 0x02,
+    }
+}
+
+#[cfg(target_os = "macos")]
 pub(crate) fn encode_tier2_packetization(
     job: J2kPacketizationEncodeJob<'_>,
 ) -> Result<Vec<u8>, Error> {
@@ -9663,7 +11871,7 @@ pub(crate) fn encode_tier2_packetization(
         );
         let header_buffer = runtime.device.new_buffer(
             header_capacity as u64,
-            MTLResourceOptions::StorageModeShared,
+            MTLResourceOptions::StorageModePrivate,
         );
         let scratch_words = max_tree_nodes
             .checked_mul(6)
@@ -9672,7 +11880,7 @@ pub(crate) fn encode_tier2_packetization(
             })?;
         let scratch_buffer = runtime.device.new_buffer(
             (scratch_words * size_of::<u32>()) as u64,
-            MTLResourceOptions::StorageModeShared,
+            MTLResourceOptions::StorageModePrivate,
         );
         let status_buffer = runtime.device.new_buffer(
             size_of::<J2kPacketEncodeStatus>() as u64,
@@ -9739,6 +11947,1000 @@ pub(crate) fn encode_tier2_packetization(
         } else {
             unsafe { core::slice::from_raw_parts(output_buffer.contents().cast::<u8>(), data_len) }
                 .to_vec()
+        })
+    })
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn encode_lossless_codestream_buffer_from_resident_classic_tier1(
+    session: &crate::MetalBackendSession,
+    tier1: &J2kResidentLosslessTier1CodeBlocks,
+    job: J2kResidentPacketizationEncodeJob<'_>,
+    codestream_job: J2kLosslessCodestreamAssemblyJob,
+) -> Result<J2kResidentLosslessCodestream, Error> {
+    wait_resident_lossless_codestream(
+        submit_lossless_codestream_buffer_from_resident_classic_tier1(
+            session,
+            tier1,
+            job,
+            codestream_job,
+        )?,
+    )
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn submit_lossless_codestream_buffer_from_resident_classic_tier1(
+    session: &crate::MetalBackendSession,
+    tier1: &J2kResidentLosslessTier1CodeBlocks,
+    job: J2kResidentPacketizationEncodeJob<'_>,
+    codestream_job: J2kLosslessCodestreamAssemblyJob,
+) -> Result<J2kPendingResidentLosslessCodestream, Error> {
+    with_runtime_for_device(&session.device, |runtime| {
+        if tier1.batch_jobs.len() != tier1.code_blocks.len() {
+            return Err(Error::MetalKernel {
+                message: "Tier-2 Metal resident packetization Tier-1 table mismatch".to_string(),
+            });
+        }
+
+        let mut resolutions = Vec::<J2kPacketResolution>::new();
+        let mut subbands = Vec::<J2kPacketSubband>::new();
+        let mut resident_blocks = Vec::<J2kResidentPacketBlock>::new();
+        let mut max_tree_nodes = 1usize;
+
+        for resolution in job.resolutions {
+            let subband_offset = u32::try_from(subbands.len()).map_err(|_| Error::MetalKernel {
+                message: "Tier-2 Metal resident packet subband table exceeds u32".to_string(),
+            })?;
+            for subband in &resolution.subbands {
+                let block_offset =
+                    u32::try_from(resident_blocks.len()).map_err(|_| Error::MetalKernel {
+                        message: "Tier-2 Metal resident packet block table exceeds u32".to_string(),
+                    })?;
+                max_tree_nodes = max_tree_nodes.max(packet_tree_node_count(
+                    subband.num_cbs_x,
+                    subband.num_cbs_y,
+                )?);
+                let code_block_start =
+                    usize::try_from(subband.code_block_start).map_err(|_| Error::MetalKernel {
+                        message: "Tier-2 Metal resident packet code-block offset exceeds usize"
+                            .to_string(),
+                    })?;
+                let code_block_count =
+                    usize::try_from(subband.code_block_count).map_err(|_| Error::MetalKernel {
+                        message: "Tier-2 Metal resident packet code-block count exceeds usize"
+                            .to_string(),
+                    })?;
+                let code_block_end =
+                    code_block_start
+                        .checked_add(code_block_count)
+                        .ok_or_else(|| Error::MetalKernel {
+                            message: "Tier-2 Metal resident packet code-block range overflow"
+                                .to_string(),
+                        })?;
+                if code_block_end > tier1.batch_jobs.len() {
+                    return Err(Error::MetalKernel {
+                        message: "Tier-2 Metal resident packet code-block range out of bounds"
+                            .to_string(),
+                    });
+                }
+                for tier1_job_index in code_block_start..code_block_end {
+                    resident_blocks.push(J2kResidentPacketBlock {
+                        tier1_job_index: u32::try_from(tier1_job_index).map_err(|_| {
+                            Error::MetalKernel {
+                                message: "Tier-2 Metal resident packet Tier-1 index exceeds u32"
+                                    .to_string(),
+                            }
+                        })?,
+                        previously_included: 0,
+                        l_block: 3,
+                        block_coding_mode: 0,
+                    });
+                }
+                subbands.push(J2kPacketSubband {
+                    block_offset,
+                    block_count: subband.code_block_count,
+                    num_cbs_x: subband.num_cbs_x,
+                    num_cbs_y: subband.num_cbs_y,
+                });
+            }
+            resolutions.push(J2kPacketResolution {
+                subband_offset,
+                subband_count: u32::try_from(resolution.subbands.len()).map_err(|_| {
+                    Error::MetalKernel {
+                        message:
+                            "Tier-2 Metal resident packet resolution subband count exceeds u32"
+                                .to_string(),
+                    }
+                })?,
+            });
+        }
+
+        if resolutions.len()
+            != usize::try_from(job.resolution_count).map_err(|_| Error::MetalKernel {
+                message: "Tier-2 Metal resident packet resolution count exceeds usize".to_string(),
+            })?
+        {
+            return Err(Error::MetalKernel {
+                message: "Tier-2 Metal resident packet resolution count mismatch".to_string(),
+            });
+        }
+        if resident_blocks.len()
+            != usize::try_from(job.code_block_count).map_err(|_| Error::MetalKernel {
+                message: "Tier-2 Metal resident packet code-block count exceeds usize".to_string(),
+            })?
+        {
+            return Err(Error::MetalKernel {
+                message: "Tier-2 Metal resident packet code-block count mismatch".to_string(),
+            });
+        }
+
+        let mut state_block_offsets = HashMap::<u32, (u32, usize)>::new();
+        let mut state_blocks = Vec::<J2kPacketStateBlock>::new();
+        let mut descriptors =
+            Vec::<J2kPacketDescriptor>::with_capacity(job.packet_descriptors.len());
+        for descriptor in job.packet_descriptors {
+            let packet_index =
+                usize::try_from(descriptor.packet_index).map_err(|_| Error::MetalKernel {
+                    message: "Tier-2 Metal resident packet descriptor packet index exceeds usize"
+                        .to_string(),
+                })?;
+            let resolution = resolutions
+                .get(packet_index)
+                .ok_or_else(|| Error::MetalKernel {
+                    message: "Tier-2 Metal resident packet descriptor packet index out of range"
+                        .to_string(),
+                })?;
+            let subband_start =
+                usize::try_from(resolution.subband_offset).map_err(|_| Error::MetalKernel {
+                    message: "Tier-2 Metal resident packet descriptor subband offset exceeds usize"
+                        .to_string(),
+                })?;
+            let subband_count =
+                usize::try_from(resolution.subband_count).map_err(|_| Error::MetalKernel {
+                    message: "Tier-2 Metal resident packet descriptor subband count exceeds usize"
+                        .to_string(),
+                })?;
+            let subband_end =
+                subband_start
+                    .checked_add(subband_count)
+                    .ok_or_else(|| Error::MetalKernel {
+                        message: "Tier-2 Metal resident packet descriptor subband range overflow"
+                            .to_string(),
+                    })?;
+            if subband_end > subbands.len() {
+                return Err(Error::MetalKernel {
+                    message: "Tier-2 Metal resident packet descriptor subband range out of bounds"
+                        .to_string(),
+                });
+            }
+            let mut packet_block_count = 0usize;
+            for subband in &subbands[subband_start..subband_end] {
+                packet_block_count = packet_block_count
+                    .checked_add(usize::try_from(subband.block_count).map_err(|_| {
+                        Error::MetalKernel {
+                            message:
+                                "Tier-2 Metal resident packet descriptor block count exceeds usize"
+                                    .to_string(),
+                        }
+                    })?)
+                    .ok_or_else(|| Error::MetalKernel {
+                        message: "Tier-2 Metal resident packet descriptor block count overflow"
+                            .to_string(),
+                    })?;
+            }
+
+            let (state_block_offset, existing_count) = if let Some(&(offset, count)) =
+                state_block_offsets.get(&descriptor.state_index)
+            {
+                (offset, count)
+            } else {
+                let offset = u32::try_from(state_blocks.len()).map_err(|_| Error::MetalKernel {
+                    message: "Tier-2 Metal resident packet state block offset exceeds u32"
+                        .to_string(),
+                })?;
+                for subband in &subbands[subband_start..subband_end] {
+                    let block_start =
+                        usize::try_from(subband.block_offset).map_err(|_| Error::MetalKernel {
+                            message:
+                                "Tier-2 Metal resident packet state block offset exceeds usize"
+                                    .to_string(),
+                        })?;
+                    let block_count =
+                        usize::try_from(subband.block_count).map_err(|_| Error::MetalKernel {
+                            message: "Tier-2 Metal resident packet state block count exceeds usize"
+                                .to_string(),
+                        })?;
+                    let block_end =
+                        block_start
+                            .checked_add(block_count)
+                            .ok_or_else(|| Error::MetalKernel {
+                                message: "Tier-2 Metal resident packet state block range overflow"
+                                    .to_string(),
+                            })?;
+                    if block_end > resident_blocks.len() {
+                        return Err(Error::MetalKernel {
+                            message: "Tier-2 Metal resident packet state block range out of bounds"
+                                .to_string(),
+                        });
+                    }
+                    for block in &resident_blocks[block_start..block_end] {
+                        state_blocks.push(J2kPacketStateBlock {
+                            previously_included: block.previously_included,
+                            l_block: block.l_block,
+                        });
+                    }
+                }
+                state_block_offsets.insert(descriptor.state_index, (offset, packet_block_count));
+                (offset, packet_block_count)
+            };
+            if existing_count != packet_block_count {
+                return Err(Error::MetalKernel {
+                    message: "Tier-2 Metal resident packet descriptor state layout mismatch"
+                        .to_string(),
+                });
+            }
+
+            descriptors.push(J2kPacketDescriptor {
+                packet_index: descriptor.packet_index,
+                state_index: descriptor.state_index,
+                layer: u32::from(descriptor.layer),
+                resolution: descriptor.resolution,
+                component: u32::from(descriptor.component),
+                precinct_lo: descriptor.precinct as u32,
+                precinct_hi: (descriptor.precinct >> 32) as u32,
+                state_block_offset,
+            });
+        }
+
+        let header_capacity = resident_blocks
+            .len()
+            .checked_mul(256)
+            .and_then(|bytes| bytes.checked_add(4096))
+            .map(|bytes| bytes.max(4096))
+            .ok_or_else(|| Error::MetalKernel {
+                message: "Tier-2 Metal resident packet header capacity overflow".to_string(),
+            })?;
+        let output_capacity = tier1
+            .output_capacity_total
+            .checked_add(
+                header_capacity
+                    .checked_mul(descriptors.len().max(resolutions.len()).max(1))
+                    .ok_or_else(|| Error::MetalKernel {
+                        message: "Tier-2 Metal resident packet output capacity overflow"
+                            .to_string(),
+                    })?,
+            )
+            .and_then(|bytes| bytes.checked_add(1024))
+            .ok_or_else(|| Error::MetalKernel {
+                message: "Tier-2 Metal resident packet output capacity overflow".to_string(),
+            })?;
+        let codestream_capacity =
+            lossless_codestream_assembly_capacity(output_capacity, codestream_job)?;
+
+        let params = J2kPacketEncodeParams {
+            resolution_count: u32::try_from(resolutions.len()).map_err(|_| Error::MetalKernel {
+                message: "Tier-2 Metal resident packet resolution count exceeds u32".to_string(),
+            })?,
+            num_layers: u32::from(job.num_layers),
+            num_components: u32::from(job.num_components),
+            code_block_count: u32::try_from(resident_blocks.len()).map_err(|_| {
+                Error::MetalKernel {
+                    message: "Tier-2 Metal resident packet code-block count exceeds u32"
+                        .to_string(),
+                }
+            })?,
+            subband_count: u32::try_from(subbands.len()).map_err(|_| Error::MetalKernel {
+                message: "Tier-2 Metal resident packet subband count exceeds u32".to_string(),
+            })?,
+            descriptor_count: u32::try_from(descriptors.len()).map_err(|_| Error::MetalKernel {
+                message: "Tier-2 Metal resident packet descriptor count exceeds u32".to_string(),
+            })?,
+            output_capacity: u32::try_from(output_capacity).map_err(|_| Error::MetalKernel {
+                message: "Tier-2 Metal resident packet output capacity exceeds u32".to_string(),
+            })?,
+            header_capacity: u32::try_from(header_capacity).map_err(|_| Error::MetalKernel {
+                message: "Tier-2 Metal resident packet header capacity exceeds u32".to_string(),
+            })?,
+            scratch_node_capacity: u32::try_from(max_tree_nodes).map_err(|_| {
+                Error::MetalKernel {
+                    message: "Tier-2 Metal resident packet scratch node capacity exceeds u32"
+                        .to_string(),
+                }
+            })?,
+        };
+        let codestream_params = J2kLosslessCodestreamAssemblyParams {
+            width: codestream_job.width,
+            height: codestream_job.height,
+            num_components: u32::from(codestream_job.num_components),
+            bit_depth: u32::from(codestream_job.bit_depth),
+            signed_samples: u32::from(codestream_job.signed),
+            num_decomposition_levels: u32::from(codestream_job.num_decomposition_levels),
+            use_mct: u32::from(codestream_job.use_mct),
+            guard_bits: u32::from(codestream_job.guard_bits),
+            progression_order: codestream_progression_order_code(codestream_job.progression_order),
+            write_tlm: u32::from(codestream_job.write_tlm),
+            high_throughput: u32::from(
+                codestream_job.block_coding_mode
+                    == J2kLosslessCodestreamBlockCodingMode::HighThroughput,
+            ),
+            output_capacity: u32::try_from(codestream_capacity).map_err(|_| {
+                Error::MetalKernel {
+                    message: "J2K Metal codestream assembly capacity exceeds u32".to_string(),
+                }
+            })?,
+        };
+
+        let resident_block_params = J2kResidentPacketBlockParams {
+            block_count: u32::try_from(resident_blocks.len()).map_err(|_| Error::MetalKernel {
+                message: "Tier-2 Metal resident packet block count exceeds u32".to_string(),
+            })?,
+            tier1_job_count: u32::try_from(tier1.batch_jobs.len()).map_err(|_| {
+                Error::MetalKernel {
+                    message: "Tier-2 Metal resident packet Tier-1 job count exceeds u32"
+                        .to_string(),
+                }
+            })?,
+        };
+
+        let resolution_buffer = copied_slice_buffer(&runtime.device, &resolutions);
+        let subband_buffer = copied_slice_buffer(&runtime.device, &subbands);
+        let resident_block_buffer = copied_slice_buffer(&runtime.device, &resident_blocks);
+        let packet_block_buffer = runtime.device.new_buffer(
+            (resident_blocks.len().max(1) * size_of::<J2kPacketBlock>()) as u64,
+            MTLResourceOptions::StorageModePrivate,
+        );
+        let descriptor_buffer = copied_slice_buffer(&runtime.device, &descriptors);
+        let state_block_buffer = copied_slice_buffer(&runtime.device, &state_blocks);
+        let output_buffer = runtime.device.new_buffer(
+            output_capacity as u64,
+            MTLResourceOptions::StorageModePrivate,
+        );
+        let codestream_buffer = runtime.device.new_buffer(
+            codestream_capacity as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let header_buffer = runtime.device.new_buffer(
+            header_capacity as u64,
+            MTLResourceOptions::StorageModePrivate,
+        );
+        let scratch_words = max_tree_nodes
+            .checked_mul(6)
+            .ok_or_else(|| Error::MetalKernel {
+                message: "Tier-2 Metal resident packet scratch size overflow".to_string(),
+            })?;
+        let scratch_buffer = runtime.device.new_buffer(
+            (scratch_words * size_of::<u32>()) as u64,
+            MTLResourceOptions::StorageModePrivate,
+        );
+        let status_buffer = runtime.device.new_buffer(
+            size_of::<J2kPacketEncodeStatus>() as u64,
+            MTLResourceOptions::StorageModePrivate,
+        );
+        let codestream_status_buffer = runtime.device.new_buffer(
+            size_of::<J2kCodestreamAssemblyStatus>() as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+
+        let command_buffer = runtime.queue.new_command_buffer();
+        if !resident_blocks.is_empty() {
+            let encoder = command_buffer.new_compute_command_encoder();
+            encoder.set_compute_pipeline_state(&runtime.packet_block_prepare_resident_classic);
+            encoder.set_buffer(0, Some(&resident_block_buffer), 0);
+            encoder.set_buffer(1, Some(&tier1.job_buffer), 0);
+            encoder.set_buffer(2, Some(&tier1.status_buffer), 0);
+            encoder.set_buffer(3, Some(&packet_block_buffer), 0);
+            encoder.set_bytes(
+                4,
+                size_of::<J2kResidentPacketBlockParams>() as u64,
+                (&raw const resident_block_params).cast(),
+            );
+            encoder.dispatch_threads(
+                MTLSize {
+                    width: resident_blocks.len() as u64,
+                    height: 1,
+                    depth: 1,
+                },
+                MTLSize {
+                    width: runtime
+                        .packet_block_prepare_resident_classic
+                        .thread_execution_width()
+                        .max(1),
+                    height: 1,
+                    depth: 1,
+                },
+            );
+            encoder.end_encoding();
+        }
+
+        let encoder = command_buffer.new_compute_command_encoder();
+        encoder.set_compute_pipeline_state(&runtime.packet_encode);
+        encoder.set_buffer(0, Some(&resolution_buffer), 0);
+        encoder.set_buffer(1, Some(&subband_buffer), 0);
+        encoder.set_buffer(2, Some(&packet_block_buffer), 0);
+        encoder.set_buffer(3, Some(&tier1.output_buffer), 0);
+        encoder.set_buffer(4, Some(&output_buffer), 0);
+        encoder.set_buffer(5, Some(&header_buffer), 0);
+        encoder.set_buffer(6, Some(&scratch_buffer), 0);
+        encoder.set_bytes(
+            7,
+            size_of::<J2kPacketEncodeParams>() as u64,
+            (&raw const params).cast(),
+        );
+        encoder.set_buffer(8, Some(&status_buffer), 0);
+        encoder.set_buffer(9, Some(&descriptor_buffer), 0);
+        encoder.set_buffer(10, Some(&state_block_buffer), 0);
+        encoder.dispatch_threads(
+            MTLSize {
+                width: 1,
+                height: 1,
+                depth: 1,
+            },
+            MTLSize {
+                width: 1,
+                height: 1,
+                depth: 1,
+            },
+        );
+        encoder.end_encoding();
+
+        let encoder = command_buffer.new_compute_command_encoder();
+        encoder.set_compute_pipeline_state(&runtime.lossless_codestream_assemble);
+        encoder.set_buffer(0, Some(&output_buffer), 0);
+        encoder.set_buffer(1, Some(&status_buffer), 0);
+        encoder.set_buffer(2, Some(&codestream_buffer), 0);
+        encoder.set_bytes(
+            3,
+            size_of::<J2kLosslessCodestreamAssemblyParams>() as u64,
+            (&raw const codestream_params).cast(),
+        );
+        encoder.set_buffer(4, Some(&codestream_status_buffer), 0);
+        encoder.dispatch_threads(
+            MTLSize {
+                width: 1,
+                height: 1,
+                depth: 1,
+            },
+            MTLSize {
+                width: 1,
+                height: 1,
+                depth: 1,
+            },
+        );
+        encoder.end_encoding();
+        command_buffer.commit();
+
+        Ok(J2kPendingResidentLosslessCodestream {
+            buffer: codestream_buffer,
+            capacity: codestream_capacity,
+            status_buffer: codestream_status_buffer,
+            command_buffer: command_buffer.to_owned(),
+            retained_command_buffers: vec![
+                tier1.prepare_command_buffer.clone(),
+                tier1.tier1_command_buffer.clone(),
+            ],
+            _retained_buffers: vec![
+                resolution_buffer,
+                subband_buffer,
+                resident_block_buffer,
+                packet_block_buffer,
+                descriptor_buffer,
+                state_block_buffer,
+                output_buffer,
+                header_buffer,
+                scratch_buffer,
+                status_buffer,
+                tier1.output_buffer.clone(),
+                tier1.status_buffer.clone(),
+                tier1.job_buffer.clone(),
+            ],
+            status_stage: "J2K codestream assembly",
+            length_error: "J2K Metal codestream output length exceeds usize",
+            capacity_error: "J2K Metal codestream output length exceeds buffer",
+        })
+    })
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn encode_lossless_codestream_buffer_from_resident_ht_tier1(
+    session: &crate::MetalBackendSession,
+    tier1: &J2kResidentLosslessHtCodeBlocks,
+    job: J2kResidentPacketizationEncodeJob<'_>,
+    codestream_job: J2kLosslessCodestreamAssemblyJob,
+) -> Result<J2kResidentLosslessCodestream, Error> {
+    wait_resident_lossless_codestream(submit_lossless_codestream_buffer_from_resident_ht_tier1(
+        session,
+        tier1,
+        job,
+        codestream_job,
+    )?)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn submit_lossless_codestream_buffer_from_resident_ht_tier1(
+    session: &crate::MetalBackendSession,
+    tier1: &J2kResidentLosslessHtCodeBlocks,
+    job: J2kResidentPacketizationEncodeJob<'_>,
+    codestream_job: J2kLosslessCodestreamAssemblyJob,
+) -> Result<J2kPendingResidentLosslessCodestream, Error> {
+    with_runtime_for_device(&session.device, |runtime| {
+        if tier1.batch_jobs.len() != tier1.code_blocks.len() {
+            return Err(Error::MetalKernel {
+                message: "HTJ2K Tier-2 Metal resident packetization Tier-1 table mismatch"
+                    .to_string(),
+            });
+        }
+
+        let mut resolutions = Vec::<J2kPacketResolution>::new();
+        let mut subbands = Vec::<J2kPacketSubband>::new();
+        let mut resident_blocks = Vec::<J2kResidentPacketBlock>::new();
+        let mut max_tree_nodes = 1usize;
+
+        for resolution in job.resolutions {
+            let subband_offset = u32::try_from(subbands.len()).map_err(|_| Error::MetalKernel {
+                message: "HTJ2K Tier-2 Metal resident packet subband table exceeds u32".to_string(),
+            })?;
+            for subband in &resolution.subbands {
+                let block_offset =
+                    u32::try_from(resident_blocks.len()).map_err(|_| Error::MetalKernel {
+                        message: "HTJ2K Tier-2 Metal resident packet block table exceeds u32"
+                            .to_string(),
+                    })?;
+                max_tree_nodes = max_tree_nodes.max(packet_tree_node_count(
+                    subband.num_cbs_x,
+                    subband.num_cbs_y,
+                )?);
+                let code_block_start =
+                    usize::try_from(subband.code_block_start).map_err(|_| Error::MetalKernel {
+                        message:
+                            "HTJ2K Tier-2 Metal resident packet code-block offset exceeds usize"
+                                .to_string(),
+                    })?;
+                let code_block_count =
+                    usize::try_from(subband.code_block_count).map_err(|_| Error::MetalKernel {
+                        message:
+                            "HTJ2K Tier-2 Metal resident packet code-block count exceeds usize"
+                                .to_string(),
+                    })?;
+                let code_block_end =
+                    code_block_start
+                        .checked_add(code_block_count)
+                        .ok_or_else(|| Error::MetalKernel {
+                            message: "HTJ2K Tier-2 Metal resident packet code-block range overflow"
+                                .to_string(),
+                        })?;
+                if code_block_end > tier1.batch_jobs.len() {
+                    return Err(Error::MetalKernel {
+                        message:
+                            "HTJ2K Tier-2 Metal resident packet code-block range out of bounds"
+                                .to_string(),
+                    });
+                }
+                for tier1_job_index in code_block_start..code_block_end {
+                    resident_blocks.push(J2kResidentPacketBlock {
+                        tier1_job_index: u32::try_from(tier1_job_index).map_err(|_| {
+                            Error::MetalKernel {
+                                message:
+                                    "HTJ2K Tier-2 Metal resident packet Tier-1 index exceeds u32"
+                                        .to_string(),
+                            }
+                        })?,
+                        previously_included: 0,
+                        l_block: 3,
+                        block_coding_mode: 1,
+                    });
+                }
+                subbands.push(J2kPacketSubband {
+                    block_offset,
+                    block_count: subband.code_block_count,
+                    num_cbs_x: subband.num_cbs_x,
+                    num_cbs_y: subband.num_cbs_y,
+                });
+            }
+            resolutions.push(J2kPacketResolution {
+                subband_offset,
+                subband_count: u32::try_from(resolution.subbands.len()).map_err(|_| {
+                    Error::MetalKernel {
+                        message: "HTJ2K Tier-2 Metal resident packet resolution subband count exceeds u32"
+                            .to_string(),
+                    }
+                })?,
+            });
+        }
+
+        if resolutions.len()
+            != usize::try_from(job.resolution_count).map_err(|_| Error::MetalKernel {
+                message: "HTJ2K Tier-2 Metal resident packet resolution count exceeds usize"
+                    .to_string(),
+            })?
+        {
+            return Err(Error::MetalKernel {
+                message: "HTJ2K Tier-2 Metal resident packet resolution count mismatch".to_string(),
+            });
+        }
+        if resident_blocks.len()
+            != usize::try_from(job.code_block_count).map_err(|_| Error::MetalKernel {
+                message: "HTJ2K Tier-2 Metal resident packet code-block count exceeds usize"
+                    .to_string(),
+            })?
+        {
+            return Err(Error::MetalKernel {
+                message: "HTJ2K Tier-2 Metal resident packet code-block count mismatch".to_string(),
+            });
+        }
+
+        let mut state_block_offsets = HashMap::<u32, (u32, usize)>::new();
+        let mut state_blocks = Vec::<J2kPacketStateBlock>::new();
+        let mut descriptors =
+            Vec::<J2kPacketDescriptor>::with_capacity(job.packet_descriptors.len());
+        for descriptor in job.packet_descriptors {
+            let packet_index =
+                usize::try_from(descriptor.packet_index).map_err(|_| Error::MetalKernel {
+                    message:
+                        "HTJ2K Tier-2 Metal resident packet descriptor packet index exceeds usize"
+                            .to_string(),
+                })?;
+            let resolution = resolutions
+                .get(packet_index)
+                .ok_or_else(|| Error::MetalKernel {
+                    message:
+                        "HTJ2K Tier-2 Metal resident packet descriptor packet index out of range"
+                            .to_string(),
+                })?;
+            let subband_start =
+                usize::try_from(resolution.subband_offset).map_err(|_| Error::MetalKernel {
+                    message:
+                        "HTJ2K Tier-2 Metal resident packet descriptor subband offset exceeds usize"
+                            .to_string(),
+                })?;
+            let subband_count =
+                usize::try_from(resolution.subband_count).map_err(|_| Error::MetalKernel {
+                    message:
+                        "HTJ2K Tier-2 Metal resident packet descriptor subband count exceeds usize"
+                            .to_string(),
+                })?;
+            let subband_end =
+                subband_start
+                    .checked_add(subband_count)
+                    .ok_or_else(|| Error::MetalKernel {
+                        message:
+                            "HTJ2K Tier-2 Metal resident packet descriptor subband range overflow"
+                                .to_string(),
+                    })?;
+            if subband_end > subbands.len() {
+                return Err(Error::MetalKernel {
+                    message:
+                        "HTJ2K Tier-2 Metal resident packet descriptor subband range out of bounds"
+                            .to_string(),
+                });
+            }
+            let mut packet_block_count = 0usize;
+            for subband in &subbands[subband_start..subband_end] {
+                packet_block_count = packet_block_count
+                    .checked_add(usize::try_from(subband.block_count).map_err(|_| {
+                        Error::MetalKernel {
+                            message: "HTJ2K Tier-2 Metal resident packet descriptor block count exceeds usize"
+                                .to_string(),
+                        }
+                    })?)
+                    .ok_or_else(|| Error::MetalKernel {
+                        message: "HTJ2K Tier-2 Metal resident packet descriptor block count overflow"
+                            .to_string(),
+                    })?;
+            }
+
+            let (state_block_offset, existing_count) = if let Some(&(offset, count)) =
+                state_block_offsets.get(&descriptor.state_index)
+            {
+                (offset, count)
+            } else {
+                let offset = u32::try_from(state_blocks.len()).map_err(|_| Error::MetalKernel {
+                    message: "HTJ2K Tier-2 Metal resident packet state block offset exceeds u32"
+                        .to_string(),
+                })?;
+                for subband in &subbands[subband_start..subband_end] {
+                    let block_start =
+                        usize::try_from(subband.block_offset).map_err(|_| Error::MetalKernel {
+                            message: "HTJ2K Tier-2 Metal resident packet state block offset exceeds usize"
+                                .to_string(),
+                        })?;
+                    let block_count =
+                        usize::try_from(subband.block_count).map_err(|_| Error::MetalKernel {
+                            message:
+                                "HTJ2K Tier-2 Metal resident packet state block count exceeds usize"
+                                    .to_string(),
+                        })?;
+                    let block_end =
+                        block_start
+                            .checked_add(block_count)
+                            .ok_or_else(|| Error::MetalKernel {
+                                message:
+                                    "HTJ2K Tier-2 Metal resident packet state block range overflow"
+                                        .to_string(),
+                            })?;
+                    if block_end > resident_blocks.len() {
+                        return Err(Error::MetalKernel {
+                            message:
+                                "HTJ2K Tier-2 Metal resident packet state block range out of bounds"
+                                    .to_string(),
+                        });
+                    }
+                    for block in &resident_blocks[block_start..block_end] {
+                        state_blocks.push(J2kPacketStateBlock {
+                            previously_included: block.previously_included,
+                            l_block: block.l_block,
+                        });
+                    }
+                }
+                state_block_offsets.insert(descriptor.state_index, (offset, packet_block_count));
+                (offset, packet_block_count)
+            };
+            if existing_count != packet_block_count {
+                return Err(Error::MetalKernel {
+                    message: "HTJ2K Tier-2 Metal resident packet descriptor state layout mismatch"
+                        .to_string(),
+                });
+            }
+
+            descriptors.push(J2kPacketDescriptor {
+                packet_index: descriptor.packet_index,
+                state_index: descriptor.state_index,
+                layer: u32::from(descriptor.layer),
+                resolution: descriptor.resolution,
+                component: u32::from(descriptor.component),
+                precinct_lo: descriptor.precinct as u32,
+                precinct_hi: (descriptor.precinct >> 32) as u32,
+                state_block_offset,
+            });
+        }
+
+        let header_capacity = resident_blocks
+            .len()
+            .checked_mul(256)
+            .and_then(|bytes| bytes.checked_add(4096))
+            .map(|bytes| bytes.max(4096))
+            .ok_or_else(|| Error::MetalKernel {
+                message: "HTJ2K Tier-2 Metal resident packet header capacity overflow".to_string(),
+            })?;
+        let output_capacity = tier1
+            .output_capacity_total
+            .checked_add(
+                header_capacity
+                    .checked_mul(descriptors.len().max(resolutions.len()).max(1))
+                    .ok_or_else(|| Error::MetalKernel {
+                        message: "HTJ2K Tier-2 Metal resident packet output capacity overflow"
+                            .to_string(),
+                    })?,
+            )
+            .and_then(|bytes| bytes.checked_add(1024))
+            .ok_or_else(|| Error::MetalKernel {
+                message: "HTJ2K Tier-2 Metal resident packet output capacity overflow".to_string(),
+            })?;
+        let codestream_capacity =
+            lossless_codestream_assembly_capacity(output_capacity, codestream_job)?;
+
+        let params = J2kPacketEncodeParams {
+            resolution_count: u32::try_from(resolutions.len()).map_err(|_| Error::MetalKernel {
+                message: "HTJ2K Tier-2 Metal resident packet resolution count exceeds u32"
+                    .to_string(),
+            })?,
+            num_layers: u32::from(job.num_layers),
+            num_components: u32::from(job.num_components),
+            code_block_count: u32::try_from(resident_blocks.len()).map_err(|_| {
+                Error::MetalKernel {
+                    message: "HTJ2K Tier-2 Metal resident packet code-block count exceeds u32"
+                        .to_string(),
+                }
+            })?,
+            subband_count: u32::try_from(subbands.len()).map_err(|_| Error::MetalKernel {
+                message: "HTJ2K Tier-2 Metal resident packet subband count exceeds u32".to_string(),
+            })?,
+            descriptor_count: u32::try_from(descriptors.len()).map_err(|_| Error::MetalKernel {
+                message: "HTJ2K Tier-2 Metal resident packet descriptor count exceeds u32"
+                    .to_string(),
+            })?,
+            output_capacity: u32::try_from(output_capacity).map_err(|_| Error::MetalKernel {
+                message: "HTJ2K Tier-2 Metal resident packet output capacity exceeds u32"
+                    .to_string(),
+            })?,
+            header_capacity: u32::try_from(header_capacity).map_err(|_| Error::MetalKernel {
+                message: "HTJ2K Tier-2 Metal resident packet header capacity exceeds u32"
+                    .to_string(),
+            })?,
+            scratch_node_capacity: u32::try_from(max_tree_nodes).map_err(|_| {
+                Error::MetalKernel {
+                    message: "HTJ2K Tier-2 Metal resident packet scratch node capacity exceeds u32"
+                        .to_string(),
+                }
+            })?,
+        };
+        let codestream_params = J2kLosslessCodestreamAssemblyParams {
+            width: codestream_job.width,
+            height: codestream_job.height,
+            num_components: u32::from(codestream_job.num_components),
+            bit_depth: u32::from(codestream_job.bit_depth),
+            signed_samples: u32::from(codestream_job.signed),
+            num_decomposition_levels: u32::from(codestream_job.num_decomposition_levels),
+            use_mct: u32::from(codestream_job.use_mct),
+            guard_bits: u32::from(codestream_job.guard_bits),
+            progression_order: codestream_progression_order_code(codestream_job.progression_order),
+            write_tlm: u32::from(codestream_job.write_tlm),
+            high_throughput: u32::from(
+                codestream_job.block_coding_mode
+                    == J2kLosslessCodestreamBlockCodingMode::HighThroughput,
+            ),
+            output_capacity: u32::try_from(codestream_capacity).map_err(|_| {
+                Error::MetalKernel {
+                    message: "HTJ2K Metal codestream assembly capacity exceeds u32".to_string(),
+                }
+            })?,
+        };
+
+        let resident_block_params = J2kResidentPacketBlockParams {
+            block_count: u32::try_from(resident_blocks.len()).map_err(|_| Error::MetalKernel {
+                message: "HTJ2K Tier-2 Metal resident packet block count exceeds u32".to_string(),
+            })?,
+            tier1_job_count: u32::try_from(tier1.batch_jobs.len()).map_err(|_| {
+                Error::MetalKernel {
+                    message: "HTJ2K Tier-2 Metal resident packet Tier-1 job count exceeds u32"
+                        .to_string(),
+                }
+            })?,
+        };
+
+        let resolution_buffer = copied_slice_buffer(&runtime.device, &resolutions);
+        let subband_buffer = copied_slice_buffer(&runtime.device, &subbands);
+        let resident_block_buffer = copied_slice_buffer(&runtime.device, &resident_blocks);
+        let packet_block_buffer = runtime.device.new_buffer(
+            (resident_blocks.len().max(1) * size_of::<J2kPacketBlock>()) as u64,
+            MTLResourceOptions::StorageModePrivate,
+        );
+        let descriptor_buffer = copied_slice_buffer(&runtime.device, &descriptors);
+        let state_block_buffer = copied_slice_buffer(&runtime.device, &state_blocks);
+        let output_buffer = runtime.device.new_buffer(
+            output_capacity as u64,
+            MTLResourceOptions::StorageModePrivate,
+        );
+        let codestream_buffer = runtime.device.new_buffer(
+            codestream_capacity as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let header_buffer = runtime.device.new_buffer(
+            header_capacity as u64,
+            MTLResourceOptions::StorageModePrivate,
+        );
+        let scratch_words = max_tree_nodes
+            .checked_mul(6)
+            .ok_or_else(|| Error::MetalKernel {
+                message: "HTJ2K Tier-2 Metal resident packet scratch size overflow".to_string(),
+            })?;
+        let scratch_buffer = runtime.device.new_buffer(
+            (scratch_words * size_of::<u32>()) as u64,
+            MTLResourceOptions::StorageModePrivate,
+        );
+        let status_buffer = runtime.device.new_buffer(
+            size_of::<J2kPacketEncodeStatus>() as u64,
+            MTLResourceOptions::StorageModePrivate,
+        );
+        let codestream_status_buffer = runtime.device.new_buffer(
+            size_of::<J2kCodestreamAssemblyStatus>() as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+
+        let command_buffer = runtime.queue.new_command_buffer();
+        if !resident_blocks.is_empty() {
+            let encoder = command_buffer.new_compute_command_encoder();
+            encoder.set_compute_pipeline_state(&runtime.packet_block_prepare_resident_ht);
+            encoder.set_buffer(0, Some(&resident_block_buffer), 0);
+            encoder.set_buffer(1, Some(&tier1.job_buffer), 0);
+            encoder.set_buffer(2, Some(&tier1.status_buffer), 0);
+            encoder.set_buffer(3, Some(&packet_block_buffer), 0);
+            encoder.set_bytes(
+                4,
+                size_of::<J2kResidentPacketBlockParams>() as u64,
+                (&raw const resident_block_params).cast(),
+            );
+            encoder.dispatch_threads(
+                MTLSize {
+                    width: resident_blocks.len() as u64,
+                    height: 1,
+                    depth: 1,
+                },
+                MTLSize {
+                    width: runtime
+                        .packet_block_prepare_resident_ht
+                        .thread_execution_width()
+                        .max(1),
+                    height: 1,
+                    depth: 1,
+                },
+            );
+            encoder.end_encoding();
+        }
+
+        let encoder = command_buffer.new_compute_command_encoder();
+        encoder.set_compute_pipeline_state(&runtime.packet_encode);
+        encoder.set_buffer(0, Some(&resolution_buffer), 0);
+        encoder.set_buffer(1, Some(&subband_buffer), 0);
+        encoder.set_buffer(2, Some(&packet_block_buffer), 0);
+        encoder.set_buffer(3, Some(&tier1.output_buffer), 0);
+        encoder.set_buffer(4, Some(&output_buffer), 0);
+        encoder.set_buffer(5, Some(&header_buffer), 0);
+        encoder.set_buffer(6, Some(&scratch_buffer), 0);
+        encoder.set_bytes(
+            7,
+            size_of::<J2kPacketEncodeParams>() as u64,
+            (&raw const params).cast(),
+        );
+        encoder.set_buffer(8, Some(&status_buffer), 0);
+        encoder.set_buffer(9, Some(&descriptor_buffer), 0);
+        encoder.set_buffer(10, Some(&state_block_buffer), 0);
+        encoder.dispatch_threads(
+            MTLSize {
+                width: 1,
+                height: 1,
+                depth: 1,
+            },
+            MTLSize {
+                width: 1,
+                height: 1,
+                depth: 1,
+            },
+        );
+        encoder.end_encoding();
+
+        let encoder = command_buffer.new_compute_command_encoder();
+        encoder.set_compute_pipeline_state(&runtime.lossless_codestream_assemble);
+        encoder.set_buffer(0, Some(&output_buffer), 0);
+        encoder.set_buffer(1, Some(&status_buffer), 0);
+        encoder.set_buffer(2, Some(&codestream_buffer), 0);
+        encoder.set_bytes(
+            3,
+            size_of::<J2kLosslessCodestreamAssemblyParams>() as u64,
+            (&raw const codestream_params).cast(),
+        );
+        encoder.set_buffer(4, Some(&codestream_status_buffer), 0);
+        encoder.dispatch_threads(
+            MTLSize {
+                width: 1,
+                height: 1,
+                depth: 1,
+            },
+            MTLSize {
+                width: 1,
+                height: 1,
+                depth: 1,
+            },
+        );
+        encoder.end_encoding();
+        command_buffer.commit();
+
+        Ok(J2kPendingResidentLosslessCodestream {
+            buffer: codestream_buffer,
+            capacity: codestream_capacity,
+            status_buffer: codestream_status_buffer,
+            command_buffer: command_buffer.to_owned(),
+            retained_command_buffers: vec![
+                tier1.prepare_command_buffer.clone(),
+                tier1.tier1_command_buffer.clone(),
+            ],
+            _retained_buffers: vec![
+                resolution_buffer,
+                subband_buffer,
+                resident_block_buffer,
+                packet_block_buffer,
+                descriptor_buffer,
+                state_block_buffer,
+                output_buffer,
+                header_buffer,
+                scratch_buffer,
+                status_buffer,
+                tier1.output_buffer.clone(),
+                tier1.status_buffer.clone(),
+                tier1.job_buffer.clone(),
+            ],
+            status_stage: "HTJ2K codestream assembly",
+            length_error: "HTJ2K Metal codestream output length exceeds usize",
+            capacity_error: "HTJ2K Metal codestream output length exceeds buffer",
         })
     })
 }
@@ -10356,13 +13558,14 @@ pub(crate) fn decode_ht_cleanup_sub_band(
 mod tests {
     use super::{
         classic_batch_uses_plain_fast_path, classic_repeated_uses_plain_fast_path,
-        decode_scaled_to_surface, j2k_pack_kernel_name_for, j2k_pack_scale_arrays,
-        output_shape_for, prepare_direct_grayscale_plan,
-        prepared_direct_grayscale_plan_compute_encoder_count,
-        prepared_repeated_direct_ht_cleanup_dispatch_count,
+        crop_prepared_direct_grayscale_plan_to_output_region, decode_scaled_to_surface,
+        j2k_pack_kernel_name_for, j2k_pack_scale_arrays, output_shape_for,
+        prepare_direct_grayscale_plan, prepared_direct_grayscale_plan_compute_encoder_count,
+        prepared_idwt_output_len, prepared_repeated_direct_ht_cleanup_dispatch_count,
         repeated_gray_store_is_contiguous_full_surface, runtime_initialization_error,
-        with_runtime_for_device, J2kClassicCleanupBatchJob, J2kClassicSegment,
-        J2kRepeatedGrayStoreParams, MetalRuntime, PreparedDirectGrayscaleStep,
+        supports_stacked_direct_component_plane_batch, with_runtime_for_device,
+        J2kClassicCleanupBatchJob, J2kClassicSegment, J2kRepeatedGrayStoreParams, MetalRuntime,
+        PreparedDirectGrayscaleStep,
     };
     use metal::Device;
     use signinum_core::PixelFormat;
@@ -10592,6 +13795,299 @@ mod tests {
             1,
             "repeated HTJ2K WSI tile batches should group adjacent sub-band cleanups like the single-tile path"
         );
+    }
+
+    #[test]
+    fn distinct_prepared_ht_direct_plans_support_stacked_component_batch() {
+        let options = EncodeOptions {
+            reversible: true,
+            num_decomposition_levels: 1,
+            ..EncodeOptions::default()
+        };
+        let bytes_a = encode_htj2k(&(0..64).collect::<Vec<u8>>(), 8, 8, 1, 8, false, &options)
+            .expect("encode first ht gray8");
+        let bytes_b = encode_htj2k(
+            &(0..64).rev().collect::<Vec<u8>>(),
+            8,
+            8,
+            1,
+            8,
+            false,
+            &options,
+        )
+        .expect("encode second ht gray8");
+        let image_a = Image::new(&bytes_a, &DecodeSettings::default()).expect("first image");
+        let image_b = Image::new(&bytes_b, &DecodeSettings::default()).expect("second image");
+        let mut context_a = DecoderContext::default();
+        let mut context_b = DecoderContext::default();
+        let plan_a = image_a
+            .build_direct_grayscale_plan_with_context(&mut context_a)
+            .expect("first direct plan");
+        let plan_b = image_b
+            .build_direct_grayscale_plan_with_context(&mut context_b)
+            .expect("second direct plan");
+        let prepared_a = prepare_direct_grayscale_plan(&plan_a).expect("first prepared plan");
+        let prepared_b = prepare_direct_grayscale_plan(&plan_b).expect("second prepared plan");
+
+        assert!(
+            supports_stacked_direct_component_plane_batch(&[&prepared_a, &prepared_b]),
+            "distinct same-shape HTJ2K grayscale plans should be eligible for one stacked batch graph"
+        );
+    }
+
+    #[test]
+    fn cropped_region_scaled_ht_direct_plan_prunes_codeblocks_outside_output_roi() {
+        let mut pixels = Vec::with_capacity(128 * 128);
+        for y in 0..128u32 {
+            for x in 0..128u32 {
+                pixels.push(((x * 3 + y * 5) & 0xff) as u8);
+            }
+        }
+        let options = EncodeOptions {
+            reversible: true,
+            num_decomposition_levels: 3,
+            code_block_width_exp: 0,
+            code_block_height_exp: 0,
+            ..EncodeOptions::default()
+        };
+        let bytes =
+            encode_htj2k(&pixels, 128, 128, 1, 8, false, &options).expect("encode ht gray8");
+        let image = Image::new(
+            &bytes,
+            &DecodeSettings {
+                target_resolution: Some((32, 32)),
+                ..DecodeSettings::default()
+            },
+        )
+        .expect("scaled image");
+        let mut context = DecoderContext::default();
+        let plan = image
+            .build_direct_grayscale_plan_with_context(&mut context)
+            .expect("direct grayscale plan");
+        let mut prepared = prepare_direct_grayscale_plan(&plan).expect("prepared direct plan");
+        let full_jobs = prepared_direct_grayscale_ht_job_count(&prepared);
+        assert!(
+            full_jobs > 8,
+            "fixture should have multiple HT code-block jobs"
+        );
+
+        crop_prepared_direct_grayscale_plan_to_output_region(
+            &mut prepared,
+            signinum_core::Rect {
+                x: 10,
+                y: 10,
+                w: 4,
+                h: 4,
+            },
+        )
+        .expect("crop direct plan");
+        let cropped_jobs = prepared_direct_grayscale_ht_job_count(&prepared);
+
+        assert!(
+            cropped_jobs > 0 && cropped_jobs < full_jobs,
+            "cropped ROI should prune HT code-block jobs; full={full_jobs}, cropped={cropped_jobs}"
+        );
+    }
+
+    #[test]
+    fn cropped_region_scaled_ht_direct_plan_compacts_coded_payloads() {
+        let mut pixels = Vec::with_capacity(128 * 128);
+        for y in 0..128u32 {
+            for x in 0..128u32 {
+                pixels.push(((x * 3 + y * 5) & 0xff) as u8);
+            }
+        }
+        let options = EncodeOptions {
+            reversible: true,
+            num_decomposition_levels: 3,
+            code_block_width_exp: 0,
+            code_block_height_exp: 0,
+            ..EncodeOptions::default()
+        };
+        let bytes =
+            encode_htj2k(&pixels, 128, 128, 1, 8, false, &options).expect("encode ht gray8");
+        let image = Image::new(
+            &bytes,
+            &DecodeSettings {
+                target_resolution: Some((32, 32)),
+                ..DecodeSettings::default()
+            },
+        )
+        .expect("scaled image");
+        let mut context = DecoderContext::default();
+        let plan = image
+            .build_direct_grayscale_plan_with_context(&mut context)
+            .expect("direct grayscale plan");
+        let mut prepared = prepare_direct_grayscale_plan(&plan).expect("prepared direct plan");
+        let full_bytes = prepared_direct_grayscale_ht_coded_byte_count(&prepared);
+        assert!(full_bytes > 0, "fixture should carry HT coded payloads");
+
+        crop_prepared_direct_grayscale_plan_to_output_region(
+            &mut prepared,
+            signinum_core::Rect {
+                x: 10,
+                y: 10,
+                w: 4,
+                h: 4,
+            },
+        )
+        .expect("crop direct plan");
+        let cropped_bytes = prepared_direct_grayscale_ht_coded_byte_count(&prepared);
+
+        assert!(
+            cropped_bytes > 0 && cropped_bytes < full_bytes,
+            "cropped ROI should compact HT coded bytes; full={full_bytes}, cropped={cropped_bytes}"
+        );
+    }
+
+    #[test]
+    fn cropped_region_scaled_ht_direct_plan_reduces_idwt_output_work() {
+        let mut pixels = Vec::with_capacity(128 * 128);
+        for y in 0..128u32 {
+            for x in 0..128u32 {
+                pixels.push(((x * 3 + y * 5) & 0xff) as u8);
+            }
+        }
+        let options = EncodeOptions {
+            reversible: true,
+            num_decomposition_levels: 3,
+            code_block_width_exp: 0,
+            code_block_height_exp: 0,
+            ..EncodeOptions::default()
+        };
+        let bytes =
+            encode_htj2k(&pixels, 128, 128, 1, 8, false, &options).expect("encode ht gray8");
+        let image = Image::new(
+            &bytes,
+            &DecodeSettings {
+                target_resolution: Some((32, 32)),
+                ..DecodeSettings::default()
+            },
+        )
+        .expect("scaled image");
+        let mut context = DecoderContext::default();
+        let plan = image
+            .build_direct_grayscale_plan_with_context(&mut context)
+            .expect("direct grayscale plan");
+        let mut prepared = prepare_direct_grayscale_plan(&plan).expect("prepared direct plan");
+        let full_samples = prepared_direct_grayscale_idwt_output_sample_count(&prepared);
+
+        crop_prepared_direct_grayscale_plan_to_output_region(
+            &mut prepared,
+            signinum_core::Rect {
+                x: 10,
+                y: 10,
+                w: 4,
+                h: 4,
+            },
+        )
+        .expect("crop direct plan");
+        let cropped_samples = prepared_direct_grayscale_idwt_output_sample_count(&prepared);
+
+        assert!(
+            cropped_samples > 0 && cropped_samples < full_samples,
+            "cropped ROI should reduce IDWT output work; full={full_samples}, cropped={cropped_samples}"
+        );
+    }
+
+    #[test]
+    fn cropped_region_ht_direct_plan_crops_all_idwt_levels() {
+        let mut pixels = Vec::with_capacity(128 * 128);
+        for y in 0..128u32 {
+            for x in 0..128u32 {
+                pixels.push(((x * 3 + y * 5) & 0xff) as u8);
+            }
+        }
+        let options = EncodeOptions {
+            reversible: true,
+            num_decomposition_levels: 3,
+            code_block_width_exp: 0,
+            code_block_height_exp: 0,
+            ..EncodeOptions::default()
+        };
+        let bytes =
+            encode_htj2k(&pixels, 128, 128, 1, 8, false, &options).expect("encode ht gray8");
+        let image = Image::new(&bytes, &DecodeSettings::default()).expect("image");
+        let mut context = DecoderContext::default();
+        let plan = image
+            .build_direct_grayscale_plan_with_context(&mut context)
+            .expect("direct grayscale plan");
+        let mut prepared = prepare_direct_grayscale_plan(&plan).expect("prepared direct plan");
+        let idwt_levels = prepared_direct_grayscale_idwt_full_and_prepared_lens(&prepared);
+        assert!(
+            idwt_levels.len() >= 3,
+            "fixture should exercise a multi-level IDWT plan"
+        );
+
+        crop_prepared_direct_grayscale_plan_to_output_region(
+            &mut prepared,
+            signinum_core::Rect {
+                x: 56,
+                y: 56,
+                w: 16,
+                h: 16,
+            },
+        )
+        .expect("crop direct plan");
+        let cropped_idwt_levels = prepared_direct_grayscale_idwt_full_and_prepared_lens(&prepared);
+
+        assert_eq!(cropped_idwt_levels.len(), idwt_levels.len());
+        for (level_idx, (full_len, cropped_len)) in cropped_idwt_levels.iter().copied().enumerate()
+        {
+            assert!(
+                cropped_len > 0 && cropped_len < full_len,
+                "cropped ROI should reduce IDWT level {level_idx} output work; full={full_len}, cropped={cropped_len}"
+            );
+        }
+    }
+
+    fn prepared_direct_grayscale_ht_job_count(plan: &super::PreparedDirectGrayscalePlan) -> usize {
+        plan.steps
+            .iter()
+            .map(|step| match step {
+                PreparedDirectGrayscaleStep::HtSubBand(sub_band) => sub_band.jobs.len(),
+                _ => 0,
+            })
+            .sum()
+    }
+
+    fn prepared_direct_grayscale_ht_coded_byte_count(
+        plan: &super::PreparedDirectGrayscalePlan,
+    ) -> usize {
+        plan.steps
+            .iter()
+            .map(|step| match step {
+                PreparedDirectGrayscaleStep::HtSubBand(sub_band) => sub_band.coded_data.len(),
+                _ => 0,
+            })
+            .sum()
+    }
+
+    fn prepared_direct_grayscale_idwt_output_sample_count(
+        plan: &super::PreparedDirectGrayscalePlan,
+    ) -> usize {
+        plan.steps
+            .iter()
+            .map(|step| match step {
+                PreparedDirectGrayscaleStep::Idwt(idwt) => prepared_idwt_output_len(idwt),
+                _ => 0,
+            })
+            .sum()
+    }
+
+    fn prepared_direct_grayscale_idwt_full_and_prepared_lens(
+        plan: &super::PreparedDirectGrayscalePlan,
+    ) -> Vec<(usize, usize)> {
+        plan.steps
+            .iter()
+            .filter_map(|step| match step {
+                PreparedDirectGrayscaleStep::Idwt(idwt) => Some((
+                    idwt.step.rect.width() as usize * idwt.step.rect.height() as usize,
+                    prepared_idwt_output_len(idwt),
+                )),
+                _ => None,
+            })
+            .collect()
     }
 
     #[test]

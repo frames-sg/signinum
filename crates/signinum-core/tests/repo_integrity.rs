@@ -171,6 +171,55 @@ fn ci_workflow_keeps_docs_and_benchmark_compile_gates() {
 }
 
 #[test]
+fn xtask_fuzz_build_checks_every_fuzz_manifest() {
+    let root = repo_root();
+    let xtask = fs::read_to_string(root.join("xtask/src/main.rs")).expect("read xtask");
+    let mut manifests = Vec::new();
+
+    for entry in fs::read_dir(root.join("crates")).expect("read crates dir") {
+        let entry = entry.expect("read crate entry");
+        let manifest = entry.path().join("fuzz/Cargo.toml");
+        if manifest.exists() {
+            manifests.push(manifest);
+        }
+    }
+    manifests.sort();
+    assert!(
+        !manifests.is_empty(),
+        "repository must keep fuzz targets under crates/*/fuzz"
+    );
+
+    for manifest in manifests {
+        let relative = manifest
+            .strip_prefix(root)
+            .expect("fuzz manifest under repo root")
+            .display()
+            .to_string();
+        assert!(
+            xtask.contains(&relative),
+            "xtask fuzz-build must check {relative}"
+        );
+    }
+}
+
+#[test]
+fn ci_coverage_job_is_a_required_gate() {
+    let workflow =
+        fs::read_to_string(repo_root().join(".github/workflows/ci.yml")).expect("read CI workflow");
+    let coverage_job = workflow_job(&workflow, "coverage");
+
+    assert!(
+        coverage_job.contains("taiki-e/install-action@cargo-llvm-cov")
+            && coverage_job.contains("cargo xtask coverage"),
+        "coverage job must install cargo-llvm-cov and run xtask coverage"
+    );
+    assert!(
+        !coverage_job.contains("continue-on-error"),
+        "coverage job must not be allowed to fail silently"
+    );
+}
+
+#[test]
 fn gpu_validation_workflow_is_self_hosted_and_explicit() {
     let root = repo_root();
     let workflow_path = root.join(".github/workflows/gpu-validation.yml");

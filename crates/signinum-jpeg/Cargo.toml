@@ -19,7 +19,7 @@ path = "src/lib.rs"
 scalar-only  = []   # retained for fuzz/reference decode until native SIMD backends land
 
 [dependencies]
-signinum-core = { path = "../signinum-core", version = "=1.0.0" }
+signinum-core = { path = "../signinum-core", version = "=1.0.1" }
 thiserror = { workspace = true }
 memchr = { version = "2.7.6", default-features = false }
 

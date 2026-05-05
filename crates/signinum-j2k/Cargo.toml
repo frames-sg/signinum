@@ -1,7 +1,7 @@
 [package]
 name        = "signinum-j2k"
 description = "JPEG 2000 inspector and decoder for whole-slide images"
-version = "1.1.0"
+version = "1.1.1"
 edition.workspace      = true
 rust-version.workspace = true
 license.workspace      = true
@@ -15,14 +15,14 @@ name = "signinum_j2k"
 path = "src/lib.rs"
 
 [dependencies]
-signinum-core = { path = "../signinum-core", version = "=1.0.0" }
-signinum-j2k-native = { path = "../signinum-j2k-native", version = "=0.3.0" }
+signinum-core = { path = "../signinum-core", version = "=1.0.1" }
+signinum-j2k-native = { path = "../signinum-j2k-native", version = "=0.3.1" }
 thiserror = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
 criterion = { workspace = true }
-signinum-j2k-native = { path = "../signinum-j2k-native", version = "=0.3.0" }
+signinum-j2k-native = { path = "../signinum-j2k-native", version = "=0.3.1" }
 
 [lints.rust]
 unsafe_code     = "forbid"

@@ -13,8 +13,8 @@ name = "signinum"
 path = "src/main.rs"
 
 [dependencies]
-signinum-j2k  = { path = "../signinum-j2k", version = "=1.1.0" }
-signinum-jpeg = { path = "../signinum-jpeg", version = "=1.0.0" }
+signinum-j2k  = { path = "../signinum-j2k", version = "=1.1.1" }
+signinum-jpeg = { path = "../signinum-jpeg", version = "=1.0.1" }
 
 # NOTE: `[profile.*]` blocks in package-level manifests are silently ignored
 # inside a workspace (see https://doc.rust-lang.org/cargo/reference/profiles.html#overrides).

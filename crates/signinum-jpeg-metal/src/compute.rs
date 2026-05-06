@@ -1037,6 +1037,13 @@ struct PlaneStage {
 }
 
 #[cfg(target_os = "macos")]
+#[derive(Clone, Copy)]
+enum PlaneStageResidency {
+    CpuStagedMetalUpload,
+    MetalResidentDecode,
+}
+
+#[cfg(target_os = "macos")]
 struct ViewportPlaneWriter<'a> {
     stage: &'a mut PlaneStage,
     dest: Rect,
@@ -1090,22 +1097,54 @@ impl PlaneStage {
         runtime: &MetalRuntime,
         fmt: PixelFormat,
     ) -> Result<Surface, Error> {
+        self.finish_with_runtime_and_residency(
+            runtime,
+            fmt,
+            PlaneStageResidency::CpuStagedMetalUpload,
+        )
+    }
+
+    fn finish_resident_with_runtime(
+        self,
+        runtime: &MetalRuntime,
+        fmt: PixelFormat,
+    ) -> Result<Surface, Error> {
+        self.finish_with_runtime_and_residency(
+            runtime,
+            fmt,
+            PlaneStageResidency::MetalResidentDecode,
+        )
+    }
+
+    fn finish_with_runtime_and_residency(
+        self,
+        runtime: &MetalRuntime,
+        fmt: PixelFormat,
+        residency: PlaneStageResidency,
+    ) -> Result<Surface, Error> {
         match (self.mode, fmt) {
             (PlaneMode::Gray | PlaneMode::YCbCr, PixelFormat::Gray8) => Ok(
-                Surface::from_cpu_staged_metal_buffer(self.plane0, self.dims, fmt),
+                surface_from_plane_buffer(self.plane0, self.dims, fmt, residency),
             ),
             (
                 PlaneMode::Gray | PlaneMode::YCbCr | PlaneMode::Rgb,
                 PixelFormat::Rgb8 | PixelFormat::Rgba8,
             )
-            | (PlaneMode::Rgb, PixelFormat::Gray8) => Ok(self.dispatch_with_runtime(runtime, fmt)),
+            | (PlaneMode::Rgb, PixelFormat::Gray8) => {
+                Ok(self.dispatch_with_runtime(runtime, fmt, residency))
+            }
             _ => Err(Error::MetalKernel {
                 message: format!("unsupported JPEG Metal pixel format {fmt:?}"),
             }),
         }
     }
 
-    fn dispatch_with_runtime(self, runtime: &MetalRuntime, fmt: PixelFormat) -> Surface {
+    fn dispatch_with_runtime(
+        self,
+        runtime: &MetalRuntime,
+        fmt: PixelFormat,
+        residency: PlaneStageResidency,
+    ) -> Surface {
         let pitch_bytes = self.dims.0 as usize * fmt.bytes_per_pixel();
         let out_buffer = runtime.device.new_buffer(
             (pitch_bytes * self.dims.1 as usize) as u64,
@@ -1146,7 +1185,22 @@ impl PlaneStage {
         command_buffer.commit();
         command_buffer.wait_until_completed();
 
-        Surface::from_cpu_staged_metal_buffer(out_buffer, self.dims, fmt)
+        surface_from_plane_buffer(out_buffer, self.dims, fmt, residency)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn surface_from_plane_buffer(
+    buffer: Buffer,
+    dims: (u32, u32),
+    fmt: PixelFormat,
+    residency: PlaneStageResidency,
+) -> Surface {
+    match residency {
+        PlaneStageResidency::CpuStagedMetalUpload => {
+            Surface::from_cpu_staged_metal_buffer(buffer, dims, fmt)
+        }
+        PlaneStageResidency::MetalResidentDecode => Surface::from_metal_buffer(buffer, dims, fmt),
     }
 }
 
@@ -7837,7 +7891,7 @@ fn try_decode_fast444_to_surface(
         plane1: Some(chroma_blue_plane),
         plane2: Some(chroma_red_plane),
     }
-    .finish_with_runtime(runtime, fmt)
+    .finish_resident_with_runtime(runtime, fmt)
     .map(Some)
 }
 
@@ -7988,7 +8042,7 @@ fn try_decode_fast444_region_to_surface(
         plane1: Some(chroma_blue_plane),
         plane2: Some(chroma_red_plane),
     }
-    .finish_with_runtime(runtime, fmt)
+    .finish_resident_with_runtime(runtime, fmt)
     .map(Some)
 }
 
@@ -8126,7 +8180,7 @@ fn try_decode_fast444_scaled_to_surface(
         plane1: Some(chroma_blue_plane),
         plane2: Some(chroma_red_plane),
     }
-    .finish_with_runtime(runtime, fmt)
+    .finish_resident_with_runtime(runtime, fmt)
     .map(Some)
 }
 
@@ -8287,7 +8341,7 @@ fn try_decode_fast444_scaled_region_to_surface(
         plane1: Some(chroma_blue_plane),
         plane2: Some(chroma_red_plane),
     }
-    .finish_with_runtime(runtime, fmt)
+    .finish_resident_with_runtime(runtime, fmt)
     .map(Some)
 }
 
@@ -9681,6 +9735,10 @@ mod tests {
         })
         .expect("metal full decode");
 
+        assert_eq!(
+            surface.residency(),
+            crate::SurfaceResidency::MetalResidentDecode
+        );
         assert_eq!(surface.as_bytes(), expected.as_slice());
     }
 
@@ -9710,6 +9768,10 @@ mod tests {
             })
             .expect("metal scaled");
 
+            assert_eq!(
+                surface.residency(),
+                crate::SurfaceResidency::MetalResidentDecode
+            );
             assert_eq!(surface.as_bytes(), expected.as_slice());
         }
     }
@@ -9744,6 +9806,10 @@ mod tests {
 
         assert_eq!(surface.dimensions, (roi.w, roi.h));
         assert_eq!(surface.fmt, PixelFormat::Rgb8);
+        assert_eq!(
+            surface.residency(),
+            crate::SurfaceResidency::MetalResidentDecode
+        );
         assert_eq!(surface.as_bytes(), expected.as_slice());
     }
 
@@ -9800,6 +9866,10 @@ mod tests {
             let surface = result.expect("surface");
             assert_eq!(surface.dimensions, (roi.w, roi.h));
             assert_eq!(surface.fmt, PixelFormat::Rgb8);
+            assert_eq!(
+                surface.residency(),
+                crate::SurfaceResidency::MetalResidentDecode
+            );
             assert_eq!(surface.as_bytes(), expected.as_slice());
         }
     }
@@ -9842,6 +9912,10 @@ mod tests {
 
         assert_eq!(surface.dimensions, (scaled_roi.w, scaled_roi.h));
         assert_eq!(surface.fmt, PixelFormat::Rgb8);
+        assert_eq!(
+            surface.residency(),
+            crate::SurfaceResidency::MetalResidentDecode
+        );
         assert_eq!(surface.as_bytes(), expected.as_slice());
     }
 
@@ -9901,6 +9975,10 @@ mod tests {
             let surface = result.expect("surface");
             assert_eq!(surface.dimensions, (scaled.w, scaled.h));
             assert_eq!(surface.fmt, PixelFormat::Rgb8);
+            assert_eq!(
+                surface.residency(),
+                crate::SurfaceResidency::MetalResidentDecode
+            );
             assert_eq!(surface.as_bytes(), expected.as_slice());
         }
     }
@@ -9945,6 +10023,10 @@ mod tests {
             let surface = result.expect("surface");
             assert_eq!(surface.dimensions, (2, 2));
             assert_eq!(surface.fmt, PixelFormat::Rgb8);
+            assert_eq!(
+                surface.residency(),
+                crate::SurfaceResidency::MetalResidentDecode
+            );
             assert_eq!(surface.as_bytes(), expected.as_slice());
         }
     }

@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file. The
 format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.3] - 2026-05-06
+
+### Changed
+
+- Updated the `signinum` facade Metal feature to depend on
+  `signinum-jpeg-metal` 0.2.2 for resident fast 4:4:4 JPEG Metal decode
+  outputs.
+
+## [0.2.2] - 2026-05-06
+
+### Fixed
+
+- Marked fast 4:4:4 Metal JPEG decode outputs as Metal-resident instead of
+  CPU-staged Metal uploads, allowing strict device-decode consumers to use the
+  resident buffer path end to end.
+
 ## [1.0.0] - 2026-05-01
 
 CPU-first 1.0 release posture.

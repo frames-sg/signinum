@@ -5029,6 +5029,38 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn ht_simd_prototype_matches_scalar_for_64x64_block() {
+        let coeffs: Vec<i32> = (0..4096)
+            .map(|idx| {
+                let value = ((idx * 37 + idx / 11 + 13) & 0xff) - 127;
+                if idx % 17 == 0 || idx % 29 == 0 {
+                    0
+                } else {
+                    value
+                }
+            })
+            .collect();
+        let job = signinum_j2k_native::J2kHtCodeBlockEncodeJob {
+            coefficients: &coeffs,
+            width: 64,
+            height: 64,
+            total_bitplanes: 8,
+        };
+
+        let scalar = compute::encode_ht_cleanup_code_blocks(&[job])
+            .expect("scalar Metal HT encode")
+            .remove(0);
+        let simd = compute::encode_ht_cleanup_code_blocks_simd_prototype_for_test(&[job])
+            .expect("SIMD prototype Metal HT encode")
+            .remove(0);
+
+        assert_eq!(simd.data, scalar.data);
+        assert_eq!(simd.num_coding_passes, scalar.num_coding_passes);
+        assert_eq!(simd.num_zero_bitplanes, scalar.num_zero_bitplanes);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn metal_tier2_packetization_kernel_matches_scalar_oracle() {
         let block0 = [0x12, 0x34, 0x56, 0x78];
         let block1 = [0x9a, 0xbc];

@@ -1760,14 +1760,15 @@ inline void j2k_ht_terminate_mel_vlc(
     }
 }
 
-inline void j2k_encode_ht_code_block_impl(
+inline void j2k_encode_ht_code_block_impl_with_max(
     device const int *coefficients,
     device uchar *out,
     J2kHtEncodeParams params,
     device const ushort *vlc_table0,
     device const ushort *vlc_table1,
     device const uchar *uvlc_table,
-    device J2kHtEncodeStatus *status
+    device J2kHtEncodeStatus *status,
+    uint max_magnitude
 ) {
     j2k_set_ht_encode_status(status, J2K_ENCODE_STATUS_FAIL, 0u, 0u, 0u, 0u);
 
@@ -1776,13 +1777,6 @@ inline void j2k_encode_ht_code_block_impl(
         params.output_capacity < J2K_HT_MS_SIZE + J2K_HT_MEL_SIZE + J2K_HT_VLC_SIZE) {
         j2k_set_ht_encode_status(status, J2K_ENCODE_STATUS_UNSUPPORTED, 1u, 0u, 0u, 0u);
         return;
-    }
-
-    uint max_magnitude = 0u;
-    for (uint y = 0u; y < params.height; ++y) {
-        for (uint x = 0u; x < params.width; ++x) {
-            max_magnitude = max(max_magnitude, j2k_classic_magnitude(coefficients[y * params.width + x]));
-        }
     }
 
     if (max_magnitude == 0u) {
@@ -1930,6 +1924,33 @@ inline void j2k_encode_ht_code_block_impl(
     j2k_set_ht_encode_status(status, J2K_ENCODE_STATUS_OK, 0u, total_len, 1u, missing_msbs);
 }
 
+inline void j2k_encode_ht_code_block_impl(
+    device const int *coefficients,
+    device uchar *out,
+    J2kHtEncodeParams params,
+    device const ushort *vlc_table0,
+    device const ushort *vlc_table1,
+    device const uchar *uvlc_table,
+    device J2kHtEncodeStatus *status
+) {
+    uint max_magnitude = 0u;
+    for (uint y = 0u; y < params.height; ++y) {
+        for (uint x = 0u; x < params.width; ++x) {
+            max_magnitude = max(max_magnitude, j2k_classic_magnitude(coefficients[y * params.width + x]));
+        }
+    }
+    j2k_encode_ht_code_block_impl_with_max(
+        coefficients,
+        out,
+        params,
+        vlc_table0,
+        vlc_table1,
+        uvlc_table,
+        status,
+        max_magnitude
+    );
+}
+
 struct J2kHtEncodeBatchJob {
     uint coefficient_offset;
     uint output_offset;
@@ -1991,6 +2012,52 @@ kernel void j2k_encode_ht_code_blocks(
         vlc_table1,
         uvlc_table,
         statuses + gid
+    );
+}
+
+kernel void j2k_encode_ht_code_blocks_simd_prototype(
+    device const int *coefficients [[buffer(0)]],
+    device uchar *out [[buffer(1)]],
+    device const J2kHtEncodeBatchJob *jobs [[buffer(2)]],
+    device const ushort *vlc_table0 [[buffer(3)]],
+    device const ushort *vlc_table1 [[buffer(4)]],
+    device const uchar *uvlc_table [[buffer(5)]],
+    device J2kHtEncodeStatus *statuses [[buffer(6)]],
+    constant uint &job_count [[buffer(7)]],
+    uint tg [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]]
+) {
+    if (tg >= job_count) {
+        return;
+    }
+
+    const J2kHtEncodeBatchJob job = jobs[tg];
+    device const int *block = coefficients + job.coefficient_offset;
+    const uint sample_count = job.width * job.height;
+    uint local_max = 0u;
+    for (uint idx = tid; idx < sample_count; idx += 32u) {
+        local_max = max(local_max, j2k_classic_magnitude(block[idx]));
+    }
+    const uint block_max = simd_max(local_max);
+
+    if (tid != 0u) {
+        return;
+    }
+
+    J2kHtEncodeParams params;
+    params.width = job.width;
+    params.height = job.height;
+    params.total_bitplanes = job.total_bitplanes;
+    params.output_capacity = job.output_capacity;
+    j2k_encode_ht_code_block_impl_with_max(
+        block,
+        out + job.output_offset,
+        params,
+        vlc_table0,
+        vlc_table1,
+        uvlc_table,
+        statuses + tg,
+        block_max
     );
 }
 

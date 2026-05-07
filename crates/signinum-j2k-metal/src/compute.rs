@@ -1207,6 +1207,9 @@ const J2K_HT_ENCODE_VLC_SIZE: usize = 3072 - J2K_HT_ENCODE_MEL_SIZE;
 const J2K_HT_ENCODE_MS_SIZE: usize = (16_384usize * 16).div_ceil(15);
 
 #[cfg(target_os = "macos")]
+const HT_SIMD_PROTOTYPE_ENV: &str = "SIGNINUM_J2K_METAL_HT_SIMD_PROTOTYPE";
+
+#[cfg(target_os = "macos")]
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct J2kClassicEncodeParams {
@@ -1519,6 +1522,7 @@ struct MetalRuntime {
     classic_encode_code_blocks: ComputePipelineState,
     ht_encode_code_block: ComputePipelineState,
     ht_encode_code_blocks: ComputePipelineState,
+    ht_encode_code_blocks_simd_prototype: ComputePipelineState,
     packet_block_prepare_resident_classic: ComputePipelineState,
     packet_block_prepare_resident_ht: ComputePipelineState,
     packet_encode: ComputePipelineState,
@@ -1712,6 +1716,9 @@ impl MetalRuntime {
             classic_encode_code_blocks: pipeline("j2k_encode_classic_code_blocks")?,
             ht_encode_code_block: pipeline("j2k_encode_ht_code_block")?,
             ht_encode_code_blocks: pipeline("j2k_encode_ht_code_blocks")?,
+            ht_encode_code_blocks_simd_prototype: pipeline(
+                "j2k_encode_ht_code_blocks_simd_prototype",
+            )?,
             packet_block_prepare_resident_classic: pipeline(
                 "j2k_prepare_packet_blocks_from_classic_status",
             )?,
@@ -11498,7 +11505,9 @@ pub(crate) fn encode_ht_prepared_device_code_blocks_resident(
 
         let command_buffer = runtime.queue.new_command_buffer();
         let encoder = command_buffer.new_compute_command_encoder();
-        encoder.set_compute_pipeline_state(&runtime.ht_encode_code_blocks);
+        let kernel = HtEncodeCodeBlocksKernel::from_env();
+        let pipeline = kernel.pipeline(runtime);
+        encoder.set_compute_pipeline_state(pipeline);
         encoder.set_buffer(0, Some(&coefficient_buffer), 0);
         encoder.set_buffer(1, Some(&output), 0);
         encoder.set_buffer(2, Some(&job_buffer), 0);
@@ -11507,21 +11516,7 @@ pub(crate) fn encode_ht_prepared_device_code_blocks_resident(
         encoder.set_buffer(5, Some(&runtime.ht_uvlc_encode_table), 0);
         encoder.set_buffer(6, Some(&status_buffer), 0);
         encoder.set_bytes(7, size_of::<u32>() as u64, (&raw const job_count).cast());
-        encoder.dispatch_threads(
-            MTLSize {
-                width: u64::from(job_count),
-                height: 1,
-                depth: 1,
-            },
-            MTLSize {
-                width: runtime
-                    .ht_encode_code_blocks
-                    .thread_execution_width()
-                    .max(1),
-                height: 1,
-                depth: 1,
-            },
-        );
+        kernel.dispatch(encoder, pipeline, job_count);
         encoder.end_encoding();
         command_buffer.commit();
 
@@ -11760,8 +11755,85 @@ fn read_ht_encoded_code_block(
 }
 
 #[cfg(target_os = "macos")]
+#[derive(Clone, Copy)]
+enum HtEncodeCodeBlocksKernel {
+    Scalar,
+    SimdPrototype,
+}
+
+#[cfg(target_os = "macos")]
+impl HtEncodeCodeBlocksKernel {
+    fn from_env() -> Self {
+        match std::env::var(HT_SIMD_PROTOTYPE_ENV) {
+            Ok(value) if value == "1" => Self::SimdPrototype,
+            _ => Self::Scalar,
+        }
+    }
+
+    fn pipeline(self, runtime: &MetalRuntime) -> &ComputePipelineState {
+        match self {
+            Self::Scalar => &runtime.ht_encode_code_blocks,
+            Self::SimdPrototype => &runtime.ht_encode_code_blocks_simd_prototype,
+        }
+    }
+
+    fn dispatch(
+        self,
+        encoder: &ComputeCommandEncoderRef,
+        pipeline: &ComputePipelineState,
+        job_count: u32,
+    ) {
+        match self {
+            Self::Scalar => {
+                encoder.dispatch_threads(
+                    MTLSize {
+                        width: u64::from(job_count),
+                        height: 1,
+                        depth: 1,
+                    },
+                    MTLSize {
+                        width: pipeline.thread_execution_width().max(1),
+                        height: 1,
+                        depth: 1,
+                    },
+                );
+            }
+            Self::SimdPrototype => {
+                encoder.dispatch_thread_groups(
+                    MTLSize {
+                        width: u64::from(job_count),
+                        height: 1,
+                        depth: 1,
+                    },
+                    MTLSize {
+                        width: 32,
+                        height: 1,
+                        depth: 1,
+                    },
+                );
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
 pub(crate) fn encode_ht_cleanup_code_blocks(
     jobs: &[J2kHtCodeBlockEncodeJob<'_>],
+) -> Result<Vec<EncodedHtJ2kCodeBlock>, Error> {
+    encode_ht_cleanup_code_blocks_with_kernel(jobs, HtEncodeCodeBlocksKernel::from_env())
+}
+
+#[cfg(all(target_os = "macos", test))]
+pub(crate) fn encode_ht_cleanup_code_blocks_simd_prototype_for_test(
+    jobs: &[J2kHtCodeBlockEncodeJob<'_>],
+) -> Result<Vec<EncodedHtJ2kCodeBlock>, Error> {
+    encode_ht_cleanup_code_blocks_with_kernel(jobs, HtEncodeCodeBlocksKernel::SimdPrototype)
+}
+
+#[cfg(target_os = "macos")]
+fn encode_ht_cleanup_code_blocks_with_kernel(
+    jobs: &[J2kHtCodeBlockEncodeJob<'_>],
+    kernel: HtEncodeCodeBlocksKernel,
 ) -> Result<Vec<EncodedHtJ2kCodeBlock>, Error> {
     with_runtime(|runtime| {
         if jobs.is_empty() {
@@ -11834,7 +11906,8 @@ pub(crate) fn encode_ht_cleanup_code_blocks(
 
         let command_buffer = runtime.queue.new_command_buffer();
         let encoder = command_buffer.new_compute_command_encoder();
-        encoder.set_compute_pipeline_state(&runtime.ht_encode_code_blocks);
+        let pipeline = kernel.pipeline(runtime);
+        encoder.set_compute_pipeline_state(pipeline);
         encoder.set_buffer(0, Some(&coefficient_buffer), 0);
         encoder.set_buffer(1, Some(&output), 0);
         encoder.set_buffer(2, Some(&job_buffer), 0);
@@ -11843,21 +11916,7 @@ pub(crate) fn encode_ht_cleanup_code_blocks(
         encoder.set_buffer(5, Some(&runtime.ht_uvlc_encode_table), 0);
         encoder.set_buffer(6, Some(&status_buffer), 0);
         encoder.set_bytes(7, size_of::<u32>() as u64, (&raw const job_count).cast());
-        encoder.dispatch_threads(
-            MTLSize {
-                width: u64::from(job_count),
-                height: 1,
-                depth: 1,
-            },
-            MTLSize {
-                width: runtime
-                    .ht_encode_code_blocks
-                    .thread_execution_width()
-                    .max(1),
-                height: 1,
-                depth: 1,
-            },
-        );
+        kernel.dispatch(encoder, pipeline, job_count);
         encoder.end_encoding();
         command_buffer.commit();
         command_buffer.wait_until_completed();
@@ -13583,7 +13642,9 @@ pub(crate) fn submit_lossless_codestream_buffers_from_prepared_ht_batch(
         })?;
         if tier1_job_count > 0 {
             let encoder = command_buffer.new_compute_command_encoder();
-            encoder.set_compute_pipeline_state(&runtime.ht_encode_code_blocks);
+            let kernel = HtEncodeCodeBlocksKernel::from_env();
+            let pipeline = kernel.pipeline(runtime);
+            encoder.set_compute_pipeline_state(pipeline);
             encoder.set_buffer(0, Some(&coefficient_buffer), 0);
             encoder.set_buffer(1, Some(&tier1_output_buffer), 0);
             encoder.set_buffer(2, Some(&tier1_job_buffer), 0);
@@ -13596,21 +13657,7 @@ pub(crate) fn submit_lossless_codestream_buffers_from_prepared_ht_batch(
                 size_of::<u32>() as u64,
                 (&raw const tier1_job_count).cast(),
             );
-            encoder.dispatch_threads(
-                MTLSize {
-                    width: u64::from(tier1_job_count),
-                    height: 1,
-                    depth: 1,
-                },
-                MTLSize {
-                    width: runtime
-                        .ht_encode_code_blocks
-                        .thread_execution_width()
-                        .max(1),
-                    height: 1,
-                    depth: 1,
-                },
-            );
+            kernel.dispatch(encoder, pipeline, tier1_job_count);
             encoder.end_encoding();
         }
 

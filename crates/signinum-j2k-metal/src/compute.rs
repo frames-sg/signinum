@@ -1241,9 +1241,19 @@ const J2K_HT_ENCODE_MEL_SIZE: usize = 192;
 const J2K_HT_ENCODE_VLC_SIZE: usize = 3072 - J2K_HT_ENCODE_MEL_SIZE;
 #[cfg(target_os = "macos")]
 const J2K_HT_ENCODE_MS_SIZE: usize = (16_384usize * 16).div_ceil(15);
+#[cfg(target_os = "macos")]
+const J2K_HT_ENCODE_BASE_OUTPUT_SIZE: usize =
+    J2K_HT_ENCODE_MS_SIZE + J2K_HT_ENCODE_MEL_SIZE + J2K_HT_ENCODE_VLC_SIZE;
 
 #[cfg(target_os = "macos")]
 const HT_SIMD_PROTOTYPE_ENV: &str = "SIGNINUM_J2K_METAL_HT_SIMD_PROTOTYPE";
+#[cfg(target_os = "macos")]
+const METAL_PROFILE_STAGES_ENV: &str = "SIGNINUM_J2K_METAL_PROFILE_STAGES";
+
+#[cfg(target_os = "macos")]
+fn env_flag_enabled(name: &str) -> bool {
+    matches!(std::env::var(name), Ok(value) if value == "1")
+}
 
 #[cfg(target_os = "macos")]
 fn ht_simd_prototype_env_requested() -> bool {
@@ -1251,7 +1261,26 @@ fn ht_simd_prototype_env_requested() -> bool {
     if let Some(enabled) = HT_SIMD_PROTOTYPE_ROUTE_OVERRIDE.with(Cell::get) {
         return enabled;
     }
-    matches!(std::env::var(HT_SIMD_PROTOTYPE_ENV), Ok(value) if value == "1")
+    env_flag_enabled(HT_SIMD_PROTOTYPE_ENV)
+}
+
+#[cfg(target_os = "macos")]
+fn metal_profile_stages_enabled() -> bool {
+    env_flag_enabled(METAL_PROFILE_STAGES_ENV)
+}
+
+#[cfg(target_os = "macos")]
+fn label_command_buffer(command_buffer: &CommandBufferRef, label: &str) {
+    if metal_profile_stages_enabled() {
+        command_buffer.set_label(label);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn label_compute_encoder(encoder: &ComputeCommandEncoderRef, label: &str) {
+    if metal_profile_stages_enabled() {
+        encoder.set_label(label);
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -1637,6 +1666,9 @@ impl MetalRuntime {
             } else {
                 None
             };
+        if ht_simd_prototype_env_requested() && ht_encode_code_blocks_simd_prototype.is_none() {
+            return Err("SIGNINUM_J2K_METAL_HT_SIMD_PROTOTYPE=1 requested, but the HTJ2K SIMD prototype pipeline is unavailable on this Metal device".to_string());
+        }
         let classic_cleanup_plain_batched_fn =
             library.get_function("j2k_decode_classic_cleanup_plain_batched", None)?;
         let classic_cleanup_batched_fn =
@@ -2019,6 +2051,7 @@ pub(crate) fn validate_metal_buffer_matches_bytes(
         let params = J2kValidateBytesParams { byte_len };
 
         let command_buffer = runtime.queue.new_command_buffer();
+        label_command_buffer(command_buffer, "signinum-j2k lossless coefficient prep");
         let encoder = command_buffer.new_compute_command_encoder();
         encoder.set_compute_pipeline_state(&runtime.validate_bytes_equal);
         encoder.set_buffer(0, Some(actual_buffer), actual_offset);
@@ -2098,6 +2131,10 @@ pub(crate) fn validate_metal_buffers_match(
         };
 
         let command_buffer = runtime.queue.new_command_buffer();
+        label_command_buffer(
+            command_buffer,
+            "signinum-j2k lossless coefficient prep batch",
+        );
         let encoder = command_buffer.new_compute_command_encoder();
         encoder.set_compute_pipeline_state(&runtime.validate_bytes_equal);
         encoder.set_buffer(0, Some(actual_buffer), actual_offset);
@@ -7177,6 +7214,7 @@ fn dispatch_lossless_deinterleave(
         sample_offset,
     };
     let encoder = command_buffer.new_compute_command_encoder();
+    label_compute_encoder(encoder, "J2K input deinterleave");
     encoder.set_compute_pipeline_state(&runtime.lossless_deinterleave_to_planes);
     encoder.set_buffer(0, Some(job.input), input_byte_offset);
     encoder.set_buffer(1, Some(plane0), 0);
@@ -7344,6 +7382,7 @@ fn dispatch_lossless_extract_coefficients(
         .max()
         .unwrap_or(1);
     let encoder = command_buffer.new_compute_command_encoder();
+    label_compute_encoder(encoder, "J2K coefficient prep");
     encoder.set_compute_pipeline_state(&runtime.lossless_extract_coefficients);
     encoder.set_buffer(0, planes.first().map(|buffer| &**buffer), 0);
     encoder.set_buffer(
@@ -11577,8 +11616,7 @@ pub(crate) fn encode_ht_prepared_device_code_blocks_resident(
             });
         }
 
-        let output_capacity =
-            J2K_HT_ENCODE_MS_SIZE + J2K_HT_ENCODE_MEL_SIZE + J2K_HT_ENCODE_VLC_SIZE;
+        let output_capacity = J2K_HT_ENCODE_BASE_OUTPUT_SIZE;
         let output_capacity_u32 =
             u32::try_from(output_capacity).map_err(|_| Error::MetalKernel {
                 message: "HTJ2K Metal resident encode output capacity exceeds u32".to_string(),
@@ -11620,7 +11658,9 @@ pub(crate) fn encode_ht_prepared_device_code_blocks_resident(
         })?;
 
         let command_buffer = runtime.queue.new_command_buffer();
+        label_command_buffer(command_buffer, "signinum-j2k htj2k resident tier1");
         let encoder = command_buffer.new_compute_command_encoder();
+        label_compute_encoder(encoder, "HTJ2K Tier-1 encode");
         let kernel = HtEncodeCodeBlocksKernel::from_env(runtime);
         let pipeline = kernel.pipeline(runtime)?;
         encoder.set_compute_pipeline_state(pipeline);
@@ -12028,7 +12068,7 @@ fn encode_ht_cleanup_code_blocks_with_runtime_and_statuses(
         return Ok(Vec::new());
     }
 
-    let output_capacity = J2K_HT_ENCODE_MS_SIZE + J2K_HT_ENCODE_MEL_SIZE + J2K_HT_ENCODE_VLC_SIZE;
+    let output_capacity = J2K_HT_ENCODE_BASE_OUTPUT_SIZE;
     let output_capacity_u32 = u32::try_from(output_capacity).map_err(|_| Error::MetalKernel {
         message: "HTJ2K Metal encode output capacity exceeds u32".to_string(),
     })?;
@@ -12091,7 +12131,9 @@ fn encode_ht_cleanup_code_blocks_with_runtime_and_statuses(
     })?;
 
     let command_buffer = runtime.queue.new_command_buffer();
+    label_command_buffer(command_buffer, "signinum-j2k htj2k tier1 batch");
     let encoder = command_buffer.new_compute_command_encoder();
+    label_compute_encoder(encoder, "HTJ2K Tier-1 encode");
     let pipeline = kernel.pipeline(runtime)?;
     encoder.set_compute_pipeline_state(pipeline);
     encoder.set_buffer(0, Some(&coefficient_buffer), 0);
@@ -12152,8 +12194,7 @@ pub(crate) fn encode_ht_cleanup_code_block(
                 message: "HTJ2K Metal encode coefficient slice is too small".to_string(),
             });
         }
-        let output_capacity =
-            J2K_HT_ENCODE_MS_SIZE + J2K_HT_ENCODE_MEL_SIZE + J2K_HT_ENCODE_VLC_SIZE;
+        let output_capacity = J2K_HT_ENCODE_BASE_OUTPUT_SIZE;
         let output_capacity_u32 =
             u32::try_from(output_capacity).map_err(|_| Error::MetalKernel {
                 message: "HTJ2K Metal encode output capacity exceeds u32".to_string(),
@@ -13706,6 +13747,7 @@ pub(crate) fn submit_lossless_codestream_buffers_from_prepared_ht_batch(
 
     with_runtime_for_device(&session.device, |runtime| {
         let command_buffer = runtime.queue.new_command_buffer();
+        label_command_buffer(command_buffer, "signinum-j2k htj2k resident encode batch");
         let mut retained_command_buffers = Vec::with_capacity(prepared_tiles.len());
         let mut retained_buffers = Vec::<Buffer>::new();
         let mut recyclable_private_buffers = Vec::<(usize, Buffer)>::new();
@@ -13746,6 +13788,9 @@ pub(crate) fn submit_lossless_codestream_buffers_from_prepared_ht_batch(
                 &mut recyclable_private_buffers,
             );
             let blit = command_buffer.new_blit_command_encoder();
+            if metal_profile_stages_enabled() {
+                blit.set_label("HTJ2K coefficient prep");
+            }
             for (tile, &dst_offset) in prepared_tiles.iter().zip(coefficient_offsets.iter()) {
                 if tile.coefficient_byte_len > 0 {
                     #[cfg(test)]
@@ -13763,8 +13808,7 @@ pub(crate) fn submit_lossless_codestream_buffers_from_prepared_ht_batch(
             (coefficient_buffer, coefficient_offsets)
         };
 
-        let output_capacity_per_job =
-            J2K_HT_ENCODE_MS_SIZE + J2K_HT_ENCODE_MEL_SIZE + J2K_HT_ENCODE_VLC_SIZE;
+        let output_capacity_per_job = J2K_HT_ENCODE_BASE_OUTPUT_SIZE;
         let output_capacity_per_job_u32 =
             u32::try_from(output_capacity_per_job).map_err(|_| Error::MetalKernel {
                 message: "HTJ2K Metal batch output capacity exceeds u32".to_string(),
@@ -13826,9 +13870,10 @@ pub(crate) fn submit_lossless_codestream_buffers_from_prepared_ht_batch(
         let tier1_job_count = u32::try_from(tier1_jobs.len()).map_err(|_| Error::MetalKernel {
             message: "HTJ2K Metal batch Tier-1 job count exceeds u32".to_string(),
         })?;
+        let kernel = HtEncodeCodeBlocksKernel::from_env(runtime);
         if tier1_job_count > 0 {
             let encoder = command_buffer.new_compute_command_encoder();
-            let kernel = HtEncodeCodeBlocksKernel::from_env(runtime);
+            label_compute_encoder(encoder, "HTJ2K Tier-1 encode");
             let pipeline = kernel.pipeline(runtime)?;
             encoder.set_compute_pipeline_state(pipeline);
             encoder.set_buffer(0, Some(&coefficient_buffer), 0);
@@ -14270,6 +14315,7 @@ pub(crate) fn submit_lossless_codestream_buffers_from_prepared_ht_batch(
         };
         if !resident_blocks.is_empty() {
             let encoder = command_buffer.new_compute_command_encoder();
+            label_compute_encoder(encoder, "HTJ2K packet block prep");
             encoder.set_compute_pipeline_state(&runtime.packet_block_prepare_resident_ht);
             encoder.set_buffer(0, Some(&resident_block_buffer), 0);
             encoder.set_buffer(1, Some(&tier1_job_buffer), 0);
@@ -14302,6 +14348,7 @@ pub(crate) fn submit_lossless_codestream_buffers_from_prepared_ht_batch(
             message: "HTJ2K Metal batch tile count exceeds u64".to_string(),
         })?;
         let encoder = command_buffer.new_compute_command_encoder();
+        label_compute_encoder(encoder, "HTJ2K packetization");
         encoder.set_compute_pipeline_state(&runtime.packet_encode_batched);
         encoder.set_buffer(0, Some(&packet_resolution_buffer), 0);
         encoder.set_buffer(1, Some(&packet_subband_buffer), 0);
@@ -14332,6 +14379,7 @@ pub(crate) fn submit_lossless_codestream_buffers_from_prepared_ht_batch(
         encoder.end_encoding();
 
         let encoder = command_buffer.new_compute_command_encoder();
+        label_compute_encoder(encoder, "HTJ2K codestream assembly");
         encoder.set_compute_pipeline_state(&runtime.lossless_codestream_assemble_batched);
         encoder.set_buffer(0, Some(&packet_output_buffer), 0);
         encoder.set_buffer(1, Some(&packet_status_buffer), 0);

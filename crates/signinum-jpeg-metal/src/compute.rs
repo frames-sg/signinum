@@ -14,8 +14,8 @@ use std::{
 
 #[cfg(target_os = "macos")]
 use metal::{
-    Buffer, CommandBufferRef, CommandQueue, CompileOptions, ComputePipelineState, Device,
-    MTLResourceOptions, MTLSize,
+    Buffer, CommandBuffer, CommandBufferRef, CommandQueue, CompileOptions, ComputePipelineState,
+    Device, MTLResourceOptions, MTLSize,
 };
 use signinum_core::{BackendRequest, PixelFormat, Rect};
 use signinum_jpeg::{
@@ -109,6 +109,29 @@ fn new_decode_plane_buffer(device: &Device, bytes: usize, returned_publicly: boo
         new_shared_buffer(device, bytes)
     } else {
         new_private_buffer(device, bytes)
+    }
+}
+
+#[cfg(target_os = "macos")]
+struct FastRgbDecodeBuffer {
+    buffer: Buffer,
+    dimensions: (u32, u32),
+    status_buffer: Buffer,
+    command_buffer: CommandBuffer,
+}
+
+#[cfg(target_os = "macos")]
+fn private_jpeg_tile_from_fast_rgb_buffer(
+    decoded: FastRgbDecodeBuffer,
+) -> crate::ResidentPrivateJpegTile {
+    crate::ResidentPrivateJpegTile {
+        buffer: decoded.buffer,
+        byte_offset: 0,
+        dimensions: decoded.dimensions,
+        pixel_format: PixelFormat::Rgb8,
+        pitch_bytes: decoded.dimensions.0 as usize * PixelFormat::Rgb8.bytes_per_pixel(),
+        status_buffer: decoded.status_buffer,
+        command_buffer: decoded.command_buffer,
     }
 }
 
@@ -1224,6 +1247,56 @@ impl PlaneStage {
         command_buffer.wait_until_completed();
 
         surface_from_plane_buffer(out_buffer, self.dims, fmt, residency)
+    }
+
+    fn dispatch_private_rgb8_with_runtime(
+        self,
+        runtime: &MetalRuntime,
+        status_buffer: Buffer,
+    ) -> crate::ResidentPrivateJpegTile {
+        let fmt = PixelFormat::Rgb8;
+        let pitch_bytes = self.dims.0 as usize * fmt.bytes_per_pixel();
+        let out_buffer = new_private_buffer(&runtime.device, pitch_bytes * self.dims.1 as usize);
+        let params = JpegPackParams {
+            width: self.dims.0,
+            height: self.dims.1,
+            out_stride: u32::try_from(pitch_bytes).expect("JPEG Metal output stride fits in u32"),
+            alpha: u32::from(u8::MAX),
+            mode: match self.mode {
+                PlaneMode::Gray => MODE_GRAY,
+                PlaneMode::YCbCr => MODE_YCBCR,
+                PlaneMode::Rgb => MODE_RGB,
+            },
+            out_format: OUT_RGB,
+        };
+
+        let command_buffer = runtime.queue.new_command_buffer();
+        let encoder = command_buffer.new_compute_command_encoder();
+        encoder.set_compute_pipeline_state(&runtime.pack_pipeline);
+        encoder.set_buffer(0, Some(&self.plane0), 0);
+        encoder.set_buffer(1, self.plane1.as_ref().map(std::convert::AsRef::as_ref), 0);
+        encoder.set_buffer(2, self.plane2.as_ref().map(std::convert::AsRef::as_ref), 0);
+        encoder.set_buffer(3, Some(&out_buffer), 0);
+        encoder.set_bytes(
+            4,
+            size_of::<JpegPackParams>() as u64,
+            (&raw const params).cast(),
+        );
+        dispatch_2d_pipeline(encoder, &runtime.pack_pipeline, self.dims);
+        encoder.end_encoding();
+        command_buffer.commit();
+        command_buffer.wait_until_completed();
+        let command_buffer = command_buffer.to_owned();
+
+        crate::ResidentPrivateJpegTile {
+            buffer: out_buffer,
+            byte_offset: 0,
+            dimensions: self.dims,
+            pixel_format: fmt,
+            pitch_bytes,
+            status_buffer,
+            command_buffer,
+        }
     }
 }
 
@@ -6539,6 +6612,25 @@ fn try_decode_fast422_to_surface(
     packet: Option<&JpegMetalFast422PacketV1>,
     fmt: PixelFormat,
 ) -> Result<Option<Surface>, Error> {
+    let Some(decoded) =
+        decode_fast422_to_rgb_buffer(runtime, packet, fmt, MTLResourceOptions::StorageModeShared)?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(Surface::from_metal_buffer(
+        decoded.buffer,
+        decoded.dimensions,
+        fmt,
+    )))
+}
+
+#[cfg(target_os = "macos")]
+fn decode_fast422_to_rgb_buffer(
+    runtime: &MetalRuntime,
+    packet: Option<&JpegMetalFast422PacketV1>,
+    fmt: PixelFormat,
+    output_storage: MTLResourceOptions,
+) -> Result<Option<FastRgbDecodeBuffer>, Error> {
     let Some(packet) = packet else {
         return Ok(None);
     };
@@ -6581,7 +6673,7 @@ fn try_decode_fast422_to_surface(
     let out_buffer = (fmt != PixelFormat::Gray8).then(|| {
         runtime.device.new_buffer(
             (params.out_stride as usize * params.height as usize) as u64,
-            MTLResourceOptions::StorageModeShared,
+            output_storage,
         )
     });
 
@@ -6673,6 +6765,7 @@ fn try_decode_fast422_to_surface(
 
     command_buffer.commit();
     command_buffer.wait_until_completed();
+    let command_buffer = command_buffer.to_owned();
 
     if let Some(status) = first_decode_error_status(&status_buffer, decode_threads) {
         return Err(Error::MetalKernel {
@@ -6683,9 +6776,11 @@ fn try_decode_fast422_to_surface(
         });
     }
 
-    Ok(Some(match out_buffer {
-        Some(out_buffer) => Surface::from_metal_buffer(out_buffer, packet.dimensions, fmt),
-        None => Surface::from_metal_buffer(y_plane, packet.dimensions, fmt),
+    Ok(Some(FastRgbDecodeBuffer {
+        buffer: out_buffer.unwrap_or(y_plane),
+        dimensions: packet.dimensions,
+        status_buffer,
+        command_buffer,
     }))
 }
 
@@ -6961,6 +7056,31 @@ fn try_decode_fast420_to_surface(
     packet: Option<&JpegMetalFast420PacketV1>,
     fmt: PixelFormat,
 ) -> Result<Option<Surface>, Error> {
+    let Some(decoded) = decode_fast420_to_rgb_buffer(
+        runtime,
+        decoder,
+        packet,
+        fmt,
+        MTLResourceOptions::StorageModeShared,
+    )?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(Surface::from_metal_buffer(
+        decoded.buffer,
+        decoded.dimensions,
+        fmt,
+    )))
+}
+
+#[cfg(target_os = "macos")]
+fn decode_fast420_to_rgb_buffer(
+    runtime: &MetalRuntime,
+    decoder: &CpuDecoder<'_>,
+    packet: Option<&JpegMetalFast420PacketV1>,
+    fmt: PixelFormat,
+    output_storage: MTLResourceOptions,
+) -> Result<Option<FastRgbDecodeBuffer>, Error> {
     let Some(packet) = packet else {
         return Ok(None);
     };
@@ -7005,7 +7125,7 @@ fn try_decode_fast420_to_surface(
     let out_buffer = (fmt != PixelFormat::Gray8).then(|| {
         runtime.device.new_buffer(
             (params.out_stride as usize * params.height as usize) as u64,
-            MTLResourceOptions::StorageModeShared,
+            output_storage,
         )
     });
 
@@ -7095,14 +7215,17 @@ fn try_decode_fast420_to_surface(
 
     command_buffer.commit();
     command_buffer.wait_until_completed();
+    let command_buffer = command_buffer.to_owned();
 
     if let Some(status) = first_decode_error_status(&status_buffer, decode_threads) {
         return Err(decode_error_from_cpu(decoder, fmt, status));
     }
 
-    Ok(Some(match out_buffer {
-        Some(out_buffer) => Surface::from_metal_buffer(out_buffer, packet.dimensions, fmt),
-        None => Surface::from_metal_buffer(y_plane, packet.dimensions, fmt),
+    Ok(Some(FastRgbDecodeBuffer {
+        buffer: out_buffer.unwrap_or(y_plane),
+        dimensions: packet.dimensions,
+        status_buffer,
+        command_buffer,
     }))
 }
 
@@ -7796,6 +7919,133 @@ fn try_decode_fast444_to_surface(
 }
 
 #[cfg(target_os = "macos")]
+fn try_decode_fast444_to_private_rgb8_tile(
+    runtime: &MetalRuntime,
+    decoder: &CpuDecoder<'_>,
+    packet: Option<&JpegMetalFast444PacketV1>,
+) -> Result<Option<crate::ResidentPrivateJpegTile>, Error> {
+    let Some(packet) = packet else {
+        return Ok(None);
+    };
+
+    let params = fast444_params(packet);
+    let mode = fast444_plane_mode(decoder);
+    let plane_len = params.width as usize * params.height as usize;
+    let y_plane = new_private_buffer(&runtime.device, plane_len);
+    let chroma_blue_plane = new_private_buffer(&runtime.device, plane_len);
+    let chroma_red_plane = new_private_buffer(&runtime.device, plane_len);
+    let decode_threads = entropy_decode_thread_count(
+        packet.restart_interval_mcus,
+        packet.restart_offsets.len(),
+        packet.entropy_checkpoints.len(),
+    );
+    let status_buffer = decode_status_buffer(&runtime.device, decode_threads);
+    let entropy_buffer = runtime.device.new_buffer_with_data(
+        packet.entropy_bytes.as_ptr().cast(),
+        packet.entropy_bytes.len() as u64,
+        MTLResourceOptions::StorageModeShared,
+    );
+    let restart_offsets_buffer = restart_offsets_buffer(&runtime.device, &packet.restart_offsets)?;
+    let entropy_checkpoints_buffer =
+        entropy_checkpoints_buffer(&runtime.device, &packet.entropy_checkpoints)?;
+
+    let dc_tables = [
+        PreparedHuffmanHost::from(&packet.y_dc_table),
+        PreparedHuffmanHost::from(&packet.cb_dc_table),
+        PreparedHuffmanHost::from(&packet.cr_dc_table),
+    ];
+    let ac_tables = [
+        PreparedHuffmanHost::from(&packet.y_ac_table),
+        PreparedHuffmanHost::from(&packet.cb_ac_table),
+        PreparedHuffmanHost::from(&packet.cr_ac_table),
+    ];
+
+    let command_buffer = runtime.queue.new_command_buffer();
+    let decoder_encoder = command_buffer.new_compute_command_encoder();
+    decoder_encoder.set_compute_pipeline_state(&runtime.fast444_decode_pipeline);
+    decoder_encoder.set_buffer(0, Some(&entropy_buffer), 0);
+    decoder_encoder.set_buffer(1, Some(&y_plane), 0);
+    decoder_encoder.set_buffer(2, Some(&chroma_blue_plane), 0);
+    decoder_encoder.set_buffer(3, Some(&chroma_red_plane), 0);
+    decoder_encoder.set_bytes(
+        4,
+        size_of::<JpegFast444Params>() as u64,
+        (&raw const params).cast(),
+    );
+    decoder_encoder.set_bytes(
+        5,
+        size_of::<[u16; 64]>() as u64,
+        packet.y_quant.as_ptr().cast(),
+    );
+    decoder_encoder.set_bytes(
+        6,
+        size_of::<[u16; 64]>() as u64,
+        packet.cb_quant.as_ptr().cast(),
+    );
+    decoder_encoder.set_bytes(
+        7,
+        size_of::<[u16; 64]>() as u64,
+        packet.cr_quant.as_ptr().cast(),
+    );
+    decoder_encoder.set_bytes(
+        8,
+        size_of::<PreparedHuffmanHost>() as u64,
+        (&raw const dc_tables[0]).cast(),
+    );
+    decoder_encoder.set_bytes(
+        9,
+        size_of::<PreparedHuffmanHost>() as u64,
+        (&raw const ac_tables[0]).cast(),
+    );
+    decoder_encoder.set_bytes(
+        10,
+        size_of::<PreparedHuffmanHost>() as u64,
+        (&raw const dc_tables[1]).cast(),
+    );
+    decoder_encoder.set_bytes(
+        11,
+        size_of::<PreparedHuffmanHost>() as u64,
+        (&raw const ac_tables[1]).cast(),
+    );
+    decoder_encoder.set_bytes(
+        12,
+        size_of::<PreparedHuffmanHost>() as u64,
+        (&raw const dc_tables[2]).cast(),
+    );
+    decoder_encoder.set_bytes(
+        13,
+        size_of::<PreparedHuffmanHost>() as u64,
+        (&raw const ac_tables[2]).cast(),
+    );
+    decoder_encoder.set_buffer(14, Some(&restart_offsets_buffer), 0);
+    decoder_encoder.set_buffer(15, Some(&status_buffer), 0);
+    decoder_encoder.set_buffer(16, Some(&entropy_checkpoints_buffer), 0);
+    dispatch_1d_pipeline(
+        decoder_encoder,
+        &runtime.fast444_decode_pipeline,
+        decode_threads,
+    );
+    decoder_encoder.end_encoding();
+    command_buffer.commit();
+    command_buffer.wait_until_completed();
+
+    if let Some(status) = first_decode_error_status(&status_buffer, decode_threads) {
+        return Err(decode_error_from_cpu(decoder, PixelFormat::Rgb8, status));
+    }
+
+    Ok(Some(
+        PlaneStage {
+            dims: packet.dimensions,
+            mode,
+            plane0: y_plane,
+            plane1: Some(chroma_blue_plane),
+            plane2: Some(chroma_red_plane),
+        }
+        .dispatch_private_rgb8_with_runtime(runtime, status_buffer),
+    ))
+}
+
+#[cfg(target_os = "macos")]
 fn try_decode_fast444_region_to_surface(
     runtime: &MetalRuntime,
     decoder: &CpuDecoder<'_>,
@@ -8301,6 +8551,44 @@ pub(crate) fn decode_to_surface_with_session(
             fast422_packet,
             fast420_packet,
         )
+    })
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn decode_private_rgb8_tile_with_session(
+    decoder: &CpuDecoder<'_>,
+    fast444_packet: Option<&JpegMetalFast444PacketV1>,
+    fast422_packet: Option<&JpegMetalFast422PacketV1>,
+    fast420_packet: Option<&JpegMetalFast420PacketV1>,
+    session: &crate::MetalBackendSession,
+) -> Result<crate::ResidentPrivateJpegTile, Error> {
+    with_runtime_for_session(session, |runtime| {
+        if let Some(tile) =
+            try_decode_fast444_to_private_rgb8_tile(runtime, decoder, fast444_packet)?
+        {
+            return Ok(tile);
+        }
+        if let Some(decoded) = decode_fast422_to_rgb_buffer(
+            runtime,
+            fast422_packet,
+            PixelFormat::Rgb8,
+            MTLResourceOptions::StorageModePrivate,
+        )? {
+            return Ok(private_jpeg_tile_from_fast_rgb_buffer(decoded));
+        }
+        if let Some(decoded) = decode_fast420_to_rgb_buffer(
+            runtime,
+            decoder,
+            fast420_packet,
+            PixelFormat::Rgb8,
+            MTLResourceOptions::StorageModePrivate,
+        )? {
+            return Ok(private_jpeg_tile_from_fast_rgb_buffer(decoded));
+        }
+        Err(Error::UnsupportedMetalRequest {
+            reason:
+                "private JPEG Metal output supports only fast baseline 4:4:4, 4:2:2, or 4:2:0 RGB8 full-tile decode",
+        })
     })
 }
 

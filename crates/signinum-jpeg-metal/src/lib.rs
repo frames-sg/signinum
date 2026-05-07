@@ -38,7 +38,7 @@ pub use encode::{
 };
 
 #[cfg(target_os = "macos")]
-use metal::{Buffer, Device, MTLResourceOptions};
+use metal::{Buffer, CommandBuffer, Device, MTLResourceOptions};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -213,6 +213,19 @@ impl DeviceSurface for Surface {
     fn byte_len(&self) -> usize {
         self.pitch_bytes * self.dimensions.1 as usize
     }
+}
+
+#[cfg(target_os = "macos")]
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct ResidentPrivateJpegTile {
+    pub buffer: Buffer,
+    pub byte_offset: usize,
+    pub dimensions: (u32, u32),
+    pub pixel_format: PixelFormat,
+    pub pitch_bytes: usize,
+    pub status_buffer: Buffer,
+    pub command_buffer: CommandBuffer,
 }
 
 #[cfg(target_os = "macos")]
@@ -408,6 +421,39 @@ impl<'a> Decoder<'a> {
                 return Err(err);
             }
             Err(Error::MetalUnavailable)
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[doc(hidden)]
+    pub fn decode_private_rgb8_tile_with_session(
+        &mut self,
+        session: &MetalBackendSession,
+    ) -> Result<ResidentPrivateJpegTile, Error> {
+        let decision = choose_route(
+            &self.inner,
+            BackendRequest::Metal,
+            PixelFormat::Rgb8,
+            batch::BatchOp::Full,
+            self.fast444_packet.as_deref(),
+            self.fast422_packet.as_deref(),
+            self.fast420_packet.as_deref(),
+        );
+        if let Some(err) = routing::decision_error(decision) {
+            return Err(err);
+        }
+        match decision {
+            routing::RouteDecision::MetalKernel => compute::decode_private_rgb8_tile_with_session(
+                &self.inner,
+                self.fast444_packet.as_deref(),
+                self.fast422_packet.as_deref(),
+                self.fast420_packet.as_deref(),
+                session,
+            ),
+            routing::RouteDecision::CpuHost
+            | routing::RouteDecision::RejectExplicitMetal { .. }
+            | routing::RouteDecision::RejectUnsupportedBackend { .. }
+            | routing::RouteDecision::MetalUnavailable => unreachable!("handled above"),
         }
     }
 }
@@ -1712,6 +1758,24 @@ mod tests {
             "resident JPEG Metal decode should use Private internal planes"
         );
         let _ = surface.as_bytes();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn jpeg_private_rgb8_tile_uses_private_output_buffer() {
+        let session = MetalBackendSession::system_default().expect("Metal backend session");
+        let mut decoder = Decoder::new(BASELINE_420).expect("decoder");
+
+        let tile = decoder
+            .decode_private_rgb8_tile_with_session(&session)
+            .expect("resident private JPEG Metal decode");
+
+        assert_eq!(tile.dimensions, (16, 16));
+        assert_eq!(tile.pixel_format, PixelFormat::Rgb8);
+        assert_eq!(tile.pitch_bytes, 16 * PixelFormat::Rgb8.bytes_per_pixel());
+        assert_eq!(tile.byte_offset, 0);
+        assert_eq!(tile.buffer.storage_mode(), metal::MTLStorageMode::Private);
+        assert!(tile.status_buffer.length() > 0);
     }
 
     #[cfg(target_os = "macos")]

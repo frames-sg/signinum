@@ -1698,6 +1698,58 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn jpeg_device_decode_uses_private_internal_planes() {
+        let session = MetalBackendSession::system_default().expect("Metal backend session");
+        let mut decoder = Decoder::new(BASELINE_420).expect("decoder");
+
+        compute::reset_jpeg_private_buffer_allocations_for_test();
+        let surface = decoder
+            .decode_to_device_with_session(PixelFormat::Rgb8, &session)
+            .expect("resident JPEG Metal decode");
+        assert_eq!(surface.residency(), SurfaceResidency::MetalResidentDecode);
+        assert!(
+            compute::jpeg_private_buffer_allocations_for_test() > 0,
+            "resident JPEG Metal decode should use Private internal planes"
+        );
+        let _ = surface.as_bytes();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn jpeg_gray_region_decode_uses_private_internal_planes() {
+        let roi = Rect {
+            x: 4,
+            y: 4,
+            w: 8,
+            h: 8,
+        };
+        let mut expected_decoder = Decoder::new(BASELINE_420).expect("expected decoder");
+        let mut expected = vec![0; roi.w as usize * roi.h as usize];
+        expected_decoder
+            .decode_region_into(
+                &mut CpuScratchPool::new(),
+                &mut expected,
+                roi.w as usize,
+                PixelFormat::Gray8,
+                roi,
+            )
+            .expect("expected CPU region decode");
+
+        let mut decoder = Decoder::new(BASELINE_420).expect("decoder");
+        compute::reset_jpeg_private_buffer_allocations_for_test();
+        let surface = decoder
+            .decode_region_to_device(PixelFormat::Gray8, roi, BackendRequest::Metal)
+            .expect("resident JPEG Metal region decode");
+        assert_eq!(surface.residency(), SurfaceResidency::MetalResidentDecode);
+        assert!(
+            compute::jpeg_private_buffer_allocations_for_test() >= 3,
+            "resident Gray8 region decode should keep decoded Y/Cb/Cr planes Private"
+        );
+        assert_eq!(surface.as_bytes(), expected.as_slice());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn uploaded_metal_surface_is_marked_cpu_staged() {
         let surface = upload_surface(
             vec![1, 2, 3],

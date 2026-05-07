@@ -2,6 +2,8 @@
 
 #![allow(clippy::similar_names)]
 
+#[cfg(all(target_os = "macos", test))]
+use std::cell::Cell;
 #[cfg(target_os = "macos")]
 use std::{
     cell::RefCell,
@@ -73,6 +75,42 @@ const REGION_SCALED_BATCH_CHUNK: usize = 8;
 const SPLIT_FAST420_BATCH_ENV: &str = "SIGNINUM_JPEG_METAL_SPLIT_FAST420_BATCH";
 #[cfg(target_os = "macos")]
 const FAST420_BATCH_TIMING_ENV: &str = "SIGNINUM_JPEG_METAL_FAST420_BATCH_TIMING";
+
+#[cfg(all(target_os = "macos", test))]
+std::thread_local! {
+    static JPEG_PRIVATE_BUFFER_ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(all(target_os = "macos", test))]
+pub(crate) fn reset_jpeg_private_buffer_allocations_for_test() {
+    JPEG_PRIVATE_BUFFER_ALLOCATIONS.with(|allocations| allocations.set(0));
+}
+
+#[cfg(all(target_os = "macos", test))]
+pub(crate) fn jpeg_private_buffer_allocations_for_test() -> usize {
+    JPEG_PRIVATE_BUFFER_ALLOCATIONS.with(Cell::get)
+}
+
+#[cfg(target_os = "macos")]
+fn new_shared_buffer(device: &Device, bytes: usize) -> Buffer {
+    device.new_buffer(bytes.max(1) as u64, MTLResourceOptions::StorageModeShared)
+}
+
+#[cfg(target_os = "macos")]
+fn new_private_buffer(device: &Device, bytes: usize) -> Buffer {
+    #[cfg(test)]
+    JPEG_PRIVATE_BUFFER_ALLOCATIONS.with(|allocations| allocations.set(allocations.get() + 1));
+    device.new_buffer(bytes.max(1) as u64, MTLResourceOptions::StorageModePrivate)
+}
+
+#[cfg(target_os = "macos")]
+fn new_decode_plane_buffer(device: &Device, bytes: usize, returned_publicly: bool) -> Buffer {
+    if returned_publicly {
+        new_shared_buffer(device, bytes)
+    } else {
+        new_private_buffer(device, bytes)
+    }
+}
 
 #[cfg(target_os = "macos")]
 #[repr(C)]
@@ -2450,15 +2488,9 @@ fn encode_fast420_region_batch_item(
         fast420_windowed_pack_params_for_dims((source_window.w, source_window.h), fmt, local_roi);
     let y_len = source_window.w as usize * source_window.h as usize;
     let chroma_len = source_window.w.div_ceil(2) as usize * source_window.h.div_ceil(2) as usize;
-    let y_plane = runtime
-        .device
-        .new_buffer(y_len as u64, MTLResourceOptions::StorageModeShared);
-    let cb_plane = runtime
-        .device
-        .new_buffer(chroma_len as u64, MTLResourceOptions::StorageModeShared);
-    let cr_plane = runtime
-        .device
-        .new_buffer(chroma_len as u64, MTLResourceOptions::StorageModeShared);
+    let y_plane = new_decode_plane_buffer(&runtime.device, y_len, false);
+    let cb_plane = new_private_buffer(&runtime.device, chroma_len);
+    let cr_plane = new_private_buffer(&runtime.device, chroma_len);
     let decode_threads = entropy_decode_thread_count(
         packet.restart_interval_mcus,
         restart_offsets.len(),
@@ -2604,15 +2636,9 @@ fn encode_fast420_scaled_batch_item(
 
     let y_len = params.scaled_width as usize * params.scaled_height as usize;
     let chroma_len = params.chroma_width as usize * params.chroma_height as usize;
-    let y_plane = runtime
-        .device
-        .new_buffer(y_len as u64, MTLResourceOptions::StorageModeShared);
-    let cb_plane = runtime
-        .device
-        .new_buffer(chroma_len as u64, MTLResourceOptions::StorageModeShared);
-    let cr_plane = runtime
-        .device
-        .new_buffer(chroma_len as u64, MTLResourceOptions::StorageModeShared);
+    let y_plane = new_decode_plane_buffer(&runtime.device, y_len, fmt == PixelFormat::Gray8);
+    let cb_plane = new_private_buffer(&runtime.device, chroma_len);
+    let cr_plane = new_private_buffer(&runtime.device, chroma_len);
     let decode_threads = entropy_decode_thread_count(
         packet.restart_interval_mcus,
         packet.restart_offsets.len(),
@@ -2846,15 +2872,9 @@ fn encode_fast420_scaled_region_batch_item(
         fast420_windowed_pack_params_for_dims((source_window.w, source_window.h), fmt, local_roi);
     let y_len = source_window.w as usize * source_window.h as usize;
     let chroma_len = source_window.w.div_ceil(2) as usize * source_window.h.div_ceil(2) as usize;
-    let y_plane = runtime
-        .device
-        .new_buffer(y_len as u64, MTLResourceOptions::StorageModeShared);
-    let cb_plane = runtime
-        .device
-        .new_buffer(chroma_len as u64, MTLResourceOptions::StorageModeShared);
-    let cr_plane = runtime
-        .device
-        .new_buffer(chroma_len as u64, MTLResourceOptions::StorageModeShared);
+    let y_plane = new_decode_plane_buffer(&runtime.device, y_len, false);
+    let cb_plane = new_private_buffer(&runtime.device, chroma_len);
+    let cr_plane = new_private_buffer(&runtime.device, chroma_len);
     let decode_threads = entropy_decode_thread_count(
         packet.restart_interval_mcus,
         restart_offsets.len(),
@@ -2992,15 +3012,9 @@ fn encode_fast420_batch_item(
     let params = fast420_params(packet, fmt)?;
     let y_len = params.width as usize * params.height as usize;
     let chroma_len = params.chroma_width as usize * params.chroma_height as usize;
-    let y_plane = runtime
-        .device
-        .new_buffer(y_len as u64, MTLResourceOptions::StorageModeShared);
-    let cb_plane = runtime
-        .device
-        .new_buffer(chroma_len as u64, MTLResourceOptions::StorageModeShared);
-    let cr_plane = runtime
-        .device
-        .new_buffer(chroma_len as u64, MTLResourceOptions::StorageModeShared);
+    let y_plane = new_decode_plane_buffer(&runtime.device, y_len, fmt == PixelFormat::Gray8);
+    let cb_plane = new_private_buffer(&runtime.device, chroma_len);
+    let cr_plane = new_private_buffer(&runtime.device, chroma_len);
     let decode_threads = entropy_decode_thread_count(
         packet.restart_interval_mcus,
         packet.restart_offsets.len(),
@@ -3145,15 +3159,9 @@ fn encode_fast422_batch_item(
     let params = fast422_params(packet, fmt)?;
     let y_len = params.width as usize * params.height as usize;
     let chroma_len = params.chroma_width as usize * params.chroma_height as usize;
-    let y_plane = runtime
-        .device
-        .new_buffer(y_len as u64, MTLResourceOptions::StorageModeShared);
-    let cb_plane = runtime
-        .device
-        .new_buffer(chroma_len as u64, MTLResourceOptions::StorageModeShared);
-    let cr_plane = runtime
-        .device
-        .new_buffer(chroma_len as u64, MTLResourceOptions::StorageModeShared);
+    let y_plane = new_decode_plane_buffer(&runtime.device, y_len, fmt == PixelFormat::Gray8);
+    let cb_plane = new_private_buffer(&runtime.device, chroma_len);
+    let cr_plane = new_private_buffer(&runtime.device, chroma_len);
     let decode_threads = entropy_decode_thread_count(
         packet.restart_interval_mcus,
         packet.restart_offsets.len(),
@@ -3330,15 +3338,9 @@ fn encode_fast422_region_batch_item(
         fast422_windowed_pack_params_for_dims((source_window.w, source_window.h), fmt, local_roi);
     let y_len = source_window.w as usize * source_window.h as usize;
     let chroma_len = source_window.w.div_ceil(2) as usize * source_window.h as usize;
-    let y_plane = runtime
-        .device
-        .new_buffer(y_len as u64, MTLResourceOptions::StorageModeShared);
-    let cb_plane = runtime
-        .device
-        .new_buffer(chroma_len as u64, MTLResourceOptions::StorageModeShared);
-    let cr_plane = runtime
-        .device
-        .new_buffer(chroma_len as u64, MTLResourceOptions::StorageModeShared);
+    let y_plane = new_decode_plane_buffer(&runtime.device, y_len, false);
+    let cb_plane = new_private_buffer(&runtime.device, chroma_len);
+    let cr_plane = new_private_buffer(&runtime.device, chroma_len);
     let decode_threads = entropy_decode_thread_count(
         packet.restart_interval_mcus,
         restart_offsets.len(),
@@ -3484,15 +3486,9 @@ fn encode_fast422_scaled_batch_item(
 
     let y_len = params.scaled_width as usize * params.scaled_height as usize;
     let chroma_len = params.chroma_width as usize * params.chroma_height as usize;
-    let y_plane = runtime
-        .device
-        .new_buffer(y_len as u64, MTLResourceOptions::StorageModeShared);
-    let cb_plane = runtime
-        .device
-        .new_buffer(chroma_len as u64, MTLResourceOptions::StorageModeShared);
-    let cr_plane = runtime
-        .device
-        .new_buffer(chroma_len as u64, MTLResourceOptions::StorageModeShared);
+    let y_plane = new_decode_plane_buffer(&runtime.device, y_len, fmt == PixelFormat::Gray8);
+    let cb_plane = new_private_buffer(&runtime.device, chroma_len);
+    let cr_plane = new_private_buffer(&runtime.device, chroma_len);
     let decode_threads = entropy_decode_thread_count(
         packet.restart_interval_mcus,
         packet.restart_offsets.len(),
@@ -3731,15 +3727,9 @@ fn encode_fast422_scaled_region_batch_item(
         fast422_windowed_pack_params_for_dims((source_window.w, source_window.h), fmt, local_roi);
     let y_len = source_window.w as usize * source_window.h as usize;
     let chroma_len = source_window.w.div_ceil(2) as usize * source_window.h as usize;
-    let y_plane = runtime
-        .device
-        .new_buffer(y_len as u64, MTLResourceOptions::StorageModeShared);
-    let cb_plane = runtime
-        .device
-        .new_buffer(chroma_len as u64, MTLResourceOptions::StorageModeShared);
-    let cr_plane = runtime
-        .device
-        .new_buffer(chroma_len as u64, MTLResourceOptions::StorageModeShared);
+    let y_plane = new_decode_plane_buffer(&runtime.device, y_len, false);
+    let cb_plane = new_private_buffer(&runtime.device, chroma_len);
+    let cr_plane = new_private_buffer(&runtime.device, chroma_len);
     let decode_threads = entropy_decode_thread_count(
         packet.restart_interval_mcus,
         restart_offsets.len(),
@@ -3895,15 +3885,13 @@ fn encode_fast444_region_batch_item(
     );
 
     let plane_len = params.width as usize * params.height as usize;
-    let y_plane = runtime
-        .device
-        .new_buffer(plane_len as u64, MTLResourceOptions::StorageModeShared);
-    let cb_plane = runtime
-        .device
-        .new_buffer(plane_len as u64, MTLResourceOptions::StorageModeShared);
-    let cr_plane = runtime
-        .device
-        .new_buffer(plane_len as u64, MTLResourceOptions::StorageModeShared);
+    let y_plane = new_decode_plane_buffer(
+        &runtime.device,
+        plane_len,
+        fmt == PixelFormat::Gray8 && mode != PlaneMode::Rgb,
+    );
+    let cb_plane = new_private_buffer(&runtime.device, plane_len);
+    let cr_plane = new_private_buffer(&runtime.device, plane_len);
     let decode_threads = entropy_decode_thread_count(
         packet.restart_interval_mcus,
         restart_offsets.len(),
@@ -4041,15 +4029,13 @@ fn encode_fast444_scaled_batch_item(
     };
 
     let plane_len = params.scaled_width as usize * params.scaled_height as usize;
-    let y_plane = runtime
-        .device
-        .new_buffer(plane_len as u64, MTLResourceOptions::StorageModeShared);
-    let cb_plane = runtime
-        .device
-        .new_buffer(plane_len as u64, MTLResourceOptions::StorageModeShared);
-    let cr_plane = runtime
-        .device
-        .new_buffer(plane_len as u64, MTLResourceOptions::StorageModeShared);
+    let y_plane = new_decode_plane_buffer(
+        &runtime.device,
+        plane_len,
+        fmt == PixelFormat::Gray8 && mode != PlaneMode::Rgb,
+    );
+    let cb_plane = new_private_buffer(&runtime.device, plane_len);
+    let cr_plane = new_private_buffer(&runtime.device, plane_len);
     let decode_threads = entropy_decode_thread_count(
         packet.restart_interval_mcus,
         packet.restart_offsets.len(),
@@ -4219,15 +4205,13 @@ fn encode_fast444_scaled_region_batch_item(
     );
 
     let plane_len = params.scaled_width as usize * params.scaled_height as usize;
-    let y_plane = runtime
-        .device
-        .new_buffer(plane_len as u64, MTLResourceOptions::StorageModeShared);
-    let cb_plane = runtime
-        .device
-        .new_buffer(plane_len as u64, MTLResourceOptions::StorageModeShared);
-    let cr_plane = runtime
-        .device
-        .new_buffer(plane_len as u64, MTLResourceOptions::StorageModeShared);
+    let y_plane = new_decode_plane_buffer(
+        &runtime.device,
+        plane_len,
+        fmt == PixelFormat::Gray8 && mode != PlaneMode::Rgb,
+    );
+    let cb_plane = new_private_buffer(&runtime.device, plane_len);
+    let cr_plane = new_private_buffer(&runtime.device, plane_len);
     let decode_threads = entropy_decode_thread_count(
         packet.restart_interval_mcus,
         restart_offsets.len(),
@@ -4357,15 +4341,13 @@ fn encode_fast444_batch_item(
 ) -> Result<BatchedDecodeItem, Error> {
     let params = fast444_params(packet);
     let plane_len = params.width as usize * params.height as usize;
-    let y_plane = runtime
-        .device
-        .new_buffer(plane_len as u64, MTLResourceOptions::StorageModeShared);
-    let cb_plane = runtime
-        .device
-        .new_buffer(plane_len as u64, MTLResourceOptions::StorageModeShared);
-    let cr_plane = runtime
-        .device
-        .new_buffer(plane_len as u64, MTLResourceOptions::StorageModeShared);
+    let y_plane = new_decode_plane_buffer(
+        &runtime.device,
+        plane_len,
+        fmt == PixelFormat::Gray8 && mode != PlaneMode::Rgb,
+    );
+    let cb_plane = new_private_buffer(&runtime.device, plane_len);
+    let cr_plane = new_private_buffer(&runtime.device, plane_len);
     let decode_threads = entropy_decode_thread_count(
         packet.restart_interval_mcus,
         packet.restart_offsets.len(),
@@ -4950,18 +4932,9 @@ fn try_decode_fast420_full_rgb_batch_to_surfaces_with_mode(
     }
 
     let timing_buffer_start = timing_enabled.then(Instant::now);
-    let y_plane = runtime.device.new_buffer(
-        (y_len * tile_count) as u64,
-        MTLResourceOptions::StorageModeShared,
-    );
-    let cb_plane = runtime.device.new_buffer(
-        (chroma_len * tile_count) as u64,
-        MTLResourceOptions::StorageModeShared,
-    );
-    let cr_plane = runtime.device.new_buffer(
-        (chroma_len * tile_count) as u64,
-        MTLResourceOptions::StorageModeShared,
-    );
+    let y_plane = new_private_buffer(&runtime.device, y_len * tile_count);
+    let cb_plane = new_private_buffer(&runtime.device, chroma_len * tile_count);
+    let cr_plane = new_private_buffer(&runtime.device, chroma_len * tile_count);
     let out_buffer = runtime.device.new_buffer(
         (out_tile_len * tile_count) as u64,
         MTLResourceOptions::StorageModeShared,
@@ -5385,18 +5358,9 @@ fn try_decode_fast422_full_rgb_batch_to_surfaces(
         entropy_checkpoints.extend(packet.entropy_checkpoints.iter().copied());
     }
 
-    let y_plane = runtime.device.new_buffer(
-        (y_len * tile_count) as u64,
-        MTLResourceOptions::StorageModeShared,
-    );
-    let cb_plane = runtime.device.new_buffer(
-        (chroma_len * tile_count) as u64,
-        MTLResourceOptions::StorageModeShared,
-    );
-    let cr_plane = runtime.device.new_buffer(
-        (chroma_len * tile_count) as u64,
-        MTLResourceOptions::StorageModeShared,
-    );
+    let y_plane = new_private_buffer(&runtime.device, y_len * tile_count);
+    let cb_plane = new_private_buffer(&runtime.device, chroma_len * tile_count);
+    let cr_plane = new_private_buffer(&runtime.device, chroma_len * tile_count);
     let out_buffer = runtime.device.new_buffer(
         (out_tile_len * tile_count) as u64,
         MTLResourceOptions::StorageModeShared,
@@ -5691,18 +5655,9 @@ fn try_decode_fast444_region_scaled_rgb_batch_to_surfaces(
         return Ok(None);
     };
 
-    let y_plane = runtime.device.new_buffer(
-        (plane_len * tile_count) as u64,
-        MTLResourceOptions::StorageModeShared,
-    );
-    let cb_plane = runtime.device.new_buffer(
-        (plane_len * tile_count) as u64,
-        MTLResourceOptions::StorageModeShared,
-    );
-    let cr_plane = runtime.device.new_buffer(
-        (plane_len * tile_count) as u64,
-        MTLResourceOptions::StorageModeShared,
-    );
+    let y_plane = new_private_buffer(&runtime.device, plane_len * tile_count);
+    let cb_plane = new_private_buffer(&runtime.device, plane_len * tile_count);
+    let cr_plane = new_private_buffer(&runtime.device, plane_len * tile_count);
     let out_buffer = runtime.device.new_buffer(
         (out_tile_len * tile_count) as u64,
         MTLResourceOptions::StorageModeShared,
@@ -5927,18 +5882,9 @@ fn try_decode_fast420_region_scaled_rgb_batch_to_surfaces(
         return Ok(None);
     };
 
-    let y_plane = runtime.device.new_buffer(
-        (first_plan.y_len * tile_count) as u64,
-        MTLResourceOptions::StorageModeShared,
-    );
-    let cb_plane = runtime.device.new_buffer(
-        (first_plan.chroma_len * tile_count) as u64,
-        MTLResourceOptions::StorageModeShared,
-    );
-    let cr_plane = runtime.device.new_buffer(
-        (first_plan.chroma_len * tile_count) as u64,
-        MTLResourceOptions::StorageModeShared,
-    );
+    let y_plane = new_private_buffer(&runtime.device, first_plan.y_len * tile_count);
+    let cb_plane = new_private_buffer(&runtime.device, first_plan.chroma_len * tile_count);
+    let cr_plane = new_private_buffer(&runtime.device, first_plan.chroma_len * tile_count);
     let out_buffer = runtime.device.new_buffer(
         (first_plan.out_tile_len * tile_count) as u64,
         MTLResourceOptions::StorageModeShared,
@@ -6156,18 +6102,9 @@ fn try_decode_fast422_region_scaled_rgb_batch_to_surfaces(
         return Ok(None);
     };
 
-    let y_plane = runtime.device.new_buffer(
-        (first_plan.y_len * tile_count) as u64,
-        MTLResourceOptions::StorageModeShared,
-    );
-    let cb_plane = runtime.device.new_buffer(
-        (first_plan.chroma_len * tile_count) as u64,
-        MTLResourceOptions::StorageModeShared,
-    );
-    let cr_plane = runtime.device.new_buffer(
-        (first_plan.chroma_len * tile_count) as u64,
-        MTLResourceOptions::StorageModeShared,
-    );
+    let y_plane = new_private_buffer(&runtime.device, first_plan.y_len * tile_count);
+    let cb_plane = new_private_buffer(&runtime.device, first_plan.chroma_len * tile_count);
+    let cr_plane = new_private_buffer(&runtime.device, first_plan.chroma_len * tile_count);
     let out_buffer = runtime.device.new_buffer(
         (first_plan.out_tile_len * tile_count) as u64,
         MTLResourceOptions::StorageModeShared,
@@ -6612,15 +6549,9 @@ fn try_decode_fast422_to_surface(
     let params = fast422_params(packet, fmt)?;
     let y_len = params.width as usize * params.height as usize;
     let chroma_len = params.chroma_width as usize * params.chroma_height as usize;
-    let y_plane = runtime
-        .device
-        .new_buffer(y_len as u64, MTLResourceOptions::StorageModeShared);
-    let cb_plane = runtime
-        .device
-        .new_buffer(chroma_len as u64, MTLResourceOptions::StorageModeShared);
-    let cr_plane = runtime
-        .device
-        .new_buffer(chroma_len as u64, MTLResourceOptions::StorageModeShared);
+    let y_plane = new_decode_plane_buffer(&runtime.device, y_len, fmt == PixelFormat::Gray8);
+    let cb_plane = new_private_buffer(&runtime.device, chroma_len);
+    let cr_plane = new_private_buffer(&runtime.device, chroma_len);
     let decode_threads = entropy_decode_thread_count(
         packet.restart_interval_mcus,
         packet.restart_offsets.len(),
@@ -6893,15 +6824,9 @@ fn try_decode_fast422_scaled_region_to_surface(
         fast422_windowed_pack_params_for_dims((source_window.w, source_window.h), fmt, local_roi);
     let y_len = source_window.w as usize * source_window.h as usize;
     let chroma_len = source_window.w.div_ceil(2) as usize * source_window.h as usize;
-    let y_plane = runtime
-        .device
-        .new_buffer(y_len as u64, MTLResourceOptions::StorageModeShared);
-    let cb_plane = runtime
-        .device
-        .new_buffer(chroma_len as u64, MTLResourceOptions::StorageModeShared);
-    let cr_plane = runtime
-        .device
-        .new_buffer(chroma_len as u64, MTLResourceOptions::StorageModeShared);
+    let y_plane = new_decode_plane_buffer(&runtime.device, y_len, false);
+    let cb_plane = new_private_buffer(&runtime.device, chroma_len);
+    let cr_plane = new_private_buffer(&runtime.device, chroma_len);
     let decode_threads = entropy_decode_thread_count(
         packet.restart_interval_mcus,
         restart_offsets.len(),
@@ -7046,16 +6971,10 @@ fn try_decode_fast420_to_surface(
     let params = fast420_params(packet, fmt)?;
     let y_len = params.width as usize * params.height as usize;
     let chroma_len = params.chroma_width as usize * params.chroma_height as usize;
-    let y_plane = runtime
-        .device
-        .new_buffer(y_len as u64, MTLResourceOptions::StorageModeShared);
+    let y_plane = new_decode_plane_buffer(&runtime.device, y_len, fmt == PixelFormat::Gray8);
     let chroma_buffers = [
-        runtime
-            .device
-            .new_buffer(chroma_len as u64, MTLResourceOptions::StorageModeShared),
-        runtime
-            .device
-            .new_buffer(chroma_len as u64, MTLResourceOptions::StorageModeShared),
+        new_private_buffer(&runtime.device, chroma_len),
+        new_private_buffer(&runtime.device, chroma_len),
     ];
     let decode_threads = entropy_decode_thread_count(
         packet.restart_interval_mcus,
@@ -7230,16 +7149,10 @@ fn try_decode_fast420_region_to_surface(
         fast420_windowed_pack_params_for_dims((source_window.w, source_window.h), fmt, local_roi);
     let y_len = source_window.w as usize * source_window.h as usize;
     let chroma_len = source_window.w.div_ceil(2) as usize * source_window.h.div_ceil(2) as usize;
-    let y_plane = runtime
-        .device
-        .new_buffer(y_len as u64, MTLResourceOptions::StorageModeShared);
+    let y_plane = new_decode_plane_buffer(&runtime.device, y_len, false);
     let chroma_buffers = [
-        runtime
-            .device
-            .new_buffer(chroma_len as u64, MTLResourceOptions::StorageModeShared),
-        runtime
-            .device
-            .new_buffer(chroma_len as u64, MTLResourceOptions::StorageModeShared),
+        new_private_buffer(&runtime.device, chroma_len),
+        new_private_buffer(&runtime.device, chroma_len),
     ];
     let decode_threads = entropy_decode_thread_count(
         packet.restart_interval_mcus,
@@ -7388,16 +7301,10 @@ fn try_decode_fast420_scaled_to_surface(
 
     let y_len = params.scaled_width as usize * params.scaled_height as usize;
     let chroma_len = params.chroma_width as usize * params.chroma_height as usize;
-    let y_plane = runtime
-        .device
-        .new_buffer(y_len as u64, MTLResourceOptions::StorageModeShared);
+    let y_plane = new_decode_plane_buffer(&runtime.device, y_len, fmt == PixelFormat::Gray8);
     let chroma_buffers = [
-        runtime
-            .device
-            .new_buffer(chroma_len as u64, MTLResourceOptions::StorageModeShared),
-        runtime
-            .device
-            .new_buffer(chroma_len as u64, MTLResourceOptions::StorageModeShared),
+        new_private_buffer(&runtime.device, chroma_len),
+        new_private_buffer(&runtime.device, chroma_len),
     ];
     let decode_threads = entropy_decode_thread_count(
         packet.restart_interval_mcus,
@@ -7614,16 +7521,10 @@ fn try_decode_fast420_scaled_region_to_surface(
         fast420_windowed_pack_params_for_dims((source_window.w, source_window.h), fmt, local_roi);
     let y_len = source_window.w as usize * source_window.h as usize;
     let chroma_len = source_window.w.div_ceil(2) as usize * source_window.h.div_ceil(2) as usize;
-    let y_plane = runtime
-        .device
-        .new_buffer(y_len as u64, MTLResourceOptions::StorageModeShared);
+    let y_plane = new_decode_plane_buffer(&runtime.device, y_len, false);
     let chroma_buffers = [
-        runtime
-            .device
-            .new_buffer(chroma_len as u64, MTLResourceOptions::StorageModeShared),
-        runtime
-            .device
-            .new_buffer(chroma_len as u64, MTLResourceOptions::StorageModeShared),
+        new_private_buffer(&runtime.device, chroma_len),
+        new_private_buffer(&runtime.device, chroma_len),
     ];
     let decode_threads = entropy_decode_thread_count(
         packet.restart_interval_mcus,
@@ -7775,16 +7676,15 @@ fn try_decode_fast444_to_surface(
     };
 
     let params = fast444_params(packet);
+    let mode = fast444_plane_mode(decoder);
     let plane_len = params.width as usize * params.height as usize;
-    let y_plane = runtime
-        .device
-        .new_buffer(plane_len as u64, MTLResourceOptions::StorageModeShared);
-    let chroma_blue_plane = runtime
-        .device
-        .new_buffer(plane_len as u64, MTLResourceOptions::StorageModeShared);
-    let chroma_red_plane = runtime
-        .device
-        .new_buffer(plane_len as u64, MTLResourceOptions::StorageModeShared);
+    let y_plane = new_decode_plane_buffer(
+        &runtime.device,
+        plane_len,
+        fmt == PixelFormat::Gray8 && mode != PlaneMode::Rgb,
+    );
+    let chroma_blue_plane = new_private_buffer(&runtime.device, plane_len);
+    let chroma_red_plane = new_private_buffer(&runtime.device, plane_len);
     let decode_threads = entropy_decode_thread_count(
         packet.restart_interval_mcus,
         packet.restart_offsets.len(),
@@ -7886,7 +7786,7 @@ fn try_decode_fast444_to_surface(
 
     PlaneStage {
         dims: packet.dimensions,
-        mode: fast444_plane_mode(decoder),
+        mode,
         plane0: y_plane,
         plane1: Some(chroma_blue_plane),
         plane2: Some(chroma_red_plane),
@@ -7926,16 +7826,15 @@ fn try_decode_fast444_region_to_surface(
         restart_offsets.len(),
         packet.entropy_checkpoints.len(),
     );
+    let mode = fast444_plane_mode(decoder);
     let plane_len = params.width as usize * params.height as usize;
-    let y_plane = runtime
-        .device
-        .new_buffer(plane_len as u64, MTLResourceOptions::StorageModeShared);
-    let chroma_blue_plane = runtime
-        .device
-        .new_buffer(plane_len as u64, MTLResourceOptions::StorageModeShared);
-    let chroma_red_plane = runtime
-        .device
-        .new_buffer(plane_len as u64, MTLResourceOptions::StorageModeShared);
+    let y_plane = new_decode_plane_buffer(
+        &runtime.device,
+        plane_len,
+        fmt == PixelFormat::Gray8 && mode != PlaneMode::Rgb,
+    );
+    let chroma_blue_plane = new_private_buffer(&runtime.device, plane_len);
+    let chroma_red_plane = new_private_buffer(&runtime.device, plane_len);
     let decode_threads = entropy_decode_thread_count(
         packet.restart_interval_mcus,
         restart_offsets.len(),
@@ -8037,7 +7936,7 @@ fn try_decode_fast444_region_to_surface(
 
     PlaneStage {
         dims: (roi.w, roi.h),
-        mode: fast444_plane_mode(decoder),
+        mode,
         plane0: y_plane,
         plane1: Some(chroma_blue_plane),
         plane2: Some(chroma_red_plane),
@@ -8064,16 +7963,15 @@ fn try_decode_fast444_scaled_to_surface(
         return Ok(None);
     };
 
+    let mode = fast444_plane_mode(decoder);
     let plane_len = params.scaled_width as usize * params.scaled_height as usize;
-    let y_plane = runtime
-        .device
-        .new_buffer(plane_len as u64, MTLResourceOptions::StorageModeShared);
-    let chroma_blue_plane = runtime
-        .device
-        .new_buffer(plane_len as u64, MTLResourceOptions::StorageModeShared);
-    let chroma_red_plane = runtime
-        .device
-        .new_buffer(plane_len as u64, MTLResourceOptions::StorageModeShared);
+    let y_plane = new_decode_plane_buffer(
+        &runtime.device,
+        plane_len,
+        fmt == PixelFormat::Gray8 && mode != PlaneMode::Rgb,
+    );
+    let chroma_blue_plane = new_private_buffer(&runtime.device, plane_len);
+    let chroma_red_plane = new_private_buffer(&runtime.device, plane_len);
     let decode_threads = entropy_decode_thread_count(
         packet.restart_interval_mcus,
         packet.restart_offsets.len(),
@@ -8175,7 +8073,7 @@ fn try_decode_fast444_scaled_to_surface(
 
     PlaneStage {
         dims: (params.scaled_width, params.scaled_height),
-        mode: fast444_plane_mode(decoder),
+        mode,
         plane0: y_plane,
         plane1: Some(chroma_blue_plane),
         plane2: Some(chroma_red_plane),
@@ -8225,16 +8123,15 @@ fn try_decode_fast444_scaled_region_to_surface(
         packet.entropy_checkpoints.len(),
     );
 
+    let mode = fast444_plane_mode(decoder);
     let plane_len = params.scaled_width as usize * params.scaled_height as usize;
-    let y_plane = runtime
-        .device
-        .new_buffer(plane_len as u64, MTLResourceOptions::StorageModeShared);
-    let chroma_blue_plane = runtime
-        .device
-        .new_buffer(plane_len as u64, MTLResourceOptions::StorageModeShared);
-    let chroma_red_plane = runtime
-        .device
-        .new_buffer(plane_len as u64, MTLResourceOptions::StorageModeShared);
+    let y_plane = new_decode_plane_buffer(
+        &runtime.device,
+        plane_len,
+        fmt == PixelFormat::Gray8 && mode != PlaneMode::Rgb,
+    );
+    let chroma_blue_plane = new_private_buffer(&runtime.device, plane_len);
+    let chroma_red_plane = new_private_buffer(&runtime.device, plane_len);
     let decode_threads = entropy_decode_thread_count(
         packet.restart_interval_mcus,
         restart_offsets.len(),
@@ -8336,7 +8233,7 @@ fn try_decode_fast444_scaled_region_to_surface(
 
     PlaneStage {
         dims: (scaled_roi.w, scaled_roi.h),
-        mode: fast444_plane_mode(decoder),
+        mode,
         plane0: y_plane,
         plane1: Some(chroma_blue_plane),
         plane2: Some(chroma_red_plane),

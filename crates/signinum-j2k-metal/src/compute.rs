@@ -1357,6 +1357,14 @@ struct J2kHtEncodeStatus {
     reserved2: u32,
 }
 
+#[cfg(all(target_os = "macos", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct HtCodeBlockSegmentLengthsForTest {
+    pub(crate) magnitude_sign: u32,
+    pub(crate) mel: u32,
+    pub(crate) vlc: u32,
+}
+
 #[cfg(target_os = "macos")]
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -11971,6 +11979,51 @@ fn encode_ht_cleanup_code_blocks_with_runtime(
     jobs: &[J2kHtCodeBlockEncodeJob<'_>],
     kernel: HtEncodeCodeBlocksKernel,
 ) -> Result<Vec<EncodedHtJ2kCodeBlock>, Error> {
+    encode_ht_cleanup_code_blocks_with_runtime_and_statuses(runtime, jobs, kernel).map(|blocks| {
+        blocks
+            .into_iter()
+            .map(|(encoded, _status)| encoded)
+            .collect()
+    })
+}
+
+#[cfg(all(target_os = "macos", test))]
+pub(crate) fn encode_ht_cleanup_code_blocks_with_segment_lengths_for_test(
+    jobs: &[J2kHtCodeBlockEncodeJob<'_>],
+    use_simd_prototype: bool,
+) -> Result<Vec<(EncodedHtJ2kCodeBlock, HtCodeBlockSegmentLengthsForTest)>, Error> {
+    with_runtime(|runtime| {
+        let kernel = if use_simd_prototype {
+            HtEncodeCodeBlocksKernel::SimdPrototype
+        } else {
+            HtEncodeCodeBlocksKernel::Scalar
+        };
+        encode_ht_cleanup_code_blocks_with_runtime_and_statuses(runtime, jobs, kernel).map(
+            |blocks| {
+                blocks
+                    .into_iter()
+                    .map(|(encoded, status)| {
+                        (
+                            encoded,
+                            HtCodeBlockSegmentLengthsForTest {
+                                magnitude_sign: status.reserved0,
+                                mel: status.reserved1,
+                                vlc: status.reserved2,
+                            },
+                        )
+                    })
+                    .collect()
+            },
+        )
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn encode_ht_cleanup_code_blocks_with_runtime_and_statuses(
+    runtime: &MetalRuntime,
+    jobs: &[J2kHtCodeBlockEncodeJob<'_>],
+    kernel: HtEncodeCodeBlocksKernel,
+) -> Result<Vec<(EncodedHtJ2kCodeBlock, J2kHtEncodeStatus)>, Error> {
     if jobs.is_empty() {
         return Ok(Vec::new());
     }
@@ -12063,7 +12116,7 @@ fn encode_ht_cleanup_code_blocks_with_runtime(
     let mut results = Vec::with_capacity(jobs.len());
     for (idx, status) in statuses.iter().copied().enumerate() {
         let batch_job = batch_jobs[idx];
-        results.push(read_ht_encoded_code_block(
+        let encoded_block = read_ht_encoded_code_block(
             status,
             &output,
             usize::try_from(batch_job.output_offset).map_err(|_| Error::MetalKernel {
@@ -12072,7 +12125,8 @@ fn encode_ht_cleanup_code_blocks_with_runtime(
             usize::try_from(batch_job.output_capacity).map_err(|_| Error::MetalKernel {
                 message: "HTJ2K Metal encode output capacity exceeds usize".to_string(),
             })?,
-        )?);
+        )?;
+        results.push((encoded_block, status));
     }
 
     Ok(results)

@@ -1136,6 +1136,27 @@ inline void j2k_set_ht_encode_status(
     status->reserved2 = 0u;
 }
 
+inline void j2k_set_ht_encode_status_with_segments(
+    device J2kHtEncodeStatus *status,
+    uint code,
+    uint detail,
+    uint data_len,
+    uint passes,
+    uint zbp,
+    uint ms_len,
+    uint mel_len,
+    uint vlc_len
+) {
+    status->code = code;
+    status->detail = detail;
+    status->data_len = data_len;
+    status->num_coding_passes = passes;
+    status->num_zero_bitplanes = zbp;
+    status->reserved0 = ms_len;
+    status->reserved1 = mel_len;
+    status->reserved2 = vlc_len;
+}
+
 inline uint j2k_ht_aligned_sign_magnitude(int coefficient, uint total_bitplanes) {
     if (coefficient == 0) {
         return 0u;
@@ -1760,7 +1781,7 @@ inline void j2k_ht_terminate_mel_vlc(
     }
 }
 
-inline void j2k_encode_ht_code_block_impl_with_max(
+inline void j2k_encode_ht_code_block_impl_with_max_and_assembly(
     device const int *coefficients,
     device uchar *out,
     J2kHtEncodeParams params,
@@ -1768,7 +1789,8 @@ inline void j2k_encode_ht_code_block_impl_with_max(
     device const ushort *vlc_table1,
     device const uchar *uvlc_table,
     device J2kHtEncodeStatus *status,
-    uint max_magnitude
+    uint max_magnitude,
+    bool assemble_final
 ) {
     j2k_set_ht_encode_status(status, J2K_ENCODE_STATUS_FAIL, 0u, 0u, 0u, 0u);
 
@@ -1901,27 +1923,65 @@ inline void j2k_encode_ht_code_block_impl_with_max(
         return;
     }
 
-    const uint total_len = ms.pos + mel.pos + vlc.pos;
+    const uint ms_len = ms.pos;
+    const uint mel_len = mel.pos;
+    const uint vlc_len = vlc.pos;
+    const uint total_len = ms_len + mel_len + vlc_len;
     if (total_len < 2u || total_len > params.output_capacity) {
         j2k_set_ht_encode_status(status, J2K_ENCODE_STATUS_FAIL, 4u, 0u, 0u, 0u);
         return;
     }
 
-    for (uint idx = 0u; idx < mel.pos; ++idx) {
-        out[ms.pos + idx] = out[J2K_HT_MEL_OFFSET + idx];
-    }
-    const uint vlc_start = J2K_HT_VLC_SIZE - vlc.pos;
-    for (uint idx = 0u; idx < vlc.pos; ++idx) {
-        out[ms.pos + mel.pos + idx] = out[J2K_HT_VLC_OFFSET + vlc_start + idx];
+    if (assemble_final) {
+        for (uint idx = 0u; idx < mel_len; ++idx) {
+            out[ms_len + idx] = out[J2K_HT_MEL_OFFSET + idx];
+        }
+        const uint vlc_start = J2K_HT_VLC_SIZE - vlc_len;
+        for (uint idx = 0u; idx < vlc_len; ++idx) {
+            out[ms_len + mel_len + idx] = out[J2K_HT_VLC_OFFSET + vlc_start + idx];
+        }
+
+        const uint last = total_len - 1u;
+        const uint prev = total_len - 2u;
+        const uint locator_bytes = mel_len + vlc_len;
+        out[last] = uchar(locator_bytes >> 4u);
+        out[prev] = uchar((out[prev] & uchar(0xF0u)) | uchar(locator_bytes & 0x0Fu));
     }
 
-    const uint last = total_len - 1u;
-    const uint prev = total_len - 2u;
-    const uint locator_bytes = mel.pos + vlc.pos;
-    out[last] = uchar(locator_bytes >> 4u);
-    out[prev] = uchar((out[prev] & uchar(0xF0u)) | uchar(locator_bytes & 0x0Fu));
+    j2k_set_ht_encode_status_with_segments(
+        status,
+        J2K_ENCODE_STATUS_OK,
+        0u,
+        total_len,
+        1u,
+        missing_msbs,
+        ms_len,
+        mel_len,
+        vlc_len
+    );
+}
 
-    j2k_set_ht_encode_status(status, J2K_ENCODE_STATUS_OK, 0u, total_len, 1u, missing_msbs);
+inline void j2k_encode_ht_code_block_impl_with_max(
+    device const int *coefficients,
+    device uchar *out,
+    J2kHtEncodeParams params,
+    device const ushort *vlc_table0,
+    device const ushort *vlc_table1,
+    device const uchar *uvlc_table,
+    device J2kHtEncodeStatus *status,
+    uint max_magnitude
+) {
+    j2k_encode_ht_code_block_impl_with_max_and_assembly(
+        coefficients,
+        out,
+        params,
+        vlc_table0,
+        vlc_table1,
+        uvlc_table,
+        status,
+        max_magnitude,
+        true
+    );
 }
 
 inline void j2k_encode_ht_code_block_impl(
@@ -2041,25 +2101,77 @@ kernel void j2k_encode_ht_code_blocks_simd_prototype(
     }
     const uint block_max = simd_max(local_max);
 
-    if (tid != 0u) {
-        return;
-    }
-
     J2kHtEncodeParams params;
     params.width = job.width;
     params.height = job.height;
     params.total_bitplanes = job.total_bitplanes;
     params.output_capacity = job.output_capacity;
-    j2k_encode_ht_code_block_impl_with_max(
-        block,
-        out + job.output_offset,
-        params,
-        vlc_table0,
-        vlc_table1,
-        uvlc_table,
-        statuses + tg,
-        block_max
-    );
+    device uchar *block_out = out + job.output_offset;
+    device J2kHtEncodeStatus *status = statuses + tg;
+    if (tid == 0u) {
+        j2k_encode_ht_code_block_impl_with_max_and_assembly(
+            block,
+            block_out,
+            params,
+            vlc_table0,
+            vlc_table1,
+            uvlc_table,
+            status,
+            block_max,
+            false
+        );
+    }
+
+    threadgroup_barrier(mem_flags::mem_device);
+
+    if (status->code != J2K_ENCODE_STATUS_OK || status->data_len == 0u) {
+        return;
+    }
+
+    const uint ms_len = status->reserved0;
+    const uint mel_len = status->reserved1;
+    const uint vlc_len = status->reserved2;
+    const uint mel_src = J2K_HT_MEL_OFFSET;
+    const uint mel_dst = ms_len;
+    const uint vlc_src = J2K_HT_VLC_OFFSET + (J2K_HT_VLC_SIZE - vlc_len);
+    const uint vlc_dst = ms_len + mel_len;
+    const bool mel_nonoverlap =
+        (mel_dst + mel_len <= mel_src) || (mel_src + mel_len <= mel_dst);
+    const bool vlc_nonoverlap =
+        (vlc_dst + vlc_len <= vlc_src) || (vlc_src + vlc_len <= vlc_dst);
+
+    if (mel_nonoverlap) {
+        for (uint idx = tid; idx < mel_len; idx += 32u) {
+            block_out[mel_dst + idx] = block_out[mel_src + idx];
+        }
+    } else if (tid == 0u) {
+        for (uint idx = 0u; idx < mel_len; ++idx) {
+            block_out[mel_dst + idx] = block_out[mel_src + idx];
+        }
+    }
+
+    threadgroup_barrier(mem_flags::mem_device);
+
+    if (vlc_nonoverlap) {
+        for (uint idx = tid; idx < vlc_len; idx += 32u) {
+            block_out[vlc_dst + idx] = block_out[vlc_src + idx];
+        }
+    } else if (tid == 0u) {
+        for (uint idx = 0u; idx < vlc_len; ++idx) {
+            block_out[vlc_dst + idx] = block_out[vlc_src + idx];
+        }
+    }
+
+    threadgroup_barrier(mem_flags::mem_device);
+
+    if (tid == 0u) {
+        const uint total_len = status->data_len;
+        const uint last = total_len - 1u;
+        const uint prev = total_len - 2u;
+        const uint locator_bytes = mel_len + vlc_len;
+        block_out[last] = uchar(locator_bytes >> 4u);
+        block_out[prev] = uchar((block_out[prev] & uchar(0xF0u)) | uchar(locator_bytes & 0x0Fu));
+    }
 }
 #endif
 

@@ -5228,6 +5228,65 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn ht_simd_prototype_length_estimate_matches_scalar() {
+        if !compute::ht_simd_prototype_available_for_test()
+            .expect("HTJ2K SIMD prototype availability query")
+        {
+            return;
+        }
+        let all_zero = vec![0; 64];
+        let patterned: Vec<i32> = (0..4096)
+            .map(|idx| {
+                let value = ((idx * 53 + idx / 13 + 21) & 0xff) - 127;
+                if idx % 19 == 0 || idx % 37 == 0 {
+                    0
+                } else {
+                    value
+                }
+            })
+            .collect();
+        let jobs = [
+            signinum_j2k_native::J2kHtCodeBlockEncodeJob {
+                coefficients: &all_zero,
+                width: 8,
+                height: 8,
+                total_bitplanes: 8,
+            },
+            signinum_j2k_native::J2kHtCodeBlockEncodeJob {
+                coefficients: &patterned,
+                width: 64,
+                height: 64,
+                total_bitplanes: 8,
+            },
+        ];
+
+        let scalar =
+            compute::encode_ht_cleanup_code_blocks_with_segment_lengths_for_test(&jobs, false)
+                .expect("scalar Metal HT segment lengths");
+        let simd =
+            compute::encode_ht_cleanup_code_blocks_with_segment_lengths_for_test(&jobs, true)
+                .expect("SIMD prototype Metal HT segment lengths");
+
+        assert_eq!(simd.len(), scalar.len());
+        for ((simd_block, simd_lengths), (scalar_block, scalar_lengths)) in
+            simd.iter().zip(scalar.iter())
+        {
+            assert_eq!(simd_block.data, scalar_block.data);
+            assert_eq!(simd_block.num_coding_passes, scalar_block.num_coding_passes);
+            assert_eq!(
+                simd_block.num_zero_bitplanes,
+                scalar_block.num_zero_bitplanes
+            );
+            assert_eq!(simd_lengths, scalar_lengths);
+            assert_eq!(
+                simd_lengths.magnitude_sign + simd_lengths.mel + simd_lengths.vlc,
+                u32::try_from(simd_block.data.len()).expect("HT data length fits u32")
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn metal_tier2_packetization_kernel_matches_scalar_oracle() {
         let block0 = [0x12, 0x34, 0x56, 0x78];
         let block1 = [0x9a, 0xbc];

@@ -28,7 +28,7 @@ rayon = "1"
 [dev-dependencies]
 criterion = { workspace = true }
 rayon = "1"
-signinum-j2k-compare = { path = "../signinum-j2k-compare", version = "=0.2.0" }
+signinum-j2k-compare = { path = "../signinum-j2k-compare" }
 
 [[bench]]
 name = "device_upload"

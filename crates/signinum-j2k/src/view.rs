@@ -134,6 +134,19 @@ impl<'a> J2kDecoder<'a> {
         &self.info
     }
 
+    /// Return the native CPU decode parallelism policy for this decoder.
+    pub fn cpu_decode_parallelism(&self) -> signinum_j2k_native::CpuDecodeParallelism {
+        self.native_context.cpu_decode_parallelism()
+    }
+
+    /// Set the native CPU decode parallelism policy for this decoder.
+    pub fn set_cpu_decode_parallelism(
+        &mut self,
+        parallelism: signinum_j2k_native::CpuDecodeParallelism,
+    ) {
+        self.native_context.set_cpu_decode_parallelism(parallelism);
+    }
+
     /// Original compressed bytes backing this decoder.
     pub fn bytes(&self) -> &'a [u8] {
         self.bytes
@@ -476,6 +489,7 @@ impl TileBatchDecode for J2kCodec {
     ) -> Result<signinum_core::DecodeOutcome<Self::Warning>, Self::Error> {
         ctx.codec_mut().record_tile_decode();
         let mut decoder = J2kDecoder::new(input)?;
+        decoder.set_cpu_decode_parallelism(ctx.codec().cpu_decode_parallelism());
         decoder.decode_into_with_scratch(pool, out, stride, fmt)
     }
 
@@ -490,6 +504,7 @@ impl TileBatchDecode for J2kCodec {
     ) -> Result<signinum_core::DecodeOutcome<Self::Warning>, Self::Error> {
         ctx.codec_mut().record_tile_decode();
         let mut decoder = J2kDecoder::new(input)?;
+        decoder.set_cpu_decode_parallelism(ctx.codec().cpu_decode_parallelism());
         decoder.decode_region_into(pool, out, stride, fmt, roi)
     }
 
@@ -504,6 +519,7 @@ impl TileBatchDecode for J2kCodec {
     ) -> Result<signinum_core::DecodeOutcome<Self::Warning>, Self::Error> {
         ctx.codec_mut().record_tile_decode();
         let mut decoder = J2kDecoder::new(input)?;
+        decoder.set_cpu_decode_parallelism(ctx.codec().cpu_decode_parallelism());
         decoder.decode_scaled_into(pool, out, stride, fmt, scale)
     }
 
@@ -519,6 +535,7 @@ impl TileBatchDecode for J2kCodec {
     ) -> Result<signinum_core::DecodeOutcome<Self::Warning>, Self::Error> {
         ctx.codec_mut().record_tile_decode();
         let mut decoder = J2kDecoder::new(input)?;
+        decoder.set_cpu_decode_parallelism(ctx.codec().cpu_decode_parallelism());
         decoder.decode_region_scaled_into(pool, out, stride, fmt, roi, scale)
     }
 }

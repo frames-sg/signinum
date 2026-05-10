@@ -29,6 +29,8 @@ pub use batch::{
     TileRegionScaledDecodeJob,
 };
 
+pub use signinum_j2k_native::CpuDecodeParallelism;
+
 pub use encode::{
     encode_j2k_lossless, encode_j2k_lossless_with_accelerator, j2k_lossless_decomposition_levels,
     j2k_lossless_decomposition_levels_for_options,

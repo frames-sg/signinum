@@ -2,7 +2,7 @@
 
 use crate::decoder::Decoder;
 use crate::error::{JpegError, MarkerKind};
-use crate::info::ColorSpace;
+use crate::info::{ColorSpace, SofKind};
 use crate::internal::checkpoint::{build_checkpoint_plan, DeviceCheckpoint};
 use crate::Warning;
 use alloc::borrow::Cow;
@@ -42,6 +42,14 @@ pub fn build_device_plan<'a>(
     decoder: &'a Decoder<'a>,
     cadence_mcus: u32,
 ) -> Result<DeviceDecodePlan<'a>, JpegError> {
+    if !matches!(
+        decoder.info().sof_kind,
+        SofKind::Baseline8 | SofKind::Extended8
+    ) {
+        return Err(JpegError::NotImplemented {
+            sof: decoder.info().sof_kind,
+        });
+    }
     let plan = &decoder.plan;
     let restart_interval = plan.restart_interval.filter(|&interval| interval > 0);
     let (scan_bytes, missing_eoi) =
@@ -75,6 +83,18 @@ pub fn build_device_plan<'a>(
 }
 
 pub fn summarize_device_batch(decoder: &Decoder<'_>, cadence_mcus: u32) -> DeviceBatchSummary {
+    if !matches!(
+        decoder.info().sof_kind,
+        SofKind::Baseline8 | SofKind::Extended8
+    ) {
+        return DeviceBatchSummary {
+            restart_interval: None,
+            checkpoint_count: 0,
+            matches_fast_420: false,
+            matches_fast_422: false,
+            matches_fast_444: false,
+        };
+    }
     let plan = &decoder.plan;
     let restart_interval = plan.restart_interval.filter(|&interval| interval > 0);
     let total_mcus = total_mcus(plan);

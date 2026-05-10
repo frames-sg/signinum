@@ -11,6 +11,8 @@ use signinum_jpeg::{
     Downscale, PixelFormat, Rect, RowSink, ScratchPool, TileBatchOptions, TileDecodeJob,
     TileRegionScaledDecodeJob, TileScaledDecodeJob,
 };
+mod fixtures;
+use fixtures::progressive_8x8_jpeg;
 use std::num::NonZeroUsize;
 use std::thread;
 
@@ -44,7 +46,7 @@ fn decode_tile_rgb8_reference(bytes: &[u8]) -> (Vec<u8>, usize) {
     let stride = width as usize * 3;
     let mut out = vec![0u8; stride * height as usize];
     dec.decode_into(&mut out, stride, PixelFormat::Rgb8)
-        .expect("baseline decode_into");
+        .expect("fixture decode_into");
     (out, stride)
 }
 
@@ -73,6 +75,32 @@ fn production_batch_decode_worker_one_matches_single_tile_decode() {
             stride,
         }];
         decode_tiles_into(&mut jobs, PixelFormat::Rgb8, options).expect("batch decode")
+    };
+
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn production_batch_decode_progressive8_matches_single_tile_decode() {
+    let bytes = progressive_8x8_jpeg();
+    let (expected, stride) = decode_tile_rgb8_reference(&bytes);
+    let mut actual = vec![0u8; expected.len()];
+
+    let outcomes = {
+        let mut jobs = vec![TileDecodeJob {
+            input: &bytes,
+            out: actual.as_mut_slice(),
+            stride,
+        }];
+        decode_tiles_into(
+            &mut jobs,
+            PixelFormat::Rgb8,
+            TileBatchOptions {
+                workers: NonZeroUsize::new(1),
+            },
+        )
+        .expect("progressive batch decode")
     };
 
     assert_eq!(outcomes.len(), 1);

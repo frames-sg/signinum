@@ -3,6 +3,7 @@
 #![allow(dead_code)]
 
 use criterion::black_box;
+use rayon::prelude::*;
 use signinum_core::{
     BackendRequest, DeviceSubmission, ImageDecodeDevice, TileBatchDecodeDevice,
     TileBatchDecodeSubmit,
@@ -12,6 +13,7 @@ use signinum_j2k::{
     Downscale, J2kContext, J2kDecoder, J2kScratchPool, PixelFormat, Rect, TileBatchOptions,
     TileDecodeJob, TileRegionScaledDecodeJob,
 };
+use signinum_j2k_compare::{grok, openjpeg};
 use signinum_j2k_metal::{
     extract_dicom_encapsulated_frames_with_limit, Codec as MetalJ2kCodec,
     J2kDecoder as MetalJ2kDecoder, J2kScratchPool as MetalJ2kScratchPool, MetalSession,
@@ -690,6 +692,68 @@ pub(crate) fn signinum_decode_external_tile_batch_region_scaled(
     black_box((outputs, outcomes));
 }
 
+pub(crate) fn openjpeg_decode_external_tile_batch_region_scaled(
+    batch: &ExternalTileBatch,
+    count: usize,
+    edge: u32,
+    scale: Downscale,
+) {
+    let count = count.min(batch.inputs.len());
+    if count == 0 {
+        return;
+    }
+
+    let reduce = downscale_reduction_factor(scale);
+    let (rois, _, _) =
+        external_batch_output_geometry(batch, count, edge, scale, mode_format(batch.mode));
+    let outputs = batch
+        .inputs
+        .par_iter()
+        .zip(rois.par_iter())
+        .take(count)
+        .map(|(bytes, roi)| match batch.mode {
+            DecodeMode::Gray8 => openjpeg::decode_gray_region_scaled(bytes, *roi, reduce),
+            DecodeMode::Rgb8 => openjpeg::decode_rgb_region_scaled(bytes, *roi, reduce),
+            DecodeMode::Gray16 => {
+                Err("openjpeg: Gray16 benchmark output is not implemented".to_string())
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .expect("OpenJPEG external tile region scaled decode");
+    black_box(outputs);
+}
+
+pub(crate) fn grok_decode_external_tile_batch_region_scaled(
+    batch: &ExternalTileBatch,
+    count: usize,
+    edge: u32,
+    scale: Downscale,
+) {
+    let count = count.min(batch.inputs.len());
+    if count == 0 {
+        return;
+    }
+
+    let reduce = downscale_reduction_factor(scale);
+    let (rois, _, _) =
+        external_batch_output_geometry(batch, count, edge, scale, mode_format(batch.mode));
+    let outputs = batch
+        .inputs
+        .par_iter()
+        .zip(rois.par_iter())
+        .take(count)
+        .map(|(bytes, roi)| match batch.mode {
+            DecodeMode::Gray8 => grok::decode_gray_region_scaled(bytes, *roi, reduce),
+            DecodeMode::Rgb8 => grok::decode_rgb_region_scaled(bytes, *roi, reduce),
+            DecodeMode::Gray16 => {
+                Err("grok: Gray16 benchmark output is not implemented".to_string())
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .expect("Grok external tile region scaled decode");
+    black_box(outputs);
+}
+
 pub(crate) fn metal_available() -> bool {
     cfg!(target_os = "macos")
 }
@@ -1262,6 +1326,36 @@ pub(crate) fn signinum_metal_supports_external_tile_batch_region_scaled(
         })
 }
 
+pub(crate) fn openjpeg_supports_external_tile_batch_region_scaled(
+    batch: &ExternalTileBatch,
+    count: usize,
+) -> bool {
+    matches!(batch.mode, DecodeMode::Gray8 | DecodeMode::Rgb8)
+        && batch
+            .inputs
+            .iter()
+            .take(count.min(batch.inputs.len()))
+            .all(|bytes| matches!(external_codec_family(bytes), ExternalCodecFamily::J2k))
+}
+
+pub(crate) fn grok_supports_external_tile_batch_region_scaled(
+    batch: &ExternalTileBatch,
+    count: usize,
+) -> bool {
+    grok::is_available()
+        && matches!(batch.mode, DecodeMode::Gray8 | DecodeMode::Rgb8)
+        && batch
+            .inputs
+            .iter()
+            .take(count.min(batch.inputs.len()))
+            .all(|bytes| {
+                matches!(
+                    external_codec_family(bytes),
+                    ExternalCodecFamily::J2k | ExternalCodecFamily::Htj2k
+                )
+            })
+}
+
 fn encode_j2k(pixels: &[u8], width: u32, height: u32, components: u8, bit_depth: u8) -> Vec<u8> {
     let options = EncodeOptions {
         reversible: true,
@@ -1398,6 +1492,10 @@ fn external_batch_output_geometry(
             (max_w.max(w), max_h.max(h))
         });
     (rois, max_width as usize * fmt.bytes_per_pixel(), max_height)
+}
+
+fn downscale_reduction_factor(scale: Downscale) -> u32 {
+    scale.denominator().trailing_zeros()
 }
 
 fn mode_format(mode: DecodeMode) -> PixelFormat {

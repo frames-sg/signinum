@@ -13,6 +13,17 @@ use crate::parse::tables::{parse_dht, parse_dqt, HuffmanTables, QuantTables};
 use alloc::vec::Vec;
 use memchr::memchr;
 
+/// One entropy-coded progressive scan plus the table state active at its SOS.
+#[derive(Debug, Clone)]
+pub(crate) struct ParsedProgressiveScan {
+    pub(crate) scan: ParsedScan,
+    pub(crate) entropy_offset: usize,
+    pub(crate) entropy_end: usize,
+    pub(crate) huffman_tables: HuffmanTables,
+    pub(crate) quant_tables: QuantTables,
+    pub(crate) restart_interval: Option<u16>,
+}
+
 /// Everything the header walk produces. `Info` is derivable from this by
 /// calling `.info()`.
 #[derive(Debug)]
@@ -42,6 +53,7 @@ pub(crate) struct ParsedHeader {
     /// (stream ended before any SOS — rejected as `MissingMarker { Sos }`
     /// before `ParsedHeader` is returned).
     pub(crate) scan: Option<ParsedScan>,
+    pub(crate) progressive_scans: Vec<ParsedProgressiveScan>,
 }
 
 impl ParsedHeader {
@@ -159,6 +171,7 @@ pub(crate) fn parse_header(bytes: &[u8]) -> Result<ParsedHeader, JpegError> {
     let mut scan_count = 0u16;
     let mut sos_offset: Option<usize> = None;
     let mut scan: Option<ParsedScan> = None;
+    let mut progressive_scans: Vec<ParsedProgressiveScan> = Vec::new();
 
     loop {
         match walker.next_marker()? {
@@ -199,10 +212,28 @@ pub(crate) fn parse_header(bytes: &[u8]) -> Result<ParsedHeader, JpegError> {
                     if let Some(sof) = sof.as_ref() {
                         validate_scan_parameters(sof.sof_kind, &parsed, m.offset + 4)?;
                         validate_sequential_scan_components(sof, &parsed, m.offset + 4)?;
+                        validate_progressive_scan_components(sof, &parsed, m.offset + 4)?;
                     }
                     sos_offset = Some(walker.position());
-                    scan = Some(parsed);
-                    scan_count = count_scan_markers(bytes, walker.position());
+                    scan = Some(parsed.clone());
+                    if matches!(
+                        sof.as_ref().map(|sof| sof.sof_kind),
+                        Some(SofKind::Progressive8 | SofKind::Progressive12)
+                    ) {
+                        progressive_scans = collect_progressive_scans(
+                            bytes,
+                            parsed,
+                            walker.position(),
+                            &mut huffman_tables,
+                            &mut quant_tables,
+                            &mut restart_interval,
+                            sof.as_ref().expect("SOF already checked"),
+                            &mut warnings,
+                        )?;
+                        scan_count = progressive_scans.len().min(u16::MAX as usize) as u16;
+                    } else {
+                        scan_count = count_scan_markers(bytes, walker.position());
+                    }
                     break;
                 }
                 0xEE => {
@@ -270,6 +301,7 @@ pub(crate) fn parse_header(bytes: &[u8]) -> Result<ParsedHeader, JpegError> {
         warnings,
         sos_offset,
         scan,
+        progressive_scans,
     })
 }
 
@@ -332,6 +364,232 @@ fn validate_sequential_scan_components(
     }
 
     Ok(())
+}
+
+fn validate_progressive_scan_components(
+    sof: &crate::parse::sof::ParsedSof,
+    scan: &ParsedScan,
+    offset: usize,
+) -> Result<(), JpegError> {
+    if !matches!(sof.sof_kind, SofKind::Progressive8 | SofKind::Progressive12) {
+        return Ok(());
+    }
+    if scan.components.is_empty()
+        || scan.ss > scan.se
+        || scan.se > 63
+        || scan.ah > 13
+        || scan.al > 13
+        || (scan.ah != 0 && scan.ah != scan.al + 1)
+        || (scan.ss == 0 && scan.se != 0)
+        || (scan.ss > 0 && scan.components.len() != 1)
+    {
+        return Err(JpegError::InvalidScanParameters {
+            offset,
+            ss: scan.ss,
+            se: scan.se,
+            ah: scan.ah,
+            al: scan.al,
+        });
+    }
+
+    let mut seen = Vec::with_capacity(scan.components.len());
+    for (i, comp) in scan.components.iter().enumerate() {
+        let component_offset = offset + 1 + i * 2;
+        if !sof.component_ids.contains(&comp.id) {
+            return Err(JpegError::UnknownScanComponent {
+                offset: component_offset,
+                component: comp.id,
+            });
+        }
+        if seen.contains(&comp.id) {
+            return Err(JpegError::DuplicateScanComponent {
+                offset: component_offset,
+                component: comp.id,
+            });
+        }
+        seen.push(comp.id);
+    }
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_progressive_scans(
+    bytes: &[u8],
+    first_scan: ParsedScan,
+    first_entropy_offset: usize,
+    huffman_tables: &mut HuffmanTables,
+    quant_tables: &mut QuantTables,
+    restart_interval: &mut Option<u16>,
+    sof: &crate::parse::sof::ParsedSof,
+    warnings: &mut Vec<Warning>,
+) -> Result<Vec<ParsedProgressiveScan>, JpegError> {
+    let mut scans = Vec::new();
+    let mut pending = Some(ParsedProgressiveScan {
+        scan: first_scan,
+        entropy_offset: first_entropy_offset,
+        entropy_end: bytes.len(),
+        huffman_tables: huffman_tables.clone(),
+        quant_tables: quant_tables.clone(),
+        restart_interval: *restart_interval,
+    });
+    let mut pos = first_entropy_offset;
+
+    while let Some((marker_offset, code)) = next_marker_after_entropy(bytes, pos) {
+        if let Some(mut scan) = pending.take() {
+            scan.entropy_end = marker_offset;
+            scans.push(scan);
+        }
+
+        match code {
+            0xD9 => return Ok(scans),
+            0xDB => {
+                let (payload, next) = marker_payload(bytes, marker_offset, code)?;
+                parse_dqt(payload, marker_offset + 4, quant_tables)?;
+                pos = next;
+            }
+            0xC4 => {
+                let (payload, next) = marker_payload(bytes, marker_offset, code)?;
+                parse_dht(payload, marker_offset + 4, huffman_tables)?;
+                pos = next;
+            }
+            0xDD => {
+                let (payload, next) = marker_payload(bytes, marker_offset, code)?;
+                if payload.len() != 2 {
+                    return Err(JpegError::InvalidSegmentLength {
+                        offset: marker_offset,
+                        marker: 0xDD,
+                        length: (payload.len() + 2) as u16,
+                    });
+                }
+                *restart_interval =
+                    normalize_restart_interval(u16::from_be_bytes([payload[0], payload[1]]));
+                pos = next;
+            }
+            0xDA => {
+                let (payload, entropy_offset) = marker_payload(bytes, marker_offset, code)?;
+                let parsed = parse_scan_header(payload, marker_offset + 4)?;
+                validate_scan_parameters(sof.sof_kind, &parsed, marker_offset + 4)?;
+                validate_progressive_scan_components(sof, &parsed, marker_offset + 4)?;
+                pending = Some(ParsedProgressiveScan {
+                    scan: parsed,
+                    entropy_offset,
+                    entropy_end: bytes.len(),
+                    huffman_tables: huffman_tables.clone(),
+                    quant_tables: quant_tables.clone(),
+                    restart_interval: *restart_interval,
+                });
+                pos = entropy_offset;
+            }
+            0xEE => {
+                let (payload, next) = marker_payload(bytes, marker_offset, code)?;
+                if let Some(t) = parse_adobe_app14(payload) {
+                    if matches!(t, AdobeTransform::Unknown) && payload.len() >= 12 {
+                        if payload[11] > 2 {
+                            warnings.push(Warning::AdobeApp14Ambiguous {
+                                raw_transform: payload[11],
+                            });
+                        }
+                    }
+                } else {
+                    warnings.push(Warning::UnknownAppMarker {
+                        marker: 0xEE,
+                        size: payload.len(),
+                    });
+                }
+                pos = next;
+            }
+            0xE0 | 0xFE => {
+                let (_, next) = marker_payload(bytes, marker_offset, code)?;
+                pos = next;
+            }
+            0xE1..=0xEF => {
+                let (payload, next) = marker_payload(bytes, marker_offset, code)?;
+                if code == 0xE2 {
+                    warnings.push(Warning::IccProfileIgnored {
+                        size: payload.len(),
+                    });
+                } else {
+                    warnings.push(Warning::UnknownAppMarker {
+                        marker: code,
+                        size: payload.len(),
+                    });
+                }
+                pos = next;
+            }
+            0x01 | 0xD8 => {
+                pos = marker_offset + 2;
+            }
+            _ => {
+                return Err(JpegError::InvalidMarker {
+                    offset: marker_offset,
+                    marker: code,
+                });
+            }
+        }
+    }
+
+    if let Some(scan) = pending {
+        scans.push(scan);
+    }
+    Ok(scans)
+}
+
+fn next_marker_after_entropy(bytes: &[u8], mut pos: usize) -> Option<(usize, u8)> {
+    while pos < bytes.len() {
+        let ff_rel = memchr(0xFF, &bytes[pos..])?;
+        let marker_prefix = pos + ff_rel;
+        let mut code_pos = marker_prefix + 1;
+        while code_pos < bytes.len() && bytes[code_pos] == 0xFF {
+            code_pos += 1;
+        }
+        if code_pos >= bytes.len() {
+            return None;
+        }
+        let code = bytes[code_pos];
+        match code {
+            0x00 | 0xD0..=0xD7 => pos = code_pos + 1,
+            _ => return Some((code_pos - 1, code)),
+        }
+    }
+    None
+}
+
+fn marker_payload(
+    bytes: &[u8],
+    marker_offset: usize,
+    marker: u8,
+) -> Result<(&[u8], usize), JpegError> {
+    let len_pos = marker_offset + 2;
+    if len_pos + 1 >= bytes.len() {
+        return Err(JpegError::Truncated {
+            offset: len_pos,
+            expected: len_pos + 2 - bytes.len(),
+        });
+    }
+    let length = usize::from(u16::from_be_bytes([bytes[len_pos], bytes[len_pos + 1]]));
+    if length < 2 {
+        return Err(JpegError::InvalidSegmentLength {
+            offset: len_pos,
+            marker,
+            length: length as u16,
+        });
+    }
+    let payload_start = len_pos + 2;
+    let payload_end = len_pos
+        .checked_add(length)
+        .ok_or(JpegError::InvalidSegmentLength {
+            offset: len_pos,
+            marker,
+            length: length as u16,
+        })?;
+    if payload_end > bytes.len() {
+        return Err(JpegError::Truncated {
+            offset: payload_start,
+            expected: payload_end - bytes.len(),
+        });
+    }
+    Ok((&bytes[payload_start..payload_end], payload_end))
 }
 
 fn count_scan_markers(bytes: &[u8], mut pos: usize) -> u16 {
@@ -560,15 +818,21 @@ mod tests {
     }
 
     #[test]
-    fn scan_count_tracks_all_sos_markers() {
+    fn scan_count_tracks_progressive_sos_markers() {
         let mut bytes = minimal_baseline_jpeg();
+        let sof_pos = bytes.windows(2).position(|w| w == [0xFF, 0xC0]).unwrap();
+        bytes[sof_pos + 1] = 0xC2;
+        let first_sos_pos = bytes.windows(2).position(|w| w == [0xFF, 0xDA]).unwrap();
+        bytes[first_sos_pos + 12] = 0;
         let eoi_pos = bytes.windows(2).rposition(|w| w == [0xFF, 0xD9]).unwrap();
         let second_scan = vec![
-            0xFF, 0xDA, 0x00, 12, 3, 1, 0x00, 2, 0x00, 3, 0x00, 0, 63, 0, 0x00,
+            0xFF, 0xDA, 0x00, 12, 3, 1, 0x00, 2, 0x00, 3, 0x00, 0, 0, 0x10, 0x00,
         ];
         bytes.splice(eoi_pos..eoi_pos, second_scan.iter().copied());
         let h = parse_header(&bytes).unwrap();
+        assert_eq!(h.sof_kind, SofKind::Progressive8);
         assert_eq!(h.scan_count, 2);
+        assert_eq!(h.progressive_scans.len(), 2);
     }
 
     #[test]

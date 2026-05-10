@@ -489,6 +489,20 @@ mod tests {
     }
 
     #[test]
+    fn decodes_single_bit_table_before_marker_padding() {
+        let raw = RawHuffmanTable {
+            bits: [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            values: HuffmanValues::from_slice(&[0]),
+        };
+        let table = HuffmanTable::from_raw(&raw).unwrap();
+        let mut br = BitReader::new(&[0x7f, 0xff, 0xc4]);
+
+        let symbol = table.decode(&mut br).unwrap();
+
+        assert_eq!(symbol, 0);
+    }
+
+    #[test]
     fn decodes_9_plus_bit_codes_via_slow_path() {
         let table = HuffmanTable::from_raw(&luma_dc_raw()).unwrap();
         // Code `111111110` (9 bits) → symbol 11. A literal 0xFF in a JPEG

@@ -48,6 +48,8 @@ pub struct EncodeOptions {
     pub progression_order: EncodeProgressionOrder,
     /// Write a TLM marker segment for the single tile-part.
     pub write_tlm: bool,
+    /// Apply the JPEG 2000 multi-component color transform for 3+ component inputs.
+    pub use_mct: bool,
 }
 
 impl Default for EncodeOptions {
@@ -61,6 +63,7 @@ impl Default for EncodeOptions {
             use_ht_block_coding: false,
             progression_order: EncodeProgressionOrder::Lrcp,
             write_tlm: false,
+            use_mct: true,
         }
     }
 }
@@ -283,7 +286,7 @@ fn encode_impl(
     let mut components = deinterleave_to_f32(pixels, num_pixels, num_components, bit_depth, signed);
 
     // Step 2: Apply forward MCT if RGB with 3+ components
-    let use_mct = num_components >= 3;
+    let use_mct = options.use_mct && num_components >= 3;
     if use_mct {
         if options.reversible {
             if !try_encode_forward_rct(&mut components, accelerator)? {

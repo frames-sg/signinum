@@ -4,6 +4,7 @@
 
 pub(crate) mod block;
 pub(crate) mod huffman;
+pub(crate) mod progressive;
 pub(crate) mod sequential;
 
 /// T.81 §A.3.6 zigzag order: the 8×8 coefficient scan order from DC to

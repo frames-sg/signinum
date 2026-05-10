@@ -5,6 +5,10 @@
 use crate::backend::Backend;
 use crate::context::DecoderContext;
 use crate::entropy::huffman::HuffmanTable;
+use crate::entropy::progressive::{
+    decode_progressive, PreparedProgressiveComponentPlan, PreparedProgressivePlan,
+    PreparedProgressiveScan, PreparedProgressiveScanComponent,
+};
 use crate::entropy::sequential::{
     decode_scan_baseline, decode_scan_baseline_rgb, decode_scan_fast_rgb_444,
     decode_scan_fast_tile_rgb, decode_scan_fast_tile_rgb_region,
@@ -22,6 +26,7 @@ use crate::output::{
     validate_buffer, Gray8Writer, InterleavedRgbWriter, OutputWriter, Rgb8Writer, Rgba8Writer,
 };
 use crate::parse::header::{parse_header, parse_info, ParsedHeader};
+use crate::parse::tables::{HuffmanValues, RawHuffmanTable};
 use crate::JpegCodec;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -229,6 +234,7 @@ pub struct Decoder<'a> {
     pub(crate) warnings: Arc<[Warning]>,
     pub(crate) backend: Backend,
     pub(crate) plan: PreparedDecodePlan,
+    pub(crate) progressive_plan: Option<PreparedProgressivePlan>,
     pub(crate) cpu_entropy_checkpoints: Mutex<CpuCheckpointCache>,
 }
 
@@ -270,7 +276,7 @@ impl<'a> Decoder<'a> {
     /// # Errors
     /// - Any parse error encountered before SOS (see [`Self::inspect`]).
     /// - [`JpegError::NotImplemented`] for SOFs that parse but are not yet
-    ///   decodable (Extended12, Progressive, Lossless — all land in M3).
+    ///   decodable (Extended12, Progressive12, Lossless — all land in M3).
     /// - [`JpegError::MissingHuffmanTable`] if the scan references a DC/AC
     ///   table slot that was never defined by a DHT segment.
     pub fn new(input: &'a [u8]) -> Result<Self, JpegError> {
@@ -295,23 +301,34 @@ impl<'a> Decoder<'a> {
             options,
         } = view;
         let backend = Backend::detect();
-        let (info, warnings, plan) = if options == DecodeOptions::default() {
+        let (info, warnings, plan, progressive_plan) = if info.sof_kind == SofKind::Progressive8 {
+            let progressive_plan = Self::build_progressive_plan(&header, &info, ctx)?;
+            let plan = Self::build_progressive_placeholder_plan(&header, &info, ctx)?;
+            (
+                info,
+                Arc::<[Warning]>::from(header.warnings.as_slice()),
+                plan,
+                Some(progressive_plan),
+            )
+        } else if options == DecodeOptions::default() {
             if let Some(scan_offset) = header.sos_offset {
                 let header_prefix = &bytes[..scan_offset];
-                ctx.resolve_decode_plan(header_prefix, |ctx| {
+                let (info, warnings, plan) = ctx.resolve_decode_plan(header_prefix, |ctx| {
                     let plan = Self::build_prepared_plan(&header, &info, ctx)?;
                     Ok((
                         info.clone(),
                         Arc::<[Warning]>::from(header.warnings.as_slice()),
                         plan,
                     ))
-                })?
+                })?;
+                (info, warnings, plan, None)
             } else {
                 let plan = Self::build_prepared_plan(&header, &info, ctx)?;
                 (
                     info,
                     Arc::<[Warning]>::from(header.warnings.as_slice()),
                     plan,
+                    None,
                 )
             }
         } else {
@@ -320,6 +337,7 @@ impl<'a> Decoder<'a> {
                 info,
                 Arc::<[Warning]>::from(header.warnings.as_slice()),
                 plan,
+                None,
             )
         };
         Ok(Self {
@@ -328,6 +346,7 @@ impl<'a> Decoder<'a> {
             warnings,
             backend,
             plan,
+            progressive_plan,
             cpu_entropy_checkpoints: Mutex::new(CpuCheckpointCache::default()),
         })
     }
@@ -405,6 +424,211 @@ impl<'a> Decoder<'a> {
         }
 
         build_decode_plan(header, info, &dc_tables, &ac_tables, ctx)
+    }
+
+    fn build_progressive_plan(
+        header: &ParsedHeader,
+        info: &Info,
+        ctx: &mut DecoderContext,
+    ) -> Result<PreparedProgressivePlan, JpegError> {
+        if info.sof_kind != SofKind::Progressive8 {
+            return Err(JpegError::NotImplemented { sof: info.sof_kind });
+        }
+        match info.color_space {
+            ColorSpace::Grayscale | ColorSpace::YCbCr | ColorSpace::Rgb => {}
+            color_space => return Err(JpegError::UnsupportedColorSpace { color_space }),
+        }
+        validate_sampling_factors(header, info)?;
+        if header.progressive_scans.is_empty() {
+            return Err(JpegError::MissingMarker {
+                marker: MarkerKind::Sos,
+            });
+        }
+
+        let max_h = u32::from(header.sampling.max_h);
+        let max_v = u32::from(header.sampling.max_v);
+        let mcu_cols = info.dimensions.0.div_ceil(8 * max_h);
+        let mcu_rows = info.dimensions.1.div_ceil(8 * max_v);
+        let mut components = Vec::with_capacity(header.component_ids.len());
+        for (output_index, &id) in header.component_ids.iter().enumerate() {
+            let (h, v) =
+                header
+                    .sampling
+                    .component(output_index)
+                    .ok_or(JpegError::MissingMarker {
+                        marker: MarkerKind::Sof,
+                    })?;
+            let quant_id =
+                *header
+                    .quant_table_ids
+                    .get(output_index)
+                    .ok_or(JpegError::MissingMarker {
+                        marker: MarkerKind::Sof,
+                    })? as usize;
+            let quant = *header
+                .quant_tables
+                .entries
+                .get(quant_id)
+                .and_then(|q| q.as_ref())
+                .ok_or(JpegError::MissingQuantTable {
+                    component: id,
+                    table_id: quant_id as u8,
+                })?;
+            components.push(PreparedProgressiveComponentPlan {
+                h,
+                v,
+                output_index,
+                quant: ctx.resolve_quant_table(quant),
+                block_cols: mcu_cols * u32::from(h),
+                block_rows: mcu_rows * u32::from(v),
+                sample_width: info
+                    .dimensions
+                    .0
+                    .saturating_mul(u32::from(h))
+                    .div_ceil(max_h),
+                sample_height: info
+                    .dimensions
+                    .1
+                    .saturating_mul(u32::from(v))
+                    .div_ceil(max_v),
+            });
+        }
+
+        let mut scans = Vec::with_capacity(header.progressive_scans.len());
+        for parsed in &header.progressive_scans {
+            let mut scan_components = Vec::with_capacity(parsed.scan.components.len());
+            for component in &parsed.scan.components {
+                let component_index = find_component_index(&header.component_ids, component.id)
+                    .ok_or(JpegError::UnknownScanComponent {
+                        offset: parsed.entropy_offset,
+                        component: component.id,
+                    })?;
+                let quant_id = *header.quant_table_ids.get(component_index).ok_or(
+                    JpegError::MissingMarker {
+                        marker: MarkerKind::Sof,
+                    },
+                )?;
+                let _ = parsed
+                    .quant_tables
+                    .entries
+                    .get(quant_id as usize)
+                    .and_then(|q| q.as_ref())
+                    .ok_or(JpegError::MissingQuantTable {
+                        component: component.id,
+                        table_id: quant_id,
+                    })?;
+                let dc_table = if parsed.scan.ss == 0 {
+                    Some(resolve_progressive_huffman(
+                        ctx,
+                        &parsed.huffman_tables.dc,
+                        component.id,
+                        0,
+                        component.dc_table,
+                    )?)
+                } else {
+                    None
+                };
+                let ac_table = if parsed.scan.ss > 0 {
+                    Some(resolve_progressive_huffman(
+                        ctx,
+                        &parsed.huffman_tables.ac,
+                        component.id,
+                        1,
+                        component.ac_table,
+                    )?)
+                } else {
+                    None
+                };
+                scan_components.push(PreparedProgressiveScanComponent {
+                    component_index,
+                    dc_table,
+                    ac_table,
+                });
+            }
+            scans.push(PreparedProgressiveScan {
+                components: scan_components,
+                ss: parsed.scan.ss,
+                se: parsed.scan.se,
+                ah: parsed.scan.ah,
+                al: parsed.scan.al,
+                entropy_offset: parsed.entropy_offset,
+                restart_interval: parsed.restart_interval,
+            });
+        }
+
+        let scratch_bytes =
+            compute_progressive_scratch_bytes(&components, info.dimensions.0 as usize)?;
+        Ok(PreparedProgressivePlan {
+            components,
+            scans,
+            sampling: info.sampling,
+            color_space: info.color_space,
+            dimensions: info.dimensions,
+            mcu_cols,
+            mcu_rows,
+            scratch_bytes,
+        })
+    }
+
+    fn build_progressive_placeholder_plan(
+        header: &ParsedHeader,
+        info: &Info,
+        ctx: &mut DecoderContext,
+    ) -> Result<PreparedDecodePlan, JpegError> {
+        let empty_raw = RawHuffmanTable {
+            bits: [0; 16],
+            values: HuffmanValues::default(),
+        };
+        let empty_huffman = ctx.resolve_huffman_table(&empty_raw)?;
+        let mut components = Vec::with_capacity(header.component_ids.len());
+        for (output_index, &id) in header.component_ids.iter().enumerate() {
+            let (h, v) =
+                header
+                    .sampling
+                    .component(output_index)
+                    .ok_or(JpegError::MissingMarker {
+                        marker: MarkerKind::Sof,
+                    })?;
+            let quant_id =
+                *header
+                    .quant_table_ids
+                    .get(output_index)
+                    .ok_or(JpegError::MissingMarker {
+                        marker: MarkerKind::Sof,
+                    })? as usize;
+            let quant = *header
+                .quant_tables
+                .entries
+                .get(quant_id)
+                .and_then(|q| q.as_ref())
+                .ok_or(JpegError::MissingQuantTable {
+                    component: id,
+                    table_id: quant_id as u8,
+                })?;
+            components.push(PreparedComponentPlan {
+                h,
+                v,
+                output_index,
+                quant: ctx.resolve_quant_table(quant),
+                dc_table: Arc::clone(&empty_huffman),
+                ac_table: Arc::clone(&empty_huffman),
+            });
+        }
+        Ok(PreparedDecodePlan {
+            components,
+            sampling: info.sampling,
+            color_space: info.color_space,
+            restart_interval: header.restart_interval,
+            dimensions: info.dimensions,
+            scan_offset: header.sos_offset.ok_or(JpegError::MissingMarker {
+                marker: MarkerKind::Sos,
+            })?,
+            scratch_bytes: compute_decode_scratch_bytes(
+                info.dimensions,
+                info.sampling,
+                DEFAULT_MAX_DECODE_BYTES,
+            )?,
+        })
     }
 
     /// The parsed header as a public [`Info`].
@@ -1469,13 +1693,17 @@ impl Decoder<'_> {
 
 impl Decoder<'_> {
     fn decode_scratch_bytes(&self, cap: usize) -> Result<usize, JpegError> {
-        if self.plan.scratch_bytes > cap {
+        let scratch_bytes = self
+            .progressive_plan
+            .as_ref()
+            .map_or(self.plan.scratch_bytes, |plan| plan.scratch_bytes);
+        if scratch_bytes > cap {
             return Err(JpegError::MemoryCapExceeded {
-                requested: self.plan.scratch_bytes,
+                requested: scratch_bytes,
                 cap,
             });
         }
-        Ok(self.plan.scratch_bytes)
+        Ok(scratch_bytes)
     }
 
     fn checkpoint_for_mcu(
@@ -1517,6 +1745,18 @@ impl Decoder<'_> {
         decoded: Rect,
     ) -> Result<DecodeOutcome, JpegError> {
         let _ = self.decode_scratch_bytes(DEFAULT_MAX_DECODE_BYTES)?;
+        if let Some(plan) = &self.progressive_plan {
+            if downscale != DownscaleFactor::Full || decoded != Rect::full(self.info.dimensions) {
+                return Err(JpegError::NotImplemented {
+                    sof: self.info.sof_kind,
+                });
+            }
+            let scan_warnings = decode_progressive(plan, self.backend, self.bytes, writer)?;
+            return Ok(DecodeOutcome {
+                decoded,
+                warnings: merged_warnings(&self.warnings, scan_warnings),
+            });
+        }
         let output_rect = scaled_rect_covering(decoded, downscale)?;
         let scan_bytes = &self.bytes[self.plan.scan_offset..];
         let scan_warnings = decode_scan_baseline(
@@ -1542,6 +1782,18 @@ impl Decoder<'_> {
         decoded: Rect,
     ) -> Result<DecodeOutcome, JpegError> {
         let _ = self.decode_scratch_bytes(DEFAULT_MAX_DECODE_BYTES)?;
+        if let Some(plan) = &self.progressive_plan {
+            if downscale != DownscaleFactor::Full || decoded != Rect::full(self.info.dimensions) {
+                return Err(JpegError::NotImplemented {
+                    sof: self.info.sof_kind,
+                });
+            }
+            let scan_warnings = decode_progressive(plan, self.backend, self.bytes, writer)?;
+            return Ok(DecodeOutcome {
+                decoded,
+                warnings: merged_warnings(&self.warnings, scan_warnings),
+            });
+        }
         let output_rect = scaled_rect_covering(decoded, downscale)?;
         let scan_bytes = &self.bytes[self.plan.scan_offset..];
         let scan_warnings =
@@ -2291,6 +2543,97 @@ fn build_decode_plan(
     })
 }
 
+fn validate_sampling_factors(header: &ParsedHeader, info: &Info) -> Result<(), JpegError> {
+    if let Some((h, v)) = header.sampling.component(0) {
+        if h != header.sampling.max_h || v != header.sampling.max_v {
+            return Err(JpegError::NotImplemented { sof: info.sof_kind });
+        }
+    }
+    for (h, v) in header.sampling.iter() {
+        if h == 0 || v == 0 || h > 4 || v > 4 {
+            return Err(JpegError::NotImplemented { sof: info.sof_kind });
+        }
+        if !header.sampling.max_h.is_multiple_of(h) || !header.sampling.max_v.is_multiple_of(v) {
+            return Err(JpegError::NotImplemented { sof: info.sof_kind });
+        }
+    }
+    Ok(())
+}
+
+fn resolve_progressive_huffman(
+    ctx: &mut DecoderContext,
+    tables: &[Option<RawHuffmanTable>; 4],
+    component: u8,
+    class: u8,
+    id: u8,
+) -> Result<Arc<HuffmanTable>, JpegError> {
+    let raw = tables
+        .get(id as usize)
+        .and_then(|table| table.as_ref())
+        .ok_or(JpegError::MissingHuffmanTable {
+            component,
+            class,
+            id,
+        })?;
+    ctx.resolve_huffman_table(raw)
+}
+
+fn compute_progressive_scratch_bytes(
+    components: &[PreparedProgressiveComponentPlan],
+    output_width: usize,
+) -> Result<usize, JpegError> {
+    let cap = DEFAULT_MAX_DECODE_BYTES;
+    let mut total = 0usize;
+    for component in components {
+        let blocks = checked_usize_product(
+            &[component.block_cols as usize, component.block_rows as usize],
+            cap,
+        )?;
+        let coeffs = checked_usize_product(&[blocks, 64, core::mem::size_of::<i32>()], cap)?;
+        total = total
+            .checked_add(coeffs)
+            .ok_or(JpegError::MemoryCapExceeded {
+                requested: usize::MAX,
+                cap,
+            })?;
+
+        let plane = checked_usize_product(
+            &[
+                component.block_cols as usize,
+                component.block_rows as usize,
+                64,
+            ],
+            cap,
+        )?;
+        total = total
+            .checked_add(plane)
+            .ok_or(JpegError::MemoryCapExceeded {
+                requested: usize::MAX,
+                cap,
+            })?;
+        if total > cap {
+            return Err(JpegError::MemoryCapExceeded {
+                requested: total,
+                cap,
+            });
+        }
+    }
+    total =
+        total
+            .checked_add(output_width.saturating_mul(3))
+            .ok_or(JpegError::MemoryCapExceeded {
+                requested: usize::MAX,
+                cap,
+            })?;
+    if total > cap {
+        return Err(JpegError::MemoryCapExceeded {
+            requested: total,
+            cap,
+        });
+    }
+    Ok(total)
+}
+
 struct SinkWriter<'a, S> {
     sink: &'a mut S,
     rows: SinkRows,
@@ -2545,10 +2888,11 @@ mod tests {
     }
 
     #[test]
-    fn decoder_new_rejects_progressive_with_not_implemented() {
+    fn decoder_new_rejects_extended12_with_not_implemented() {
         let mut bytes = minimal_baseline_jpeg();
         let p = bytes.windows(2).position(|w| w == [0xFF, 0xC0]).unwrap();
-        bytes[p + 1] = 0xC2;
+        bytes[p + 1] = 0xC1;
+        bytes[p + 4] = 12;
         let err = Decoder::new(&bytes).unwrap_err();
         assert!(err.is_not_implemented());
     }

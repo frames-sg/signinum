@@ -1269,7 +1269,14 @@ fn lossless_device_encode_levels(width: u32, height: u32, options: J2kLosslessEn
 
     options
         .max_decomposition_levels
-        .map_or(levels, |max_levels| levels.min(max_levels))
+        .map_or(levels, |requested| {
+            let max_levels = if width.min(height) <= 1 {
+                0
+            } else {
+                width.min(height).ilog2() as u8
+            };
+            requested.min(max_levels)
+        })
 }
 
 #[cfg(target_os = "macos")]

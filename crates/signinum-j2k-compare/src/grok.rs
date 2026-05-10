@@ -24,6 +24,14 @@ pub fn decode_gray_region(bytes: &[u8], roi: Rect) -> Result<Vec<u8>, String> {
     decode(bytes, 1, None, Some(roi))
 }
 
+pub fn decode_rgb_region_scaled(bytes: &[u8], roi: Rect, reduce: u32) -> Result<Vec<u8>, String> {
+    decode(bytes, 3, Some(reduce), Some(roi))
+}
+
+pub fn decode_gray_region_scaled(bytes: &[u8], roi: Rect, reduce: u32) -> Result<Vec<u8>, String> {
+    decode(bytes, 1, Some(reduce), Some(roi))
+}
+
 pub fn decode_rgb_scaled(bytes: &[u8], reduce: u32) -> Result<Vec<u8>, String> {
     decode(bytes, 3, Some(reduce), None)
 }

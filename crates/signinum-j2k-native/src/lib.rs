@@ -109,7 +109,7 @@ pub use error::{
 pub use j2c::encode::{
     encode, encode_htj2k, encode_with_accelerator, EncodeOptions, EncodeProgressionOrder,
 };
-pub use j2c::DecoderContext;
+pub use j2c::{CpuDecodeParallelism, DecoderContext};
 
 mod j2c;
 mod jp2;
@@ -2498,6 +2498,39 @@ mod tests {
             .channel_data
             .iter()
             .all(|component| component.container.truncated().len() == 2));
+    }
+
+    #[test]
+    fn decoder_context_defaults_to_auto_cpu_parallelism() {
+        let context = DecoderContext::default();
+
+        assert_eq!(context.cpu_decode_parallelism(), CpuDecodeParallelism::Auto);
+    }
+
+    #[test]
+    fn classic_j2k_auto_and_serial_cpu_parallelism_match_pixels() {
+        let bytes = fixture_multi_block();
+        let image = Image::new(&bytes, &DecodeSettings::default()).expect("image");
+        let mut auto_context = DecoderContext::default();
+        let mut serial_context = DecoderContext::default();
+        serial_context.set_cpu_decode_parallelism(CpuDecodeParallelism::Serial);
+
+        let auto = image
+            .decode_with_context(&mut auto_context)
+            .expect("auto decode");
+        let serial = image
+            .decode_with_context(&mut serial_context)
+            .expect("serial decode");
+
+        assert_eq!(auto.data, serial.data);
+    }
+
+    #[test]
+    fn serial_cpu_parallelism_disables_classic_sub_band_parallel_branch() {
+        assert!(!j2c::should_decode_classic_sub_band_in_parallel(
+            CpuDecodeParallelism::Serial,
+            16
+        ));
     }
 
     #[test]

@@ -67,6 +67,10 @@ fn stage_family(
         return Err(format!("missing {real_name} in {}", lib_dir.display()));
     }
     let real_dst = out_dir.join(real_name);
+    if real_dst.exists() {
+        std::fs::remove_file(&real_dst)
+            .map_err(|err| format!("remove {}: {err}", real_dst.display()))?;
+    }
     std::fs::copy(&real_src, &real_dst).map_err(|err| format!("copy {real_name}: {err}"))?;
     symlink_in_dir(real_name, &out_dir.join(compat_name))?;
     symlink_in_dir(compat_name, &out_dir.join(link_name))?;

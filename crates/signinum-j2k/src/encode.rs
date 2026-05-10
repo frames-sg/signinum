@@ -50,6 +50,8 @@ pub enum ReversibleTransform {
     /// Reversible color transform with 5/3 wavelet transform.
     #[default]
     Rct53,
+    /// No color transform with 5/3 wavelet transform.
+    None53,
 }
 
 /// Validation policy for the lossless encode facade.
@@ -70,11 +72,9 @@ pub struct J2kLosslessEncodeOptions {
     pub backend: EncodeBackendPreference,
     pub block_coding_mode: J2kBlockCodingMode,
     pub progression: J2kProgressionOrder,
-    /// Optional upper bound on the default lossless decomposition level policy.
+    /// Optional explicit lossless decomposition level request.
     ///
-    /// This is primarily for container profiles that need a shallower DWT than
-    /// the facade's normal RPCL default, while preserving the zero-level policy
-    /// for very small images.
+    /// Requests are clamped to the geometry-safe maximum for the tile.
     pub max_decomposition_levels: Option<u8>,
     pub reversible_transform: ReversibleTransform,
     pub validation: J2kEncodeValidation,
@@ -297,6 +297,7 @@ fn native_lossless_options(
         use_ht_block_coding: options.block_coding_mode == J2kBlockCodingMode::HighThroughput,
         progression_order,
         write_tlm: options.progression == J2kProgressionOrder::Rpcl,
+        use_mct: options.reversible_transform == ReversibleTransform::Rct53,
         ..EncodeOptions::default()
     }
 }
@@ -339,7 +340,7 @@ pub fn j2k_lossless_decomposition_levels_for_options(
     let levels = j2k_lossless_decomposition_levels_for_progression(samples, options.progression);
     options
         .max_decomposition_levels
-        .map_or(levels, |max_levels| levels.min(max_levels))
+        .map_or(levels, |requested| requested.min(levels))
 }
 
 fn j2k_rpcl_lossless_decomposition_levels(samples: J2kLosslessSamples<'_>) -> u8 {
@@ -434,7 +435,7 @@ fn required_encode_stages(
     let high_throughput = options.block_coding_mode == J2kBlockCodingMode::HighThroughput;
 
     let mut bits = RequiredEncodeStages::PACKETIZATION;
-    if samples.components >= 3 {
+    if samples.components >= 3 && options.reversible_transform == ReversibleTransform::Rct53 {
         bits |= RequiredEncodeStages::FORWARD_RCT;
     }
     if decomposition_levels > 0 {
@@ -491,4 +492,42 @@ fn validate_lossless_roundtrip(
         }));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        encode_j2k_lossless, J2kBlockCodingMode, J2kEncodeValidation, J2kLosslessEncodeOptions,
+        J2kLosslessSamples, J2kProgressionOrder, ReversibleTransform,
+    };
+
+    fn cod_mct(codestream: &[u8]) -> u8 {
+        let cod_offset = codestream
+            .windows(2)
+            .position(|window| window == [0xFF, 0x52])
+            .expect("COD marker");
+        codestream[cod_offset + 8]
+    }
+
+    #[test]
+    fn lossless_encode_can_disable_component_transform() {
+        let pixels: Vec<u8> = (0..4 * 4 * 3)
+            .map(|value| ((value * 17) & 0xFF) as u8)
+            .collect();
+        let samples = J2kLosslessSamples::new(&pixels, 4, 4, 3, 8, false).unwrap();
+        let encoded = encode_j2k_lossless(
+            samples,
+            &J2kLosslessEncodeOptions {
+                block_coding_mode: J2kBlockCodingMode::Classic,
+                progression: J2kProgressionOrder::Lrcp,
+                max_decomposition_levels: Some(0),
+                reversible_transform: ReversibleTransform::None53,
+                validation: J2kEncodeValidation::CpuRoundTrip,
+                ..J2kLosslessEncodeOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(cod_mct(&encoded.codestream), 0);
+    }
 }

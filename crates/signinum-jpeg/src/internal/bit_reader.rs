@@ -183,7 +183,6 @@ impl<'a> BitReader<'a> {
     }
 
     /// Combined peek + consume. Refills as needed.
-    #[cfg(test)]
     pub(crate) fn read_bits(&mut self, n: u8) -> Result<u32, JpegError> {
         self.ensure_bits(n)?;
         let v = self.peek_bits(n);

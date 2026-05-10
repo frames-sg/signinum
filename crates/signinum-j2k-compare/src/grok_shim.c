@@ -22,6 +22,32 @@ static uint8_t signinum_clamp_u8(int32_t value) {
   return (uint8_t)value;
 }
 
+static int32_t signinum_grok_component_sample(const grk_image_comp *component,
+                                              size_t index) {
+  if (!component || !component->data) {
+    return 0;
+  }
+  switch (component->data_type) {
+  case GRK_INT_8:
+    if (!component->sgnd) {
+      return ((const uint8_t *)component->data)[index];
+    }
+    return ((const int8_t *)component->data)[index];
+  case GRK_INT_16:
+    if (!component->sgnd) {
+      return ((const uint16_t *)component->data)[index];
+    }
+    return ((const int16_t *)component->data)[index];
+  case GRK_INT_32:
+    if (!component->sgnd) {
+      return (int32_t)((const uint32_t *)component->data)[index];
+    }
+    return ((const int32_t *)component->data)[index];
+  default:
+    return ((const int32_t *)component->data)[index];
+  }
+}
+
 int signinum_grok_decode_u8(const uint8_t *bytes, size_t len, uint32_t reduce,
                               int has_region, uint32_t x0, uint32_t y0,
                               uint32_t x1, uint32_t y1, uint32_t channels,
@@ -101,7 +127,8 @@ int signinum_grok_decode_u8(const uint8_t *bytes, size_t len, uint32_t reduce,
     for (uint32_t col = 0; col < width; ++col) {
       size_t dst = ((size_t)row * width + col) * channels;
       grk_image_comp *c0 = &image->comps[0];
-      int32_t v0 = ((int32_t *)c0->data)[(size_t)row * c0->stride + col];
+      size_t c0_index = (size_t)row * c0->stride + col;
+      int32_t v0 = signinum_grok_component_sample(c0, c0_index);
       if (channels == 1) {
         packed[dst] = signinum_clamp_u8(v0);
         continue;
@@ -115,8 +142,10 @@ int signinum_grok_decode_u8(const uint8_t *bytes, size_t len, uint32_t reduce,
       }
       grk_image_comp *c1 = &image->comps[1];
       grk_image_comp *c2 = &image->comps[2];
-      int32_t v1 = ((int32_t *)c1->data)[(size_t)row * c1->stride + col];
-      int32_t v2 = ((int32_t *)c2->data)[(size_t)row * c2->stride + col];
+      size_t c1_index = (size_t)row * c1->stride + col;
+      size_t c2_index = (size_t)row * c2->stride + col;
+      int32_t v1 = signinum_grok_component_sample(c1, c1_index);
+      int32_t v2 = signinum_grok_component_sample(c2, c2_index);
       packed[dst] = signinum_clamp_u8(v0);
       packed[dst + 1] = signinum_clamp_u8(v1);
       packed[dst + 2] = signinum_clamp_u8(v2);

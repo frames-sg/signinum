@@ -53,6 +53,7 @@ pub(crate) fn decode<'a>(
     }
 
     ctx.reset(header, &tiles[0]);
+    let cpu_decode_parallelism = ctx.cpu_decode_parallelism;
     let (tile_ctx, storage) = (&mut ctx.tile_decode_context, &mut ctx.storage);
 
     for tile in &tiles {
@@ -96,6 +97,7 @@ pub(crate) fn decode<'a>(
             tile_ctx,
             storage,
             ht_decoder,
+            cpu_decode_parallelism,
         )?;
     }
 
@@ -732,11 +734,31 @@ impl OutputRegion {
     }
 }
 
+/// CPU parallelism policy for native JPEG 2000 decode.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CpuDecodeParallelism {
+    /// Allow a single tile decode to use internal code-block parallelism.
+    #[default]
+    Auto,
+    /// Keep code-block decode serial for callers that already parallelize tiles.
+    Serial,
+}
+
 /// A decoder context for decoding JPEG2000 images.
-#[derive(Default)]
 pub struct DecoderContext<'a> {
     pub(crate) tile_decode_context: TileDecodeContext,
     storage: DecompositionStorage<'a>,
+    cpu_decode_parallelism: CpuDecodeParallelism,
+}
+
+impl Default for DecoderContext<'_> {
+    fn default() -> Self {
+        Self {
+            tile_decode_context: TileDecodeContext::default(),
+            storage: DecompositionStorage::default(),
+            cpu_decode_parallelism: CpuDecodeParallelism::Auto,
+        }
+    }
 }
 
 impl DecoderContext<'_> {
@@ -748,6 +770,16 @@ impl DecoderContext<'_> {
     pub(crate) fn set_output_region(&mut self, output_region: Option<(u32, u32, u32, u32)>) {
         self.tile_decode_context.output_region = output_region.map(OutputRegion::from_tuple);
     }
+
+    /// Return the native CPU decode parallelism policy.
+    pub fn cpu_decode_parallelism(&self) -> CpuDecodeParallelism {
+        self.cpu_decode_parallelism
+    }
+
+    /// Set the native CPU decode parallelism policy.
+    pub fn set_cpu_decode_parallelism(&mut self, parallelism: CpuDecodeParallelism) {
+        self.cpu_decode_parallelism = parallelism;
+    }
 }
 
 fn decode_tile<'a, 'b>(
@@ -757,6 +789,7 @@ fn decode_tile<'a, 'b>(
     tile_ctx: &mut TileDecodeContext,
     storage: &mut DecompositionStorage<'a>,
     ht_decoder: &mut Option<&mut dyn HtCodeBlockDecoder>,
+    cpu_decode_parallelism: CpuDecodeParallelism,
 ) -> Result<()> {
     storage.reset();
 
@@ -769,7 +802,14 @@ fn decode_tile<'a, 'b>(
     segment::parse(tile, progression_iterator, header, storage)?;
     // We then decode the bitplanes of each code block, yielding the
     // (possibly dequantized) coefficients of each code block.
-    decode_component_tile_bit_planes(tile, tile_ctx, storage, header, ht_decoder)?;
+    decode_component_tile_bit_planes(
+        tile,
+        tile_ctx,
+        storage,
+        header,
+        ht_decoder,
+        cpu_decode_parallelism,
+    )?;
 
     // Unlike before, we interleave the apply_idwt and store stages
     // for each component tile so we can reuse allocations better.
@@ -942,6 +982,7 @@ fn decode_component_tile_bit_planes<'a>(
     storage: &mut DecompositionStorage<'a>,
     header: &Header<'_>,
     ht_decoder: &mut Option<&mut dyn HtCodeBlockDecoder>,
+    cpu_decode_parallelism: CpuDecodeParallelism,
 ) -> Result<()> {
     for (tile_decompositions_idx, component_info) in tile.component_infos.iter().enumerate() {
         // Only decode the resolution levels we actually care about.
@@ -960,6 +1001,7 @@ fn decode_component_tile_bit_planes<'a>(
                     storage,
                     header,
                     ht_decoder,
+                    cpu_decode_parallelism,
                 )?;
             }
         }
@@ -976,6 +1018,7 @@ fn decode_sub_band_bitplanes(
     storage: &mut DecompositionStorage<'_>,
     header: &Header<'_>,
     ht_decoder: &mut Option<&mut dyn HtCodeBlockDecoder>,
+    cpu_decode_parallelism: CpuDecodeParallelism,
 ) -> Result<()> {
     let sub_band = storage.sub_bands[sub_band_idx].clone();
 
@@ -1071,34 +1114,7 @@ fn decode_sub_band_bitplanes(
     };
 
     if let Some(ht_decoder) = ht_decoder.as_deref_mut() {
-        let mut pending_blocks = Vec::new();
-        for precinct in sub_band
-            .precincts
-            .clone()
-            .map(|idx| &storage.precincts[idx])
-        {
-            for code_block in precinct
-                .code_blocks
-                .clone()
-                .map(|idx| &storage.code_blocks[idx])
-            {
-                let (combined_data, segments) = collect_classic_code_block_data(
-                    code_block,
-                    &component_info.coding_style.parameters.code_block_style,
-                    storage,
-                )?;
-                pending_blocks.push(PendingClassicBlock {
-                    combined_data,
-                    segments,
-                    output_x: code_block.rect.x0 - sub_band.rect.x0,
-                    output_y: code_block.rect.y0 - sub_band.rect.y0,
-                    width: code_block.rect.width(),
-                    height: code_block.rect.height(),
-                    missing_bit_planes: code_block.missing_bit_planes,
-                    number_of_coding_passes: code_block.number_of_coding_passes,
-                });
-            }
-        }
+        let pending_blocks = collect_pending_classic_blocks(&sub_band, component_info, storage)?;
 
         let batch_jobs: Vec<_> = pending_blocks
             .iter()
@@ -1153,6 +1169,25 @@ fn decode_sub_band_bitplanes(
         }
 
         return Ok(());
+    }
+
+    let code_block_count = count_classic_code_blocks(&sub_band, storage);
+    if should_decode_classic_sub_band_in_parallel(cpu_decode_parallelism, code_block_count) {
+        #[cfg(feature = "parallel")]
+        {
+            let pending_blocks =
+                collect_pending_classic_blocks(&sub_band, component_info, storage)?;
+            let decoded_blocks = decode_classic_sub_band_blocks_parallel(
+                &pending_blocks,
+                classic_job_sub_band_type,
+                classic_job_style,
+                header.strict,
+                num_bitplanes,
+                dequantization_step,
+            )?;
+            copy_decoded_classic_blocks_to_sub_band(&decoded_blocks, &sub_band, storage)?;
+            return Ok(());
+        }
     }
 
     for precinct in sub_band
@@ -1218,6 +1253,155 @@ struct PendingClassicBlock {
     height: u32,
     missing_bit_planes: u8,
     number_of_coding_passes: u8,
+}
+
+struct DecodedClassicBlock {
+    output_x: u32,
+    output_y: u32,
+    width: u32,
+    height: u32,
+    coefficients: Vec<f32>,
+}
+
+fn count_classic_code_blocks(sub_band: &SubBand, storage: &DecompositionStorage<'_>) -> usize {
+    sub_band
+        .precincts
+        .clone()
+        .map(|idx| &storage.precincts[idx])
+        .map(|precinct| precinct.code_blocks.len())
+        .sum()
+}
+
+fn collect_pending_classic_blocks(
+    sub_band: &SubBand,
+    component_info: &ComponentInfo,
+    storage: &DecompositionStorage<'_>,
+) -> Result<Vec<PendingClassicBlock>> {
+    let mut pending_blocks = Vec::with_capacity(count_classic_code_blocks(sub_band, storage));
+    for precinct in sub_band
+        .precincts
+        .clone()
+        .map(|idx| &storage.precincts[idx])
+    {
+        for code_block in precinct
+            .code_blocks
+            .clone()
+            .map(|idx| &storage.code_blocks[idx])
+        {
+            let (combined_data, segments) = collect_classic_code_block_data(
+                code_block,
+                &component_info.coding_style.parameters.code_block_style,
+                storage,
+            )?;
+            pending_blocks.push(PendingClassicBlock {
+                combined_data,
+                segments,
+                output_x: code_block.rect.x0 - sub_band.rect.x0,
+                output_y: code_block.rect.y0 - sub_band.rect.y0,
+                width: code_block.rect.width(),
+                height: code_block.rect.height(),
+                missing_bit_planes: code_block.missing_bit_planes,
+                number_of_coding_passes: code_block.number_of_coding_passes,
+            });
+        }
+    }
+    Ok(pending_blocks)
+}
+
+pub(crate) fn should_decode_classic_sub_band_in_parallel(
+    parallelism: CpuDecodeParallelism,
+    code_block_count: usize,
+) -> bool {
+    cfg!(feature = "parallel") && parallelism == CpuDecodeParallelism::Auto && code_block_count >= 4
+}
+
+#[cfg(feature = "parallel")]
+fn decode_classic_sub_band_blocks_parallel(
+    pending_blocks: &[PendingClassicBlock],
+    sub_band_type: J2kSubBandType,
+    style: J2kCodeBlockStyle,
+    strict: bool,
+    total_bitplanes: u8,
+    dequantization_step: f32,
+) -> Result<Vec<DecodedClassicBlock>> {
+    use rayon::prelude::*;
+
+    pending_blocks
+        .par_iter()
+        .map(|pending| {
+            let output_stride = pending.width as usize;
+            let output_len = output_stride
+                .checked_mul(pending.height as usize)
+                .ok_or(DecodingError::CodeBlockDecodeFailure)?;
+            let mut coefficients = vec![0.0; output_len];
+            decode_j2k_code_block_scalar(
+                J2kCodeBlockDecodeJob {
+                    data: &pending.combined_data,
+                    segments: &pending.segments,
+                    width: pending.width,
+                    height: pending.height,
+                    output_stride,
+                    missing_bit_planes: pending.missing_bit_planes,
+                    number_of_coding_passes: pending.number_of_coding_passes,
+                    total_bitplanes,
+                    sub_band_type,
+                    style,
+                    strict,
+                    dequantization_step,
+                },
+                &mut coefficients,
+            )?;
+            Ok(DecodedClassicBlock {
+                output_x: pending.output_x,
+                output_y: pending.output_y,
+                width: pending.width,
+                height: pending.height,
+                coefficients,
+            })
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn copy_decoded_classic_blocks_to_sub_band(
+    decoded_blocks: &[DecodedClassicBlock],
+    sub_band: &SubBand,
+    storage: &mut DecompositionStorage<'_>,
+) -> Result<()> {
+    let sub_band_width = sub_band.rect.width() as usize;
+    let base_store = &mut storage.coefficients[sub_band.coefficients.clone()];
+    for block in decoded_blocks {
+        if block
+            .output_x
+            .checked_add(block.width)
+            .is_none_or(|x1| x1 > sub_band.rect.width())
+            || block
+                .output_y
+                .checked_add(block.height)
+                .is_none_or(|y1| y1 > sub_band.rect.height())
+        {
+            bail!(DecodingError::CodeBlockDecodeFailure);
+        }
+        let block_width = block.width as usize;
+        for row in 0..block.height as usize {
+            let dst_start = (block.output_y as usize + row)
+                .checked_mul(sub_band_width)
+                .and_then(|offset| offset.checked_add(block.output_x as usize))
+                .ok_or(DecodingError::CodeBlockDecodeFailure)?;
+            let dst_end = dst_start
+                .checked_add(block_width)
+                .ok_or(DecodingError::CodeBlockDecodeFailure)?;
+            let src_start = row
+                .checked_mul(block_width)
+                .ok_or(DecodingError::CodeBlockDecodeFailure)?;
+            let src_end = src_start
+                .checked_add(block_width)
+                .ok_or(DecodingError::CodeBlockDecodeFailure)?;
+            base_store[dst_start..dst_end].copy_from_slice(&block.coefficients[src_start..src_end]);
+        }
+    }
+    Ok(())
 }
 
 fn decode_sub_band_ht_blocks(

@@ -4,7 +4,10 @@ mod common;
 
 use common::{
     bench_inputs, distinct_gray_tile_batch_inputs, distinct_rgb_tile_batch_inputs,
-    external_wsi_tile_batches, j2k_tile_batch_sizes, metal_available, signinum_adaptive_decode,
+    external_wsi_tile_batches, grok_decode_external_tile_batch_region_scaled,
+    grok_supports_external_tile_batch_region_scaled, j2k_tile_batch_sizes, metal_available,
+    openjpeg_decode_external_tile_batch_region_scaled,
+    openjpeg_supports_external_tile_batch_region_scaled, signinum_adaptive_decode,
     signinum_adaptive_decode_external_tile_batch_region_scaled, signinum_adaptive_decode_region,
     signinum_adaptive_decode_region_scaled, signinum_adaptive_decode_scaled,
     signinum_adaptive_decode_tile_batch, signinum_adaptive_decode_tile_batch_region_scaled,
@@ -25,7 +28,9 @@ use common::{
     signinum_metal_supports_tile_batch_region_scaled_distinct, DecodeMode,
 };
 use criterion::{criterion_group, criterion_main, Criterion};
+use signinum_core::Rect;
 use signinum_j2k::Downscale;
+use signinum_j2k_compare::{grok, openjpeg};
 
 fn bench_compare(c: &mut Criterion) {
     let inputs = bench_inputs();
@@ -51,6 +56,16 @@ fn bench_compare(c: &mut Criterion) {
         decode_gray.bench_function(format!("signinum-adaptive/{}", input.name), |b| {
             b.iter(|| signinum_adaptive_decode(&input.bytes, input.mode));
         });
+        if !input.is_ht && openjpeg::is_available() {
+            decode_gray.bench_function(format!("openjpeg/{}", input.name), |b| {
+                b.iter(|| openjpeg::decode_gray(&input.bytes).expect("OpenJPEG decode"));
+            });
+        }
+        if grok::is_available() {
+            decode_gray.bench_function(format!("grok/{}", input.name), |b| {
+                b.iter(|| grok::decode_gray(&input.bytes).expect("Grok decode"));
+            });
+        }
         if metal_available() && signinum_metal_supports_decode(&input.bytes, input.mode) {
             decode_gray.bench_function(format!("signinum-metal/{}", input.name), |b| {
                 b.iter(|| signinum_metal_decode(&input.bytes, input.mode));
@@ -64,6 +79,16 @@ fn bench_compare(c: &mut Criterion) {
         decode_rgb.bench_function(format!("signinum/{}", input.name), |b| {
             b.iter(|| signinum_decode(&input.bytes, input.mode));
         });
+        if !input.is_ht && openjpeg::is_available() {
+            decode_rgb.bench_function(format!("openjpeg/{}", input.name), |b| {
+                b.iter(|| openjpeg::decode_rgb(&input.bytes).expect("OpenJPEG decode"));
+            });
+        }
+        if grok::is_available() {
+            decode_rgb.bench_function(format!("grok/{}", input.name), |b| {
+                b.iter(|| grok::decode_rgb(&input.bytes).expect("Grok decode"));
+            });
+        }
         if metal_available() && signinum_metal_supports_decode(&input.bytes, input.mode) {
             decode_rgb.bench_function(format!("signinum-metal/{}", input.name), |b| {
                 b.iter(|| signinum_metal_decode(&input.bytes, input.mode));
@@ -83,6 +108,20 @@ fn bench_compare(c: &mut Criterion) {
         wsi_region.bench_function(format!("signinum-adaptive/{}", input.name), |b| {
             b.iter(|| signinum_adaptive_decode_region(&input.bytes, input.mode, 256));
         });
+        if !input.is_ht && openjpeg::is_available() {
+            wsi_region.bench_function(format!("openjpeg/{}", input.name), |b| {
+                let roi = compare_roi(input.dimensions, 256);
+                b.iter(|| {
+                    openjpeg::decode_gray_region(&input.bytes, roi).expect("OpenJPEG region decode")
+                });
+            });
+        }
+        if grok::is_available() {
+            wsi_region.bench_function(format!("grok/{}", input.name), |b| {
+                let roi = compare_roi(input.dimensions, 256);
+                b.iter(|| grok::decode_gray_region(&input.bytes, roi).expect("Grok region decode"));
+            });
+        }
         if metal_available() && signinum_metal_supports_region(&input.bytes, input.mode, 256) {
             wsi_region.bench_function(format!("signinum-metal/{}", input.name), |b| {
                 b.iter(|| signinum_metal_decode_region(&input.bytes, input.mode, 256));
@@ -104,6 +143,18 @@ fn bench_compare(c: &mut Criterion) {
                 signinum_adaptive_decode_scaled(&input.bytes, input.mode, Downscale::Quarter);
             });
         });
+        if !input.is_ht && openjpeg::is_available() {
+            wsi_scaled.bench_function(format!("openjpeg/{}", input.name), |b| {
+                b.iter(|| {
+                    openjpeg::decode_gray_scaled(&input.bytes, 2).expect("OpenJPEG scaled decode")
+                });
+            });
+        }
+        if grok::is_available() {
+            wsi_scaled.bench_function(format!("grok/{}", input.name), |b| {
+                b.iter(|| grok::decode_gray_scaled(&input.bytes, 2).expect("Grok scaled decode"));
+            });
+        }
         if metal_available()
             && signinum_metal_supports_scaled(&input.bytes, input.mode, Downscale::Quarter)
         {
@@ -343,6 +394,38 @@ fn bench_compare(c: &mut Criterion) {
                         });
                     },
                 );
+                if openjpeg::is_available()
+                    && openjpeg_supports_external_tile_batch_region_scaled(batch, count)
+                {
+                    external_wsi_region_scaled.bench_function(
+                        format!("openjpeg/{}/batch_{count}", batch.name),
+                        |b| {
+                            b.iter(|| {
+                                openjpeg_decode_external_tile_batch_region_scaled(
+                                    batch,
+                                    count,
+                                    256,
+                                    Downscale::Quarter,
+                                );
+                            });
+                        },
+                    );
+                }
+                if grok_supports_external_tile_batch_region_scaled(batch, count) {
+                    external_wsi_region_scaled.bench_function(
+                        format!("grok/{}/batch_{count}", batch.name),
+                        |b| {
+                            b.iter(|| {
+                                grok_decode_external_tile_batch_region_scaled(
+                                    batch,
+                                    count,
+                                    256,
+                                    Downscale::Quarter,
+                                );
+                            });
+                        },
+                    );
+                }
                 if metal_available()
                     && signinum_metal_supports_external_tile_batch_region_scaled(
                         batch,
@@ -418,6 +501,15 @@ fn bench_compare(c: &mut Criterion) {
         }
     }
     wsi_tile_batch_rgb_distinct.finish();
+}
+
+fn compare_roi(dimensions: (u32, u32), extent: u32) -> Rect {
+    Rect {
+        x: dimensions.0.saturating_sub(extent) / 2,
+        y: dimensions.1.saturating_sub(extent) / 2,
+        w: dimensions.0.min(extent),
+        h: dimensions.1.min(extent),
+    }
 }
 
 criterion_group!(benches, bench_compare);

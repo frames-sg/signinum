@@ -5,7 +5,7 @@ use std::num::NonZeroUsize;
 
 use signinum_core::{DecodeOutcome, DecoderContext, Downscale, PixelFormat, Rect, TileBatchDecode};
 
-use crate::{J2kCodec, J2kContext, J2kError, J2kScratchPool};
+use crate::{CpuDecodeParallelism, J2kCodec, J2kContext, J2kError, J2kScratchPool};
 
 /// One full-tile decode request for [`decode_tiles_into`].
 pub struct TileDecodeJob<'i, 'o> {
@@ -113,22 +113,26 @@ pub fn decode_tiles_into(
     let job_count = jobs.len();
     let worker_count = tile_batch_worker_count(job_count, options);
     let chunk_size = job_count.div_ceil(worker_count);
-    let results = std::thread::scope(|scope| {
-        let mut handles = Vec::with_capacity(worker_count);
-        for (chunk_index, chunk) in jobs.chunks_mut(chunk_size).enumerate() {
-            let start_index = chunk_index * chunk_size;
-            handles.push(scope.spawn(move || decode_tile_job_chunk(start_index, chunk, fmt)));
-        }
-
-        let mut results = Vec::with_capacity(job_count);
-        for handle in handles {
-            match handle.join() {
-                Ok(chunk_results) => results.extend(chunk_results),
-                Err(payload) => std::panic::resume_unwind(payload),
+    let results =
+        std::thread::scope(|scope| {
+            let mut handles = Vec::with_capacity(worker_count);
+            for (chunk_index, chunk) in jobs.chunks_mut(chunk_size).enumerate() {
+                let start_index = chunk_index * chunk_size;
+                let inner_parallelism = inner_parallelism_for_batch(job_count);
+                handles.push(scope.spawn(move || {
+                    decode_tile_job_chunk(start_index, chunk, fmt, inner_parallelism)
+                }));
             }
-        }
-        results
-    });
+
+            let mut results = Vec::with_capacity(job_count);
+            for handle in handles {
+                match handle.join() {
+                    Ok(chunk_results) => results.extend(chunk_results),
+                    Err(payload) => std::panic::resume_unwind(payload),
+                }
+            }
+            results
+        });
 
     collect_tile_batch_results(job_count, results)
 }
@@ -151,9 +155,14 @@ pub fn decode_tiles_region_scaled_into(
         let mut handles = Vec::with_capacity(worker_count);
         for (chunk_index, chunk) in jobs.chunks_mut(chunk_size).enumerate() {
             let start_index = chunk_index * chunk_size;
-            handles.push(
-                scope.spawn(move || decode_tile_region_scaled_job_chunk(start_index, chunk, fmt)),
-            );
+            handles.push(scope.spawn(move || {
+                decode_tile_region_scaled_job_chunk(
+                    start_index,
+                    chunk,
+                    fmt,
+                    inner_parallelism_for_batch(job_count),
+                )
+            }));
         }
 
         let mut results = Vec::with_capacity(job_count);
@@ -180,12 +189,23 @@ fn tile_batch_worker_count(batch_size: usize, options: TileBatchOptions) -> usiz
     workers.max(1).min(batch_size)
 }
 
+fn inner_parallelism_for_batch(batch_size: usize) -> CpuDecodeParallelism {
+    if batch_size > 1 {
+        CpuDecodeParallelism::Serial
+    } else {
+        CpuDecodeParallelism::Auto
+    }
+}
+
 fn decode_tile_job_chunk(
     start_index: usize,
     jobs: &mut [TileDecodeJob<'_, '_>],
     fmt: PixelFormat,
+    inner_parallelism: CpuDecodeParallelism,
 ) -> Vec<IndexedBatchResult> {
-    let mut ctx = DecoderContext::new();
+    let mut ctx = DecoderContext::<J2kContext>::new();
+    ctx.codec_mut()
+        .set_cpu_decode_parallelism(inner_parallelism);
     let mut pool = J2kScratchPool::new();
     let mut results = Vec::with_capacity(jobs.len());
     for (local_index, job) in jobs.iter_mut().enumerate() {
@@ -200,8 +220,11 @@ fn decode_tile_region_scaled_job_chunk(
     start_index: usize,
     jobs: &mut [TileRegionScaledDecodeJob<'_, '_>],
     fmt: PixelFormat,
+    inner_parallelism: CpuDecodeParallelism,
 ) -> Vec<IndexedBatchResult> {
-    let mut ctx = DecoderContext::new();
+    let mut ctx = DecoderContext::<J2kContext>::new();
+    ctx.codec_mut()
+        .set_cpu_decode_parallelism(inner_parallelism);
     let mut pool = J2kScratchPool::new();
     let mut results = Vec::with_capacity(jobs.len());
     for (local_index, job) in jobs.iter_mut().enumerate() {

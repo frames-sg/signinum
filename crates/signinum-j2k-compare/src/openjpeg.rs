@@ -32,6 +32,14 @@ pub fn decode_gray_region(bytes: &[u8], roi: Rect) -> Result<Vec<u8>, String> {
     decode(bytes, 1, None, Some(roi))
 }
 
+pub fn decode_rgb_region_scaled(bytes: &[u8], roi: Rect, reduce: u32) -> Result<Vec<u8>, String> {
+    decode(bytes, 3, Some(reduce), Some(roi))
+}
+
+pub fn decode_gray_region_scaled(bytes: &[u8], roi: Rect, reduce: u32) -> Result<Vec<u8>, String> {
+    decode(bytes, 1, Some(reduce), Some(roi))
+}
+
 pub fn decode_rgb_scaled(bytes: &[u8], reduce: u32) -> Result<Vec<u8>, String> {
     decode(bytes, 3, Some(reduce), None)
 }
@@ -155,7 +163,7 @@ fn pack_image(image: *mut opj_image_t, channels: usize) -> Result<Vec<u8>, Strin
     for row in 0..height {
         for col in 0..width {
             let dst = (row * width + col) * channels;
-            let sample0 = read_component(image_ref, 0, row, col)?;
+            let sample0 = read_component(image_ref, 0, row, col, width, height)?;
             if channels == 1 {
                 out[dst] = sample0;
                 continue;
@@ -167,14 +175,21 @@ fn pack_image(image: *mut opj_image_t, channels: usize) -> Result<Vec<u8>, Strin
                 continue;
             }
             out[dst] = sample0;
-            out[dst + 1] = read_component(image_ref, 1, row, col)?;
-            out[dst + 2] = read_component(image_ref, 2, row, col)?;
+            out[dst + 1] = read_component(image_ref, 1, row, col, width, height)?;
+            out[dst + 2] = read_component(image_ref, 2, row, col, width, height)?;
         }
     }
     Ok(out)
 }
 
-fn read_component(image: &opj_image, index: usize, row: usize, col: usize) -> Result<u8, String> {
+fn read_component(
+    image: &opj_image,
+    index: usize,
+    row: usize,
+    col: usize,
+    full_width: usize,
+    full_height: usize,
+) -> Result<u8, String> {
     let comp = unsafe {
         image
             .comps
@@ -186,8 +201,14 @@ fn read_component(image: &opj_image, index: usize, row: usize, col: usize) -> Re
         return Err("openjpeg: component data missing".to_string());
     }
     let stride = comp.w as usize;
-    let data = unsafe { slice::from_raw_parts(comp.data, stride * comp.h as usize) };
-    let value = data[row * stride + col];
+    let height = comp.h as usize;
+    if stride == 0 || height == 0 {
+        return Err("openjpeg: component has zero-sized output".to_string());
+    }
+    let data = unsafe { slice::from_raw_parts(comp.data, stride * height) };
+    let comp_col = col.saturating_mul(stride) / full_width.max(1);
+    let comp_row = row.saturating_mul(height) / full_height.max(1);
+    let value = data[comp_row.min(height - 1) * stride + comp_col.min(stride - 1)];
     Ok(scale_to_u8(value, comp.prec, comp.sgnd != 0))
 }
 

@@ -874,7 +874,7 @@ checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
 name = "signinum"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "signinum-core",
  "signinum-j2k",
@@ -912,7 +912,7 @@ dependencies = [
 
 [[package]]
 name = "signinum-j2k"
-version = "1.1.2"
+version = "1.2.0"
 dependencies = [
  "criterion",
  "proptest",
@@ -933,7 +933,7 @@ dependencies = [
 
 [[package]]
 name = "signinum-j2k-cuda"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "criterion",
  "signinum-core",
@@ -945,7 +945,7 @@ dependencies = [
 
 [[package]]
 name = "signinum-j2k-metal"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "criterion",
  "libc",
@@ -953,14 +953,16 @@ dependencies = [
  "rayon",
  "signinum-core",
  "signinum-j2k",
+ "signinum-j2k-compare",
  "signinum-j2k-native",
  "thiserror",
 ]
 
 [[package]]
 name = "signinum-j2k-native"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
+ "criterion",
  "fearless_simd",
  "libm",
  "log",

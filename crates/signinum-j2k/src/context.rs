@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use signinum_core::{CacheStats, CodecContext};
+use signinum_j2k_native::CpuDecodeParallelism;
 #[cfg(target_os = "macos")]
 use signinum_j2k_native::J2kDirectGrayscalePlan;
 
@@ -15,6 +16,7 @@ struct DirectGrayPlanCache {
 pub struct J2kContext {
     hits: u64,
     misses: u64,
+    cpu_decode_parallelism: CpuDecodeParallelism,
     #[cfg(target_os = "macos")]
     direct_gray_plan: Option<DirectGrayPlanCache>,
 }
@@ -24,6 +26,7 @@ impl J2kContext {
         Self {
             hits: 0,
             misses: 0,
+            cpu_decode_parallelism: CpuDecodeParallelism::Auto,
             #[cfg(target_os = "macos")]
             direct_gray_plan: None,
         }
@@ -31,6 +34,14 @@ impl J2kContext {
 
     pub(crate) fn record_tile_decode(&mut self) {
         self.misses = self.misses.saturating_add(1);
+    }
+
+    pub fn cpu_decode_parallelism(&self) -> CpuDecodeParallelism {
+        self.cpu_decode_parallelism
+    }
+
+    pub fn set_cpu_decode_parallelism(&mut self, parallelism: CpuDecodeParallelism) {
+        self.cpu_decode_parallelism = parallelism;
     }
 
     #[cfg(target_os = "macos")]
@@ -57,6 +68,7 @@ impl CodecContext for J2kContext {
     fn clear(&mut self) {
         self.hits = 0;
         self.misses = 0;
+        self.cpu_decode_parallelism = CpuDecodeParallelism::Auto;
         #[cfg(target_os = "macos")]
         {
             self.direct_gray_plan = None;

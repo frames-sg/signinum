@@ -6,7 +6,8 @@ use signinum_jpeg::{Decoder, Downscale, JpegError, PixelFormat, Rect};
 
 mod fixtures;
 use fixtures::{
-    grayscale_8x8_jpeg, minimal_baseline_420_jpeg, rgb_app14_8x8_jpeg, rgb_app14_8x8_rgb,
+    grayscale_8x8_jpeg, minimal_baseline_420_jpeg, progressive_8x8_jpeg, rgb_app14_8x8_jpeg,
+    rgb_app14_8x8_rgb,
 };
 
 fn minimal_cmyk_baseline_jpeg() -> Vec<u8> {
@@ -266,6 +267,43 @@ fn decode_into_gray8_scaled_projects_constant_app14_rgb_pixels() {
             .unwrap();
         assert!(buf.iter().all(|&px| px == expected), "factor={factor:?}");
     }
+}
+
+#[test]
+fn decoder_new_accepts_progressive8() {
+    let bytes = progressive_8x8_jpeg();
+    let dec = Decoder::new(&bytes).expect("progressive 8-bit JPEG must construct");
+
+    assert_eq!(dec.info().dimensions, (8, 8));
+}
+
+#[test]
+fn decode_progressive8_rgb8_matches_jpeg_decoder_reference() {
+    let bytes = progressive_8x8_jpeg();
+    let mut reference_decoder = jpeg_decoder::Decoder::new(std::io::Cursor::new(&bytes));
+    let reference = reference_decoder
+        .decode()
+        .expect("jpeg-decoder reference decode");
+    let info = reference_decoder.info().expect("jpeg-decoder info");
+    assert_eq!((info.width, info.height), (8, 8));
+
+    let dec = Decoder::new(&bytes).expect("progressive 8-bit JPEG must construct");
+    let (w, h) = dec.info().dimensions;
+    let mut actual = vec![0u8; (w * h * 3) as usize];
+    dec.decode_into(&mut actual, (w * 3) as usize, PixelFormat::Rgb8)
+        .expect("progressive decode must succeed");
+
+    assert_eq!(actual.len(), reference.len());
+    let max_delta = actual
+        .iter()
+        .zip(reference.iter())
+        .map(|(&a, &b)| a.abs_diff(b))
+        .max()
+        .unwrap_or(0);
+    assert!(
+        max_delta <= 3,
+        "progressive RGB max channel delta {max_delta} exceeds tolerance"
+    );
 }
 
 #[test]

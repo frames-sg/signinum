@@ -120,6 +120,43 @@ fn production_batch_decode_parallel_preserves_order_and_output() {
 }
 
 #[test]
+fn production_batch_decode_matches_repeated_single_tile_decodes() {
+    let inputs = [
+        rgb_fixture(),
+        encode_codestream(&(48_u8..96).collect::<Vec<_>>(), 4, 4, 3, 8),
+        encode_codestream(&(96_u8..144).collect::<Vec<_>>(), 4, 4, 3, 8),
+    ];
+    let expected = inputs
+        .iter()
+        .map(|input| decode_rgb8_reference(input).0)
+        .collect::<Vec<_>>();
+    let stride = 4 * PixelFormat::Rgb8.bytes_per_pixel();
+    let mut outputs = expected
+        .iter()
+        .map(|tile| vec![0_u8; tile.len()])
+        .collect::<Vec<_>>();
+    let options = TileBatchOptions {
+        workers: NonZeroUsize::new(2),
+    };
+
+    let outcomes = {
+        let mut jobs = inputs
+            .iter()
+            .zip(outputs.iter_mut())
+            .map(|(input, out)| TileDecodeJob {
+                input: input.as_slice(),
+                out: out.as_mut_slice(),
+                stride,
+            })
+            .collect::<Vec<_>>();
+        decode_tiles_into(&mut jobs, PixelFormat::Rgb8, options).expect("batch decode")
+    };
+
+    assert_eq!(outcomes.len(), inputs.len());
+    assert_eq!(outputs, expected);
+}
+
+#[test]
 fn production_batch_region_scaled_decode_parallel_preserves_order_and_output() {
     const JOBS: usize = 12;
     let codestream = rgb_fixture();

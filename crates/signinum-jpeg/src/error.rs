@@ -192,8 +192,9 @@ pub enum JpegError {
 
     /// Transient pre-1.0 gap: the SOF is parseable and will eventually be
     /// supported by the decoder, but the current release does not implement
-    /// it yet. M3 removes this variant by implementing Extended12, Progressive,
-    /// and Lossless. Distinct from `UnsupportedSof` because callers routing
+    /// it yet. M3 removes this variant by implementing Extended12,
+    /// Progressive12, and Lossless. Distinct from `UnsupportedSof` because
+    /// callers routing
     /// to a fallback decoder on `is_unsupported()` should NOT reroute streams
     /// that a newer version of signinum will decode natively.
     #[error("decode not yet implemented for {sof:?} — see CHANGELOG for milestone")]

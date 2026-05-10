@@ -340,7 +340,9 @@ pub fn j2k_lossless_decomposition_levels_for_options(
     let levels = j2k_lossless_decomposition_levels_for_progression(samples, options.progression);
     options
         .max_decomposition_levels
-        .map_or(levels, |requested| requested.min(levels))
+        .map_or(levels, |requested| {
+            requested.min(max_decomposition_levels(samples.width, samples.height))
+        })
 }
 
 fn j2k_rpcl_lossless_decomposition_levels(samples: J2kLosslessSamples<'_>) -> u8 {
@@ -497,8 +499,9 @@ fn validate_lossless_roundtrip(
 #[cfg(test)]
 mod tests {
     use super::{
-        encode_j2k_lossless, J2kBlockCodingMode, J2kEncodeValidation, J2kLosslessEncodeOptions,
-        J2kLosslessSamples, J2kProgressionOrder, ReversibleTransform,
+        encode_j2k_lossless, j2k_lossless_decomposition_levels_for_options, J2kBlockCodingMode,
+        J2kEncodeValidation, J2kLosslessEncodeOptions, J2kLosslessSamples, J2kProgressionOrder,
+        ReversibleTransform,
     };
 
     fn cod_mct(codestream: &[u8]) -> u8 {
@@ -529,5 +532,23 @@ mod tests {
         .unwrap();
 
         assert_eq!(cod_mct(&encoded.codestream), 0);
+    }
+
+    #[test]
+    fn explicit_decomposition_levels_override_default_lrcp_policy() {
+        let pixels = vec![0; 128 * 128];
+        let samples = J2kLosslessSamples::new(&pixels, 128, 128, 1, 8, false).unwrap();
+
+        let levels = j2k_lossless_decomposition_levels_for_options(
+            samples,
+            J2kLosslessEncodeOptions {
+                block_coding_mode: J2kBlockCodingMode::Classic,
+                progression: J2kProgressionOrder::Lrcp,
+                max_decomposition_levels: Some(5),
+                ..J2kLosslessEncodeOptions::default()
+            },
+        );
+
+        assert_eq!(levels, 5);
     }
 }

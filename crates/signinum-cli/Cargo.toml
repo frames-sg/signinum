@@ -1,7 +1,7 @@
 [package]
 name        = "signinum-cli"
 description = "Command-line tool for signinum: inspect"
-version = "1.0.2"
+version = "1.0.3"
 edition.workspace      = true
 rust-version.workspace = true
 license.workspace      = true
@@ -13,8 +13,8 @@ name = "signinum"
 path = "src/main.rs"
 
 [dependencies]
-signinum-j2k  = { path = "../signinum-j2k", version = "=1.2.0" }
-signinum-jpeg = { path = "../signinum-jpeg", version = "=1.1.0" }
+signinum-j2k  = { path = "../signinum-j2k", version = "=1.2.1" }
+signinum-jpeg = { path = "../signinum-jpeg", version = "=1.1.1" }
 
 # NOTE: `[profile.*]` blocks in package-level manifests are silently ignored
 # inside a workspace (see https://doc.rust-lang.org/cargo/reference/profiles.html#overrides).

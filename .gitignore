@@ -9,3 +9,9 @@ __pycache__/
 
 # Manuscripts (kept local, not published in repo)
 paper/
+papers/
+docs/papers/
+docs/benchmarks/paper/
+*.pdf
+*.docx
+*.pptx

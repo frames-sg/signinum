@@ -1,277 +1,252 @@
 # signinum
 
-Pathology codec stack for whole-slide imaging workloads.
+Rust codec primitives for pathology and whole-slide imaging workloads.
 
-## Status
+`signinum` is for compressed tile payloads: JPEG, JPEG 2000 / HTJ2K, and
+container tile compression such as Deflate, Zstd, LZW, and uncompressed tiles.
+It is not a whole-slide container reader, pyramid manager, cache, or DICOM
+writer. Use [`statumen`](https://github.com/frames-sg/statumen) for slide
+container parsing and [`wsi-dicom`](https://github.com/frames-sg/wsi-dicom)
+for DICOM VL Whole Slide Microscopy export.
 
-`signinum` is a native-first codec workspace for pathology and WSI software.
-The current public-source release target is the `signinum` facade release:
-`signinum-core`, `signinum-jpeg`, `signinum-j2k`, `signinum-tilecodec`,
-`signinum-cli`, and the `signinum` facade are the stable user-facing crates.
-Runtime backend selection defaults to `Auto`; compiled device adapters are used
-for supported workloads when available, with CPU as the fallback. GPU adapter
-crates remain pre-1.0 while their runtime support and routing policies continue
-to harden.
-The core stack in this repository is:
+## Choose a crate
 
-- `signinum-jpeg` — native JPEG decode for WSI tiles
-- `signinum-jpeg-metal` — Apple Metal JPEG tile decode and device-output
-  adapter for batched WSI workloads; pre-1.0
-- `signinum-jpeg-cuda` — CUDA-facing JPEG device-output API adapter; explicit
-  full-frame RGB8 CUDA requests use NVIDIA nvJPEG when `cuda-runtime`, a CUDA
-  driver, and nvJPEG are available, with CPU decode plus CUDA upload fallback
-  for unsupported shapes; pre-1.0
-- `signinum-j2k` — native in-repo JPEG 2000 / HTJ2K inspect and decode;
-  includes WSI-native ROI, reduced-resolution, and combined ROI+reduced-
-  resolution decode surfaces plus lossless encode
-- `signinum-j2k-metal` — Apple Metal device-output adapter for JPEG 2000 /
-  HTJ2K tiles; pre-1.0
-- `signinum-j2k-cuda` — CUDA-facing JPEG 2000 / HTJ2K device-output API
-  adapter; explicit CUDA requests upload decoded output into CUDA device memory
-  when the `cuda-runtime` feature and a CUDA driver are available; no JPEG
-  2000 / HTJ2K CUDA kernel decode or NVIDIA performance claim is made yet
-- `signinum-tilecodec` — tile decompression primitives for Deflate, Zstd,
-  LZW, and Uncompressed payloads
-- `signinum-core` — shared traits, pixel/sample types, scratch/context
-  contracts
-- `signinum-cli` — CLI inspection entry point
+| Task | Use | Install |
+|------|-----|---------|
+| Start a new application with one import surface | `signinum` facade | `cargo add signinum` |
+| JPEG tile inspect/decode | `signinum-jpeg` or `signinum::jpeg` | `cargo add signinum-jpeg` |
+| JPEG 2000 / HTJ2K inspect, decode, and lossless encode | `signinum-j2k` or `signinum::j2k` | `cargo add signinum-j2k` |
+| TIFF/DICOM-style tile decompression | `signinum-tilecodec` or `signinum::tilecodec` | `cargo add signinum-tilecodec` |
+| Shared pixel, backend, scratch, row, and passthrough traits | `signinum-core` | `cargo add signinum-core` |
+| CLI header inspection | `signinum-cli` | `cargo install signinum-cli` |
+| Apple Metal device-output surfaces | `signinum-jpeg-metal`, `signinum-j2k-metal`, or the facade `metal` feature | `cargo add signinum-jpeg-metal` |
+| CUDA device-memory output | `signinum-jpeg-cuda`, `signinum-j2k-cuda`, plus the adapter `cuda-runtime` feature | `cargo add signinum-jpeg-cuda --features cuda-runtime` or `cargo add signinum-j2k-cuda --features cuda-runtime` |
 
-## Which crate should I use?
-
-- Most application code: `cargo add signinum`, then import from the facade
-  modules (`signinum::jpeg`, `signinum::j2k`, and `signinum::tilecodec`).
-- Whole-slide reader/container workflows: use
-  [`statumen`](https://github.com/frames-sg/statumen).
-- DICOM VL Whole Slide Microscopy export: use
-  [`wsi-dicom`](https://github.com/frames-sg/wsi-dicom).
-- JPEG tile decode: `cargo add signinum-jpeg`.
-- JPEG 2000 / HTJ2K tile decode: `cargo add signinum-j2k`.
-- Tile decompression primitives: `cargo add signinum-tilecodec`.
-- Shared traits and pixel/backend types: `cargo add signinum-core`.
-- Command-line inspection: `cargo install signinum-cli`, then run
-  `signinum inspect <file>`.
-- Apple Metal device-output adapters: `signinum-jpeg-metal` or
-  `signinum-j2k-metal`.
-- CUDA device-memory output adapters: `signinum-jpeg-cuda` or
-  `signinum-j2k-cuda` with the `cuda-runtime` feature when a CUDA driver is
-  available.
-
-Target decode hosts are native `x86_64` and `aarch64`.
-CPU decode surfaces are the 1.0 compatibility promise. Metal device-output
-adapters are validated on Apple Silicon macOS but stay on the post-1.0
-hardening track. CUDA crates provide explicit device-memory output through the
-`cuda-runtime` feature when a CUDA driver is available. JPEG full-frame RGB8
-CUDA requests can decode with nvJPEG when the library is installed; other CUDA
-adapter shapes still use CPU decode plus CUDA upload. Benchmark results are
-hardware-specific and must be collected on self-hosted GPU runners.
-
-## Roadmap
-
-Current roadmap:
-
-- hardening Metal adapter APIs and backend routing policies
-- validating and recording Metal runtime benchmark baselines
-- adding x86_64 GPU benchmark coverage
-- hardening CUDA nvJPEG decode coverage and benchmarking larger WSI-shaped
-  JPEG tiles on x86_64 CUDA hosts
-
-## What this is
-
-`signinum` is designed around WSI access patterns instead of generic
-consumer-image decode:
-
-- borrowed parse/decode surfaces
-- caller-owned scratch pools and decoder contexts
-- decode-time ROI and reduced-resolution output
-- row-bounded output for large tiles and stripes
-- tile-batch APIs for repeated viewer workloads
-- additive device-output adapters for Metal and CUDA consumers
-- explicit separation between image codecs and tile decompression codecs
-
-The public WSI decode surface is documented in
-[docs/wsi-decode-api.md](docs/wsi-decode-api.md).
-WSI/DICOM conversion layers should follow the passthrough-first policy in
-[docs/wsi-dicom-passthrough.md](docs/wsi-dicom-passthrough.md).
-The repo-local passthrough contract lives in `signinum-core`; JPEG and J2K
-views expose borrowed candidates so container writers can copy compressed
-frame/tile bytes unchanged only after syntax, payload kind, and metadata checks
-pass.
-
-The project is structured so WSI readers can compose their own threading,
-vendor/container parsing, pyramid policy, caching, and prefetch around codec
-primitives instead of paying for a monolithic runtime.
-
-## Fast Path For LLM-Assisted Use
-
-If you are a pathologist or researcher asking an LLM to use this repository,
-give it this instruction:
-
-> Use `signinum` only for JPEG, JPEG 2000 / HTJ2K, and tile decompression
-> primitives. If the task says "open a whole-slide image", use `statumen`
-> first. If the task says "convert a slide to DICOM", use `wsi-dicom`.
-
-For ordinary Rust code, start with the facade:
+Most application code should start with the facade:
 
 ```toml
 [dependencies]
 signinum = "0.4.1"
 ```
 
-Then choose the module that matches the compressed payload:
+The facade exposes:
+
+- `signinum::jpeg` for JPEG tiles
+- `signinum::j2k` for JPEG 2000 / HTJ2K
+- `signinum::tilecodec` for container tile decompression
+- shared `signinum-core` contracts at the crate root and under
+  `signinum::core`
+
+The default facade build includes portable CPU codecs and the Metal adapter.
+Use `--no-default-features` when you want only the CPU-portable facade, or
+`--features cuda` / `--features gpu` when the facade should expose CUDA adapter
+modules. CUDA runtime allocation, copies, kernels, and nvJPEG loading are
+enabled on the adapter crates with their `cuda-runtime` feature.
+
+## Quick start
+
+The snippets below assume they are inside a function that returns `Result`.
+
+Inspect JPEG and JPEG 2000 headers without decoding pixels:
 
 ```rust
 use signinum::jpeg::Decoder as JpegDecoder;
 use signinum::j2k::J2kDecoder;
 
-let jpeg_info = JpegDecoder::inspect(&std::fs::read("tile.jpg")?)?;
-let j2k_info = J2kDecoder::inspect(&std::fs::read("tile.jp2")?)?;
-println!("JPEG={:?} J2K={:?}", jpeg_info.dimensions, j2k_info.dimensions);
+let jpeg_bytes = std::fs::read("tile.jpg")?;
+let jpeg_info = JpegDecoder::inspect(&jpeg_bytes)?;
+
+let j2k_bytes = std::fs::read("tile.jp2")?;
+let j2k_info = J2kDecoder::inspect(&j2k_bytes)?;
+
+println!("JPEG: {:?}", jpeg_info.dimensions);
+println!("J2K:  {:?}", j2k_info.dimensions);
 ```
 
-## Current scope
+Decode a JPEG tile into caller-owned RGB output:
 
-### `signinum-jpeg`
+```rust
+use signinum::{jpeg::Decoder as JpegDecoder, PixelFormat};
 
-- Baseline JPEG support already present in the crate
+let bytes = std::fs::read("tile.jpg")?;
+let decoder = JpegDecoder::new(&bytes)?;
+let (width, height) = decoder.info().dimensions;
+let stride = width as usize * PixelFormat::Rgb8.bytes_per_pixel();
+let mut rgb = vec![0_u8; stride * height as usize];
+
+decoder.decode_into(&mut rgb, stride, PixelFormat::Rgb8)?;
+```
+
+Decode a JPEG 2000 / HTJ2K tile with the same caller-owned output model:
+
+```rust
+use signinum::{j2k::J2kDecoder, j2k::J2kScratchPool, Downscale, PixelFormat};
+
+let bytes = std::fs::read("tile.jp2")?;
+let mut decoder = J2kDecoder::new(&bytes)?;
+let (width, height) = decoder.info().dimensions;
+let stride = width as usize * PixelFormat::Rgb8.bytes_per_pixel();
+let mut rgb = vec![0_u8; stride * height as usize];
+let mut scratch = J2kScratchPool::new();
+
+decoder.decode_scaled_into(
+    &mut scratch,
+    &mut rgb,
+    stride,
+    PixelFormat::Rgb8,
+    Downscale::None,
+)?;
+```
+
+Encode lossless JPEG 2000 / HTJ2K when compressed source bytes cannot be
+passed through legally:
+
+```rust
+use signinum::j2k::{
+    encode_j2k_lossless, J2kLosslessEncodeOptions, J2kLosslessSamples,
+};
+
+let pixels = vec![0_u8; 256 * 256];
+let samples = J2kLosslessSamples::new(&pixels, 256, 256, 1, 8, false)?;
+let encoded = encode_j2k_lossless(samples, &J2kLosslessEncodeOptions::default())?;
+
+assert!(encoded.codestream.starts_with(&[0xFF, 0x4F]));
+```
+
+Decompress a container tile payload:
+
+```rust
+use signinum::{tilecodec::DeflateCodec, TileDecompress};
+
+let compressed = std::fs::read("tile.deflate")?;
+let mut pool = <DeflateCodec as TileDecompress>::Pool::default();
+let mut out = vec![0_u8; 1 << 20];
+let written = DeflateCodec::decompress_into(&mut pool, &compressed, &mut out)?;
+
+println!("decoded {written} bytes");
+```
+
+Inspect from the command line:
+
+```sh
+cargo install signinum-cli
+signinum inspect tile.jp2
+```
+
+## Supported workflows
+
+`signinum-jpeg` provides WSI-focused JPEG inspect and decode:
+
+- borrowed parse surfaces through `JpegView`
+- baseline JPEG decode for WSI tiles
 - ROI, scaled decode, row streaming, and tile-batch decode APIs
-- borrowed passthrough candidates for baseline and extended sequential JPEG
-  interchange streams
-- Baseline JPEG encode remains a small fallback/test/derived-output utility;
-  it is not the diagnostic WSI/DICOM storage path when compressed tile
-  passthrough or lossless J2K/HTJ2K output is available
-- WSI-focused benchmarking against `jpeg-decoder`, `zune-jpeg`, and direct
-  `libjpeg-turbo` decode paths
-- Metal and CUDA adapter crates keep the core JPEG decoder pure-Rust CPU while
-  exposing device-output surfaces for downstream GPU pipelines; the Metal path
-  has optimized kernel paths for supported baseline JPEG tile shapes, including
-  batched 4:2:0 and 4:2:2 RGB WSI tile decode, while explicit full-frame RGB8
-  CUDA requests use nvJPEG when available and fall back to CPU decode plus
-  CUDA upload otherwise
+- passthrough candidates for baseline and extended sequential interchange
+  streams
+- a small baseline JPEG encoder for fixtures, fallback, and derived output
 
-### `signinum-j2k`
+`signinum-j2k` provides JPEG 2000 / HTJ2K inspect, decode, and encode:
 
-- JP2 / raw codestream inspect
-- borrowed passthrough candidates for raw JPEG 2000 / HTJ2K codestreams and
-  JP2 files, with payload-kind rejection available for DICOM codestream-only
-  destinations
-- full-frame, region, scaled, combined region+scaled, row-bounded, and
-  tile-batch decode
-- repo-local pure-Rust JPEG 2000 / HTJ2K decode engine
-- lossless JPEG 2000 / HTJ2K encode for new diagnostic codestreams when
-  compressed source payloads cannot be passed through legally
-- ROI+reduced-resolution performance coverage in the CPU and Metal benchmark
-  harnesses
-- parity and benchmark coverage against Grok and OpenJPEG on CPU
-- Metal and CUDA adapter crates expose device-output surfaces without moving
-  the core decoder crate onto GPU-specific dependencies; explicit Metal
-  requests return Metal-backed full, ROI, scaled, and ROI+scaled surfaces on
-  macOS, while explicit CUDA requests return CUDA-backed full, ROI, scaled, and
-  ROI+scaled surfaces when `cuda-runtime` and a CUDA driver are available
+- JP2 and raw codestream inspection
+- borrowed passthrough candidates for JP2, JPEG 2000, and HTJ2K payloads
+- full-frame, ROI, reduced-resolution, combined ROI+reduced-resolution,
+  row-bounded, and tile-batch decode
+- pure-Rust in-repo JPEG 2000 / HTJ2K decode engine
+- lossless JPEG 2000 / HTJ2K encode for new diagnostic codestreams
+- parity and benchmark coverage against Grok and OpenJPEG where available
 
-### `signinum-tilecodec`
+`signinum-tilecodec` provides tile decompression primitives:
 
 - `DeflateCodec`
 - `ZstdCodec`
 - `LzwCodec`
 - `UncompressedCodec`
 
-These codecs expose the shared `TileDecompress` trait from `signinum-core`.
+These codecs implement the shared `TileDecompress` trait from `signinum-core`.
 
-## Quick start
+## Backend model
 
-JPEG inspect:
+The public API uses `BackendRequest` so callers state what kind of output they
+need:
 
-```rust
-use signinum_jpeg::{Decoder, JpegView};
+- `BackendRequest::Cpu` requires host-backed output.
+- `BackendRequest::Auto` lets an adapter use a validated device path for
+  supported workloads and otherwise fall back to CPU.
+- `BackendRequest::Metal` requires resident Metal execution on macOS and
+  reports unsupported or unavailable requests as errors.
+- `BackendRequest::Cuda` requires CUDA device-memory output when the
+  `cuda-runtime` feature and a CUDA driver are available.
 
-let bytes = std::fs::read("tile.jpg")?;
-let info = Decoder::inspect(&bytes)?;
-println!(
-    "{:?} {:?} mcu={:?} restart={:?}",
-    info.dimensions,
-    info.color_space,
-    info.mcu_geometry,
-    info.restart_interval
-);
-if let Some(index) = JpegView::parse(&bytes)?.restart_index()? {
-    println!("restart segments={}", index.segments.len());
-}
+CPU decode is the portability baseline on native `x86_64` and `aarch64`
+hosts. Device adapters are additive: removing Metal and CUDA crates leaves the
+CPU codec stack functional.
+
+Metal adapters target Apple Silicon macOS. They return `MTLBuffer`-backed
+`DeviceSurface`s for supported shapes and keep explicit Metal requests strict.
+If a caller wants CPU-decoded bytes uploaded to Metal, use the adapter's
+explicit CPU-staged upload APIs instead of `BackendRequest::Metal`.
+
+CUDA adapters expose CUDA device-memory output for explicit CUDA requests when
+they are built with `cuda-runtime`. `signinum-jpeg-cuda` can use NVIDIA nvJPEG
+for full-frame RGB8 JPEG requests when `cuda-runtime`, a CUDA driver, and
+`libnvjpeg` are available; unsupported JPEG shapes use CPU decode plus CUDA
+upload. `signinum-j2k-cuda` currently returns CUDA-backed output by uploading
+CPU-decoded JPEG 2000 / HTJ2K pixels; it does not claim CUDA codestream decode
+kernels yet.
+
+## Architecture at a glance
+
+The workspace is layered so container readers and viewers can bring their own
+threading, I/O, cache, pyramid policy, and prefetch logic.
+
+```text
+foundation -> codecs / codec engines -> device adapters -> facade / CLI
 ```
 
-JPEG 2000 decode:
+| Layer | Crates | Responsibility |
+|-------|--------|----------------|
+| Foundation | `signinum-core` | Shared traits, pixel/sample types, backend selection, device surfaces, scratch/context contracts, passthrough contracts |
+| Codecs | `signinum-jpeg`, `signinum-j2k`, `signinum-tilecodec` | Format-specific inspect, decode, encode, row, ROI, scaled, batch, and decompression APIs |
+| Engine | `signinum-j2k-native` | Published implementation dependency for the public J2K crate |
+| Adapters | `signinum-jpeg-metal`, `signinum-j2k-metal`, `signinum-jpeg-cuda`, `signinum-j2k-cuda` | Device-output surfaces for downstream GPU pipelines |
+| Runtime helper | `signinum-cuda-runtime` | CUDA Driver API allocation, copy, kernel, and nvJPEG loading used by CUDA adapters |
+| Facade and CLI | `signinum`, `signinum-cli` | One import surface for application code and `signinum inspect <file>` |
+| Reference tooling | `signinum-j2k-compare` | OpenJPEG/Grok comparison helpers for tests and benches; not a runtime dependency |
 
-```rust
-use signinum_core::{Downscale, PixelFormat};
-use signinum_j2k::J2kDecoder;
+The full system map, dependency rules, and current adapter routing policy live
+in [docs/architecture.md](docs/architecture.md).
 
-let bytes = std::fs::read("tile.jp2")?;
-let mut decoder = J2kDecoder::new(&bytes)?;
-let (w, h) = decoder.info().dimensions;
-let mut rgb = vec![0_u8; (w * h * 3) as usize];
-decoder.decode_scaled_into(
-    &mut signinum_j2k::J2kScratchPool::new(),
-    &mut rgb,
-    (w * 3) as usize,
-    PixelFormat::Rgb8,
-    Downscale::None,
-)?;
-```
+## WSI and DICOM passthrough policy
 
-JPEG 2000 / HTJ2K Metal tile batch:
+Container integrations should pass compressed tile bytes through unchanged
+whenever the destination transfer syntax and frame metadata make that legal.
+Codec views expose borrowed `PassthroughCandidate`s; container layers remain
+responsible for DICOM-specific frame ordering, fragment writing, and metadata
+validation.
 
-```rust
-use signinum_core::{BackendRequest, PixelFormat};
-use signinum_j2k_metal::MetalTileBatch;
+If new diagnostic codestream bytes are required, prefer lossless JPEG 2000 /
+HTJ2K encode. Baseline JPEG encode is for explicit fallback, generated
+fixtures, or non-diagnostic derived output.
 
-let tile_bytes: Vec<Vec<u8>> = load_visible_j2k_tiles()?;
-let mut batch = MetalTileBatch::with_capacity(tile_bytes.len());
+See:
 
-for tile in &tile_bytes {
-    batch.push_tile(tile, PixelFormat::Gray8, BackendRequest::Metal)?;
-}
+- [docs/wsi-decode-api.md](docs/wsi-decode-api.md)
+- [docs/wsi-dicom-passthrough.md](docs/wsi-dicom-passthrough.md)
 
-let surfaces = batch.decode_all()?;
-```
+## For LLM-assisted use
 
-WSI readers should own vendor parsing, pyramid levels, tile coordinates,
-caching, prefetch, and viewport policy. The Metal adapters only batch codec
-requests and return decoded surfaces in submission order. If a caller already
-stores compressed tile payloads in `Arc<[u8]>`, the `push_shared_*` methods can
-queue them without another tile-byte copy. Use explicit `BackendRequest::Metal`
-when a batched caller must require Metal execution; `BackendRequest::Auto` can
-use validated device paths for supported workloads and otherwise returns CPU
-fallback output.
+If you are asking an LLM to use this repository, give it this instruction:
 
-Tile decompression:
+> Use `signinum` for JPEG, JPEG 2000 / HTJ2K, tile decompression, and
+> device-output codec primitives. If the task says "open a whole-slide image",
+> use `statumen` first. If the task says "convert a slide to DICOM", use
+> `wsi-dicom`.
 
-```rust
-use signinum_core::TileDecompress;
-use signinum_tilecodec::{DeflateCodec, DeflatePool};
-
-let compressed = std::fs::read("tile.deflate")?;
-let mut pool = DeflatePool::new();
-let mut out = vec![0_u8; 1 << 20];
-let written = DeflateCodec::decompress_into(&mut pool, &compressed, &mut out)?;
-println!("decoded {} bytes", written);
-```
-
-CLI inspect:
-
-```sh
-$ signinum inspect tile.jp2
-1024×1024 Srgb bit=8 comps=3 levels=6 tiles=Some(...)
-```
-
-Runnable crate examples are available under:
-
-- `crates/signinum-jpeg/examples`
-- `crates/signinum-j2k/examples`
-- `crates/signinum-tilecodec/examples`
-
-## Benchmarks
+## Benchmarks and parity
 
 Benchmark methodology and comparator policy live in [docs/bench.md](docs/bench.md).
-The repo now carries dedicated compare benches for:
+Parity expectations live in [docs/parity.md](docs/parity.md).
+
+The repo carries compare benches for:
 
 - `signinum-jpeg`
 - `signinum-j2k`
@@ -279,12 +254,34 @@ The repo now carries dedicated compare benches for:
 - `signinum-j2k-metal`
 - `signinum-tilecodec`
 
-Release staging notes live in [docs/release.md](docs/release.md).
+Benchmark results are hardware-specific. GPU benchmark baselines should be
+collected on self-hosted runners with the target device stack installed.
+
+## Project docs
+
+- [docs/architecture.md](docs/architecture.md) - workspace map and dependency rules
+- [docs/wsi-decode-api.md](docs/wsi-decode-api.md) - public WSI decode API guide
+- [docs/wsi-dicom-passthrough.md](docs/wsi-dicom-passthrough.md) - passthrough-first conversion policy
+- [docs/bench.md](docs/bench.md) - benchmark methodology
+- [docs/parity.md](docs/parity.md) - reference decoder parity expectations
+- [docs/release.md](docs/release.md) - release staging notes
+- [CHANGELOG.md](CHANGELOG.md) - release history
+
+Runnable crate examples are available under:
+
+- `crates/signinum-jpeg/examples`
+- `crates/signinum-j2k/examples`
+- `crates/signinum-tilecodec/examples`
+
+## Platform and MSRV
+
+- Rust edition: 2021
+- MSRV: Rust 1.94, pinned by [rust-toolchain.toml](rust-toolchain.toml)
+- Decode hosts: native `x86_64` and `aarch64`
+- Metal: Apple Silicon macOS for resident Metal device surfaces
+- CUDA: hosts with a CUDA driver when CUDA adapters are built with
+  `cuda-runtime`
 
 ## License
 
-Apache-2.0. See `LICENSE-APACHE`.
-
-## MSRV
-
-Rust 1.94.
+Apache-2.0. See [LICENSE-APACHE](LICENSE-APACHE).

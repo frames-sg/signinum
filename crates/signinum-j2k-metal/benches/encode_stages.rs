@@ -1,14 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+#[cfg(target_os = "macos")]
 use signinum_core::PixelFormat;
 use signinum_j2k::{
     encode_j2k_lossless, EncodeBackendPreference, J2kEncodeValidation, J2kLosslessEncodeOptions,
     J2kLosslessSamples,
 };
+use signinum_j2k_metal::MetalEncodeStageAccelerator;
+#[cfg(target_os = "macos")]
 use signinum_j2k_metal::{
     encode_lossless_from_padded_metal_buffer_with_report, MetalBackendSession,
-    MetalEncodeStageAccelerator, MetalLosslessEncodeTile,
+    MetalLosslessEncodeTile,
 };
 use signinum_j2k_native::{J2kEncodeStageAccelerator, J2kForwardDwt53Job, J2kForwardRctJob};
 

@@ -1060,16 +1060,16 @@ fn try_encode_resident_lossless_tiles_to_metal_buffer_batch(
     }))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(test, target_os = "macos"))]
 const GPU_ENCODE_DEFAULT_INFLIGHT_TILES: usize = 64;
-#[cfg(target_os = "macos")]
+#[cfg(any(test, target_os = "macos"))]
 const GPU_ENCODE_FALLBACK_HW_MEM_BYTES: usize = 8 * 1024 * 1024 * 1024;
-#[cfg(target_os = "macos")]
+#[cfg(any(test, target_os = "macos"))]
 const GPU_ENCODE_MAX_DEFAULT_MEMORY_BUDGET_BYTES: usize = 10 * 1024 * 1024 * 1024;
-#[cfg(target_os = "macos")]
+#[cfg(any(test, target_os = "macos"))]
 const GPU_ENCODE_MEMORY_BUDGET_PERCENT: usize = 40;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(test, target_os = "macos"))]
 fn default_gpu_encode_memory_budget_bytes_for_hw_mem(hw_memsize: usize) -> usize {
     hw_memsize
         .saturating_mul(GPU_ENCODE_MEMORY_BUDGET_PERCENT)
@@ -1078,7 +1078,7 @@ fn default_gpu_encode_memory_budget_bytes_for_hw_mem(hw_memsize: usize) -> usize
         .clamp(1, GPU_ENCODE_MAX_DEFAULT_MEMORY_BUDGET_BYTES)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(test, target_os = "macos"))]
 fn default_gpu_encode_memory_budget_bytes() -> usize {
     let hw_memsize = host_memory_bytes().unwrap_or(GPU_ENCODE_FALLBACK_HW_MEM_BYTES);
     default_gpu_encode_memory_budget_bytes_for_hw_mem(hw_memsize)
@@ -1103,7 +1103,12 @@ fn host_memory_bytes() -> Option<usize> {
         .flatten()
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(test, not(target_os = "macos")))]
+fn host_memory_bytes() -> Option<usize> {
+    None
+}
+
+#[cfg(any(test, target_os = "macos"))]
 fn resolve_lossless_encode_config(
     tile_count: usize,
     estimated_peak_bytes_per_tile: usize,
@@ -1146,7 +1151,7 @@ fn resolve_lossless_encode_config(
     })
 }
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(test)]
 fn resolve_lossless_encode_config_for_test(
     tile_count: usize,
     estimated_peak_bytes_per_tile: usize,

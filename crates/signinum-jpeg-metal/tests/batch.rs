@@ -3,7 +3,9 @@ use signinum_core::{
     Downscale, PixelFormat, Rect, TileBatchDecodeDevice, TileBatchDecodeSubmit,
 };
 use signinum_jpeg::{Decoder as CpuDecoder, DecoderContext as JpegDecoderContext};
-use signinum_jpeg_metal::{Codec, JpegTileBatch, MetalSession, ScratchPool};
+#[cfg(target_os = "macos")]
+use signinum_jpeg_metal::JpegTileBatch;
+use signinum_jpeg_metal::{Codec, MetalSession, ScratchPool};
 
 const BASELINE_420: &[u8] = include_bytes!("../fixtures/jpeg/baseline_420_16x16.jpg");
 const BASELINE_420_RESTART: &[u8] =

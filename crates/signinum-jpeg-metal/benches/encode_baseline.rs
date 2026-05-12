@@ -7,10 +7,12 @@
 )]
 
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
+#[cfg(target_os = "macos")]
 use signinum_core::PixelFormat;
 use signinum_jpeg::{
     encode_jpeg_baseline, JpegBackend, JpegEncodeOptions, JpegSamples, JpegSubsampling,
 };
+#[cfg(target_os = "macos")]
 use signinum_jpeg_metal::{
     encode_jpeg_baseline_batch_from_metal_buffers, encode_jpeg_baseline_from_metal_buffer,
     JpegBaselineMetalEncodeTile, MetalBackendSession,
@@ -27,6 +29,7 @@ fn bench_encode_baseline(c: &mut Criterion) {
     let tile_bytes = dim as usize * dim as usize * 3;
     let rgb = generated_rgb_tiles(dim, batch_size);
     let cpu_options = options(JpegBackend::Cpu);
+    #[cfg(target_os = "macos")]
     let metal_options = options(JpegBackend::Metal);
 
     let mut single = c.benchmark_group("jpeg_baseline_encode_single");

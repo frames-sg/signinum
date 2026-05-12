@@ -106,41 +106,57 @@ fn clippy() -> Result<(), String> {
 
 fn test() -> Result<(), String> {
     if env::consts::OS != "macos" {
-        return run_cargo(&["test", "--workspace", "--all-targets", "--all-features"]);
+        return test_workspace_without_benches(&[]);
     }
 
-    run_cargo(&[
-        "test",
-        "--workspace",
-        "--all-targets",
-        "--all-features",
-        "--exclude",
-        "signinum-j2k-metal",
-    ])?;
+    test_workspace_without_benches(&["--exclude", "signinum-j2k-metal"])?;
     if skip_j2k_metal_runtime_on_hosted_github_macos() {
         eprintln!(
             "skipping signinum-j2k-metal runtime tests on GitHub-hosted macOS; \
              self-hosted gpu-validation runs the Metal runtime suite"
         );
-        return run_cargo(&[
-            "test",
-            "-p",
-            "signinum-j2k-metal",
-            "--all-targets",
-            "--all-features",
-            "--no-run",
-        ]);
+        return test_package_without_benches("signinum-j2k-metal", true);
     }
-    run_cargo_with_env(
-        &[
-            "test",
-            "-p",
-            "signinum-j2k-metal",
-            "--all-targets",
-            "--all-features",
-        ],
-        &[("RUST_TEST_THREADS", "1")],
-    )
+    test_package_without_benches("signinum-j2k-metal", false)
+}
+
+fn test_workspace_without_benches(extra_args: &[&str]) -> Result<(), String> {
+    let mut test_args = vec![
+        "test",
+        "--workspace",
+        "--all-features",
+        "--lib",
+        "--bins",
+        "--tests",
+    ];
+    test_args.extend_from_slice(extra_args);
+    run_cargo(&test_args)?;
+
+    let mut doc_args = vec!["test", "--workspace", "--all-features", "--doc"];
+    doc_args.extend_from_slice(extra_args);
+    run_cargo(&doc_args)
+}
+
+fn test_package_without_benches(package: &str, no_run: bool) -> Result<(), String> {
+    let mut test_args = vec![
+        "test",
+        "-p",
+        package,
+        "--all-features",
+        "--lib",
+        "--bins",
+        "--tests",
+    ];
+    if no_run {
+        test_args.push("--no-run");
+    }
+
+    if no_run {
+        return run_cargo(&test_args);
+    }
+
+    run_cargo_with_env(&test_args, &[("RUST_TEST_THREADS", "1")])?;
+    run_cargo(&["test", "-p", package, "--all-features", "--doc"])
 }
 
 fn doc() -> Result<(), String> {

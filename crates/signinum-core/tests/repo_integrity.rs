@@ -171,6 +171,27 @@ fn ci_workflow_keeps_docs_and_benchmark_compile_gates() {
 }
 
 #[test]
+fn xtask_test_does_not_run_benchmarks_as_tests() {
+    let xtask = fs::read_to_string(repo_root().join("xtask/src/main.rs")).expect("read xtask");
+    let test_section = xtask
+        .split("fn test()")
+        .nth(1)
+        .and_then(|rest| rest.split("fn doc()").next())
+        .expect("xtask test section");
+
+    for required in ["\"--lib\"", "\"--bins\"", "\"--tests\"", "\"--doc\""] {
+        assert!(
+            test_section.contains(required),
+            "xtask test must include cargo test selector `{required}`"
+        );
+    }
+    assert!(
+        !test_section.contains("\"--all-targets\""),
+        "xtask test must not pass --all-targets because harness=false benchmark binaries would run as tests"
+    );
+}
+
+#[test]
 fn xtask_fuzz_build_checks_every_fuzz_manifest() {
     let root = repo_root();
     let xtask = fs::read_to_string(root.join("xtask/src/main.rs")).expect("read xtask");

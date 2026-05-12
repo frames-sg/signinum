@@ -21,8 +21,6 @@ design notes that an agent can reach without leaving the repo.
 - [`docs/wsi-decode-api.md`](wsi-decode-api.md) — public WSI decode API guide.
 - [`docs/wsi-dicom-passthrough.md`](wsi-dicom-passthrough.md) — passthrough-first
   policy for WSI/DICOM conversion layers built on these codec primitives.
-- [`HANDOFF-2026-04-23-adaptive-codec-runtime.md`](private-docs/HANDOFF-2026-04-23-adaptive-codec-runtime.md)
-  — most recent in-flight design handoff (adaptive backend routing).
 - Crate-level `README.md` files where present — crate-scoped contracts and
   feature notes.
 
@@ -288,8 +286,8 @@ There are three target backends. Selection is explicit in the public API.
 
 `BackendRequest::Auto` stays conservative: small or low-yield decodes are
 served from CPU; larger batches with supported shapes can be routed to a
-device backend. The adaptive routing policy is iterating in
-[`HANDOFF-2026-04-23-adaptive-codec-runtime.md`](private-docs/HANDOFF-2026-04-23-adaptive-codec-runtime.md).
+device backend. Public routing behavior is documented in the crate-level
+READMEs, benchmark notes, and release notes.
 
 ## Lifecycle and ownership
 

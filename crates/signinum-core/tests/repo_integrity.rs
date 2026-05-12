@@ -500,7 +500,6 @@ fn public_docs_describe_facade_auto_and_cuda_runtime_surface_scope() {
 fn public_docs_route_users_to_current_crates() {
     let root = repo_root();
     let readme = fs::read_to_string(root.join("README.md")).expect("read README");
-    let migration = fs::read_to_string(root.join("private-notes.md")).expect("read migration docs");
 
     for required in [
         "Which crate should I use?",
@@ -518,37 +517,43 @@ fn public_docs_route_users_to_current_crates() {
         );
     }
 
-    for current in [
-        "signinum",
-        "signinum-core",
-        "signinum-jpeg",
-        "signinum-j2k",
-        "signinum-tilecodec",
-        "signinum-cli",
-        "statumen",
-        "wsi-dicom",
-    ] {
-        assert!(
-            migration.contains(current),
-            "private-notes.md must route users to `{current}`"
-        );
-    }
-
     let legacy_terms = [
         format!("{}{}", "ash", "lar"),
         format!("{}{}", "zig", "gurat"),
     ];
-    for (name, docs) in [
-        ("README.md", readme.as_str()),
-        ("private-notes.md", migration.as_str()),
-    ] {
-        for legacy in &legacy_terms {
-            assert!(
-                !docs.to_ascii_lowercase().contains(legacy),
-                "{name} must use current package names only"
-            );
+    for legacy in &legacy_terms {
+        assert!(
+            !readme.to_ascii_lowercase().contains(legacy),
+            "README.md must use current package names only"
+        );
+    }
+}
+
+#[test]
+fn public_repo_excludes_agent_private_artifacts() {
+    let root = repo_root();
+    let private_dir = ["docs", "private-docs"].join("/");
+    let migration_doc = ["MIGRATION", ".md"].concat();
+    let migration_doc_lower = migration_doc.to_ascii_lowercase();
+    let mut offenders = Vec::new();
+
+    for path in repo_text_files(root) {
+        let relative = path.strip_prefix(root).unwrap_or(&path);
+        let relative_text = relative.to_string_lossy();
+        let file_name = path
+            .file_name()
+            .and_then(OsStr::to_str)
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if relative_text.starts_with(&private_dir) || file_name == migration_doc_lower {
+            offenders.push(relative_text.to_string());
         }
     }
+
+    assert!(
+        offenders.is_empty(),
+        "public repo must not track agent-private planning docs or migration scratch files: {offenders:?}"
+    );
 }
 
 #[test]

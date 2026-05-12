@@ -3,11 +3,14 @@ target/
 Cargo.lock.bak
 .vscode/
 .idea/
+
+
+private-notes.md
+private-notes.md
 *.swp
 __pycache__/
 *.py[cod]
 
-# Manuscripts (kept local, not published in repo)
 paper/
 papers/
 docs/papers/

@@ -8,9 +8,11 @@ extend-exclude = [
 [default.extend-words]
 APPn = "APPn"
 flate = "flate"
+iy = "iy"
 ois = "ois"
 Pn = "Pn"
 Psot = "Psot"
+setp = "setp"
 SIZ = "SIZ"
 Siz = "Siz"
 TPsot = "TPsot"

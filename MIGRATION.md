@@ -1,54 +1,46 @@
-# Migration Notes
+# Current Package Names
 
-The public codec crates moved from the retired `ashlar-*` package family to
-the `signinum-*` package family. The whole-slide reader crate moved from
-`ziggurat` to `statumen`.
+The public documentation now uses only the current Signinum and Statumen
+package names. New projects should choose from these crates:
 
-Yanked retired crates remain available to existing lockfiles, but new
-dependency resolution should use the current package names.
+| Need | Package |
+| --- | --- |
+| Facade codec API | `signinum` |
+| JPEG tile inspect/decode | `signinum-jpeg` |
+| JPEG 2000 / HTJ2K inspect/decode/encode | `signinum-j2k` |
+| Tile decompression primitives | `signinum-tilecodec` |
+| Shared codec traits and pixel/backend types | `signinum-core` |
+| Command-line inspection | `signinum-cli` |
+| Whole-slide container reading | `statumen` |
+| DICOM VL Whole Slide Microscopy export | `wsi-dicom` |
 
-## Codec Crates
-
-| Retired package | Current package |
-|-----------------|-----------------|
-| `ashlar-core` | `signinum-core` |
-| `ashlar-jpeg` | `signinum-jpeg` |
-| `ashlar-j2k` | `signinum-j2k` |
-| `ashlar-tilecodec` | `signinum-tilecodec` |
-| `ashlar-cli` | `signinum-cli` |
-| `ashlar-j2k-native` | `signinum-j2k-native` |
-| `ashlar-jpeg-metal` | `signinum-jpeg-metal` |
-| `ashlar-j2k-metal` | `signinum-j2k-metal` |
-| `ashlar-jpeg-cuda` | `signinum-jpeg-cuda` |
-| `ashlar-j2k-cuda` | `signinum-j2k-cuda` |
-
-`ashlar-j2k-compare` was a local oracle/comparison helper. It does not have a
-published replacement for downstream use.
-
-## Reader Crate
-
-| Retired package | Current package |
-|-----------------|-----------------|
-| `ziggurat` | `statumen` |
-
-Use `statumen` when you need whole-slide reader/container behavior. Use the
-`signinum-*` crates when you need codec primitives directly.
+Prefer `signinum` when an application wants a single import surface for codec
+primitives. Prefer the narrower crates when a downstream package wants a small
+dependency graph or a specific codec API.
 
 ## Cargo Examples
 
 ```toml
 [dependencies]
-signinum-jpeg = "1.0"
-signinum-j2k = "1.0"
-signinum-tilecodec = "1.0"
+signinum = "1.2.3"
+```
+
+```toml
+[dependencies]
+signinum-jpeg = "1.1"
+signinum-j2k = "1.2"
+signinum-tilecodec = "1"
 ```
 
 For CUDA device-memory output:
 
 ```toml
 [dependencies]
-signinum-jpeg-cuda = { version = "0.2", features = ["cuda-runtime"] }
+signinum-jpeg-cuda = { version = "0.3", features = ["cuda-runtime"] }
+signinum-j2k-cuda = { version = "0.3", features = ["cuda-runtime"] }
 ```
 
-The CUDA adapters upload CPU-decoded bytes into CUDA device memory. They do
-not provide CUDA kernel decode or make NVIDIA performance claims.
+The CUDA adapters return CUDA device-memory surfaces when the runtime feature,
+a CUDA driver, and the relevant runtime libraries are available. Unsupported
+shapes fall back only where that backend's API explicitly documents fallback
+behavior.

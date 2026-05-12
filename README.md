@@ -38,8 +38,12 @@ The core stack in this repository is:
 
 ## Which crate should I use?
 
+- Most application code: `cargo add signinum`, then import from the facade
+  modules (`signinum::jpeg`, `signinum::j2k`, and `signinum::tilecodec`).
 - Whole-slide reader/container workflows: use
   [`statumen`](https://github.com/jcwal1516/statumen).
+- DICOM VL Whole Slide Microscopy export: use
+  [`wsi-dicom`](https://github.com/jcwal1516/wsi-dicom).
 - JPEG tile decode: `cargo add signinum-jpeg`.
 - JPEG 2000 / HTJ2K tile decode: `cargo add signinum-j2k`.
 - Tile decompression primitives: `cargo add signinum-tilecodec`.
@@ -52,10 +56,6 @@ The core stack in this repository is:
   `signinum-j2k-cuda` with the `cuda-runtime` feature when a CUDA driver is
   available.
 
-The bare `signinum` package on crates.io is a reserved landing package, not
-the codec API. If you are migrating from the retired package names, see
-[MIGRATION.md](MIGRATION.md).
-
 Target decode hosts are native `x86_64` and `aarch64`.
 CPU decode surfaces are the 1.0 compatibility promise. Metal device-output
 adapters are validated on Apple Silicon macOS but stay on the post-1.0
@@ -67,7 +67,7 @@ hardware-specific and must be collected on self-hosted GPU runners.
 
 ## Roadmap
 
-After the facade release, the project is focused on:
+Current roadmap:
 
 - hardening Metal adapter APIs and backend routing policies
 - validating and recording Metal runtime benchmark baselines
@@ -100,6 +100,33 @@ pass.
 The project is structured so WSI readers can compose their own threading,
 vendor/container parsing, pyramid policy, caching, and prefetch around codec
 primitives instead of paying for a monolithic runtime.
+
+## Fast Path For LLM-Assisted Use
+
+If you are a pathologist or researcher asking an LLM to use this repository,
+give it this instruction:
+
+> Use `signinum` only for JPEG, JPEG 2000 / HTJ2K, and tile decompression
+> primitives. If the task says "open a whole-slide image", use `statumen`
+> first. If the task says "convert a slide to DICOM", use `wsi-dicom`.
+
+For ordinary Rust code, start with the facade:
+
+```toml
+[dependencies]
+signinum = "1.2.3"
+```
+
+Then choose the module that matches the compressed payload:
+
+```rust
+use signinum::jpeg::Decoder as JpegDecoder;
+use signinum::j2k::J2kDecoder;
+
+let jpeg_info = JpegDecoder::inspect(&std::fs::read("tile.jpg")?)?;
+let j2k_info = J2kDecoder::inspect(&std::fs::read("tile.jp2")?)?;
+println!("JPEG={:?} J2K={:?}", jpeg_info.dimensions, j2k_info.dimensions);
+```
 
 ## Current scope
 

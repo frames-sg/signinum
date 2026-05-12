@@ -451,15 +451,17 @@ fn public_docs_describe_facade_auto_and_cuda_runtime_surface_scope() {
 }
 
 #[test]
-fn public_docs_route_users_to_current_crates_after_rename() {
+fn public_docs_route_users_to_current_crates() {
     let root = repo_root();
     let readme = fs::read_to_string(root.join("README.md")).expect("read README");
     let migration = fs::read_to_string(root.join("MIGRATION.md")).expect("read migration docs");
 
     for required in [
         "Which crate should I use?",
-        "MIGRATION.md",
+        "Fast Path For LLM-Assisted Use",
+        "cargo add signinum",
         "statumen",
+        "wsi-dicom",
         "signinum-jpeg",
         "signinum-j2k",
         "signinum-cli",
@@ -470,30 +472,37 @@ fn public_docs_route_users_to_current_crates_after_rename() {
         );
     }
 
-    for mapping in [
-        ("ashlar-core", "signinum-core"),
-        ("ashlar-jpeg", "signinum-jpeg"),
-        ("ashlar-j2k", "signinum-j2k"),
-        ("ashlar-tilecodec", "signinum-tilecodec"),
-        ("ashlar-cli", "signinum-cli"),
-        ("ashlar-j2k-native", "signinum-j2k-native"),
-        ("ashlar-jpeg-metal", "signinum-jpeg-metal"),
-        ("ashlar-j2k-metal", "signinum-j2k-metal"),
-        ("ashlar-jpeg-cuda", "signinum-jpeg-cuda"),
-        ("ashlar-j2k-cuda", "signinum-j2k-cuda"),
+    for current in [
+        "signinum",
+        "signinum-core",
+        "signinum-jpeg",
+        "signinum-j2k",
+        "signinum-tilecodec",
+        "signinum-cli",
+        "statumen",
+        "wsi-dicom",
     ] {
         assert!(
-            migration.contains(mapping.0) && migration.contains(mapping.1),
-            "MIGRATION.md must map `{}` to `{}`",
-            mapping.0,
-            mapping.1
+            migration.contains(current),
+            "MIGRATION.md must route users to `{current}`"
         );
     }
 
-    assert!(
-        migration.contains("ziggurat") && migration.contains("statumen"),
-        "MIGRATION.md must map the retired reader crate to statumen"
-    );
+    let legacy_terms = [
+        format!("{}{}", "ash", "lar"),
+        format!("{}{}", "zig", "gurat"),
+    ];
+    for (name, docs) in [
+        ("README.md", readme.as_str()),
+        ("MIGRATION.md", migration.as_str()),
+    ] {
+        for legacy in &legacy_terms {
+            assert!(
+                !docs.to_ascii_lowercase().contains(legacy),
+                "{name} must use current package names only"
+            );
+        }
+    }
 }
 
 #[test]

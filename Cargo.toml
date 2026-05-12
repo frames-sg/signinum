@@ -22,8 +22,8 @@ version      = "1.0.1"
 edition      = "2021"
 rust-version = "1.94"
 license      = "Apache-2.0"
-repository   = "https://github.com/jcwal1516/signinum"
-homepage     = "https://github.com/jcwal1516/signinum"
+repository   = "https://github.com/frames-sg/signinum"
+homepage     = "https://github.com/frames-sg/signinum"
 keywords     = ["pathology", "wsi", "jpeg", "jpeg2000", "tiff"]
 categories   = ["multimedia::images"]
 

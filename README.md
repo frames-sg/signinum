@@ -41,9 +41,9 @@ The core stack in this repository is:
 - Most application code: `cargo add signinum`, then import from the facade
   modules (`signinum::jpeg`, `signinum::j2k`, and `signinum::tilecodec`).
 - Whole-slide reader/container workflows: use
-  [`statumen`](https://github.com/jcwal1516/statumen).
+  [`statumen`](https://github.com/frames-sg/statumen).
 - DICOM VL Whole Slide Microscopy export: use
-  [`wsi-dicom`](https://github.com/jcwal1516/wsi-dicom).
+  [`wsi-dicom`](https://github.com/frames-sg/wsi-dicom).
 - JPEG tile decode: `cargo add signinum-jpeg`.
 - JPEG 2000 / HTJ2K tile decode: `cargo add signinum-j2k`.
 - Tile decompression primitives: `cargo add signinum-tilecodec`.

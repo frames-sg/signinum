@@ -13,7 +13,7 @@ cargo add signinum-jpeg
 ```
 
 Use this crate when you need codec primitives directly. Use
-[`statumen`](https://github.com/jcwal1516/statumen) when you need a whole-slide
+[`statumen`](https://github.com/frames-sg/statumen) when you need a whole-slide
 reader/container layer.
 
 ```rust

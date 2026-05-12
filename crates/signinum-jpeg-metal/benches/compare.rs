@@ -227,11 +227,10 @@ fn digest_bytes(bytes: &[u8]) -> u64 {
 }
 
 fn coalesce_hit_rate_label(hit_count: usize, total_count: usize) -> String {
-    let tenths = if total_count == 0 {
-        0
-    } else {
-        hit_count.saturating_mul(1000) / total_count
-    };
+    let tenths = hit_count
+        .saturating_mul(1000)
+        .checked_div(total_count)
+        .unwrap_or(0);
     format!("coalesce_hits_{}p{}pct", tenths / 10, tenths % 10)
 }
 

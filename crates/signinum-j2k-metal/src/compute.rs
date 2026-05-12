@@ -2478,12 +2478,7 @@ impl PlaneStage {
 
         let mut bit_depths = [0u32; 4];
         let mut planes: [Option<Buffer>; 4] = [None, None, None, None];
-        for (index, (plane, buffer)) in decoded
-            .planes()
-            .iter()
-            .zip(captured_planes.into_iter())
-            .enumerate()
-        {
+        for (index, (plane, buffer)) in decoded.planes().iter().zip(captured_planes).enumerate() {
             bit_depths[index] = u32::from(plane.bit_depth());
             planes[index] = Some(buffer);
         }
@@ -7635,10 +7630,8 @@ pub(crate) fn prepare_lossless_device_code_blocks_batch(
         let command_buffer = runtime.queue.new_command_buffer();
         let mut prepared = Vec::with_capacity(items.len());
 
-        for ((item, item_sizes), coefficient_byte_offset) in items
-            .into_iter()
-            .zip(sizes.into_iter())
-            .zip(coefficient_byte_offsets.into_iter())
+        for ((item, item_sizes), coefficient_byte_offset) in
+            items.into_iter().zip(sizes).zip(coefficient_byte_offsets)
         {
             let job = item.job;
             let mut recyclable_private_buffers = Vec::new();

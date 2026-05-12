@@ -2168,7 +2168,7 @@ fn prepare_planned_resident_ht_lossless_tiles_batch(
     }
 
     let mut batch_items = Vec::with_capacity(metadatas.len());
-    for (metadata, plan_info) in metadatas.iter().zip(plan_infos.into_iter()) {
+    for (metadata, plan_info) in metadatas.iter().zip(plan_infos) {
         let tile = metadata.tile.as_tile();
         batch_items.push(compute::J2kLosslessDeviceBatchPrepareItem {
             tile_index: plan_info.index,

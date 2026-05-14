@@ -20,6 +20,7 @@ scalar-only  = []   # retained for fuzz/reference decode until native SIMD backe
 
 [dependencies]
 signinum-core = { path = "../signinum-core", version = "=0.4.1" }
+signinum-profile = { path = "../signinum-profile", version = "=0.4.1" }
 thiserror = { workspace = true }
 memchr = { version = "2.7.6", default-features = false }
 rayon = "1"

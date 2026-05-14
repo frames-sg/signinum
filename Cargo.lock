@@ -981,6 +981,7 @@ dependencies = [
  "proptest",
  "rayon",
  "signinum-core",
+ "signinum-profile",
  "thiserror",
  "zune-core",
  "zune-jpeg",

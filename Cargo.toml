@@ -4,6 +4,7 @@ members = [
     "crates/signinum",
     "crates/signinum-core",
     "crates/signinum-cuda-runtime",
+    "crates/signinum-profile",
     "crates/signinum-j2k-compare",
     "crates/signinum-j2k-native",
     "crates/signinum-j2k",

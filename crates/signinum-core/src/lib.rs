@@ -10,6 +10,7 @@
 extern crate alloc;
 
 pub mod backend;
+mod buffer;
 pub mod context;
 pub mod error;
 pub mod passthrough;
@@ -22,6 +23,7 @@ pub mod traits;
 pub mod types;
 
 pub use backend::{BackendCapabilities, BackendKind, BackendRequest, CpuFeatures};
+pub use buffer::copy_tight_pixels_to_strided_output;
 pub use context::{CacheStats, CodecContext, DecoderContext};
 pub use error::{BufferError, CodecError, InputError, NotImplemented, Unsupported};
 pub use passthrough::{

@@ -14,10 +14,10 @@ mod profile;
 use core::convert::Infallible;
 
 use signinum_core::{
-    BackendKind, BackendRequest, BufferError, CodecError, DecodeOutcome, DeviceSubmission,
-    DeviceSurface, Downscale, ImageCodec, ImageDecode, ImageDecodeDevice, ImageDecodeSubmit,
-    PixelFormat, ReadySubmission, Rect, TileBatchDecode, TileBatchDecodeDevice,
-    TileBatchDecodeManyDevice, TileBatchDecodeSubmit,
+    copy_tight_pixels_to_strided_output, BackendKind, BackendRequest, BufferError, CodecError,
+    DecodeOutcome, DeviceSubmission, DeviceSurface, Downscale, ImageCodec, ImageDecode,
+    ImageDecodeDevice, ImageDecodeSubmit, PixelFormat, ReadySubmission, Rect, TileBatchDecode,
+    TileBatchDecodeDevice, TileBatchDecodeManyDevice, TileBatchDecodeSubmit,
 };
 #[cfg(feature = "cuda-runtime")]
 use signinum_cuda_runtime::{CudaContext, CudaDeviceBuffer, CudaDwt53Output, CudaError};
@@ -477,12 +477,16 @@ impl Surface {
 
     pub fn download_into(&self, out: &mut [u8], stride: usize) -> Result<(), Error> {
         match &self.storage {
-            Storage::Host(bytes) => copy_into_output(bytes, self.dimensions, self.fmt, out, stride),
+            Storage::Host(bytes) => {
+                copy_tight_pixels_to_strided_output(bytes, self.dimensions, self.fmt, out, stride)
+                    .map_err(Error::from)
+            }
             #[cfg(feature = "cuda-runtime")]
             Storage::Cuda(buffer) => {
                 let mut tight = vec![0u8; self.byte_len()];
                 buffer.copy_to_host(&mut tight).map_err(cuda_error)?;
-                copy_into_output(&tight, self.dimensions, self.fmt, out, stride)
+                copy_tight_pixels_to_strided_output(&tight, self.dimensions, self.fmt, out, stride)
+                    .map_err(Error::from)
             }
         }
     }
@@ -1298,37 +1302,6 @@ fn cuda_error(error: CudaError) -> Error {
             message: other.to_string(),
         },
     }
-}
-
-fn copy_into_output(
-    src: &[u8],
-    dimensions: (u32, u32),
-    fmt: PixelFormat,
-    out: &mut [u8],
-    stride: usize,
-) -> Result<(), Error> {
-    let row_bytes = dimensions.0 as usize * fmt.bytes_per_pixel();
-    if stride < row_bytes {
-        return Err(BufferError::StrideTooSmall { row_bytes, stride }.into());
-    }
-    let required = if dimensions.1 == 0 {
-        0
-    } else {
-        stride * (dimensions.1 as usize - 1) + row_bytes
-    };
-    if out.len() < required {
-        return Err(BufferError::OutputTooSmall {
-            required,
-            have: out.len(),
-        }
-        .into());
-    }
-    for y in 0..dimensions.1 as usize {
-        let src_row = &src[y * row_bytes..(y + 1) * row_bytes];
-        let dst_start = y * stride;
-        out[dst_start..dst_start + row_bytes].copy_from_slice(src_row);
-    }
-    Ok(())
 }
 
 pub use signinum_j2k::{J2kContext, J2kScratchPool};

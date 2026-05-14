@@ -17,9 +17,10 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 
 use signinum_core::{
-    BackendKind, BackendRequest, BufferError, CodecError, DecodeOutcome, DeviceSubmission,
-    DeviceSurface, Downscale, ImageCodec, ImageDecode, ImageDecodeDevice, ImageDecodeSubmit,
-    PixelFormat, Rect, TileBatchDecodeDevice, TileBatchDecodeSubmit,
+    copy_tight_pixels_to_strided_output, BackendKind, BackendRequest, BufferError, CodecError,
+    DecodeOutcome, DeviceSubmission, DeviceSurface, Downscale, ImageCodec, ImageDecode,
+    ImageDecodeDevice, ImageDecodeSubmit, PixelFormat, Rect, TileBatchDecodeDevice,
+    TileBatchDecodeSubmit,
 };
 use signinum_jpeg::{
     adapter::{
@@ -28,9 +29,8 @@ use signinum_jpeg::{
         build_metal_fast444_packet, build_metal_fast444_packet_for_decoder, decoder_bytes,
         JpegMetalFast420PacketV1, JpegMetalFast422PacketV1, JpegMetalFast444PacketV1,
     },
-    ColorSpace as JpegColorSpace, DecodeOutcome as JpegDecodeOutcome, Decoder as CpuDecoder,
-    DecoderContext as CpuDecoderContext, JpegError, JpegView, Rect as JpegRect,
-    ScratchPool as CpuScratchPool, Warning as CpuWarning,
+    DecodeOutcome as JpegDecodeOutcome, Decoder as CpuDecoder, DecoderContext as CpuDecoderContext,
+    JpegError, JpegView, Rect as JpegRect, ScratchPool as CpuScratchPool, Warning as CpuWarning,
 };
 
 pub use encode::{
@@ -134,7 +134,8 @@ impl Surface {
     }
 
     pub fn download_into(&self, out: &mut [u8], stride: usize) -> Result<(), Error> {
-        copy_into_output(self.as_bytes(), self.dimensions, self.fmt, out, stride)
+        copy_tight_pixels_to_strided_output(self.as_bytes(), self.dimensions, self.fmt, out, stride)
+            .map_err(Error::from)
     }
 
     #[cfg(target_os = "macos")]
@@ -651,7 +652,7 @@ impl<'a> ImageDecode<'a> for Decoder<'a> {
     type View = JpegView<'a>;
 
     fn inspect(input: &'a [u8]) -> Result<signinum_core::Info, Self::Error> {
-        Ok(convert_info(&CpuDecoder::inspect(input)?))
+        Ok(CpuDecoder::inspect(input)?.to_core_info())
     }
 
     fn parse(input: &'a [u8]) -> Result<Self::View, Self::Error> {
@@ -1711,7 +1712,7 @@ fn decode_region_scaled_cpu_upload(
     scale: Downscale,
     backend: BackendRequest,
 ) -> Result<Surface, Error> {
-    let scaled = scaled_rect_covering(roi, scale);
+    let scaled = roi.scaled_covering(scale);
     let dims = (scaled.w, scaled.h);
     let stride = dims.0 as usize * fmt.bytes_per_pixel();
     let mut out = vec![0u8; stride * dims.1 as usize];
@@ -1724,34 +1725,6 @@ fn decode_region_scaled_cpu_upload(
         scale,
     )?;
     upload_surface(out, dims, fmt, backend)
-}
-
-fn convert_info(info: &signinum_jpeg::Info) -> signinum_core::Info {
-    signinum_core::Info {
-        dimensions: info.dimensions,
-        components: match info.color_space {
-            JpegColorSpace::Grayscale => 1,
-            JpegColorSpace::YCbCr | JpegColorSpace::Rgb => 3,
-            JpegColorSpace::Cmyk | JpegColorSpace::Ycck => 4,
-        },
-        colorspace: match info.color_space {
-            JpegColorSpace::Grayscale => signinum_core::Colorspace::Grayscale,
-            JpegColorSpace::YCbCr => signinum_core::Colorspace::YCbCr,
-            JpegColorSpace::Rgb => signinum_core::Colorspace::Rgb,
-            JpegColorSpace::Cmyk => signinum_core::Colorspace::Cmyk,
-            JpegColorSpace::Ycck => signinum_core::Colorspace::Ycck,
-        },
-        bit_depth: info.bit_depth,
-        tile_layout: None,
-        coded_unit_layout: Some(signinum_core::CodedUnitLayout {
-            unit_width: info.mcu_geometry.width,
-            unit_height: info.mcu_geometry.height,
-            units_x: info.mcu_geometry.columns,
-            units_y: info.mcu_geometry.rows,
-        }),
-        restart_interval: info.restart_interval.map(u32::from),
-        resolution_levels: 1,
-    }
 }
 
 fn convert_outcome(outcome: JpegDecodeOutcome) -> DecodeOutcome<CpuWarning> {
@@ -1780,22 +1753,6 @@ fn scaled_dims(full: (u32, u32), scale: Downscale) -> (u32, u32) {
         full.0.div_ceil(scale.denominator()),
         full.1.div_ceil(scale.denominator()),
     )
-}
-
-fn scaled_rect_covering(rect: Rect, scale: Downscale) -> Rect {
-    let denom = scale.denominator();
-    let x_end = rect.x + rect.w;
-    let y_end = rect.y + rect.h;
-    let x0 = rect.x / denom;
-    let y0 = rect.y / denom;
-    let x1 = x_end.div_ceil(denom);
-    let y1 = y_end.div_ceil(denom);
-    Rect {
-        x: x0,
-        y: y0,
-        w: x1.saturating_sub(x0),
-        h: y1.saturating_sub(y0),
-    }
 }
 
 pub(crate) fn upload_surface(
@@ -1850,39 +1807,6 @@ pub(crate) fn upload_surface(
         }
         BackendRequest::Cuda => Err(Error::UnsupportedBackend { request: backend }),
     }
-}
-
-fn copy_into_output(
-    src: &[u8],
-    dimensions: (u32, u32),
-    fmt: PixelFormat,
-    out: &mut [u8],
-    stride: usize,
-) -> Result<(), Error> {
-    let row_bytes = dimensions.0 as usize * fmt.bytes_per_pixel();
-    if stride < row_bytes {
-        return Err(BufferError::StrideTooSmall { row_bytes, stride }.into());
-    }
-    let required = if dimensions.1 == 0 {
-        0
-    } else {
-        stride * (dimensions.1 as usize - 1) + row_bytes
-    };
-    if out.len() < required {
-        return Err(BufferError::OutputTooSmall {
-            required,
-            have: out.len(),
-        }
-        .into());
-    }
-
-    for y in 0..dimensions.1 as usize {
-        let src_row = &src[y * row_bytes..(y + 1) * row_bytes];
-        let dst_start = y * stride;
-        out[dst_start..dst_start + row_bytes].copy_from_slice(src_row);
-    }
-
-    Ok(())
 }
 
 pub use signinum_jpeg::{

@@ -152,22 +152,6 @@ fn crop_bytes(full: &[u8], full_width: usize, bytes_per_pixel: usize, roi: Rect)
     out
 }
 
-fn scaled_rect_covering(rect: Rect, scale: Downscale) -> Rect {
-    let denom = scale.denominator();
-    let x_end = rect.x + rect.w;
-    let y_end = rect.y + rect.h;
-    let x0 = rect.x / denom;
-    let y0 = rect.y / denom;
-    let x1 = x_end.div_ceil(denom);
-    let y1 = y_end.div_ceil(denom);
-    Rect {
-        x: x0,
-        y: y0,
-        w: x1.saturating_sub(x0),
-        h: y1.saturating_sub(y0),
-    }
-}
-
 #[derive(Default)]
 struct CollectRowsU8 {
     rows: Vec<u8>,
@@ -421,7 +405,7 @@ fn decode_region_scaled_into_matches_cropping_scaled_decode_for_supported_format
         h: 3,
     };
     let scale = Downscale::Half;
-    let scaled_roi = scaled_rect_covering(roi, scale);
+    let scaled_roi = roi.scaled_covering(scale);
 
     let rgb8_pixels: Vec<u8> = (0_u8..48).collect();
     let rgb8_codestream = encode_codestream(&rgb8_pixels, 4, 4, 3, 8, true);
@@ -591,7 +575,7 @@ fn decode_region_scaled_htj2k_gray8_matches_cropping_scaled_decode() {
         h: 3,
     };
     let scale = Downscale::Half;
-    let scaled_roi = scaled_rect_covering(roi, scale);
+    let scaled_roi = roi.scaled_covering(scale);
 
     let mut scaled_decoder = J2kDecoder::new(&codestream).expect("scaled decoder");
     let mut scaled = vec![0_u8; 2 * 2];
@@ -815,7 +799,7 @@ fn tile_batch_region_scaled_decode_matches_decoder_region_scaled_decode() {
         h: 3,
     };
     let scale = Downscale::Half;
-    let scaled_roi = scaled_rect_covering(roi, scale);
+    let scaled_roi = roi.scaled_covering(scale);
     let stride = scaled_roi.w as usize * PixelFormat::Rgb8.bytes_per_pixel();
 
     let mut decoder = J2kDecoder::new(&codestream).expect("decoder");

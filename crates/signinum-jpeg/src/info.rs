@@ -297,6 +297,36 @@ pub struct Info {
     pub scan_count: u16,
 }
 
+impl Info {
+    pub fn to_core_info(&self) -> signinum_core::Info {
+        signinum_core::Info {
+            dimensions: self.dimensions,
+            components: self.sampling.len() as u8,
+            colorspace: core_colorspace(self.color_space),
+            bit_depth: self.bit_depth,
+            tile_layout: None,
+            coded_unit_layout: Some(signinum_core::CodedUnitLayout {
+                unit_width: self.mcu_geometry.width,
+                unit_height: self.mcu_geometry.height,
+                units_x: self.mcu_geometry.columns,
+                units_y: self.mcu_geometry.rows,
+            }),
+            restart_interval: self.restart_interval.map(u32::from),
+            resolution_levels: 1,
+        }
+    }
+}
+
+fn core_colorspace(color_space: ColorSpace) -> signinum_core::Colorspace {
+    match color_space {
+        ColorSpace::Grayscale => signinum_core::Colorspace::Grayscale,
+        ColorSpace::YCbCr => signinum_core::Colorspace::YCbCr,
+        ColorSpace::Rgb => signinum_core::Colorspace::Rgb,
+        ColorSpace::Cmyk => signinum_core::Colorspace::Cmyk,
+        ColorSpace::Ycck => signinum_core::Colorspace::Ycck,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -382,5 +412,83 @@ mod tests {
         assert_eq!(sampling.components(), &[(2, 2), (1, 1), (1, 1)]);
         assert_eq!(sampling.max_h, 2);
         assert_eq!(sampling.max_v, 2);
+    }
+
+    #[test]
+    fn info_to_core_info_preserves_metadata_for_device_adapters() {
+        let info = Info {
+            dimensions: (32, 16),
+            color_space: ColorSpace::YCbCr,
+            sampling: SamplingFactors::from_components(&[(2, 2), (1, 1), (1, 1)]),
+            sof_kind: SofKind::Baseline8,
+            bit_depth: 8,
+            restart_interval: Some(2),
+            mcu_geometry: McuGeometry {
+                width: 16,
+                height: 16,
+                columns: 2,
+                rows: 1,
+                count: 2,
+            },
+            scan_count: 1,
+        };
+
+        let core = info.to_core_info();
+
+        assert_eq!(core.dimensions, (32, 16));
+        assert_eq!(core.components, 3);
+        assert_eq!(core.colorspace, signinum_core::Colorspace::YCbCr);
+        assert_eq!(core.bit_depth, 8);
+        assert_eq!(core.tile_layout, None);
+        assert_eq!(
+            core.coded_unit_layout,
+            Some(signinum_core::CodedUnitLayout {
+                unit_width: 16,
+                unit_height: 16,
+                units_x: 2,
+                units_y: 1,
+            })
+        );
+        assert_eq!(core.restart_interval, Some(2));
+        assert_eq!(core.resolution_levels, 1);
+    }
+
+    #[test]
+    fn info_to_core_info_preserves_four_component_colorspaces() {
+        for (color_space, core_colorspace) in [
+            (ColorSpace::Cmyk, signinum_core::Colorspace::Cmyk),
+            (ColorSpace::Ycck, signinum_core::Colorspace::Ycck),
+        ] {
+            let info = Info {
+                dimensions: (64, 32),
+                color_space,
+                sampling: SamplingFactors::from_components(&[(1, 1), (1, 1), (1, 1), (1, 1)]),
+                sof_kind: SofKind::Baseline8,
+                bit_depth: 8,
+                restart_interval: None,
+                mcu_geometry: McuGeometry {
+                    width: 8,
+                    height: 8,
+                    columns: 8,
+                    rows: 4,
+                    count: 32,
+                },
+                scan_count: 1,
+            };
+
+            let core = info.to_core_info();
+
+            assert_eq!(core.components, 4);
+            assert_eq!(core.colorspace, core_colorspace);
+            assert_eq!(
+                core.coded_unit_layout,
+                Some(signinum_core::CodedUnitLayout {
+                    unit_width: 8,
+                    unit_height: 8,
+                    units_x: 8,
+                    units_y: 4,
+                })
+            );
+        }
     }
 }

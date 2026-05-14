@@ -6,6 +6,10 @@ use crate::{pixel::PixelFormat, sample::SampleType};
 pub enum BufferError {
     #[error("output buffer too small: required {required} bytes, have {have}")]
     OutputTooSmall { required: usize, have: usize },
+    #[error("input buffer too small: required {required} bytes, have {have}")]
+    InputTooSmall { required: usize, have: usize },
+    #[error("buffer size overflow while computing {what}")]
+    SizeOverflow { what: &'static str },
     #[error("stride {stride} is smaller than row width {row_bytes}")]
     StrideTooSmall { row_bytes: usize, stride: usize },
     #[error("stride {stride} is not aligned to {align}")]

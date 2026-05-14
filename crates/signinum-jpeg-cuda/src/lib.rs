@@ -13,10 +13,10 @@
 mod profile;
 
 use signinum_core::{
-    BackendKind, BackendRequest, BufferError, CodecError, DecodeOutcome, DeviceSubmission,
-    DeviceSurface, Downscale, ImageCodec, ImageDecode, ImageDecodeDevice, ImageDecodeSubmit,
-    PixelFormat, ReadySubmission, Rect, TileBatchDecodeDevice, TileBatchDecodeManyDevice,
-    TileBatchDecodeSubmit,
+    copy_tight_pixels_to_strided_output, BackendKind, BackendRequest, BufferError, CodecError,
+    DecodeOutcome, DeviceSubmission, DeviceSurface, Downscale, ImageCodec, ImageDecode,
+    ImageDecodeDevice, ImageDecodeSubmit, PixelFormat, ReadySubmission, Rect,
+    TileBatchDecodeDevice, TileBatchDecodeManyDevice, TileBatchDecodeSubmit,
 };
 #[cfg(feature = "cuda-runtime")]
 use signinum_cuda_runtime::{CudaContext, CudaDeviceBuffer, CudaError};
@@ -25,9 +25,8 @@ use signinum_jpeg::adapter::decoder_bytes;
 use signinum_jpeg::{
     decode_tile_into_in_context, decode_tile_region_into_in_context,
     decode_tile_region_scaled_into_in_context, decode_tile_scaled_into_in_context,
-    ColorSpace as JpegColorSpace, DecodeOutcome as JpegDecodeOutcome, Decoder as CpuDecoder,
-    DecoderContext as CpuDecoderContext, JpegError, JpegView, Rect as JpegRect,
-    ScratchPool as CpuScratchPool, Warning as CpuWarning,
+    DecodeOutcome as JpegDecodeOutcome, Decoder as CpuDecoder, DecoderContext as CpuDecoderContext,
+    JpegError, JpegView, Rect as JpegRect, ScratchPool as CpuScratchPool, Warning as CpuWarning,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -151,12 +150,16 @@ impl Surface {
 
     pub fn download_into(&self, out: &mut [u8], stride: usize) -> Result<(), Error> {
         match &self.storage {
-            Storage::Host(bytes) => copy_into_output(bytes, self.dimensions, self.fmt, out, stride),
+            Storage::Host(bytes) => {
+                copy_tight_pixels_to_strided_output(bytes, self.dimensions, self.fmt, out, stride)
+                    .map_err(Error::from)
+            }
             #[cfg(feature = "cuda-runtime")]
             Storage::Cuda(buffer) => {
                 let mut tight = vec![0u8; self.byte_len()];
                 buffer.copy_to_host(&mut tight).map_err(cuda_error)?;
-                copy_into_output(&tight, self.dimensions, self.fmt, out, stride)
+                copy_tight_pixels_to_strided_output(&tight, self.dimensions, self.fmt, out, stride)
+                    .map_err(Error::from)
             }
         }
     }
@@ -462,7 +465,7 @@ impl<'a> ImageDecode<'a> for Decoder<'a> {
     type View = JpegView<'a>;
 
     fn inspect(input: &'a [u8]) -> Result<signinum_core::Info, Self::Error> {
-        Ok(convert_info(&CpuDecoder::inspect(input)?))
+        Ok(CpuDecoder::inspect(input)?.to_core_info())
     }
 
     fn parse(input: &'a [u8]) -> Result<Self::View, Self::Error> {
@@ -1142,34 +1145,6 @@ fn try_decode_tiles_nvjpeg_batch(
     Ok(None)
 }
 
-fn convert_info(info: &signinum_jpeg::Info) -> signinum_core::Info {
-    signinum_core::Info {
-        dimensions: info.dimensions,
-        components: match info.color_space {
-            JpegColorSpace::Grayscale => 1,
-            JpegColorSpace::YCbCr | JpegColorSpace::Rgb => 3,
-            JpegColorSpace::Cmyk | JpegColorSpace::Ycck => 4,
-        },
-        colorspace: match info.color_space {
-            JpegColorSpace::Grayscale => signinum_core::Colorspace::Grayscale,
-            JpegColorSpace::YCbCr => signinum_core::Colorspace::YCbCr,
-            JpegColorSpace::Rgb => signinum_core::Colorspace::Rgb,
-            JpegColorSpace::Cmyk => signinum_core::Colorspace::Cmyk,
-            JpegColorSpace::Ycck => signinum_core::Colorspace::Ycck,
-        },
-        bit_depth: info.bit_depth,
-        tile_layout: None,
-        coded_unit_layout: Some(signinum_core::CodedUnitLayout {
-            unit_width: info.mcu_geometry.width,
-            unit_height: info.mcu_geometry.height,
-            units_x: info.mcu_geometry.columns,
-            units_y: info.mcu_geometry.rows,
-        }),
-        restart_interval: info.restart_interval.map(u32::from),
-        resolution_levels: 1,
-    }
-}
-
 fn convert_outcome(outcome: JpegDecodeOutcome) -> DecodeOutcome<CpuWarning> {
     DecodeOutcome {
         decoded: Rect {
@@ -1327,37 +1302,6 @@ fn cuda_error(error: CudaError) -> Error {
             message: other.to_string(),
         },
     }
-}
-
-fn copy_into_output(
-    src: &[u8],
-    dimensions: (u32, u32),
-    fmt: PixelFormat,
-    out: &mut [u8],
-    stride: usize,
-) -> Result<(), Error> {
-    let row_bytes = dimensions.0 as usize * fmt.bytes_per_pixel();
-    if stride < row_bytes {
-        return Err(BufferError::StrideTooSmall { row_bytes, stride }.into());
-    }
-    let required = if dimensions.1 == 0 {
-        0
-    } else {
-        stride * (dimensions.1 as usize - 1) + row_bytes
-    };
-    if out.len() < required {
-        return Err(BufferError::OutputTooSmall {
-            required,
-            have: out.len(),
-        }
-        .into());
-    }
-    for y in 0..dimensions.1 as usize {
-        let src_row = &src[y * row_bytes..(y + 1) * row_bytes];
-        let dst_start = y * stride;
-        out[dst_start..dst_start + row_bytes].copy_from_slice(src_row);
-    }
-    Ok(())
 }
 
 pub use signinum_jpeg::{DecoderContext, ScratchPool};

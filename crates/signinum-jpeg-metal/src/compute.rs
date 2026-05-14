@@ -2896,7 +2896,7 @@ fn encode_fast420_scaled_region_batch_item(
             message: format!("unsupported JPEG Metal fast420 scale {scale:?}"),
         });
     };
-    let scaled_roi = scaled_rect_covering(roi, scale);
+    let scaled_roi = roi.scaled_covering(scale);
     let scaled_roi = signinum_jpeg::Rect {
         x: scaled_roi.x,
         y: scaled_roi.y,
@@ -3750,7 +3750,7 @@ fn encode_fast422_scaled_region_batch_item(
             message: format!("unsupported JPEG Metal fast422 scale {scale:?}"),
         });
     };
-    let scaled_roi = scaled_rect_covering(roi, scale);
+    let scaled_roi = roi.scaled_covering(scale);
     let scaled_roi = signinum_jpeg::Rect {
         x: scaled_roi.x,
         y: scaled_roi.y,
@@ -4242,7 +4242,7 @@ fn encode_fast444_scaled_region_batch_item(
     roi: Rect,
     scale: signinum_core::Downscale,
 ) -> Result<BatchedDecodeItem, Error> {
-    let scaled_roi = scaled_rect_covering(roi, scale);
+    let scaled_roi = roi.scaled_covering(scale);
     let scaled_roi = signinum_jpeg::Rect {
         x: scaled_roi.x,
         y: scaled_roi.y,
@@ -4733,7 +4733,7 @@ fn fast420_region_scaled_batch_plan(
     segment_count: u32,
 ) -> Option<RegionScaledBatchPlan> {
     let full_params = fast420_scaled_params(packet, scale)?;
-    let scaled_roi = scaled_rect_covering(roi, scale);
+    let scaled_roi = roi.scaled_covering(scale);
     let scaled_roi = signinum_jpeg::Rect {
         x: scaled_roi.x,
         y: scaled_roi.y,
@@ -4803,7 +4803,7 @@ fn fast422_region_scaled_batch_plan(
     segment_count: u32,
 ) -> Option<RegionScaledBatchPlan> {
     let full_params = fast422_scaled_params(packet, scale)?;
-    let scaled_roi = scaled_rect_covering(roi, scale);
+    let scaled_roi = roi.scaled_covering(scale);
     let scaled_roi = signinum_jpeg::Rect {
         x: scaled_roi.x,
         y: scaled_roi.y,
@@ -5629,7 +5629,7 @@ fn try_decode_fast444_region_scaled_rgb_batch_to_surfaces(
         return Ok(None);
     }
 
-    let first_scaled = scaled_rect_covering(first_roi, first_scale);
+    let first_scaled = first_roi.scaled_covering(first_scale);
     let first_scaled_roi = signinum_jpeg::Rect {
         x: first_scaled.x,
         y: first_scaled.y,
@@ -5666,7 +5666,7 @@ fn try_decode_fast444_region_scaled_rgb_batch_to_surfaces(
         {
             return Ok(None);
         }
-        let scaled = scaled_rect_covering(roi, scale);
+        let scaled = roi.scaled_covering(scale);
         let scaled_roi = signinum_jpeg::Rect {
             x: scaled.x,
             y: scaled.y,
@@ -6335,7 +6335,7 @@ fn decode_region_scaled_packet_surface(
             message: "JPEG Metal expected a region scaled batch request".to_string(),
         });
     };
-    let scaled = scaled_rect_covering(roi, scale);
+    let scaled = roi.scaled_covering(scale);
     let scaled_roi = signinum_jpeg::Rect {
         x: scaled.x,
         y: scaled.y,
@@ -8514,23 +8514,6 @@ fn try_decode_fast444_scaled_region_to_surface(
 }
 
 #[cfg(target_os = "macos")]
-fn scaled_rect_covering(rect: Rect, scale: signinum_core::Downscale) -> Rect {
-    let denom = scale.denominator();
-    let x_end = rect.x + rect.w;
-    let y_end = rect.y + rect.h;
-    let x0 = rect.x / denom;
-    let y0 = rect.y / denom;
-    let x1 = x_end.div_ceil(denom);
-    let y1 = y_end.div_ceil(denom);
-    Rect {
-        x: x0,
-        y: y0,
-        w: x1.saturating_sub(x0),
-        h: y1.saturating_sub(y0),
-    }
-}
-
-#[cfg(target_os = "macos")]
 pub(crate) fn decode_to_surface(
     decoder: &CpuDecoder<'_>,
     pool: &mut signinum_jpeg::ScratchPool,
@@ -8712,15 +8695,13 @@ pub(crate) fn decode_scaled_to_surface(
             w: full.0,
             h: full.1,
         };
-        let scaled = scaled_rect_covering(
-            Rect {
-                x: 0,
-                y: 0,
-                w: full.0,
-                h: full.1,
-            },
-            scale,
-        );
+        let scaled = (Rect {
+            x: 0,
+            y: 0,
+            w: full.0,
+            h: full.1,
+        })
+        .scaled_covering(scale);
         let mut stage = cached_plane_stage(
             &runtime.device,
             decoder.info().color_space,
@@ -8744,15 +8725,13 @@ pub(crate) fn decode_region_scaled_to_surface(
     fast420_packet: Option<&JpegMetalFast420PacketV1>,
 ) -> Result<Surface, Error> {
     with_runtime(|runtime| {
-        let scaled_roi = scaled_rect_covering(
-            Rect {
-                x: roi.x,
-                y: roi.y,
-                w: roi.w,
-                h: roi.h,
-            },
-            scale,
-        );
+        let scaled_roi = (Rect {
+            x: roi.x,
+            y: roi.y,
+            w: roi.w,
+            h: roi.h,
+        })
+        .scaled_covering(scale);
         if let Some(surface) = try_decode_fast444_scaled_region_to_surface(
             runtime,
             decoder,
@@ -8797,15 +8776,13 @@ pub(crate) fn decode_region_scaled_to_surface(
         )? {
             return Ok(surface);
         }
-        let scaled = scaled_rect_covering(
-            Rect {
-                x: roi.x,
-                y: roi.y,
-                w: roi.w,
-                h: roi.h,
-            },
-            scale,
-        );
+        let scaled = (Rect {
+            x: roi.x,
+            y: roi.y,
+            w: roi.w,
+            h: roi.h,
+        })
+        .scaled_covering(scale);
         let mut stage = cached_plane_stage(
             &runtime.device,
             decoder.info().color_space,
@@ -8828,7 +8805,7 @@ pub(crate) fn compose_rgb_viewport_from_regions(
         let mut stage =
             cached_plane_stage(&runtime.device, decoder.info().color_space, viewport_dims)?;
         for tile in tiles {
-            let dims = scaled_rect_covering(tile.source_roi, scale);
+            let dims = tile.source_roi.scaled_covering(scale);
             if (dims.w, dims.h) != (tile.dest.w, tile.dest.h) {
                 return Err(Error::MetalKernel {
                     message: format!(
@@ -9541,7 +9518,7 @@ mod tests {
                 scale,
             )
             .expect("cpu region scaled");
-        let scaled = scaled_rect_covering(roi, scale);
+        let scaled = roi.scaled_covering(scale);
 
         let results = decode_full_batch_to_surfaces(&requests)
             .expect("batch result")
@@ -9911,7 +9888,7 @@ mod tests {
                 scale,
             )
             .expect("cpu region scaled");
-        let scaled = scaled_rect_covering(roi, scale);
+        let scaled = roi.scaled_covering(scale);
 
         let results = decode_full_batch_to_surfaces(&requests)
             .expect("batch result")
@@ -10170,7 +10147,7 @@ mod tests {
                 scale,
             )
             .expect("cpu region scaled");
-        let scaled = scaled_rect_covering(roi, scale);
+        let scaled = roi.scaled_covering(scale);
 
         let results = decode_full_batch_to_surfaces(&requests)
             .expect("batch result")

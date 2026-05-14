@@ -10,9 +10,7 @@ use alloc::vec::Vec;
 
 use super::bitplane::{BitPlaneDecodeBuffers, BitPlaneDecodeContext};
 use super::build::{CodeBlock, Decomposition, Layer, Precinct, Segment, SubBand, SubBandType};
-use super::codestream::{
-    ComponentInfo, Header, ProgressionOrder, QuantizationStyle, WaveletTransform,
-};
+use super::codestream::{ComponentInfo, Header, ProgressionOrder, QuantizationStyle};
 use super::ht_block_decode::{self, HtBlockDecodeContext};
 use super::idwt::IDWTOutput;
 use super::progression::{
@@ -290,7 +288,7 @@ pub(crate) fn build_direct_color_plan<'a>(
         ),
         bit_depths,
         mct: tile.mct,
-        transform: external_transform(transform),
+        transform: J2kWaveletTransform::from(transform),
         component_plans,
     })
 }
@@ -364,19 +362,19 @@ fn build_component_plan_from_storage(
             .ok_or(DecodingError::CodeBlockDecodeFailure)?;
         steps.push(J2kDirectGrayscaleStep::Idwt(J2kDirectIdwtStep {
             output_band_id,
-            rect: external_rect(decomposition.rect),
-            transform: external_transform(component_info.wavelet_transform()),
+            rect: J2kRect::from(decomposition.rect),
+            transform: J2kWaveletTransform::from(component_info.wavelet_transform()),
             ll_band_id: current_ll_band_id,
-            ll: external_rect(current_ll_rect),
+            ll: J2kRect::from(current_ll_rect),
             hl_band_id: sub_band_ids[decomposition.sub_bands[0]]
                 .ok_or(DecodingError::CodeBlockDecodeFailure)?,
-            hl: external_rect(hl.rect),
+            hl: J2kRect::from(hl.rect),
             lh_band_id: sub_band_ids[decomposition.sub_bands[1]]
                 .ok_or(DecodingError::CodeBlockDecodeFailure)?,
-            lh: external_rect(lh.rect),
+            lh: J2kRect::from(lh.rect),
             hh_band_id: sub_band_ids[decomposition.sub_bands[2]]
                 .ok_or(DecodingError::CodeBlockDecodeFailure)?,
-            hh: external_rect(hh.rect),
+            hh: J2kRect::from(hh.rect),
         }));
         current_ll_rect = decomposition.rect;
         current_ll_band_id = output_band_id;
@@ -403,7 +401,7 @@ fn build_component_plan_from_storage(
     let output_y = resolution_tile.rect.y0.saturating_sub(image_y_offset);
     steps.push(J2kDirectGrayscaleStep::Store(J2kDirectStoreStep {
         input_band_id: current_ll_band_id,
-        input_rect: external_rect(current_ll_rect),
+        input_rect: J2kRect::from(current_ll_rect),
         source_x,
         source_y,
         copy_width,
@@ -534,7 +532,7 @@ fn build_grayscale_sub_band_step(
         return Ok(Some(J2kDirectGrayscaleStep::HtSubBand(
             HtOwnedSubBandPlan {
                 band_id,
-                rect: external_rect(sub_band.rect),
+                rect: J2kRect::from(sub_band.rect),
                 width: sub_band.rect.width(),
                 height: sub_band.rect.height(),
                 jobs,
@@ -614,28 +612,12 @@ fn build_grayscale_sub_band_step(
     Ok(Some(J2kDirectGrayscaleStep::ClassicSubBand(
         J2kOwnedSubBandPlan {
             band_id,
-            rect: external_rect(sub_band.rect),
+            rect: J2kRect::from(sub_band.rect),
             width: sub_band.rect.width(),
             height: sub_band.rect.height(),
             jobs,
         },
     )))
-}
-
-fn external_rect(rect: super::rect::IntRect) -> J2kRect {
-    J2kRect {
-        x0: rect.x0,
-        y0: rect.y0,
-        x1: rect.x1,
-        y1: rect.y1,
-    }
-}
-
-fn external_transform(transform: WaveletTransform) -> J2kWaveletTransform {
-    match transform {
-        WaveletTransform::Reversible53 => J2kWaveletTransform::Reversible53,
-        WaveletTransform::Irreversible97 => J2kWaveletTransform::Irreversible97,
-    }
 }
 
 fn collect_classic_code_block_data(

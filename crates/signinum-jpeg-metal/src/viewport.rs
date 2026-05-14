@@ -59,7 +59,7 @@ pub fn is_contiguous_viewport_workload(workload: &ViewportWorkload) -> bool {
     }
 
     let source = viewport_source_bounds(workload);
-    let scaled_source = scaled_rect_covering(source, workload.scale);
+    let scaled_source = source.scaled_covering(workload.scale);
     if (scaled_source.w, scaled_source.h) != workload.viewport_dims {
         return false;
     }
@@ -68,7 +68,7 @@ pub fn is_contiguous_viewport_workload(workload: &ViewportWorkload) -> bool {
     let mut area_sum = 0u64;
 
     for tile in &workload.tiles {
-        let scaled_tile = scaled_rect_covering(tile.source_roi, workload.scale);
+        let scaled_tile = tile.source_roi.scaled_covering(workload.scale);
         let expected = Rect {
             x: scaled_tile.x.saturating_sub(scaled_source.x),
             y: scaled_tile.y.saturating_sub(scaled_source.y),
@@ -245,7 +245,7 @@ pub fn suggest_viewport_workload(dimensions: (u32, u32)) -> Option<ViewportWorkl
             w: viewport_dims.0.saturating_mul(denom),
             h: viewport_dims.1.saturating_mul(denom),
         };
-        let scaled_source = scaled_rect_covering(source_viewport, scale);
+        let scaled_source = source_viewport.scaled_covering(scale);
         if (scaled_source.w, scaled_source.h) != viewport_dims {
             continue;
         }
@@ -293,7 +293,7 @@ pub fn compose_viewport_cpu(
     let mut viewport = vec![0u8; viewport_stride * viewport_dims.1 as usize];
 
     for tile in tiles {
-        let scaled = scaled_rect_covering(tile.source_roi, scale);
+        let scaled = tile.source_roi.scaled_covering(scale);
         let tile_dims = (scaled.w, scaled.h);
         if tile_dims != (tile.dest.w, tile.dest.h) {
             return Err(Error::MetalKernel {
@@ -520,22 +520,6 @@ fn viewport_origin(full_extent: u32, viewport_extent: u32, align: u32) -> Option
 
     let centered = (full_extent - viewport_extent) / 2;
     Some(centered - centered % align)
-}
-
-fn scaled_rect_covering(rect: Rect, scale: Downscale) -> Rect {
-    let denom = scale.denominator();
-    let x_end = rect.x + rect.w;
-    let y_end = rect.y + rect.h;
-    let x0 = rect.x / denom;
-    let y0 = rect.y / denom;
-    let x1 = x_end.div_ceil(denom);
-    let y1 = y_end.div_ceil(denom);
-    Rect {
-        x: x0,
-        y: y0,
-        w: x1.saturating_sub(x0),
-        h: y1.saturating_sub(y0),
-    }
 }
 
 fn to_jpeg_rect(rect: Rect) -> JpegRect {

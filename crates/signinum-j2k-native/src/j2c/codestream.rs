@@ -288,6 +288,24 @@ impl ComponentInfo {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::J2kWaveletTransform;
+
+    #[test]
+    fn wavelet_transform_converts_to_external_selector() {
+        assert_eq!(
+            J2kWaveletTransform::from(WaveletTransform::Reversible53),
+            J2kWaveletTransform::Reversible53
+        );
+        assert_eq!(
+            J2kWaveletTransform::from(WaveletTransform::Irreversible97),
+            J2kWaveletTransform::Irreversible97
+        );
+    }
+}
+
 /// Progression order (Table A.16).
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ProgressionOrder {
@@ -324,6 +342,15 @@ impl WaveletTransform {
             0 => Ok(Self::Irreversible97),
             1 => Ok(Self::Reversible53),
             _ => err!(ValidationError::InvalidTransformation),
+        }
+    }
+}
+
+impl From<WaveletTransform> for crate::J2kWaveletTransform {
+    fn from(transform: WaveletTransform) -> Self {
+        match transform {
+            WaveletTransform::Reversible53 => Self::Reversible53,
+            WaveletTransform::Irreversible97 => Self::Irreversible97,
         }
     }
 }

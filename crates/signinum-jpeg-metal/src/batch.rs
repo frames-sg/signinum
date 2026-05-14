@@ -125,7 +125,7 @@ impl QueuedRequest {
                 },
                 BatchOp::Scaled(scale) => BatchKind::Scaled { scale },
                 BatchOp::RegionScaled { roi, scale } => {
-                    let scaled = scaled_rect_covering(roi, scale);
+                    let scaled = roi.scaled_covering(scale);
                     BatchKind::RegionScaled {
                         dims: (scaled.w, scaled.h),
                         scale,
@@ -134,22 +134,6 @@ impl QueuedRequest {
             },
             shape: session.resolve_batch_shape(&self.input, self.backend)?,
         })
-    }
-}
-
-fn scaled_rect_covering(rect: Rect, scale: Downscale) -> Rect {
-    let denom = scale.denominator();
-    let x_end = rect.x + rect.w;
-    let y_end = rect.y + rect.h;
-    let x0 = rect.x / denom;
-    let y0 = rect.y / denom;
-    let x1 = x_end.div_ceil(denom);
-    let y1 = y_end.div_ceil(denom);
-    Rect {
-        x: x0,
-        y: y0,
-        w: x1.saturating_sub(x0),
-        h: y1.saturating_sub(y0),
     }
 }
 

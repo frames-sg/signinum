@@ -75,3 +75,30 @@ impl IntRect {
         self.x0 < other.x1 && other.x0 < self.x1 && self.y0 < other.y1 && other.y0 < self.y1
     }
 }
+
+impl From<IntRect> for crate::J2kRect {
+    fn from(rect: IntRect) -> Self {
+        Self {
+            x0: rect.x0,
+            y0: rect.y0,
+            x1: rect.x1,
+            y1: rect.y1,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::J2kRect;
+
+    #[test]
+    fn int_rect_converts_to_external_j2k_rect() {
+        let rect = J2kRect::from(IntRect::from_ltrb(3, 5, 11, 17));
+
+        assert_eq!(rect.x0, 3);
+        assert_eq!(rect.y0, 5);
+        assert_eq!(rect.x1, 11);
+        assert_eq!(rect.y1, 17);
+    }
+}

@@ -25,22 +25,6 @@ fn encode_codestream(
     .expect("encode")
 }
 
-fn scaled_rect_covering(rect: Rect, scale: Downscale) -> Rect {
-    let denom = scale.denominator();
-    let x_end = rect.x + rect.w;
-    let y_end = rect.y + rect.h;
-    let x0 = rect.x / denom;
-    let y0 = rect.y / denom;
-    let x1 = x_end.div_ceil(denom);
-    let y1 = y_end.div_ceil(denom);
-    Rect {
-        x: x0,
-        y: y0,
-        w: x1.saturating_sub(x0),
-        h: y1.saturating_sub(y0),
-    }
-}
-
 fn rgb_fixture() -> Vec<u8> {
     let pixels = (0_u8..48).collect::<Vec<_>>();
     encode_codestream(&pixels, 4, 4, 3, 8)
@@ -167,7 +151,7 @@ fn production_batch_region_scaled_decode_parallel_preserves_order_and_output() {
         h: 3,
     };
     let scale = Downscale::Half;
-    let scaled_roi = scaled_rect_covering(roi, scale);
+    let scaled_roi = roi.scaled_covering(scale);
     let stride = scaled_roi.w as usize * PixelFormat::Rgb8.bytes_per_pixel();
 
     let mut decoder = J2kDecoder::new(&codestream).expect("decoder");

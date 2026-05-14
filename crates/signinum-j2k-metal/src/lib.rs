@@ -28,10 +28,10 @@ use std::{
 };
 
 use signinum_core::{
-    BackendKind, BackendRequest, BufferError, CodecError, DecodeOutcome, DeviceSubmission,
-    DeviceSurface, Downscale, ImageCodec, ImageDecode, ImageDecodeDevice, ImageDecodeSubmit,
-    PixelFormat, ReadySubmission, Rect, TileBatchDecodeDevice, TileBatchDecodeManyDevice,
-    TileBatchDecodeSubmit,
+    copy_tight_pixels_to_strided_output, BackendKind, BackendRequest, BufferError, CodecError,
+    DecodeOutcome, DeviceSubmission, DeviceSurface, Downscale, ImageCodec, ImageDecode,
+    ImageDecodeDevice, ImageDecodeSubmit, PixelFormat, ReadySubmission, Rect,
+    TileBatchDecodeDevice, TileBatchDecodeManyDevice, TileBatchDecodeSubmit,
 };
 use signinum_j2k::{
     adapter::device_plan::{DeviceDecodePlan, DeviceDecodeRequest},
@@ -202,7 +202,8 @@ impl Surface {
     }
 
     pub fn download_into(&self, out: &mut [u8], stride: usize) -> Result<(), Error> {
-        copy_into_output(self.as_bytes(), self.dimensions, self.fmt, out, stride)
+        copy_tight_pixels_to_strided_output(self.as_bytes(), self.dimensions, self.fmt, out, stride)
+            .map_err(Error::from)
     }
 
     #[cfg(target_os = "macos")]
@@ -2280,39 +2281,6 @@ fn upload_surface_to_metal_with_device(
         byte_offset: 0,
         storage: Storage::Metal(buffer),
     }
-}
-
-fn copy_into_output(
-    src: &[u8],
-    dimensions: (u32, u32),
-    fmt: PixelFormat,
-    out: &mut [u8],
-    stride: usize,
-) -> Result<(), Error> {
-    let row_bytes = dimensions.0 as usize * fmt.bytes_per_pixel();
-    if stride < row_bytes {
-        return Err(BufferError::StrideTooSmall { row_bytes, stride }.into());
-    }
-    let required = if dimensions.1 == 0 {
-        0
-    } else {
-        stride * (dimensions.1 as usize - 1) + row_bytes
-    };
-    if out.len() < required {
-        return Err(BufferError::OutputTooSmall {
-            required,
-            have: out.len(),
-        }
-        .into());
-    }
-
-    for y in 0..dimensions.1 as usize {
-        let src_row = &src[y * row_bytes..(y + 1) * row_bytes];
-        let dst_start = y * stride;
-        out[dst_start..dst_start + row_bytes].copy_from_slice(src_row);
-    }
-
-    Ok(())
 }
 
 pub use signinum_j2k::{J2kContext, J2kScratchPool};

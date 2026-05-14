@@ -417,24 +417,6 @@ fn apply_level(
     }
 }
 
-#[inline(always)]
-fn external_rect(rect: IntRect) -> J2kRect {
-    J2kRect {
-        x0: rect.x0,
-        y0: rect.y0,
-        x1: rect.x1,
-        y1: rect.y1,
-    }
-}
-
-#[inline(always)]
-fn external_transform(transform: WaveletTransform) -> J2kWaveletTransform {
-    match transform {
-        WaveletTransform::Reversible53 => J2kWaveletTransform::Reversible53,
-        WaveletTransform::Irreversible97 => J2kWaveletTransform::Irreversible97,
-    }
-}
-
 #[derive(Clone, Copy)]
 struct IDWTInput<'a> {
     rect: IntRect,
@@ -464,22 +446,22 @@ fn single_decomposition_job<'a>(
     let lh = &storage.sub_bands[decomposition.sub_bands[1]];
     let hh = &storage.sub_bands[decomposition.sub_bands[2]];
     J2kSingleDecompositionIdwtJob {
-        rect: external_rect(decomposition.rect),
-        transform: external_transform(transform),
+        rect: J2kRect::from(decomposition.rect),
+        transform: J2kWaveletTransform::from(transform),
         ll: J2kIdwtBand {
-            rect: external_rect(input.rect),
+            rect: J2kRect::from(input.rect),
             coefficients: input.coefficients,
         },
         hl: J2kIdwtBand {
-            rect: external_rect(hl.rect),
+            rect: J2kRect::from(hl.rect),
             coefficients: &storage.coefficients[hl.coefficients.clone()],
         },
         lh: J2kIdwtBand {
-            rect: external_rect(lh.rect),
+            rect: J2kRect::from(lh.rect),
             coefficients: &storage.coefficients[lh.coefficients.clone()],
         },
         hh: J2kIdwtBand {
-            rect: external_rect(hh.rect),
+            rect: J2kRect::from(hh.rect),
             coefficients: &storage.coefficients[hh.coefficients.clone()],
         },
     }

@@ -1,8 +1,9 @@
 use signinum_core::{
-    BackendCapabilities, BackendKind, BackendRequest, CodecContext, CodecError, CpuFeatures,
-    DecoderContext, DeviceSubmission, DeviceSurface, Downscale, ImageCodec, PassthroughCandidate,
-    PassthroughDecision, PassthroughRejectReason, PassthroughRequirements, PixelFormat,
-    PixelLayout, ReadySubmission, Rect, SampleType, ScratchPool, TileBatchDecodeManyDevice,
+    copy_tight_pixels_to_strided_output, BackendCapabilities, BackendKind, BackendRequest,
+    BufferError, CodecContext, CodecError, CpuFeatures, DecoderContext, DeviceSubmission,
+    DeviceSurface, Downscale, ImageCodec, PassthroughCandidate, PassthroughDecision,
+    PassthroughRejectReason, PassthroughRequirements, PixelFormat, PixelLayout, ReadySubmission,
+    Rect, SampleType, ScratchPool, TileBatchDecodeManyDevice,
 };
 use signinum_core::{
     CodedUnitLayout, Colorspace, CompressedPayloadKind, CompressedTransferSyntax, Info, TileLayout,
@@ -63,6 +64,130 @@ fn rect_full_and_is_within_match_existing_jpeg_behavior() {
         h: 100,
     }
     .is_within((640, 480)));
+}
+
+#[test]
+fn copy_tight_pixels_to_strided_output_copies_exact_rows() {
+    let src = [1, 2, 3, 4, 5, 6];
+    let mut out = [0; 6];
+
+    copy_tight_pixels_to_strided_output(&src, (2, 1), PixelFormat::Rgb8, &mut out, 6)
+        .expect("copy exact rows");
+
+    assert_eq!(out, src);
+}
+
+#[test]
+fn copy_tight_pixels_to_strided_output_preserves_row_padding() {
+    let src = [1, 2, 3, 4, 5, 6, 7, 8];
+    let mut out = [0xee; 12];
+
+    copy_tight_pixels_to_strided_output(&src, (2, 2), PixelFormat::Gray16, &mut out, 6)
+        .expect("copy padded rows");
+
+    assert_eq!(out, [1, 2, 3, 4, 0xee, 0xee, 5, 6, 7, 8, 0xee, 0xee]);
+}
+
+#[test]
+fn copy_tight_pixels_to_strided_output_accepts_empty_height() {
+    let mut out = [0xee; 2];
+
+    copy_tight_pixels_to_strided_output(&[], (3, 0), PixelFormat::Rgba8, &mut out, 0)
+        .expect("copy zero rows");
+
+    assert_eq!(out, [0xee, 0xee]);
+}
+
+#[test]
+fn copy_tight_pixels_to_strided_output_accepts_empty_width() {
+    let mut out = [0xee; 2];
+
+    copy_tight_pixels_to_strided_output(&[], (0, 3), PixelFormat::Rgba8, &mut out, 0)
+        .expect("copy zero-width rows");
+
+    assert_eq!(out, [0xee, 0xee]);
+}
+
+#[test]
+fn copy_tight_pixels_to_strided_output_rejects_short_source() {
+    let mut out = [0; 6];
+
+    let err = copy_tight_pixels_to_strided_output(
+        &[1, 2, 3, 4, 5],
+        (2, 1),
+        PixelFormat::Rgb8,
+        &mut out,
+        6,
+    )
+    .expect_err("source too small");
+
+    assert_eq!(
+        err,
+        BufferError::InputTooSmall {
+            required: 6,
+            have: 5,
+        }
+    );
+}
+
+#[test]
+fn copy_tight_pixels_to_strided_output_rejects_small_stride() {
+    let mut out = [0; 6];
+
+    let err = copy_tight_pixels_to_strided_output(
+        &[1, 2, 3, 4, 5, 6],
+        (2, 1),
+        PixelFormat::Rgb8,
+        &mut out,
+        5,
+    )
+    .expect_err("stride too small");
+
+    assert_eq!(
+        err,
+        BufferError::StrideTooSmall {
+            row_bytes: 6,
+            stride: 5,
+        }
+    );
+}
+
+#[test]
+fn copy_tight_pixels_to_strided_output_rejects_small_output() {
+    let src = [1, 2, 3, 4, 5, 6, 7, 8];
+    let mut out = [0; 9];
+
+    let err = copy_tight_pixels_to_strided_output(&src, (2, 2), PixelFormat::Gray16, &mut out, 6)
+        .expect_err("output too small");
+
+    assert_eq!(
+        err,
+        BufferError::OutputTooSmall {
+            required: 10,
+            have: 9,
+        }
+    );
+}
+
+#[test]
+fn copy_tight_pixels_to_strided_output_rejects_strided_output_overflow() {
+    let mut out = [];
+
+    let err = copy_tight_pixels_to_strided_output(
+        &[1, 2],
+        (1, 2),
+        PixelFormat::Gray8,
+        &mut out,
+        usize::MAX,
+    )
+    .expect_err("strided output overflows");
+
+    assert_eq!(
+        err,
+        BufferError::SizeOverflow {
+            what: "strided output size",
+        }
+    );
 }
 
 #[test]

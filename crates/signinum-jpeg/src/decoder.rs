@@ -34,10 +34,9 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 use core::num::NonZeroUsize;
 use signinum_core::{
-    Colorspace as CoreColorspace, CompressedPayloadKind, CompressedTransferSyntax,
-    DecodeOutcome as CoreDecodeOutcome, DecodeRowsError, DecoderContext as CoreDecoderContext,
-    Downscale, ImageCodec, ImageDecode, ImageDecodeRows, PassthroughCandidate, PixelFormat,
-    RowSink, TileBatchDecode,
+    CompressedPayloadKind, CompressedTransferSyntax, DecodeOutcome as CoreDecodeOutcome,
+    DecodeRowsError, DecoderContext as CoreDecoderContext, Downscale, ImageCodec, ImageDecode,
+    ImageDecodeRows, PassthroughCandidate, PixelFormat, RowSink, TileBatchDecode,
 };
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -208,7 +207,7 @@ impl<'a> JpegView<'a> {
                 self.bytes,
                 transfer_syntax,
                 CompressedPayloadKind::JpegInterchange,
-                core_info(&self.info),
+                self.info.to_core_info(),
             )
         })
     }
@@ -645,7 +644,7 @@ impl<'a> Decoder<'a> {
                 self.bytes,
                 transfer_syntax,
                 CompressedPayloadKind::JpegInterchange,
-                core_info(&self.info),
+                self.info.to_core_info(),
             )
         })
     }
@@ -2138,16 +2137,6 @@ fn merged_warnings(header_warnings: &[Warning], scan_warnings: Vec<Warning>) -> 
     warnings
 }
 
-fn core_colorspace(color_space: ColorSpace) -> CoreColorspace {
-    match color_space {
-        ColorSpace::Grayscale => CoreColorspace::Grayscale,
-        ColorSpace::YCbCr => CoreColorspace::YCbCr,
-        ColorSpace::Rgb => CoreColorspace::Rgb,
-        ColorSpace::Cmyk => CoreColorspace::Cmyk,
-        ColorSpace::Ycck => CoreColorspace::Ycck,
-    }
-}
-
 fn jpeg_passthrough_syntax(info: &Info) -> Option<CompressedTransferSyntax> {
     match info.sof_kind {
         SofKind::Baseline8 if info.bit_depth == 8 => Some(CompressedTransferSyntax::JpegBaseline8),
@@ -2157,24 +2146,6 @@ fn jpeg_passthrough_syntax(info: &Info) -> Option<CompressedTransferSyntax> {
         SofKind::Baseline8 | SofKind::Progressive8 | SofKind::Progressive12 | SofKind::Lossless => {
             None
         }
-    }
-}
-
-fn core_info(info: &Info) -> signinum_core::Info {
-    signinum_core::Info {
-        dimensions: info.dimensions,
-        components: info.sampling.len() as u8,
-        colorspace: core_colorspace(info.color_space),
-        bit_depth: info.bit_depth,
-        tile_layout: None,
-        coded_unit_layout: Some(signinum_core::CodedUnitLayout {
-            unit_width: info.mcu_geometry.width,
-            unit_height: info.mcu_geometry.height,
-            units_x: info.mcu_geometry.columns,
-            units_y: info.mcu_geometry.rows,
-        }),
-        restart_interval: info.restart_interval.map(u32::from),
-        resolution_levels: 1,
     }
 }
 
@@ -2252,7 +2223,7 @@ impl<'a> ImageDecode<'a> for Decoder<'a> {
     type View = JpegView<'a>;
 
     fn inspect(input: &'a [u8]) -> Result<signinum_core::Info, Self::Error> {
-        Ok(core_info(&Decoder::inspect(input)?))
+        Ok(Decoder::inspect(input)?.to_core_info())
     }
 
     fn parse(input: &'a [u8]) -> Result<Self::View, Self::Error> {

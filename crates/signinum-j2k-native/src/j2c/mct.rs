@@ -39,7 +39,7 @@ pub(crate) fn apply_inverse(
 
     let handled = if let Some(backend) = backend.as_deref_mut() {
         backend.decode_inverse_mct(J2kInverseMctJob {
-            transform: external_transform(transform),
+            transform: J2kWaveletTransform::from(transform),
             plane0: &mut s0.container,
             plane1: &mut s1.container,
             plane2: &mut s2.container,
@@ -61,14 +61,6 @@ pub(crate) fn apply_inverse(
     }
 
     Ok(())
-}
-
-#[inline(always)]
-fn external_transform(transform: WaveletTransform) -> J2kWaveletTransform {
-    match transform {
-        WaveletTransform::Reversible53 => J2kWaveletTransform::Reversible53,
-        WaveletTransform::Irreversible97 => J2kWaveletTransform::Irreversible97,
-    }
 }
 
 fn apply_inner(transform: WaveletTransform, s0: &mut [f32], s1: &mut [f32], s2: &mut [f32]) {

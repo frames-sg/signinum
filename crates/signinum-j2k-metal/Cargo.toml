@@ -18,6 +18,7 @@ path = "src/lib.rs"
 signinum-core = { path = "../signinum-core", version = "=0.4.1" }
 signinum-j2k = { path = "../signinum-j2k", version = "=0.4.1" }
 signinum-j2k-native = { path = "../signinum-j2k-native", version = "=0.4.1" }
+signinum-profile = { path = "../signinum-profile", version = "=0.4.1" }
 thiserror = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]

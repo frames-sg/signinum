@@ -23,6 +23,7 @@ signinum-core = { path = "../signinum-core", version = "=0.4.1" }
 signinum-cuda-runtime = { path = "../signinum-cuda-runtime", version = "=0.4.1", optional = true }
 signinum-j2k = { path = "../signinum-j2k", version = "=0.4.1" }
 signinum-j2k-native = { path = "../signinum-j2k-native", version = "=0.4.1" }
+signinum-profile = { path = "../signinum-profile", version = "=0.4.1" }
 thiserror = { workspace = true }
 
 [dev-dependencies]

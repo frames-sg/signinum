@@ -22,6 +22,7 @@ cuda-runtime = ["dep:signinum-cuda-runtime"]
 signinum-core = { path = "../signinum-core", version = "=0.4.1" }
 signinum-cuda-runtime = { path = "../signinum-cuda-runtime", version = "=0.4.1", optional = true }
 signinum-jpeg = { path = "../signinum-jpeg", version = "=0.4.1" }
+signinum-profile = { path = "../signinum-profile", version = "=0.4.1" }
 thiserror = { workspace = true }
 
 [dev-dependencies]

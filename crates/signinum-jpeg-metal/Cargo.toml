@@ -17,6 +17,7 @@ path = "src/lib.rs"
 [dependencies]
 signinum-core = { path = "../signinum-core", version = "=0.4.1" }
 signinum-jpeg = { path = "../signinum-jpeg", version = "=0.4.1" }
+signinum-profile = { path = "../signinum-profile", version = "=0.4.1" }
 thiserror = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]

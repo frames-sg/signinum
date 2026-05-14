@@ -940,6 +940,7 @@ dependencies = [
  "signinum-cuda-runtime",
  "signinum-j2k",
  "signinum-j2k-native",
+ "signinum-profile",
  "thiserror",
 ]
 
@@ -955,6 +956,7 @@ dependencies = [
  "signinum-j2k",
  "signinum-j2k-compare",
  "signinum-j2k-native",
+ "signinum-profile",
  "thiserror",
 ]
 
@@ -993,6 +995,7 @@ dependencies = [
  "signinum-core",
  "signinum-cuda-runtime",
  "signinum-jpeg",
+ "signinum-profile",
  "thiserror",
 ]
 
@@ -1006,6 +1009,7 @@ dependencies = [
  "metal",
  "signinum-core",
  "signinum-jpeg",
+ "signinum-profile",
  "thiserror",
 ]
 

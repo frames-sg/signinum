@@ -12,8 +12,11 @@ use signinum_j2k_native::{
 #[derive(Default)]
 pub(crate) struct MetalHtBlockDecoder {
     blocks_decoded: usize,
+    #[cfg(target_os = "macos")]
     kernel_dispatches: usize,
+    #[cfg(target_os = "macos")]
     sub_band_batches: usize,
+    #[cfg(target_os = "macos")]
     batched_kernel_dispatches: usize,
 }
 
@@ -23,17 +26,17 @@ impl MetalHtBlockDecoder {
         self.blocks_decoded
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     pub(crate) fn kernel_dispatches(&self) -> usize {
         self.kernel_dispatches
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     pub(crate) fn sub_band_batches(&self) -> usize {
         self.sub_band_batches
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     pub(crate) fn batched_kernel_dispatches(&self) -> usize {
         self.batched_kernel_dispatches
     }
@@ -163,6 +166,8 @@ pub(crate) fn supports_metal_ht_geometry(width: u32, height: u32) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #![cfg_attr(not(target_os = "macos"), allow(dead_code))]
+
     use super::MetalHtBlockDecoder;
     #[cfg(target_os = "macos")]
     use crate::compute;

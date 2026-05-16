@@ -11,13 +11,14 @@ use signinum_j2k_native::{
 
 #[derive(Default)]
 pub(crate) struct MetalStoreDecoder {
+    #[cfg(target_os = "macos")]
     kernel_dispatches: usize,
     #[cfg(target_os = "macos")]
     captured_planes: Vec<Buffer>,
 }
 
 impl MetalStoreDecoder {
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     pub(crate) fn kernel_dispatches(&self) -> usize {
         self.kernel_dispatches
     }

@@ -12,8 +12,10 @@ use signinum_j2k_native::{
 #[derive(Default)]
 pub(crate) struct MetalClassicBlockDecoder {
     blocks_decoded: usize,
+    #[cfg(target_os = "macos")]
     kernel_dispatches: usize,
     sub_band_batches: usize,
+    #[cfg(target_os = "macos")]
     batched_kernel_dispatches: usize,
 }
 
@@ -23,7 +25,7 @@ impl MetalClassicBlockDecoder {
         self.blocks_decoded
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     pub(crate) fn kernel_dispatches(&self) -> usize {
         self.kernel_dispatches
     }
@@ -33,7 +35,7 @@ impl MetalClassicBlockDecoder {
         self.sub_band_batches
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     pub(crate) fn batched_kernel_dispatches(&self) -> usize {
         self.batched_kernel_dispatches
     }
@@ -178,6 +180,8 @@ fn supports_metal_classic_kernel(job: &J2kCodeBlockDecodeJob<'_>) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #![cfg_attr(not(target_os = "macos"), allow(dead_code))]
+
     use super::MetalClassicBlockDecoder;
     #[cfg(target_os = "macos")]
     use crate::compute;

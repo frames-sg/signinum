@@ -7,7 +7,7 @@ use crate::{profile, Error};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RouteDecision {
     CpuHost,
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    #[cfg(target_os = "macos")]
     MetalKernel,
     RejectExplicitMetal {
         reason: &'static str,
@@ -15,7 +15,7 @@ pub(crate) enum RouteDecision {
     RejectUnsupportedBackend {
         request: BackendRequest,
     },
-    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    #[cfg(not(target_os = "macos"))]
     MetalUnavailable,
 }
 
@@ -80,8 +80,12 @@ pub(crate) fn decision_error(decision: RouteDecision) -> Option<Error> {
         RouteDecision::RejectUnsupportedBackend { request } => {
             Some(Error::UnsupportedBackend { request })
         }
+        #[cfg(not(target_os = "macos"))]
         RouteDecision::MetalUnavailable => Some(Error::MetalUnavailable),
+        #[cfg(target_os = "macos")]
         RouteDecision::CpuHost | RouteDecision::MetalKernel => None,
+        #[cfg(not(target_os = "macos"))]
+        RouteDecision::CpuHost => None,
     }
 }
 
@@ -95,6 +99,7 @@ fn unsupported_metal_format_reason(fmt: PixelFormat) -> &'static str {
 fn j2k_route_decision_profile(decision: RouteDecision) -> (&'static str, &'static str) {
     match decision {
         RouteDecision::CpuHost => ("cpu_host", "none"),
+        #[cfg(target_os = "macos")]
         RouteDecision::MetalKernel => ("metal_kernel", "none"),
         RouteDecision::RejectExplicitMetal { .. } => {
             ("reject_explicit_metal", "unsupported_format")
@@ -102,6 +107,7 @@ fn j2k_route_decision_profile(decision: RouteDecision) -> (&'static str, &'stati
         RouteDecision::RejectUnsupportedBackend { .. } => {
             ("reject_unsupported_backend", "unsupported_backend")
         }
+        #[cfg(not(target_os = "macos"))]
         RouteDecision::MetalUnavailable => ("metal_unavailable", "metal_unavailable"),
     }
 }

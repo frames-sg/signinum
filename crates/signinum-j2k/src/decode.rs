@@ -70,7 +70,6 @@ pub(crate) fn decode_region_scaled_from_info(
     })
 }
 
-#[allow(dead_code)]
 pub(crate) fn decode_region(
     bytes: &[u8],
     _pool: &mut J2kScratchPool,
@@ -164,7 +163,6 @@ pub(crate) fn decode_image_into_with_native_context<'a>(
     }
 }
 
-#[allow(dead_code)]
 fn decode_image_region_into(
     image: &Image<'_>,
     out: &mut [u8],

@@ -555,8 +555,6 @@ fn convert_forward_dwt53_output(
             hl: level.hl,
             lh: level.lh,
             hh: level.hh,
-            width: level.width,
-            height: level.height,
             low_width: level.low_width,
             low_height: level.low_height,
             high_width: level.high_width,

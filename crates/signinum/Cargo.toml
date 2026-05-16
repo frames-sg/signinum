@@ -32,7 +32,13 @@ signinum-jpeg-cuda = { path = "../signinum-jpeg-cuda", version = "=0.4.2", optio
 signinum-j2k-cuda = { path = "../signinum-j2k-cuda", version = "=0.4.2", optional = true }
 
 [dev-dependencies]
+criterion = { workspace = true }
 signinum-j2k-native = { path = "../signinum-j2k-native", version = "=0.4.2" }
+signinum-test-support = { path = "../signinum-test-support" }
+
+[[bench]]
+name = "facade"
+harness = false
 
 [lints.rust]
 unsafe_code = "forbid"

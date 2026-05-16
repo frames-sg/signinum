@@ -116,6 +116,7 @@ impl MetalEncodeStageAccelerator {
         }
     }
 
+    #[cfg(target_os = "macos")]
     fn for_host_output(options: J2kLosslessEncodeOptions) -> Self {
         if options.backend == EncodeBackendPreference::Auto {
             Self::for_auto_host_output()

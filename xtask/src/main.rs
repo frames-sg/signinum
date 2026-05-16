@@ -170,6 +170,15 @@ fn typos() -> Result<(), String> {
 }
 
 fn bench_build() -> Result<(), String> {
+    run_cargo(&[
+        "bench",
+        "-p",
+        "signinum-j2k",
+        "--bench",
+        "public_api",
+        "--no-run",
+    ])?;
+    run_cargo(&["bench", "-p", "signinum", "--bench", "facade", "--no-run"])?;
     run_cargo(&["bench", "-p", "signinum-jpeg", "--no-run"])?;
     run_cargo(&["bench", "-p", "signinum-jpeg-metal", "--no-run"])?;
     run_cargo(&[

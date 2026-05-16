@@ -1,11 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-#[cfg(target_os = "macos")]
-use signinum_core::PixelFormat;
-#[cfg(target_os = "macos")]
-use signinum_j2k::J2kError;
-#[cfg(target_os = "macos")]
-use signinum_j2k_native::{DecoderContext as NativeDecoderContext, Image as NativeImage};
 #[cfg(all(target_os = "macos", test))]
 use signinum_j2k_native::{
     HtCodeBlockBatchJob, HtCodeBlockDecodeJob, HtOwnedCodeBlockBatchJob, HtOwnedSubBandPlan,
@@ -16,8 +10,8 @@ use signinum_j2k_native::{
 
 #[cfg(all(target_os = "macos", test))]
 use crate::compute;
-#[cfg(target_os = "macos")]
-use crate::{Error, Surface};
+#[cfg(all(target_os = "macos", test))]
+use crate::Error;
 
 #[cfg(target_os = "macos")]
 #[cfg(test)]
@@ -30,7 +24,6 @@ struct DirectExecutionState {
 #[cfg(target_os = "macos")]
 #[cfg(test)]
 struct ExecutedGrayscalePlane {
-    #[allow(dead_code)]
     storage: Vec<f32>,
 }
 
@@ -54,32 +47,6 @@ impl DirectExecutionState {
                 ),
             })
     }
-}
-
-#[cfg(target_os = "macos")]
-#[allow(dead_code)]
-pub(crate) fn try_decode_image_to_surface<'a>(
-    image: &NativeImage<'a>,
-    context: &mut NativeDecoderContext<'a>,
-    fmt: PixelFormat,
-) -> Result<Option<Surface>, Error> {
-    if !matches!(fmt, PixelFormat::Gray8 | PixelFormat::Gray16) {
-        return Ok(None);
-    }
-
-    let plan = match image.build_direct_grayscale_plan_with_context(context) {
-        Ok(plan) => plan,
-        Err(error) if is_unsupported_direct_plan_error(&error.to_string()) => return Ok(None),
-        Err(error) => {
-            return Err(Error::Decode(J2kError::Backend(format!(
-                "failed to build J2K MetalDirect grayscale plan: {error}"
-            ))));
-        }
-    };
-
-    Ok(Some(crate::compute::execute_direct_grayscale_plan(
-        &plan, fmt,
-    )?))
 }
 
 #[cfg(target_os = "macos")]

@@ -9,17 +9,16 @@ use signinum_j2k_native::{
     Result,
 };
 
-#[allow(dead_code)]
 #[derive(Default)]
 pub(crate) struct MetalStoreDecoder {
+    #[cfg(target_os = "macos")]
     kernel_dispatches: usize,
     #[cfg(target_os = "macos")]
     captured_planes: Vec<Buffer>,
 }
 
-#[allow(dead_code)]
 impl MetalStoreDecoder {
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     pub(crate) fn kernel_dispatches(&self) -> usize {
         self.kernel_dispatches
     }
@@ -61,7 +60,6 @@ impl HtCodeBlockDecoder for MetalStoreDecoder {
 }
 
 #[cfg(target_os = "macos")]
-#[allow(dead_code)]
 fn supports_metal_store(job: &J2kStoreComponentJob<'_>) -> bool {
     job.copy_width > 0
         && job.copy_height > 0

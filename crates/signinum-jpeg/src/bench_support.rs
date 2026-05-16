@@ -46,12 +46,12 @@ impl Bench420DispatchStats {
         self.neon_tail_chunks
     }
 
-    #[allow(dead_code)]
+    #[cfg(target_arch = "aarch64")]
     pub(crate) fn record_scalar_chunk(&mut self) {
         self.scalar_chunks += 1;
     }
 
-    #[allow(dead_code)]
+    #[cfg(target_arch = "aarch64")]
     pub(crate) fn record_neon_tail_chunk(&mut self) {
         self.neon_tail_chunks += 1;
     }
@@ -187,7 +187,7 @@ impl Drop for Bench420DispatchStatsGuard {
     }
 }
 
-#[allow(dead_code)]
+#[cfg(target_arch = "aarch64")]
 pub(crate) fn record_420_dispatch_scalar_chunk() {
     BENCH_420_DISPATCH_STATS.with(|slot| {
         let stats = slot.get();
@@ -199,7 +199,7 @@ pub(crate) fn record_420_dispatch_scalar_chunk() {
     });
 }
 
-#[allow(dead_code)]
+#[cfg(target_arch = "aarch64")]
 pub(crate) fn record_420_dispatch_neon_tail_chunk() {
     BENCH_420_DISPATCH_STATS.with(|slot| {
         let stats = slot.get();

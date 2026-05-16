@@ -46,6 +46,7 @@ backend APIs are still hardening.
 | `signinum-j2k-metal` | adapter | Apple Metal device-output adapter for `signinum-j2k`. Same shape as the JPEG adapter. |
 | `signinum-jpeg-cuda` | adapter | CUDA-facing API adapter for JPEG. `Auto`/`Cpu` stay host-backed; explicit full-frame RGB8 CUDA requests use nvJPEG when `cuda-runtime`, a CUDA driver, and `libnvjpeg` are available, with CPU decode plus CUDA upload fallback for unsupported shapes. |
 | `signinum-j2k-cuda` | adapter | CUDA-facing API adapter for J2K. Explicit CUDA requests upload CPU-decoded output into CUDA device memory when `cuda-runtime` and a CUDA driver are available. |
+| `signinum` | facade | Stable public import surface over `core`, the CPU codecs, tile decompression, and optional Metal/CUDA adapters behind facade features. |
 | `signinum-cli` | binary | `signinum inspect <file>` entry point. Header parsing only, no decode. |
 
 Out-of-tree but in-repo:
@@ -57,13 +58,14 @@ Out-of-tree but in-repo:
 
 ## Layered architecture and dependency rules
 
-signinum is organized as four concentric layers plus narrow helper crates.
-Dependencies must flow inward only. An agent adding a dependency edge that
+signinum is organized as foundation/helper crates, codec engines, codecs,
+adapters, and facade/binary surfaces. Dependencies must flow inward only. An
+agent adding a dependency edge that
 points outward is changing the architecture and should stop and update this
 document first.
 
 ```
-foundation / helper crates  →  codec engines  →  codecs  →  adapters  →  binary
+foundation / helper crates  →  codec engines  →  codecs  →  adapters  →  facade / binary
 ```
 
 | Layer | Members | May depend on |
@@ -73,8 +75,9 @@ foundation / helper crates  →  codec engines  →  codecs  →  adapters  → 
 | codec engines | `signinum-j2k-native` | helper crates. Internal only. Not re-exported. |
 | codecs | `signinum-jpeg`, `signinum-j2k`, `signinum-tilecodec` | foundation, codec engines, helper crates. Must not depend on each other. Must not depend on adapters or `cli`. |
 | adapters | `signinum-jpeg-metal`, `signinum-j2k-metal`, `signinum-jpeg-cuda`, `signinum-j2k-cuda` | foundation, helper crates, exactly one matching codec, optional engine for the matching codec. Adapters in different format families must not depend on each other. |
-| binary | `signinum-cli` | foundation, codecs. Must not depend on adapters (kept host-neutral). |
-| dev-only | `signinum-j2k-compare` | foundation. Used as a reference comparator in tests/benches; never a runtime dependency. |
+| facade | `signinum` | foundation, codecs, tilecodec, optional adapters behind feature gates. |
+| binary | `signinum-cli` | codecs. Must not depend on adapters (kept host-neutral). |
+| dev-only | `signinum-j2k-compare` | foundation and the codec under test. Used as a reference comparator in tests/benches; never a runtime dependency. |
 
 Hard rules enforced today (the goal is to mechanize these as the workspace
 matures, mirroring harness-engineering structural tests):
@@ -119,9 +122,10 @@ signinum-j2k          -> signinum-j2k-native, signinum-core
 signinum-j2k-metal    -> signinum-j2k, signinum-j2k-native, signinum-profile, signinum-core
 signinum-j2k-cuda     -> signinum-j2k, signinum-j2k-native, signinum-cuda-runtime, signinum-profile, signinum-core
 
-signinum-cli          -> signinum-jpeg, signinum-j2k, signinum-core
+signinum              -> signinum-core, signinum-jpeg, signinum-j2k, signinum-tilecodec, signinum-jpeg-metal, signinum-j2k-metal, signinum-jpeg-cuda, signinum-j2k-cuda
+signinum-cli          -> signinum-jpeg, signinum-j2k
 
-signinum-j2k-compare  -> signinum-core (test/bench reference only)
+signinum-j2k-compare  -> signinum-core, signinum-j2k (test/bench reference only)
 ```
 
 ## Core abstractions

@@ -25,6 +25,10 @@ criterion = { workspace = true }
 signinum-j2k-native = { path = "../signinum-j2k-native", version = "=0.4.2" }
 signinum-test-support = { path = "../signinum-test-support" }
 
+[[bench]]
+name = "public_api"
+harness = false
+
 [lints.rust]
 unsafe_code     = "forbid"
 unreachable_pub = "warn"

@@ -20,7 +20,7 @@ pub(crate) fn upsample_1x1(input: &[u8], output: &mut [u8]) {
 
 /// Horizontal fancy upsample (4:2:2). `input_row` has length `input_cols`;
 /// `output_row` must have length `2 * input_cols`.
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(crate) fn upsample_h2v1_fancy(input_row: &[u8], output_row: &mut [u8]) {
     let n = input_row.len();
     assert_eq!(output_row.len(), n * 2, "output row must be 2× input width");
@@ -76,7 +76,7 @@ pub(crate) fn upsample_h2v1_fancy_row(
 /// chroma sample, with distinct formulas at the first and last column so
 /// boundary pixels stay consistent with interior pixels under the same
 /// 3:1 / 1:3 blend.
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(crate) fn upsample_h2v2_fancy(
     prev: &[u8],
     curr: &[u8],

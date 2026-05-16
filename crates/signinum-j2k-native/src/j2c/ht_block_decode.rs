@@ -171,7 +171,6 @@ pub(crate) fn decode_combined(
     .ok_or(DecodingError::CodeBlockDecodeFailure.into())
 }
 
-#[allow(dead_code)]
 pub(crate) fn decode_combined_validated(
     combined: &CombinedCodeBlockData,
     missing_bit_planes: u8,

@@ -229,9 +229,11 @@ or shared table/scratch reuse surfaces.
 
 ## Commands
 
-Compile-only check:
+Compile-only checks:
 
 ```sh
+cargo bench -p signinum-j2k --bench public_api --no-run
+cargo bench -p signinum --bench facade --no-run
 cargo bench -p signinum-jpeg --no-run
 ```
 
@@ -245,6 +247,18 @@ Run the signinum-only microbenches:
 
 ```sh
 cargo bench -p signinum-jpeg --bench micro
+```
+
+Run the J2K public API benches:
+
+```sh
+cargo bench -p signinum-j2k --bench public_api
+```
+
+Run the facade dispatch benches:
+
+```sh
+cargo bench -p signinum --bench facade
 ```
 
 Run against local extracted WSI JPEG tiles:
@@ -280,6 +294,8 @@ aggregate line per route/stage group instead of one stderr line per iteration.
 Baseline commands:
 
 ```sh
+cargo bench --profile release-bench -p signinum-j2k --bench public_api
+cargo bench --profile release-bench -p signinum --bench facade
 cargo bench --profile release-bench -p signinum-jpeg
 cargo bench --profile release-bench -p signinum-j2k-native
 cargo bench --profile release-bench -p signinum-jpeg-metal --bench compare --no-run

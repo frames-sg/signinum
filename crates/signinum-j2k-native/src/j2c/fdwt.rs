@@ -31,13 +31,10 @@ pub(crate) struct DwtDecomposition {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
 pub(crate) struct DwtLevel {
     pub(crate) hl: Vec<f32>,
     pub(crate) lh: Vec<f32>,
     pub(crate) hh: Vec<f32>,
-    pub(crate) width: u32,
-    pub(crate) height: u32,
     /// Dimensions of the low-pass subband at this level.
     pub(crate) low_width: u32,
     pub(crate) low_height: u32,
@@ -153,8 +150,6 @@ pub(crate) fn forward_dwt(
             hl,
             lh,
             hh,
-            width: current_width as u32,
-            height: current_height as u32,
             low_width: low_w as u32,
             low_height: low_h as u32,
             high_width: high_w as u32,

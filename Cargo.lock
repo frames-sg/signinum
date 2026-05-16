@@ -876,6 +876,7 @@ checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 name = "signinum"
 version = "0.4.2"
 dependencies = [
+ "criterion",
  "signinum-core",
  "signinum-j2k",
  "signinum-j2k-cuda",
@@ -884,6 +885,7 @@ dependencies = [
  "signinum-jpeg",
  "signinum-jpeg-cuda",
  "signinum-jpeg-metal",
+ "signinum-test-support",
  "signinum-tilecodec",
 ]
 
@@ -899,6 +901,7 @@ dependencies = [
 name = "signinum-core"
 version = "0.4.2"
 dependencies = [
+ "serde_json",
  "thiserror",
 ]
 

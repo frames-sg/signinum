@@ -4,6 +4,7 @@
 #![warn(unreachable_pub)]
 
 mod batch;
+#[cfg(any(test, target_os = "macos"))]
 mod classic;
 #[cfg(target_os = "macos")]
 mod compute;
@@ -11,11 +12,15 @@ mod dicom;
 #[cfg(target_os = "macos")]
 mod direct;
 mod encode;
+#[cfg(any(test, target_os = "macos"))]
 mod ht;
+#[cfg(any(test, target_os = "macos"))]
 mod idwt;
+#[cfg(any(test, target_os = "macos"))]
 mod mct;
 mod profile;
 mod routing;
+#[cfg(any(test, target_os = "macos"))]
 mod store;
 
 use core::convert::Infallible;
@@ -1333,23 +1338,20 @@ impl<'a> J2kDecoder<'a> {
 
         match route {
             routing::RouteDecision::CpuHost => self.decode_to_cpu_surface(fmt),
+            #[cfg(target_os = "macos")]
             routing::RouteDecision::MetalKernel => {
-                #[cfg(target_os = "macos")]
-                {
-                    if let Some(surface) = self.decode_direct_to_surface(fmt)? {
-                        Ok(surface)
-                    } else {
-                        self.decode_full_to_metal_surface(fmt)
-                    }
-                }
-                #[cfg(not(target_os = "macos"))]
-                {
-                    Err(Error::MetalUnavailable)
+                if let Some(surface) = self.decode_direct_to_surface(fmt)? {
+                    Ok(surface)
+                } else {
+                    self.decode_full_to_metal_surface(fmt)
                 }
             }
             routing::RouteDecision::RejectExplicitMetal { .. }
-            | routing::RouteDecision::RejectUnsupportedBackend { .. }
-            | routing::RouteDecision::MetalUnavailable => unreachable!("handled by decision_error"),
+            | routing::RouteDecision::RejectUnsupportedBackend { .. } => {
+                unreachable!("handled by decision_error")
+            }
+            #[cfg(not(target_os = "macos"))]
+            routing::RouteDecision::MetalUnavailable => unreachable!("handled by decision_error"),
         }
     }
 
@@ -1370,19 +1372,14 @@ impl<'a> J2kDecoder<'a> {
         )?;
         match route {
             routing::RouteDecision::CpuHost => self.decode_region_to_cpu_surface(fmt, plan),
-            routing::RouteDecision::MetalKernel => {
-                #[cfg(target_os = "macos")]
-                {
-                    self.decode_region_to_metal_surface(fmt, plan)
-                }
-                #[cfg(not(target_os = "macos"))]
-                {
-                    Err(Error::MetalUnavailable)
-                }
-            }
+            #[cfg(target_os = "macos")]
+            routing::RouteDecision::MetalKernel => self.decode_region_to_metal_surface(fmt, plan),
             routing::RouteDecision::RejectExplicitMetal { .. }
-            | routing::RouteDecision::RejectUnsupportedBackend { .. }
-            | routing::RouteDecision::MetalUnavailable => unreachable!("handled by decision_error"),
+            | routing::RouteDecision::RejectUnsupportedBackend { .. } => {
+                unreachable!("handled by decision_error")
+            }
+            #[cfg(not(target_os = "macos"))]
+            routing::RouteDecision::MetalUnavailable => unreachable!("handled by decision_error"),
         }
     }
 
@@ -1430,19 +1427,16 @@ impl<'a> J2kDecoder<'a> {
         )?;
         match route {
             routing::RouteDecision::CpuHost => self.decode_scaled_to_cpu_surface(fmt, scale, plan),
+            #[cfg(target_os = "macos")]
             routing::RouteDecision::MetalKernel => {
-                #[cfg(target_os = "macos")]
-                {
-                    self.decode_scaled_to_metal_surface(fmt, scale, plan)
-                }
-                #[cfg(not(target_os = "macos"))]
-                {
-                    Err(Error::MetalUnavailable)
-                }
+                self.decode_scaled_to_metal_surface(fmt, scale, plan)
             }
             routing::RouteDecision::RejectExplicitMetal { .. }
-            | routing::RouteDecision::RejectUnsupportedBackend { .. }
-            | routing::RouteDecision::MetalUnavailable => unreachable!("handled by decision_error"),
+            | routing::RouteDecision::RejectUnsupportedBackend { .. } => {
+                unreachable!("handled by decision_error")
+            }
+            #[cfg(not(target_os = "macos"))]
+            routing::RouteDecision::MetalUnavailable => unreachable!("handled by decision_error"),
         }
     }
 
@@ -1457,12 +1451,16 @@ impl<'a> J2kDecoder<'a> {
         if let Some(error) = routing::decision_error(route) {
             return Err(error);
         }
-        if matches!(route, routing::RouteDecision::MetalKernel)
-            && !matches!(fmt, PixelFormat::Gray8 | PixelFormat::Gray16)
+        #[cfg(target_os = "macos")]
         {
-            return Err(Error::UnsupportedMetalRequest {
-                reason: "J2K Metal ROI+scaled direct decode currently supports Gray8/Gray16 only",
-            });
+            if matches!(route, routing::RouteDecision::MetalKernel)
+                && !matches!(fmt, PixelFormat::Gray8 | PixelFormat::Gray16)
+            {
+                return Err(Error::UnsupportedMetalRequest {
+                    reason:
+                        "J2K Metal ROI+scaled direct decode currently supports Gray8/Gray16 only",
+                });
+            }
         }
 
         let plan = DeviceDecodePlan::for_image(
@@ -1473,19 +1471,16 @@ impl<'a> J2kDecoder<'a> {
             routing::RouteDecision::CpuHost => {
                 self.decode_region_scaled_to_cpu_surface(fmt, roi, scale, plan)
             }
+            #[cfg(target_os = "macos")]
             routing::RouteDecision::MetalKernel => {
-                #[cfg(target_os = "macos")]
-                {
-                    self.decode_region_scaled_to_metal_surface(fmt, roi, scale, plan)
-                }
-                #[cfg(not(target_os = "macos"))]
-                {
-                    Err(Error::MetalUnavailable)
-                }
+                self.decode_region_scaled_to_metal_surface(fmt, roi, scale, plan)
             }
             routing::RouteDecision::RejectExplicitMetal { .. }
-            | routing::RouteDecision::RejectUnsupportedBackend { .. }
-            | routing::RouteDecision::MetalUnavailable => unreachable!("handled by decision_error"),
+            | routing::RouteDecision::RejectUnsupportedBackend { .. } => {
+                unreachable!("handled by decision_error")
+            }
+            #[cfg(not(target_os = "macos"))]
+            routing::RouteDecision::MetalUnavailable => unreachable!("handled by decision_error"),
         }
     }
 

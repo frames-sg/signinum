@@ -556,7 +556,7 @@ pub(crate) fn pow2i(exp: i32) -> f32 {
 }
 
 #[inline(always)]
-#[cfg_attr(feature = "simd", allow(dead_code))]
+#[cfg(not(feature = "simd"))]
 pub(crate) fn min_f32(a: f32, b: f32) -> f32 {
     #[cfg(feature = "std")]
     {
@@ -573,7 +573,7 @@ pub(crate) fn min_f32(a: f32, b: f32) -> f32 {
 }
 
 #[inline(always)]
-#[cfg_attr(feature = "simd", allow(dead_code))]
+#[cfg(not(feature = "simd"))]
 pub(crate) fn max_f32(a: f32, b: f32) -> f32 {
     #[cfg(feature = "std")]
     {

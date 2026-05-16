@@ -9,23 +9,23 @@ use signinum_j2k_native::{
     HtCodeBlockDecodeJob, HtCodeBlockDecoder, J2kCodeBlockDecodeJob, J2kSubBandDecodeJob, Result,
 };
 
-#[allow(dead_code)]
 #[derive(Default)]
 pub(crate) struct MetalClassicBlockDecoder {
     blocks_decoded: usize,
+    #[cfg(target_os = "macos")]
     kernel_dispatches: usize,
     sub_band_batches: usize,
+    #[cfg(target_os = "macos")]
     batched_kernel_dispatches: usize,
 }
 
-#[allow(dead_code)]
 impl MetalClassicBlockDecoder {
     #[cfg(test)]
     pub(crate) fn blocks_decoded(&self) -> usize {
         self.blocks_decoded
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     pub(crate) fn kernel_dispatches(&self) -> usize {
         self.kernel_dispatches
     }
@@ -35,7 +35,7 @@ impl MetalClassicBlockDecoder {
         self.sub_band_batches
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     pub(crate) fn batched_kernel_dispatches(&self) -> usize {
         self.batched_kernel_dispatches
     }
@@ -96,7 +96,6 @@ impl HtCodeBlockDecoder for MetalClassicBlockDecoder {
 }
 
 #[cfg(target_os = "macos")]
-#[allow(dead_code)]
 fn supports_metal_classic_kernel(job: &J2kCodeBlockDecodeJob<'_>) -> bool {
     if job.width == 0 || job.height == 0 {
         return false;
@@ -181,7 +180,7 @@ fn supports_metal_classic_kernel(job: &J2kCodeBlockDecodeJob<'_>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    #![allow(dead_code)]
+    #![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 
     use super::MetalClassicBlockDecoder;
     #[cfg(target_os = "macos")]

@@ -425,38 +425,6 @@ inline ushort pack_to_u16(float sample, float max_value, float scale) {
     return ushort(min(floor(clamped * scale + 0.5f), 65535.0f));
 }
 
-kernel void j2k_pack_u8(
-    device const float *plane0 [[buffer(0)]],
-    device const float *plane1 [[buffer(1)]],
-    device const float *plane2 [[buffer(2)]],
-    device const float *plane3 [[buffer(3)]],
-    device uchar *out [[buffer(4)]],
-    constant J2kPackParams &params [[buffer(5)]],
-    uint2 gid [[thread_position_in_grid]]
-) {
-    if (gid.x >= params.width || gid.y >= params.height) {
-        return;
-    }
-
-    const uint idx = gid.y * params.width + gid.x;
-    uint out_idx = gid.y * params.out_stride + gid.x * params.output_channels;
-
-    if (params.output_channels == 1) {
-        out[out_idx] = scale_to_u8(plane0[idx], params.max_values[0], params.u8_scales[0]);
-        return;
-    }
-
-    out[out_idx] = scale_to_u8(plane0[idx], params.max_values[0], params.u8_scales[0]);
-    out[out_idx + 1] = scale_to_u8(plane1[idx], params.max_values[1], params.u8_scales[1]);
-    out[out_idx + 2] = scale_to_u8(plane2[idx], params.max_values[2], params.u8_scales[2]);
-
-    if (params.output_channels == 4) {
-        out[out_idx + 3] = params.opaque_alpha != 0
-            ? uchar(255)
-            : scale_to_u8(plane3[idx], params.max_values[3], params.u8_scales[3]);
-    }
-}
-
 kernel void j2k_pack_gray8(
     device const float *plane0 [[buffer(0)]],
     device const float *plane1 [[buffer(1)]],
@@ -610,32 +578,6 @@ kernel void j2k_pack_rgba8(
     out[out_idx + 1] = scale_to_u8(plane1[idx], params.max_values[1], params.u8_scales[1]);
     out[out_idx + 2] = scale_to_u8(plane2[idx], params.max_values[2], params.u8_scales[2]);
     out[out_idx + 3] = scale_to_u8(plane3[idx], params.max_values[3], params.u8_scales[3]);
-}
-
-kernel void j2k_pack_u16(
-    device const float *plane0 [[buffer(0)]],
-    device const float *plane1 [[buffer(1)]],
-    device const float *plane2 [[buffer(2)]],
-    device const float *plane3 [[buffer(3)]],
-    device ushort *out [[buffer(4)]],
-    constant J2kPackParams &params [[buffer(5)]],
-    uint2 gid [[thread_position_in_grid]]
-) {
-    if (gid.x >= params.width || gid.y >= params.height) {
-        return;
-    }
-
-    const uint idx = gid.y * params.width + gid.x;
-    uint out_idx = (gid.y * params.out_stride) / 2u + gid.x * params.output_channels;
-
-    if (params.output_channels == 1) {
-        out[out_idx] = pack_to_u16(plane0[idx], params.max_values[0], params.u16_scales[0]);
-        return;
-    }
-
-    out[out_idx] = pack_to_u16(plane0[idx], params.max_values[0], params.u16_scales[0]);
-    out[out_idx + 1] = pack_to_u16(plane1[idx], params.max_values[1], params.u16_scales[1]);
-    out[out_idx + 2] = pack_to_u16(plane2[idx], params.max_values[2], params.u16_scales[2]);
 }
 
 kernel void j2k_pack_gray16(

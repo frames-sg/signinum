@@ -233,6 +233,7 @@ Compile-only checks:
 
 ```sh
 cargo bench -p signinum-j2k --bench public_api --no-run
+cargo bench -p signinum-j2k-native --bench tier1_bitplane --no-run
 cargo bench -p signinum --bench facade --no-run
 cargo bench -p signinum-jpeg --no-run
 ```
@@ -254,6 +255,18 @@ Run the J2K public API benches:
 ```sh
 cargo bench -p signinum-j2k --bench public_api
 ```
+
+Run the CPU J2K regression guard after creating a benchmark-only baseline tag:
+
+```sh
+git tag j2k-bench-original <benchmark-only-commit>
+cargo xtask j2k-perf-guard --baseline-ref j2k-bench-original --threshold-percent 10 --quick
+```
+
+The guard runs deterministic Cargo Criterion benches for `signinum-j2k` and
+`signinum-j2k-native` in separate baseline/current target directories, compares
+median point estimates, and fails when a current result is more than 10% slower
+than the baseline. External WSI inputs, Metal, and CUDA stay report-only.
 
 Run the facade dispatch benches:
 

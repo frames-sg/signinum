@@ -2,6 +2,8 @@ use std::env;
 use std::ffi::OsString;
 use std::process::{Command, ExitCode};
 
+mod perf_guard;
+
 const PUBLISHABLE_PACKAGES: &[&str] = &[
     "signinum-core",
     "signinum-cuda-runtime",
@@ -64,6 +66,7 @@ fn run() -> Result<(), String> {
         "doc" | "docs" => doc(),
         "typos" => typos(),
         "bench-build" => bench_build(),
+        "j2k-perf-guard" => perf_guard::j2k_perf_guard(env::args().skip(2)),
         "fuzz-build" => fuzz_build(),
         "deny" => deny(),
         "no-std" => no_std(),
@@ -176,6 +179,14 @@ fn bench_build() -> Result<(), String> {
         "signinum-j2k",
         "--bench",
         "public_api",
+        "--no-run",
+    ])?;
+    run_cargo(&[
+        "bench",
+        "-p",
+        "signinum-j2k-native",
+        "--bench",
+        "tier1_bitplane",
         "--no-run",
     ])?;
     run_cargo(&["bench", "-p", "signinum", "--bench", "facade", "--no-run"])?;
@@ -375,6 +386,7 @@ fn print_help() {
            doc           build workspace docs with warnings denied\n\
            typos         run typos\n\
            bench-build   compile benchmark targets\n\
+           j2k-perf-guard compare CPU J2K Criterion medians against a baseline git ref\n\
            fuzz-build    compile fuzz harnesses\n\
            deny          run cargo-deny\n\
            no-std        check no_std-compatible codec crates\n\
@@ -383,4 +395,108 @@ fn print_help() {
            coverage      generate lcov.info with cargo-llvm-cov\n\
            package       preflight publishable package contents from a clean worktree; strict for registry-independent crates and list-only for staged dependencies"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::perf_guard::{
+        compare_estimates, discover_estimates, BenchEstimate, RegressionOutcome,
+    };
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn compare_estimates_flags_median_regression_above_threshold() {
+        let baseline = BenchEstimate {
+            id: "j2k_public_decode/rgb8_full_128x128".to_string(),
+            median_ns: 1_000.0,
+        };
+        let current = BenchEstimate {
+            id: baseline.id.clone(),
+            median_ns: 1_120.0,
+        };
+
+        let outcomes = compare_estimates(&[baseline], &[current], 10.0).unwrap();
+
+        assert_eq!(
+            outcomes,
+            vec![RegressionOutcome {
+                id: "j2k_public_decode/rgb8_full_128x128".to_string(),
+                baseline_ns: 1_000.0,
+                current_ns: 1_120.0,
+                delta_percent: 12.0,
+                regressed: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn compare_estimates_allows_median_delta_at_threshold() {
+        let baseline = BenchEstimate {
+            id: "tier1_bitplane_decode/decode_64x64/default".to_string(),
+            median_ns: 2_000.0,
+        };
+        let current = BenchEstimate {
+            id: baseline.id.clone(),
+            median_ns: 2_200.0,
+        };
+
+        let outcomes = compare_estimates(&[baseline], &[current], 10.0).unwrap();
+
+        assert!(!outcomes[0].regressed);
+        assert_eq!(outcomes[0].delta_percent, 10.0);
+    }
+
+    #[test]
+    fn compare_estimates_reports_missing_current_result() {
+        let baseline = BenchEstimate {
+            id: "j2k_public_decode_gray/gray8_full_128x128".to_string(),
+            median_ns: 500.0,
+        };
+
+        let err = compare_estimates(&[baseline], &[], 10.0).unwrap_err();
+
+        assert!(
+            err.contains("missing current benchmark result"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn discover_estimates_reads_criterion_median_point_estimates() {
+        let root = temp_dir("signinum-perf-guard-test");
+        let estimate_path = root
+            .join("target")
+            .join("criterion")
+            .join("j2k_public_decode")
+            .join("rgb8_full_128x128")
+            .join("new");
+        fs::create_dir_all(&estimate_path).unwrap();
+        fs::write(
+            estimate_path.join("estimates.json"),
+            r#"{"median":{"point_estimate":321.5}}"#,
+        )
+        .unwrap();
+
+        let estimates = discover_estimates(&root.join("target").join("criterion")).unwrap();
+
+        assert_eq!(
+            estimates,
+            vec![BenchEstimate {
+                id: "j2k_public_decode/rgb8_full_128x128".to_string(),
+                median_ns: 321.5,
+            }]
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        let mut dir = std::env::temp_dir();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        dir.push(format!("{name}-{}-{nanos}", std::process::id()));
+        dir
+    }
 }

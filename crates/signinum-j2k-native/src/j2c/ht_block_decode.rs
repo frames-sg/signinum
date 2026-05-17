@@ -1,6 +1,5 @@
 //! Scalar HTJ2K block decoding.
 
-use alloc::vec;
 use alloc::vec::Vec;
 
 use super::build::CodeBlock;
@@ -11,6 +10,7 @@ use crate::error::{bail, DecodingError, Result};
 #[derive(Default)]
 pub(crate) struct HtBlockDecodeContext {
     coefficients: Vec<u32>,
+    scratch: HtBlockDecodeScratch,
     width: u32,
     height: u32,
 }
@@ -27,6 +27,60 @@ impl HtBlockDecodeContext {
     pub(crate) fn coefficient_rows(&self) -> impl Iterator<Item = &[u32]> {
         self.coefficients.chunks_exact(self.width as usize)
     }
+}
+
+#[derive(Default)]
+struct HtBlockDecodeScratch {
+    cleanup: Vec<u16>,
+    v_n: Vec<u32>,
+    sigma: Vec<u16>,
+    prev_row_sig: Vec<u16>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct HtBlockDecodeScratchCapacities {
+    cleanup: usize,
+    v_n: usize,
+    sigma: usize,
+    prev_row_sig: usize,
+}
+
+#[cfg(test)]
+impl HtBlockDecodeScratch {
+    fn capacities_for_test(&self) -> HtBlockDecodeScratchCapacities {
+        HtBlockDecodeScratchCapacities {
+            cleanup: self.cleanup.capacity(),
+            v_n: self.v_n.capacity(),
+            sigma: self.sigma.capacity(),
+            prev_row_sig: self.prev_row_sig.capacity(),
+        }
+    }
+
+    fn poison_for_test(&mut self) {
+        self.cleanup.fill(u16::MAX);
+        self.v_n.fill(u32::MAX);
+        self.sigma.fill(u16::MAX);
+        self.prev_row_sig.fill(u16::MAX);
+    }
+}
+
+fn zeroed_u16_scratch(buffer: &mut Vec<u16>, len: usize) -> &mut [u16] {
+    if buffer.len() < len {
+        buffer.resize(len, 0);
+    }
+    buffer[..len].fill(0);
+
+    &mut buffer[..len]
+}
+
+fn zeroed_u32_scratch(buffer: &mut Vec<u32>, len: usize) -> &mut [u32] {
+    if buffer.len() < len {
+        buffer.resize(len, 0);
+    }
+    buffer[..len].fill(0);
+
+    &mut buffer[..len]
 }
 
 pub(crate) fn coefficient_to_i32(value: u32, k_max: u8) -> i32 {
@@ -81,7 +135,7 @@ pub(crate) fn decode(
     }
 
     let combined = collect_code_block_data(code_block, storage)?;
-    decode_combined_validated(
+    decode_combined_validated_with_scratch(
         &combined,
         code_block.missing_bit_planes,
         total_bitplanes,
@@ -92,6 +146,7 @@ pub(crate) fn decode(
         code_block.rect.width(),
         code_block.rect.height(),
         code_block.rect.width(),
+        &mut ctx.scratch,
     )
 }
 
@@ -156,6 +211,31 @@ pub(crate) fn decode_combined(
     stripe_causal: bool,
     decoded_data: &mut [u32],
 ) -> Result<()> {
+    let mut scratch = HtBlockDecodeScratch::default();
+    decode_combined_with_scratch(
+        combined,
+        missing_bit_planes,
+        number_of_coding_passes,
+        width,
+        height,
+        stride,
+        stripe_causal,
+        decoded_data,
+        &mut scratch,
+    )
+}
+
+fn decode_combined_with_scratch(
+    combined: &CombinedCodeBlockData,
+    missing_bit_planes: u8,
+    number_of_coding_passes: u8,
+    width: u32,
+    height: u32,
+    stride: u32,
+    stripe_causal: bool,
+    decoded_data: &mut [u32],
+    scratch: &mut HtBlockDecodeScratch,
+) -> Result<()> {
     decode_impl(
         &combined.data,
         decoded_data,
@@ -167,24 +247,19 @@ pub(crate) fn decode_combined(
         height,
         stride,
         stripe_causal,
+        scratch,
     )
     .ok_or(DecodingError::CodeBlockDecodeFailure.into())
 }
 
-pub(crate) fn decode_combined_validated(
-    combined: &CombinedCodeBlockData,
+fn validate_combined_decode(
     missing_bit_planes: u8,
     total_bitplanes: u8,
     number_of_coding_passes: u8,
-    stripe_causal: bool,
     strict: bool,
-    decoded_data: &mut [u32],
-    width: u32,
-    height: u32,
-    stride: u32,
-) -> Result<()> {
+) -> Result<bool> {
     if total_bitplanes == 0 {
-        return Ok(());
+        return Ok(false);
     }
 
     if total_bitplanes > 31 {
@@ -209,7 +284,27 @@ pub(crate) fn decode_combined_validated(
         bail!(DecodingError::TooManyCodingPasses);
     }
 
-    if number_of_coding_passes == 0 || actual_bitplanes == 0 {
+    Ok(number_of_coding_passes != 0 && actual_bitplanes != 0)
+}
+
+pub(crate) fn decode_combined_validated(
+    combined: &CombinedCodeBlockData,
+    missing_bit_planes: u8,
+    total_bitplanes: u8,
+    number_of_coding_passes: u8,
+    stripe_causal: bool,
+    strict: bool,
+    decoded_data: &mut [u32],
+    width: u32,
+    height: u32,
+    stride: u32,
+) -> Result<()> {
+    if !validate_combined_decode(
+        missing_bit_planes,
+        total_bitplanes,
+        number_of_coding_passes,
+        strict,
+    )? {
         return Ok(());
     }
 
@@ -222,6 +317,41 @@ pub(crate) fn decode_combined_validated(
         stride,
         stripe_causal,
         decoded_data,
+    )
+}
+
+fn decode_combined_validated_with_scratch(
+    combined: &CombinedCodeBlockData,
+    missing_bit_planes: u8,
+    total_bitplanes: u8,
+    number_of_coding_passes: u8,
+    stripe_causal: bool,
+    strict: bool,
+    decoded_data: &mut [u32],
+    width: u32,
+    height: u32,
+    stride: u32,
+    scratch: &mut HtBlockDecodeScratch,
+) -> Result<()> {
+    if !validate_combined_decode(
+        missing_bit_planes,
+        total_bitplanes,
+        number_of_coding_passes,
+        strict,
+    )? {
+        return Ok(());
+    }
+
+    decode_combined_with_scratch(
+        combined,
+        missing_bit_planes,
+        number_of_coding_passes,
+        width,
+        height,
+        stride,
+        stripe_causal,
+        decoded_data,
+        scratch,
     )
 }
 
@@ -486,6 +616,7 @@ fn decode_impl(
     height: u32,
     stride: u32,
     stripe_causal: bool,
+    scratch_buffers: &mut HtBlockDecodeScratch,
 ) -> Option<()> {
     if num_passes > 1 && lengths2 == 0 {
         num_passes = 1;
@@ -518,7 +649,7 @@ fn decode_impl(
 
     let quad_rows = height.div_ceil(2) as usize;
     let sstr = ((width + 2 + 7) & !7) as usize;
-    let mut scratch = vec![0u16; sstr * (quad_rows + 1)];
+    let scratch = zeroed_u16_scratch(&mut scratch_buffers.cleanup, sstr * (quad_rows + 1));
     let mmsbp2 = missing_msbs + 2;
 
     {
@@ -660,7 +791,7 @@ fn decode_impl(
     {
         let mut magsgn = ForwardBitReader::<0xFF>::new(&coded_data[..lcup - scup]);
         let v_n_width = width.div_ceil(2) as usize + 2;
-        let mut v_n_scratch = vec![0u32; v_n_width];
+        let v_n_scratch = zeroed_u32_scratch(&mut scratch_buffers.v_n, v_n_width);
         let mut prev_v_n = 0u32;
         let mut x = 0u32;
         let mut sp = 0usize;
@@ -767,7 +898,7 @@ fn decode_impl(
     if num_passes > 1 {
         let sigma_rows = height.div_ceil(4) as usize + 1;
         let mstr = ((width.div_ceil(4) + 2 + 7) & !7) as usize;
-        let mut sigma = vec![0u16; sigma_rows * mstr];
+        let sigma = zeroed_u16_scratch(&mut scratch_buffers.sigma, sigma_rows * mstr);
 
         {
             let mut y = 0u32;
@@ -805,7 +936,10 @@ fn decode_impl(
         }
 
         {
-            let mut prev_row_sig = vec![0u16; width.div_ceil(4) as usize + 8];
+            let prev_row_sig = zeroed_u16_scratch(
+                &mut scratch_buffers.prev_row_sig,
+                width.div_ceil(4) as usize + 8,
+            );
             let mut sigprop = ForwardBitReader::<0>::new(&coded_data[lcup..lcup + len2]);
 
             for y in (0..height).step_by(4) {
@@ -834,13 +968,13 @@ fn decode_impl(
                     let idx = (x >> 2) as usize;
                     let ps =
                         u32::from(prev_row_sig[idx]) | (u32::from(prev_row_sig[idx + 1]) << 16);
-                    let ns = read_u32_pair(&sigma, next_row + idx);
+                    let ns = read_u32_pair(sigma, next_row + idx);
                     let mut u = (ps & 0x8888_8888) >> 3;
                     if !stripe_causal {
                         u |= (ns & 0x1111_1111) << 3;
                     }
 
-                    let cs = read_u32_pair(&sigma, cur_row + idx);
+                    let cs = read_u32_pair(sigma, cur_row + idx);
                     let mut mbr = cs;
                     mbr |= (cs & 0x7777_7777) << 1;
                     mbr |= (cs & 0xEEEE_EEEE) >> 1;
@@ -980,7 +1114,7 @@ fn decode_impl(
             let half = 1u32 << (p - 2);
             let mstr = ((width.div_ceil(4) + 2 + 7) & !7) as usize;
             let sigma_rows = height.div_ceil(4) as usize + 1;
-            let mut sigma = vec![0u16; sigma_rows * mstr];
+            let sigma = zeroed_u16_scratch(&mut scratch_buffers.sigma, sigma_rows * mstr);
 
             let mut y = 0u32;
             while y < height {
@@ -1018,7 +1152,7 @@ fn decode_impl(
 
                 for i in (0..width).step_by(8) {
                     let cwd = magref.fetch();
-                    let sig = read_u32_pair(&sigma, cur_sig_idx);
+                    let sig = read_u32_pair(sigma, cur_sig_idx);
                     cur_sig_idx += 2;
                     let mut col_mask = 0xFu32;
                     let mut cwd_mut = cwd;
@@ -1074,6 +1208,7 @@ mod tests {
         assert_eq!(encoded.num_coding_passes, 1);
 
         let mut decoded = vec![0u32; original.len()];
+        let mut scratch = HtBlockDecodeScratch::default();
         let decoded_ok = decode_impl(
             &encoded.data,
             &mut decoded,
@@ -1085,6 +1220,7 @@ mod tests {
             4,
             4,
             false,
+            &mut scratch,
         );
         assert!(decoded_ok.is_some(), "encoded={:02x?}", encoded.data);
 
@@ -1103,6 +1239,7 @@ mod tests {
         assert_eq!(encoded.num_coding_passes, 1);
 
         let mut decoded = vec![0u32; original.len()];
+        let mut scratch = HtBlockDecodeScratch::default();
         let decoded_ok = decode_impl(
             &encoded.data,
             &mut decoded,
@@ -1114,9 +1251,91 @@ mod tests {
             4,
             4,
             false,
+            &mut scratch,
         );
         assert!(decoded_ok.is_some(), "encoded={:02x?}", encoded.data);
 
+        let decoded_i32: Vec<i32> = decoded
+            .into_iter()
+            .map(|value| coefficient_to_i32(value, total_bitplanes))
+            .collect();
+        assert_eq!(decoded_i32, original, "encoded={:02x?}", encoded.data);
+    }
+
+    #[test]
+    fn scratch_resize_zeroes_existing_values_when_growing() {
+        let mut scratch = HtBlockDecodeScratch::default();
+
+        zeroed_u16_scratch(&mut scratch.cleanup, 4).fill(7);
+        assert_eq!(zeroed_u16_scratch(&mut scratch.cleanup, 8), &[0; 8]);
+
+        zeroed_u32_scratch(&mut scratch.v_n, 4).fill(9);
+        assert_eq!(zeroed_u32_scratch(&mut scratch.v_n, 8), &[0; 8]);
+    }
+
+    #[test]
+    fn decode_combined_validated_with_scratch_reuses_zeroed_buffers() {
+        let width = 16u32;
+        let height = 16u32;
+        let original: Vec<i32> = (0..(width * height))
+            .map(|i| {
+                let value = (i as i32 % 47) - 23;
+                if i % 5 == 0 {
+                    0
+                } else {
+                    value
+                }
+            })
+            .collect();
+        let total_bitplanes = 6u8;
+        let encoded =
+            encode_code_block(&original, width, height, total_bitplanes).expect("encode HT block");
+        let combined = CombinedCodeBlockData {
+            data: encoded.data.clone(),
+            cleanup_length: encoded.data.len() as u32,
+            refinement_length: 0,
+        };
+        let mut scratch = HtBlockDecodeScratch::default();
+        let mut decoded = vec![0u32; original.len()];
+
+        decode_combined_validated_with_scratch(
+            &combined,
+            encoded.num_zero_bitplanes,
+            total_bitplanes,
+            encoded.num_coding_passes,
+            false,
+            true,
+            &mut decoded,
+            width,
+            height,
+            width,
+            &mut scratch,
+        )
+        .expect("decode HT block");
+
+        let first_capacities = scratch.capacities_for_test();
+        assert!(first_capacities.cleanup > 0);
+        assert!(first_capacities.v_n > 0);
+
+        scratch.poison_for_test();
+        decoded.fill(0);
+
+        decode_combined_validated_with_scratch(
+            &combined,
+            encoded.num_zero_bitplanes,
+            total_bitplanes,
+            encoded.num_coding_passes,
+            false,
+            true,
+            &mut decoded,
+            width,
+            height,
+            width,
+            &mut scratch,
+        )
+        .expect("decode HT block after scratch poison");
+
+        assert_eq!(scratch.capacities_for_test(), first_capacities);
         let decoded_i32: Vec<i32> = decoded
             .into_iter()
             .map(|value| coefficient_to_i32(value, total_bitplanes))

@@ -400,7 +400,8 @@ fn print_help() {
 #[cfg(test)]
 mod tests {
     use super::perf_guard::{
-        compare_estimates, discover_estimates, BenchEstimate, RegressionOutcome,
+        compare_estimates, discover_estimates, sync_benchmark_sources, BenchEstimate,
+        RegressionOutcome,
     };
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -486,6 +487,35 @@ mod tests {
                 id: "j2k_public_decode/rgb8_full_128x128".to_string(),
                 median_ns: 321.5,
             }]
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn sync_benchmark_sources_overlays_current_bench_files() {
+        let root = temp_dir("signinum-perf-guard-sync-test");
+        let source = root.join("source");
+        let target = root.join("target");
+        let public_bench = "crates/signinum-j2k/benches/public_api.rs";
+        let native_bench = "crates/signinum-j2k-native/benches/tier1_bitplane.rs";
+        fs::create_dir_all(source.join("crates/signinum-j2k/benches")).unwrap();
+        fs::create_dir_all(source.join("crates/signinum-j2k-native/benches")).unwrap();
+        fs::create_dir_all(target.join("crates/signinum-j2k/benches")).unwrap();
+        fs::create_dir_all(target.join("crates/signinum-j2k-native/benches")).unwrap();
+        fs::write(source.join(public_bench), "current public bench").unwrap();
+        fs::write(source.join(native_bench), "current native bench").unwrap();
+        fs::write(target.join(public_bench), "old public bench").unwrap();
+        fs::write(target.join(native_bench), "old native bench").unwrap();
+
+        sync_benchmark_sources(&source, &target).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(target.join(public_bench)).unwrap(),
+            "current public bench"
+        );
+        assert_eq!(
+            fs::read_to_string(target.join(native_bench)).unwrap(),
+            "current native bench"
         );
         let _ = fs::remove_dir_all(root);
     }

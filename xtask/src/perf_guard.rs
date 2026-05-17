@@ -47,6 +47,10 @@ const BENCH_COMMANDS: &[BenchCommand] = &[
         bench: "tier1_bitplane",
     },
 ];
+const BENCH_SOURCE_FILES: &[&str] = &[
+    "crates/signinum-j2k/benches/public_api.rs",
+    "crates/signinum-j2k-native/benches/tier1_bitplane.rs",
+];
 
 pub(crate) fn j2k_perf_guard(args: impl Iterator<Item = String>) -> Result<(), String> {
     let options = PerfGuardOptions::parse(args)?;
@@ -57,6 +61,7 @@ pub(crate) fn j2k_perf_guard(args: impl Iterator<Item = String>) -> Result<(), S
 
     let baseline_worktree = perf_root.join("baseline-worktree");
     recreate_baseline_worktree(&root, &baseline_worktree, &options.baseline_ref)?;
+    sync_benchmark_sources(&root, &baseline_worktree)?;
 
     let baseline_target = perf_root.join("baseline-target");
     let current_target = perf_root.join("current-target");
@@ -76,6 +81,30 @@ pub(crate) fn j2k_perf_guard(args: impl Iterator<Item = String>) -> Result<(), S
     } else {
         Ok(())
     }
+}
+
+pub(crate) fn sync_benchmark_sources(source_root: &Path, target_root: &Path) -> Result<(), String> {
+    for relative in BENCH_SOURCE_FILES {
+        let source = source_root.join(relative);
+        let target = target_root.join(relative);
+        let parent = target.parent().ok_or_else(|| {
+            format!(
+                "benchmark source target has no parent directory: {}",
+                target.display()
+            )
+        })?;
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("failed to create {}: {err}", parent.display()))?;
+        fs::copy(&source, &target).map_err(|err| {
+            format!(
+                "failed to copy benchmark source {} to {}: {err}",
+                source.display(),
+                target.display()
+            )
+        })?;
+    }
+
+    Ok(())
 }
 
 pub(crate) fn compare_estimates(

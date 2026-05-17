@@ -221,6 +221,7 @@ fn bench_rows(c: &mut Criterion) {
 
 fn bench_tile_batch(c: &mut Criterion) {
     let repeated = encode_gray8_codestream(TILE_SIDE, TILE_SIDE);
+    let ht_repeated = encode_ht_gray8_codestream(TILE_SIDE, TILE_SIDE);
     let mut distinct = Vec::with_capacity(BATCH_SIZE);
     for idx in 0..BATCH_SIZE {
         let mut pixels = patterned_gray8(TILE_SIDE, TILE_SIDE);
@@ -251,6 +252,25 @@ fn bench_tile_batch(c: &mut Criterion) {
                     PixelFormat::Gray8,
                 )
                 .expect("decode repeated gray8 tile");
+            }
+            black_box(&out);
+        });
+    });
+
+    group.bench_function("htj2k_gray8_repeated_batch_16", |b| {
+        b.iter(|| {
+            let mut ctx = DecoderContext::<J2kContext>::default();
+            let mut pool = J2kScratchPool::new();
+            for _ in 0..BATCH_SIZE {
+                <J2kCodec as TileBatchDecode>::decode_tile(
+                    &mut ctx,
+                    &mut pool,
+                    black_box(ht_repeated.as_slice()),
+                    &mut out,
+                    stride,
+                    PixelFormat::Gray8,
+                )
+                .expect("decode repeated htj2k gray8 tile");
             }
             black_box(&out);
         });

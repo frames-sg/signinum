@@ -12,6 +12,7 @@ fn public_api_bench_exposes_cpu_decode_regression_surface() {
         "gray8_rows_128x128",
         "gray8_repeated_batch_16",
         "gray8_distinct_batch_16",
+        "htj2k_gray8_repeated_batch_16",
         "htj2k_gray8_full_512x512",
     ] {
         assert!(

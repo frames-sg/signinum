@@ -17,9 +17,9 @@ use crate::{
 use alloc::vec::Vec;
 use core::convert::Infallible;
 use signinum_core::{
-    CompressedPayloadKind, CompressedTransferSyntax, DecodeRowsError, DecoderContext, Downscale,
-    ImageCodec, ImageDecode, ImageDecodeRows, Info, PassthroughCandidate, PixelFormat, Rect,
-    RowSink, TileBatchDecode,
+    BufferError, CompressedPayloadKind, CompressedTransferSyntax, DecodeRowsError, DecoderContext,
+    Downscale, ImageCodec, ImageDecode, ImageDecodeRows, Info, PassthroughCandidate, PixelFormat,
+    Rect, RowSink, TileBatchDecode,
 };
 
 /// Borrowed parse result for a JP2 or raw JPEG 2000 / HTJ2K codestream.
@@ -410,21 +410,20 @@ impl<'a> ImageDecodeRows<'a, u8> for J2kDecoder<'a> {
     {
         let fmt = row_format_u8(self.info()).map_err(DecodeRowsError::Decode)?;
         let row_bytes = row_bytes_for(self.info(), fmt).map_err(DecodeRowsError::Decode)?;
+        let full_len = row_bytes
+            .checked_mul(self.info.dimensions.1 as usize)
+            .ok_or_else(|| {
+                DecodeRowsError::Decode(J2kError::Buffer(BufferError::SizeOverflow {
+                    what: "J2K row decode output buffer",
+                }))
+            })?;
         let mut pool = J2kScratchPool::new();
-        let row = pool.packed_bytes(row_bytes);
-        for y in 0..self.info.dimensions.1 {
-            self.decode_region_into_cached(
-                row,
-                row_bytes,
-                fmt,
-                Rect {
-                    x: 0,
-                    y,
-                    w: self.info.dimensions.0,
-                    h: 1,
-                },
-            )
+        let full = pool.packed_bytes(full_len);
+        self.decode_into_cached(full, row_bytes, fmt)
             .map_err(DecodeRowsError::Decode)?;
+        for y in 0..self.info.dimensions.1 {
+            let start = y as usize * row_bytes;
+            let row = &full[start..start + row_bytes];
             sink.write_row(y, row).map_err(DecodeRowsError::Sink)?;
         }
         Ok(signinum_core::DecodeOutcome {
@@ -443,22 +442,21 @@ impl<'a> ImageDecodeRows<'a, u16> for J2kDecoder<'a> {
         let fmt = row_format_u16(self.info()).map_err(DecodeRowsError::Decode)?;
         let row_bytes = row_bytes_for(self.info(), fmt).map_err(DecodeRowsError::Decode)?;
         let samples_per_row = row_samples_for(self.info(), fmt).map_err(DecodeRowsError::Decode)?;
+        let full_len = row_bytes
+            .checked_mul(self.info.dimensions.1 as usize)
+            .ok_or_else(|| {
+                DecodeRowsError::Decode(J2kError::Buffer(BufferError::SizeOverflow {
+                    what: "J2K row decode output buffer",
+                }))
+            })?;
         let mut pool = J2kScratchPool::new();
-        let (packed, row) = pool.packed_bytes_and_row_u16(row_bytes, samples_per_row);
-        for y in 0..self.info.dimensions.1 {
-            self.decode_region_into_cached(
-                packed,
-                row_bytes,
-                fmt,
-                Rect {
-                    x: 0,
-                    y,
-                    w: self.info.dimensions.0,
-                    h: 1,
-                },
-            )
+        let (packed, row) = pool.packed_bytes_and_row_u16(full_len, samples_per_row);
+        self.decode_into_cached(packed, row_bytes, fmt)
             .map_err(DecodeRowsError::Decode)?;
-            for (dst, src) in row.iter_mut().zip(packed.chunks_exact(2)) {
+        for y in 0..self.info.dimensions.1 {
+            let start = y as usize * row_bytes;
+            let packed_row = &packed[start..start + row_bytes];
+            for (dst, src) in row.iter_mut().zip(packed_row.chunks_exact(2)) {
                 *dst = u16::from_le_bytes([src[0], src[1]]);
             }
             sink.write_row(y, row).map_err(DecodeRowsError::Sink)?;

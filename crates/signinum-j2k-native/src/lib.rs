@@ -1433,6 +1433,33 @@ impl<'a> Image<'a> {
         })
     }
 
+    /// Decode borrowed component planes for a requested region using a
+    /// caller-provided decoder context.
+    pub fn decode_region_components_with_context<'ctx>(
+        &self,
+        roi: (u32, u32, u32, u32),
+        decoder_context: &'ctx mut DecoderContext<'a>,
+    ) -> Result<DecodedComponents<'ctx>> {
+        validate_roi((self.width(), self.height()), roi)?;
+        let (_x, _y, width, height) = roi;
+        let decoded_image = self.prepare_decoded_image_with_region(decoder_context, Some(roi))?;
+        let planes = decoded_image
+            .decoded_components
+            .iter()
+            .map(|component| ComponentPlane {
+                samples: component.container.truncated(),
+                bit_depth: component.bit_depth,
+            })
+            .collect();
+
+        Ok(DecodedComponents {
+            dimensions: (width, height),
+            color_space: self.color_space.clone(),
+            has_alpha: self.has_alpha,
+            planes,
+        })
+    }
+
     /// Decode borrowed component planes for a requested region while
     /// delegating code-block/transform stages through the hidden backend hook.
     #[doc(hidden)]

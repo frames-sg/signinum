@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::backend::{ColorSpace, DecodeSettings, Image, RawBitmap};
+use crate::backend::{ColorSpace, DecodeSettings, DecodedComponents, Image, RawBitmap};
 use crate::{backend, J2kError, J2kScratchPool};
 use alloc::{string::ToString, vec::Vec};
 use core::convert::Infallible;
@@ -129,6 +129,12 @@ pub(crate) fn decode_image_into_with_native_context<'a>(
     let dims = (image.width(), image.height());
     match fmt {
         PixelFormat::Rgb8 | PixelFormat::Rgba8 | PixelFormat::Gray8 => {
+            if can_decode_u8_directly(image.color_space(), image.has_alpha(), dims, stride, fmt) {
+                image
+                    .decode_into(out, native_context)
+                    .map_err(|err| J2kError::Backend(err.to_string()))?;
+                return Ok(());
+            }
             let decoded = image
                 .decode_with_context(native_context)
                 .map_err(|err| J2kError::Backend(err.to_string()))?;
@@ -163,6 +169,22 @@ pub(crate) fn decode_image_into_with_native_context<'a>(
     }
 }
 
+fn can_decode_u8_directly(
+    color_space: &ColorSpace,
+    has_alpha: bool,
+    dims: (u32, u32),
+    stride: usize,
+    fmt: PixelFormat,
+) -> bool {
+    let width = dims.0 as usize;
+    match (color_space, has_alpha, fmt) {
+        (ColorSpace::RGB, false, PixelFormat::Rgb8) => stride == width * 3,
+        (ColorSpace::RGB, true, PixelFormat::Rgba8) => stride == width * 4,
+        (ColorSpace::Gray, false, PixelFormat::Gray8) => stride == width,
+        _ => false,
+    }
+}
+
 fn decode_image_region_into(
     image: &Image<'_>,
     out: &mut [u8],
@@ -182,21 +204,12 @@ pub(crate) fn decode_image_region_into_with_native_context<'a>(
     fmt: PixelFormat,
     roi: Rect,
 ) -> Result<(), J2kError> {
-    let dims = (roi.w, roi.h);
     match fmt {
         PixelFormat::Rgb8 | PixelFormat::Rgba8 | PixelFormat::Gray8 => {
-            let decoded = image
-                .decode_region_with_context((roi.x, roi.y, roi.w, roi.h), native_context)
+            let components = image
+                .decode_region_components_with_context((roi.x, roi.y, roi.w, roi.h), native_context)
                 .map_err(|err| J2kError::Backend(err.to_string()))?;
-            write_u8_output(
-                image.color_space(),
-                image.has_alpha(),
-                dims,
-                &decoded.data,
-                out,
-                stride,
-                fmt,
-            )
+            write_components_u8_output(&components, out, stride, fmt)
         }
         PixelFormat::Rgb16 | PixelFormat::Gray16 => {
             let raw = image
@@ -217,6 +230,129 @@ pub(crate) fn decode_image_region_into_with_native_context<'a>(
         }
         .into()),
     }
+}
+
+fn write_components_u8_output(
+    components: &DecodedComponents<'_>,
+    out: &mut [u8],
+    stride: usize,
+    fmt: PixelFormat,
+) -> Result<(), J2kError> {
+    let (width, height) = components.dimensions();
+    let width = width as usize;
+    let height = height as usize;
+    let planes = components.planes();
+    match (
+        components.color_space(),
+        components.has_alpha(),
+        planes.len(),
+        fmt,
+    ) {
+        (ColorSpace::Gray, false, 1, PixelFormat::Gray8) => {
+            write_component_rows_u8(&planes[0], out, stride, width, height);
+            Ok(())
+        }
+        (ColorSpace::RGB, false, 3, PixelFormat::Rgb8)
+        | (ColorSpace::RGB, true, 4, PixelFormat::Rgb8) => {
+            write_rgb_component_rows_u8(planes, out, stride, width, height);
+            Ok(())
+        }
+        (ColorSpace::RGB, false, 3, PixelFormat::Rgba8) => {
+            write_rgba_component_rows_u8(planes, out, stride, width, height, true);
+            Ok(())
+        }
+        (ColorSpace::RGB, true, 4, PixelFormat::Rgba8) => {
+            write_rgba_component_rows_u8(planes, out, stride, width, height, false);
+            Ok(())
+        }
+        _ => Err(Unsupported {
+            what: "backend color space cannot be mapped to requested 8-bit pixel format",
+        }
+        .into()),
+    }
+}
+
+fn write_component_rows_u8(
+    plane: &signinum_j2k_native::ComponentPlane<'_>,
+    out: &mut [u8],
+    stride: usize,
+    width: usize,
+    height: usize,
+) {
+    for y in 0..height {
+        let src = &plane.samples()[y * width..(y + 1) * width];
+        let dst = &mut out[y * stride..y * stride + width];
+        write_samples_as_u8(src, plane.bit_depth(), dst);
+    }
+}
+
+fn write_rgb_component_rows_u8(
+    planes: &[signinum_j2k_native::ComponentPlane<'_>],
+    out: &mut [u8],
+    stride: usize,
+    width: usize,
+    height: usize,
+) {
+    for y in 0..height {
+        let row = y * width;
+        let dst = &mut out[y * stride..y * stride + width * 3];
+        for x in 0..width {
+            let dst = &mut dst[x * 3..x * 3 + 3];
+            for channel in 0..3 {
+                dst[channel] = sample_as_u8(
+                    planes[channel].samples()[row + x],
+                    planes[channel].bit_depth(),
+                );
+            }
+        }
+    }
+}
+
+fn write_rgba_component_rows_u8(
+    planes: &[signinum_j2k_native::ComponentPlane<'_>],
+    out: &mut [u8],
+    stride: usize,
+    width: usize,
+    height: usize,
+    synthesize_alpha: bool,
+) {
+    for y in 0..height {
+        let row = y * width;
+        let dst = &mut out[y * stride..y * stride + width * 4];
+        for x in 0..width {
+            let dst = &mut dst[x * 4..x * 4 + 4];
+            for channel in 0..3 {
+                dst[channel] = sample_as_u8(
+                    planes[channel].samples()[row + x],
+                    planes[channel].bit_depth(),
+                );
+            }
+            dst[3] = if synthesize_alpha {
+                u8::MAX
+            } else {
+                sample_as_u8(planes[3].samples()[row + x], planes[3].bit_depth())
+            };
+        }
+    }
+}
+
+fn write_samples_as_u8(src: &[f32], bit_depth: u8, dst: &mut [u8]) {
+    for (sample, dst) in src.iter().zip(dst.iter_mut()) {
+        *dst = sample_as_u8(*sample, bit_depth);
+    }
+}
+
+fn sample_as_u8(sample: f32, bit_depth: u8) -> u8 {
+    let rounded = sample.round();
+    if bit_depth == 8 {
+        return rounded.clamp(0.0, f32::from(u8::MAX)) as u8;
+    }
+    let max_value = if bit_depth >= 16 {
+        f32::from(u16::MAX)
+    } else {
+        f32::from(((1_u16 << bit_depth) - 1).max(1))
+    };
+    ((rounded.clamp(0.0, max_value) / max_value) * f32::from(u8::MAX)).round() as u8
 }
 
 pub(crate) fn validate_supported_format(fmt: PixelFormat) -> Result<(), J2kError> {
@@ -405,5 +541,53 @@ fn convert_or_copy_u16(
             let widened = (u32::from(*sample) * u32::from(u16::MAX) + (max_value / 2)) / max_value;
             dst_sample.copy_from_slice(&(widened as u16).to_le_bytes());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{can_decode_u8_directly, ColorSpace, PixelFormat};
+
+    #[test]
+    fn direct_u8_decode_accepts_exact_rgb_and_gray_layouts() {
+        assert!(can_decode_u8_directly(
+            &ColorSpace::RGB,
+            false,
+            (128, 64),
+            128 * 3,
+            PixelFormat::Rgb8
+        ));
+        assert!(can_decode_u8_directly(
+            &ColorSpace::Gray,
+            false,
+            (128, 64),
+            128,
+            PixelFormat::Gray8
+        ));
+    }
+
+    #[test]
+    fn direct_u8_decode_rejects_format_conversion_and_padded_stride() {
+        assert!(!can_decode_u8_directly(
+            &ColorSpace::RGB,
+            false,
+            (128, 64),
+            128 * 4,
+            PixelFormat::Rgba8
+        ));
+        assert!(!can_decode_u8_directly(
+            &ColorSpace::RGB,
+            true,
+            (128, 64),
+            128 * 3,
+            PixelFormat::Rgb8
+        ));
+        assert!(!can_decode_u8_directly(
+            &ColorSpace::Gray,
+            false,
+            (128, 64),
+            160,
+            PixelFormat::Gray8
+        ));
     }
 }

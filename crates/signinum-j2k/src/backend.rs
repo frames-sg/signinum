@@ -4,7 +4,9 @@ use crate::J2kError;
 use alloc::string::ToString;
 use signinum_core::{Colorspace, Info};
 
-pub(crate) use signinum_j2k_native::{ColorSpace, DecodeSettings, Image, RawBitmap};
+pub(crate) use signinum_j2k_native::{
+    ColorSpace, DecodeSettings, DecodedComponents, Image, RawBitmap,
+};
 
 pub(crate) fn image(bytes: &[u8], settings: DecodeSettings) -> Result<Image<'_>, J2kError> {
     Image::new(bytes, &settings).map_err(|err| J2kError::Backend(err.to_string()))

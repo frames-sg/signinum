@@ -38,3 +38,31 @@ fn decoded_components_expose_component_planes() {
     }
     assert_eq!(interleaved, bitmap.data);
 }
+
+#[test]
+fn decoded_region_components_expose_cropped_component_planes() {
+    let bytes = fixture();
+    let image = Image::new(&bytes, &DecodeSettings::default()).expect("image");
+    let mut context = DecoderContext::default();
+    let bitmap = image
+        .decode_region_with_context((1, 0, 1, 2), &mut DecoderContext::default())
+        .expect("bitmap");
+    let planes = image
+        .decode_region_components_with_context((1, 0, 1, 2), &mut context)
+        .expect("component region decode");
+
+    assert_eq!(planes.dimensions(), (1, 2));
+    assert_eq!(planes.planes().len(), 3);
+    assert!(planes
+        .planes()
+        .iter()
+        .all(|plane| plane.samples().len() == 2));
+
+    let mut interleaved = Vec::with_capacity(6);
+    for idx in 0..2 {
+        for plane in planes.planes() {
+            interleaved.push(plane.samples()[idx].round() as u8);
+        }
+    }
+    assert_eq!(interleaved, bitmap.data);
+}

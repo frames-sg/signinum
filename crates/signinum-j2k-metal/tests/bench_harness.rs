@@ -99,11 +99,12 @@ fn compare_bench_keeps_multiple_htj2k_gray_sizes() {
         common.contains("inputs.extend(ht_bench_inputs()"),
         "bench_inputs must include all generated HTJ2K size candidates, not only the first success"
     );
-    assert!(
-        common.contains("(\"htj2k_gray_1024\", 1024_u32, 1024_u32)")
-            && common.contains("(\"htj2k_gray_512\", 512_u32, 512_u32)"),
-        "HTJ2K bench coverage must include 1024 and 512 grayscale tiles"
-    );
+    for fixture_name in ["\"htj2k_gray_1024\"", "\"htj2k_gray_512\""] {
+        assert!(
+            common.contains(fixture_name),
+            "HTJ2K bench coverage must include {fixture_name}"
+        );
+    }
 }
 
 #[test]
@@ -125,7 +126,7 @@ fn external_wsi_bench_groups_by_codec_family() {
 }
 
 #[test]
-fn metal_region_scaled_benches_gate_to_grayscale_direct_modes() {
+fn metal_region_scaled_benches_gate_to_direct_modes() {
     let common = include_str!("../benches/common/mod.rs");
 
     assert!(
@@ -133,8 +134,8 @@ fn metal_region_scaled_benches_gate_to_grayscale_direct_modes() {
         "ROI+scaled Metal benchmark support must have a cheap format gate"
     );
     assert!(
-        common.contains("matches!(mode, DecodeMode::Gray8 | DecodeMode::Gray16)"),
-        "ROI+scaled Metal benchmarks must only advertise direct grayscale modes until RGB is GPU-native"
+        common.contains("DecodeMode::Gray8 | DecodeMode::Gray16 | DecodeMode::Rgb8"),
+        "ROI+scaled Metal benchmarks must advertise RGB once RGB is GPU-native"
     );
     for helper in [
         "signinum_metal_supports_region_scaled",
@@ -151,6 +152,78 @@ fn metal_region_scaled_benches_gate_to_grayscale_direct_modes() {
         assert!(
             helper_body.contains("supports_metal_region_scaled_mode("),
             "{helper} must skip unsupported ROI+scaled Metal formats before probing decode"
+        );
+    }
+}
+
+#[test]
+fn compare_bench_rgb_region_scaled_reports_resident_vs_cpu_staged_metal() {
+    let common = include_str!("../benches/common/mod.rs");
+    let compare = include_str!("../benches/compare.rs");
+
+    assert!(
+        common.contains("signinum_cpu_staged_metal_decode_tile_batch_region_scaled"),
+        "common benchmarks must expose a CPU decode plus CPU-to-Metal upload baseline"
+    );
+    assert!(
+        common.contains("decode_region_scaled_to_cpu_staged_metal_surface_with_session"),
+        "CPU-staged baseline must use the explicit CPU-staged Metal API"
+    );
+    assert!(
+        compare.contains("wsi_tile_batch_region_scaled_rgb_q4"),
+        "compare bench must include an RGB ROI+scaled batch group"
+    );
+    assert!(
+        compare.contains("signinum-cpu-staged-metal")
+            && compare.contains("signinum-metal-resident"),
+        "RGB ROI+scaled benches must report CPU-staged Metal and resident hybrid Metal separately"
+    );
+}
+
+#[test]
+fn compare_bench_distinct_rgb_region_scaled_reports_cpu_auto_and_resident_metal() {
+    let compare = include_str!("../benches/compare.rs");
+
+    assert!(
+        compare.contains("wsi_tile_batch_region_scaled_rgb_distinct_q4"),
+        "compare bench must include a distinct RGB ROI+scaled batch group"
+    );
+    assert!(
+        compare.contains("distinct_rgb_tile_batch_inputs(input, count)"),
+        "distinct RGB ROI+scaled group must use generated distinct RGB tiles"
+    );
+    assert!(
+        compare.contains("signinum_decode_tile_batch_region_scaled_distinct")
+            && compare.contains("signinum_adaptive_decode_tile_batch_region_scaled_distinct")
+            && compare.contains("signinum_metal_decode_tile_batch_region_scaled_distinct"),
+        "distinct RGB ROI+scaled group must report CPU, Auto, and explicit resident Metal timings"
+    );
+}
+
+#[test]
+fn compare_bench_exposes_htj2k_measurement_first_surfaces() {
+    let common = include_str!("../benches/common/mod.rs");
+    let compare = include_str!("../benches/compare.rs");
+
+    for expected in [
+        "htj2k_region_scaled_plan_build",
+        "htj2k_feeder_coalesce",
+        "htj2k_metal_route",
+    ] {
+        assert!(
+            compare.contains(expected),
+            "compare benchmark is missing `{expected}`"
+        );
+    }
+
+    for expected in [
+        "benchmark_region_scaled_direct_plan_prepare",
+        "benchmark_group_region_scaled_requests",
+        "\"htj2k_rgb_512\"",
+    ] {
+        assert!(
+            common.contains(expected),
+            "common benchmark helpers are missing `{expected}`"
         );
     }
 }

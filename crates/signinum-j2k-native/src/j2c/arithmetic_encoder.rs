@@ -3,7 +3,6 @@
 //! This is the encoding counterpart of `arithmetic_decoder.rs`.
 //! It uses the same QE probability table and context state machine.
 
-use alloc::vec;
 use alloc::vec::Vec;
 
 /// MQ arithmetic encoder context (identical layout to decoder context).
@@ -123,8 +122,15 @@ pub(crate) struct ArithmeticEncoder {
 
 impl ArithmeticEncoder {
     pub(crate) fn new() -> Self {
+        Self::with_capacity(1)
+    }
+
+    pub(crate) fn with_capacity(capacity: usize) -> Self {
+        let mut data = Vec::with_capacity(capacity.max(1));
+        data.push(0x00);
+
         Self {
-            data: vec![0x00], // Sentinel byte at index 0
+            data, // Sentinel byte at index 0
             a: 0x8000,
             c: 0,
             ct: 12,
@@ -132,7 +138,7 @@ impl ArithmeticEncoder {
     }
 
     /// Encode a single symbol (0 or 1) with the given context (C.2.6 ENCODE).
-    #[inline]
+    #[inline(always)]
     pub(crate) fn encode(&mut self, bit: u32, context: &mut ArithmeticEncoderContext) {
         let qe_entry = &QE_TABLE[context.index() as usize];
         self.a -= qe_entry.qe;
@@ -292,6 +298,24 @@ mod tests {
         let mut dec_ctx = ArithmeticDecoderContext::default();
         for _ in 0..100 {
             assert_eq!(decoder.decode(&mut dec_ctx), 0);
+        }
+    }
+
+    #[test]
+    fn with_capacity_preserves_round_trip_encoding() {
+        let mut encoder = ArithmeticEncoder::with_capacity(128);
+        let mut enc_ctx = ArithmeticEncoderContext::default();
+        let symbols = [0u32, 1, 0, 1, 1, 0, 0, 1, 0, 0, 1, 1];
+
+        for &symbol in &symbols {
+            encoder.encode(symbol, &mut enc_ctx);
+        }
+        let encoded = encoder.finish();
+
+        let mut decoder = ArithmeticDecoder::new(&encoded);
+        let mut dec_ctx = ArithmeticDecoderContext::default();
+        for &symbol in &symbols {
+            assert_eq!(decoder.decode(&mut dec_ctx), symbol);
         }
     }
 

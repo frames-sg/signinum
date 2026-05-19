@@ -30,6 +30,8 @@ use crate::{
 };
 use crate::{DecodeSettings, Image};
 
+const HT_CPU_PARALLEL_FALLBACK_MIN_JOBS: usize = 4;
+
 /// Encoding options for JPEG 2000.
 #[derive(Debug, Clone)]
 pub struct EncodeOptions {
@@ -737,6 +739,28 @@ struct PreparedResolutionPacket {
     subbands: Vec<PreparedEncodeSubband>,
 }
 
+fn copy_code_block_coefficients(
+    quantized: &[i32],
+    width: usize,
+    x0: usize,
+    y0: usize,
+    cbw: usize,
+    cbh: usize,
+) -> Vec<i32> {
+    let len = cbw * cbh;
+    let start = y0 * width + x0;
+    if cbw == width {
+        return quantized[start..start + len].to_vec();
+    }
+
+    let mut coefficients = Vec::with_capacity(len);
+    for y in 0..cbh {
+        let row_start = (y0 + y) * width + x0;
+        coefficients.extend_from_slice(&quantized[row_start..row_start + cbw]);
+    }
+    coefficients
+}
+
 fn prepare_subband(
     coefficients: &[f32],
     width: u32,
@@ -781,14 +805,14 @@ fn prepare_subband(
             let cbw = x1 - x0;
             let cbh = y1 - y0;
 
-            // Extract code-block coefficients
-            let mut cb_coeffs = vec![0i32; (cbw * cbh) as usize];
-            for y in 0..cbh {
-                for x in 0..cbw {
-                    cb_coeffs[(y * cbw + x) as usize] =
-                        quantized[((y0 + y) * width + (x0 + x)) as usize];
-                }
-            }
+            let cb_coeffs = copy_code_block_coefficients(
+                &quantized,
+                width as usize,
+                x0 as usize,
+                y0 as usize,
+                cbw as usize,
+                cbh as usize,
+            );
 
             code_blocks.push(PreparedEncodeCodeBlock {
                 coefficients: cb_coeffs,
@@ -917,6 +941,9 @@ fn encode_all_ht_code_blocks(
     }
 
     if accelerator.prefer_parallel_cpu_code_block_fallback() {
+        if jobs.len() < HT_CPU_PARALLEL_FALLBACK_MIN_JOBS {
+            return encode_all_ht_code_blocks_serial_cpu(&jobs);
+        }
         return encode_all_ht_code_blocks_parallel(&jobs);
     }
 
@@ -984,6 +1011,21 @@ fn encode_all_tier1_code_blocks(
         }
     }
     Ok(encoded)
+}
+
+fn encode_all_ht_code_blocks_serial_cpu(
+    jobs: &[crate::J2kHtCodeBlockEncodeJob<'_>],
+) -> Result<Vec<bitplane_encode::EncodedCodeBlock>, &'static str> {
+    jobs.iter()
+        .map(|job| {
+            ht_block_encode::encode_code_block(
+                job.coefficients,
+                job.width,
+                job.height,
+                job.total_bitplanes,
+            )
+        })
+        .collect()
 }
 
 #[cfg(feature = "parallel")]
@@ -1155,6 +1197,10 @@ fn deinterleave_to_f32(
     bit_depth: u8,
     signed: bool,
 ) -> Vec<Vec<f32>> {
+    if num_components == 3 && bit_depth == 8 && !signed {
+        return deinterleave_rgb8_unsigned_to_f32(pixels, num_pixels);
+    }
+
     let nc = num_components as usize;
     let mut components = vec![vec![0.0f32; num_pixels]; nc];
     let unsigned_offset = if signed {
@@ -1190,6 +1236,20 @@ fn deinterleave_to_f32(
     }
 
     components
+}
+
+fn deinterleave_rgb8_unsigned_to_f32(pixels: &[u8], num_pixels: usize) -> Vec<Vec<f32>> {
+    let mut r = Vec::with_capacity(num_pixels);
+    let mut g = Vec::with_capacity(num_pixels);
+    let mut b = Vec::with_capacity(num_pixels);
+
+    for pixel in pixels.chunks_exact(3).take(num_pixels) {
+        r.push(f32::from(pixel[0]) - 128.0);
+        g.push(f32::from(pixel[1]) - 128.0);
+        b.push(f32::from(pixel[2]) - 128.0);
+    }
+
+    vec![r, g, b]
 }
 
 /// Calculate the maximum number of decomposition levels for given dimensions.
@@ -1428,6 +1488,63 @@ mod tests {
 
             assert_eq!(parallel, serial);
         }
+    }
+
+    #[test]
+    fn ht_cpu_parallel_fallback_threshold_matches_parallel_output() {
+        assert_eq!(HT_CPU_PARALLEL_FALLBACK_MIN_JOBS, 4);
+
+        let blocks: Vec<Vec<i32>> = (0..HT_CPU_PARALLEL_FALLBACK_MIN_JOBS)
+            .map(|seed| {
+                (0usize..64 * 64)
+                    .map(|index| {
+                        let value = (((index * 31) ^ (seed * 17)) & 0x01ff) as i32 - 255;
+                        if (index + seed).is_multiple_of(11) {
+                            0
+                        } else {
+                            value
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+        let jobs: Vec<_> = blocks
+            .iter()
+            .map(|coefficients| crate::J2kHtCodeBlockEncodeJob {
+                coefficients,
+                width: 64,
+                height: 64,
+                total_bitplanes: 10,
+            })
+            .collect();
+
+        let serial =
+            encode_all_ht_code_blocks_serial_cpu(&jobs[..HT_CPU_PARALLEL_FALLBACK_MIN_JOBS - 1])
+                .expect("serial tiny HT encode");
+        let parallel =
+            encode_all_ht_code_blocks_parallel(&jobs[..HT_CPU_PARALLEL_FALLBACK_MIN_JOBS])
+                .expect("parallel HT encode");
+        let serial_threshold =
+            encode_all_ht_code_blocks_serial_cpu(&jobs[..HT_CPU_PARALLEL_FALLBACK_MIN_JOBS])
+                .expect("serial threshold HT encode");
+
+        assert_eq!(serial.len(), HT_CPU_PARALLEL_FALLBACK_MIN_JOBS - 1);
+        assert_eq!(parallel.len(), HT_CPU_PARALLEL_FALLBACK_MIN_JOBS);
+        assert_eq!(serial_threshold.len(), parallel.len());
+        for (serial, parallel) in serial_threshold.iter().zip(&parallel) {
+            assert_eq!(serial.data, parallel.data);
+            assert_eq!(serial.num_coding_passes, parallel.num_coding_passes);
+            assert_eq!(serial.num_zero_bitplanes, parallel.num_zero_bitplanes);
+        }
+    }
+
+    #[test]
+    fn code_block_extraction_copies_partial_edge_blocks_rowwise() {
+        let quantized: Vec<i32> = (0..20).collect();
+
+        let block = copy_code_block_coefficients(&quantized, 5, 3, 1, 2, 3);
+
+        assert_eq!(block, vec![8, 9, 13, 14, 18, 19]);
     }
 
     #[test]
@@ -1731,6 +1848,18 @@ mod tests {
         assert_eq!(comps[0], vec![-118.0, -88.0]); // R
         assert_eq!(comps[1], vec![-108.0, -78.0]); // G
         assert_eq!(comps[2], vec![-98.0, -68.0]); // B
+    }
+
+    #[test]
+    fn deinterleave_rgb8_unsigned_fast_path_matches_generic_output() {
+        let pixels = (0..96)
+            .map(|value| ((value * 19 + value / 3) & 0xff) as u8)
+            .collect::<Vec<_>>();
+
+        let expected = deinterleave_to_f32(&pixels, 32, 3, 8, false);
+        let actual = deinterleave_rgb8_unsigned_to_f32(&pixels, 32);
+
+        assert_eq!(actual, expected);
     }
 
     #[test]

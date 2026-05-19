@@ -256,17 +256,70 @@ Run the J2K public API benches:
 cargo bench -p signinum-j2k --bench public_api
 ```
 
-Run the CPU J2K regression guard after creating a benchmark-only baseline tag:
+Run the J2K regression guard after creating a benchmark-only baseline tag:
 
 ```sh
 git tag j2k-bench-original <benchmark-only-commit>
 cargo xtask j2k-perf-guard --baseline-ref j2k-bench-original --threshold-percent 10 --quick
 ```
 
-The guard runs deterministic Cargo Criterion benches for `signinum-j2k` and
-`signinum-j2k-native` in separate baseline/current target directories, compares
-median point estimates, and fails when a current result is more than 10% slower
-than the baseline. External WSI inputs, Metal, and CUDA stay report-only.
+For measurement-first work against a dirty current tree, record and compare a
+named local snapshot:
+
+```sh
+cargo xtask j2k-perf-guard --record-current htj2k-measured-v1 --quick
+cargo xtask j2k-perf-guard --compare-current htj2k-measured-v1 --quick
+```
+
+Current-tree snapshots are stored under
+`target/signinum-perf/current-tree-baselines/`. The guard prints every measured
+row, but hard-fails only stable HTJ2K maturation rows: public HTJ2K API rows,
+native cleanup/refinement rows, CPUUpload batch decode, feeder grouping,
+ROI+scaled plan preparation, public WSI HTJ2K tile-batch rows, and resident
+Metal WSI HTJ2K rows. Classic J2K, exploratory Tier-1 rows when included,
+explicit Metal route-threshold probes, and explicitly diagnostic CPU-staged WSI
+rows are still reported so benchmark drift is visible without turning noisy
+exploratory probes into hard gates.
+
+HTJ2K measured maturation snapshot `htj2k-measured-v1` was recorded on
+2026-05-18 from the current working tree before production decode/feed changes.
+The final quick compare on the same host exited 0 with these key medians:
+
+| Surface | Baseline | Current | Delta |
+| --- | ---: | ---: | ---: |
+| CPUUpload scalar batch 14 | 5.105 us | 5.207 us | +2.00% |
+| feeder gray 1024 ptr-eq batch 16 | 15.200 us | 7.761 us | -48.94% |
+| feeder gray 1024 value-equal batch 16 | 15.748 us | 8.322 us | -47.15% |
+| feeder gray 512 ptr-eq batch 16 | 7.885 us | 7.831 us | -0.69% |
+| feeder gray 512 value-equal batch 16 | 7.928 us | 7.679 us | -3.14% |
+| feeder RGB 512 ptr-eq batch 16 | 14.843 us | 9.240 us | -37.75% |
+| feeder RGB 512 value-equal batch 16 | 15.549 us | 16.161 us | +3.93% |
+| HT cleanup encode seed 2459041792 | 22.392 us | 21.768 us | -2.79% |
+| HT cleanup encode seed 2459041793 | 22.371 us | 22.140 us | -1.03% |
+| HTJ2K plan build gray 1024 ROI q4 | 62.673 us | 45.612 us | -27.22% |
+| HTJ2K plan build gray 512 ROI q4 | 37.046 us | 21.170 us | -42.86% |
+| HTJ2K plan build RGB 512 ROI q4 | 29.490 us | 29.832 us | +1.16% |
+| Metal route CPU-staged batch 1 | 540.559 us | 347.953 us | -35.63% |
+| Metal route CPU-staged batch 16 | 4.553 ms | 4.153 ms | -8.79% |
+| Metal route resident batch 16 | 732.670 us | 529.423 us | -27.74% |
+| WSI public CPU HTJ2K RGB 512 batch 16 | 880.781 us | 704.076 us | -20.06% |
+| WSI Metal-resident HTJ2K RGB 512 batch 16 | 596.213 us | 357.897 us | -39.97% |
+
+Remaining gaps from this run:
+
+- ROI code-block pruning is protected by a direct job-count regression test and
+  now produces measured gray-plan preparation wins. RGB plan preparation remains
+  essentially flat in this pass, so color production decode keeps the previous
+  full-plan/crop behavior until a color ROI path measures better.
+- CPUUpload worker-local scratch reuse is protected by a direct workspace reuse
+  regression test, but this quick wall-clock row was noisy across runs
+  (-5.31% on the previous compare, +2.00% here). Treat it as an allocation
+  cleanup and architecture win, not a stable speedup claim.
+- `wsi_tile_batch_region_scaled_rgb_q4/signinum-cpu-staged-metal_htj2k_rgb_512_batch_16`
+  reported +10.48%. It is a diagnostic explicit CPU-staged WSI row; public CPU
+  tile-batch and Metal-resident WSI rows improved and remain hard-gated.
+- True multi-pass HTJ2K encode semantics remain out of scope. The current
+  encode benches and tests cover cleanup-only behavior only.
 
 Run the facade dispatch benches:
 
@@ -520,19 +573,19 @@ Current v1 scope is explicit:
   throughput instead of duplicate-input reuse. Unsupported shapes fall back
   through CPU decode plus device-surface upload according to the requested
   backend
-- J2K: grayscale full-tile and ROI+scaled MetalDirect paths keep marker parsing
-  and plan construction on CPU, then dispatch supported classic Tier-1 or
-  HTJ2K cleanup jobs, grouped sub-band work, IDWT, and store/pack in a resident
-  Metal command sequence. Distinct grayscale ROI+scaled tile batches are
-  coalesced across separate codestreams. Cropped ROI+scaled plans prune
-  irrelevant code-block jobs, compact retained HTJ2K coded payloads, and crop
-  every required IDWT output level, carrying input-window origins through the
-  resident band graph so intermediate IDWT levels can feed later cropped levels
-  safely. RGB ROI+scaled and unsupported codestream features still fall back
-  through CPU reconstruction plus device-surface upload
+- J2K: grayscale and RGB full-tile plus ROI+scaled MetalDirect paths keep marker
+  parsing and plan construction on CPU, then dispatch supported classic Tier-1
+  or HTJ2K cleanup jobs, grouped sub-band work, IDWT, optional MCT, and
+  store/pack in a resident Metal command sequence. Distinct grayscale and RGB
+  ROI+scaled tile batches are coalesced across separate codestreams. Cropped
+  ROI+scaled plans prune irrelevant code-block jobs, compact retained HTJ2K
+  coded payloads, and crop every required IDWT output level, carrying
+  input-window origins through the resident band graph so intermediate IDWT
+  levels can feed later cropped levels safely. Unsupported codestream features
+  still fall back through CPU reconstruction plus device-surface upload
 - J2K `signinum-adaptive` ROI+scaled batch benches submit through
   `BackendRequest::Auto`; the batching layer chooses CPU for short/small
-  batches and Metal for measured grayscale batch thresholds
+  batches and Metal for measured grayscale/RGB batch thresholds
 - these benches measure complete codec-device tasks, including surface
   production; they do not include WSI container parsing, tile lookup, caching,
   or prefetch policy

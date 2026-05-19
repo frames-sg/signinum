@@ -134,14 +134,14 @@ fn decode_inner(
         // Only one termination per code block, so we can just decode the
         // whole range in one single go, processing all coding passes at once.
         let mut decoder = ArithmeticDecoder::new(&bp_buffers.combined_layers);
-        handle_arithmetic_coding_passes(
-            0,
-            code_block
-                .number_of_coding_passes
-                .min(ctx.max_coding_passes),
-            ctx,
-            &mut decoder,
-        )?;
+        let end = code_block
+            .number_of_coding_passes
+            .min(ctx.max_coding_passes);
+        if ctx.uses_normal_arithmetic_neighbor_path() {
+            handle_normal_arithmetic_coding_passes(0, end, ctx, &mut decoder)?;
+        } else {
+            handle_arithmetic_coding_passes(0, end, ctx, &mut decoder)?;
+        }
     } else {
         // Otherwise, each segment introduces a termination. For "termination on
         // each pass", each segment only covers one coding pass
@@ -191,6 +191,24 @@ fn handle_arithmetic_coding_passes(
     ctx: &mut BitPlaneDecodeContext,
     decoder: &mut ArithmeticDecoder<'_>,
 ) -> Option<()> {
+    handle_arithmetic_coding_passes_with_neighbors::<false>(start, end, ctx, decoder)
+}
+
+fn handle_normal_arithmetic_coding_passes(
+    start: u8,
+    end: u8,
+    ctx: &mut BitPlaneDecodeContext,
+    decoder: &mut ArithmeticDecoder<'_>,
+) -> Option<()> {
+    handle_arithmetic_coding_passes_with_neighbors::<true>(start, end, ctx, decoder)
+}
+
+fn handle_arithmetic_coding_passes_with_neighbors<const NORMAL_NEIGHBORS: bool>(
+    start: u8,
+    end: u8,
+    ctx: &mut BitPlaneDecodeContext,
+    decoder: &mut ArithmeticDecoder<'_>,
+) -> Option<()> {
     for coding_pass in start..end {
         let current_bitplane = coding_pass.div_ceil(3);
         ctx.current_bit_position = ctx.bitplanes - 1 - current_bitplane;
@@ -199,7 +217,7 @@ fn handle_arithmetic_coding_passes(
         // are in the order SPP -> MRR -> C.
         match coding_pass % 3 {
             0 => {
-                SafeScalarTier1::cleanup_pass_arithmetic(ctx, decoder);
+                cleanup_pass_arithmetic_with_neighbors::<NORMAL_NEIGHBORS>(ctx, decoder);
 
                 if ctx.style.segmentation_symbols {
                     let b0 = decoder.read_bit(ctx.arithmetic_decoder_context(18));
@@ -215,10 +233,14 @@ fn handle_arithmetic_coding_passes(
                 ctx.reset_for_next_bitplane();
             }
             1 => {
-                SafeScalarTier1::significance_propagation_pass_arithmetic(ctx, decoder);
+                significance_propagation_pass_arithmetic_with_neighbors::<NORMAL_NEIGHBORS>(
+                    ctx, decoder,
+                );
             }
             2 => {
-                SafeScalarTier1::magnitude_refinement_pass_arithmetic(ctx, decoder);
+                magnitude_refinement_pass_arithmetic_with_neighbors::<NORMAL_NEIGHBORS>(
+                    ctx, decoder,
+                );
             }
             _ => unreachable!(),
         }
@@ -614,6 +636,45 @@ impl BitPlaneDecodeContext {
     }
 
     #[inline(always)]
+    fn set_significant_index_for_path<const NORMAL_NEIGHBORS: bool>(
+        &mut self,
+        idx: usize,
+        padded_width: usize,
+    ) {
+        if NORMAL_NEIGHBORS {
+            self.set_significant_index_normal(idx, padded_width);
+        } else {
+            self.set_significant_index(idx, padded_width);
+        }
+    }
+
+    #[inline(always)]
+    fn set_significant_index_normal(&mut self, idx: usize, padded_width: usize) {
+        if self.coefficient_states[idx].is_significant() {
+            return;
+        }
+
+        self.coefficient_states[idx].set_significant();
+
+        let top_start = idx - padded_width - 1;
+        let top = &mut self.neighbor_significances[top_start..top_start + 3];
+        top[0].set_bottom_right();
+        top[1].set_bottom();
+        top[2].set_bottom_left();
+
+        let middle_start = idx - 1;
+        let middle = &mut self.neighbor_significances[middle_start..middle_start + 3];
+        middle[0].set_right();
+        middle[2].set_left();
+
+        let bottom_start = idx + padded_width - 1;
+        let bottom = &mut self.neighbor_significances[bottom_start..bottom_start + 3];
+        bottom[0].set_top_right();
+        bottom[1].set_top();
+        bottom[2].set_top_left();
+    }
+
+    #[inline(always)]
     fn push_magnitude_bit_index(&mut self, idx: usize, bit: u32) {
         self.coefficients[idx].push_bit_at(bit, self.current_bit_position);
     }
@@ -638,6 +699,18 @@ impl BitPlaneDecodeContext {
         } else {
             neighbors.all()
         }
+    }
+
+    #[inline(always)]
+    fn normal_neighborhood_significance_states_index(&self, idx: usize) -> u8 {
+        self.neighbor_significances[idx].all()
+    }
+
+    #[inline(always)]
+    fn uses_normal_arithmetic_neighbor_path(&self) -> bool {
+        !self.style.selective_arithmetic_coding_bypass
+            && !self.style.termination_on_each_pass
+            && !self.style.vertically_causal_context
     }
 }
 
@@ -666,7 +739,21 @@ fn decode_code_block_segments_inner(
 
         if segment.use_arithmetic {
             let mut decoder = ArithmeticDecoder::new(segment_data);
-            handle_arithmetic_coding_passes(start_coding_pass, end_coding_pass, ctx, &mut decoder)?;
+            if ctx.uses_normal_arithmetic_neighbor_path() {
+                handle_normal_arithmetic_coding_passes(
+                    start_coding_pass,
+                    end_coding_pass,
+                    ctx,
+                    &mut decoder,
+                )?;
+            } else {
+                handle_arithmetic_coding_passes(
+                    start_coding_pass,
+                    end_coding_pass,
+                    ctx,
+                    &mut decoder,
+                )?;
+            }
         } else {
             let mut decoder = BypassDecoder::new(segment_data, ctx.strict);
             handle_bypass_coding_passes(start_coding_pass, end_coding_pass, ctx, &mut decoder)?;
@@ -680,182 +767,9 @@ fn decode_code_block_segments_inner(
     Some(())
 }
 
-trait Tier1PassDecoder {
-    fn cleanup_pass_arithmetic(
-        ctx: &mut BitPlaneDecodeContext,
-        decoder: &mut ArithmeticDecoder<'_>,
-    );
-
-    fn significance_propagation_pass_arithmetic(
-        ctx: &mut BitPlaneDecodeContext,
-        decoder: &mut ArithmeticDecoder<'_>,
-    );
-
-    fn magnitude_refinement_pass_arithmetic(
-        ctx: &mut BitPlaneDecodeContext,
-        decoder: &mut ArithmeticDecoder<'_>,
-    );
-
-    fn cleanup_pass_bypass(
-        ctx: &mut BitPlaneDecodeContext,
-        decoder: &mut BypassDecoder<'_>,
-    ) -> Option<()>;
-
-    fn significance_propagation_pass_bypass(
-        ctx: &mut BitPlaneDecodeContext,
-        decoder: &mut BypassDecoder<'_>,
-    ) -> Option<()>;
-
-    fn magnitude_refinement_pass_bypass(
-        ctx: &mut BitPlaneDecodeContext,
-        decoder: &mut BypassDecoder<'_>,
-    ) -> Option<()>;
-}
-
 struct SafeScalarTier1;
 
-impl Tier1PassDecoder for SafeScalarTier1 {
-    /// Perform the cleanup pass, specified in D.3.4.
-    ///
-    /// See also the flow chart in Figure 7.3 in the JPEG2000 book.
-    fn cleanup_pass_arithmetic(
-        ctx: &mut BitPlaneDecodeContext,
-        decoder: &mut ArithmeticDecoder<'_>,
-    ) {
-        let width = ctx.width as usize;
-        let height = ctx.height as usize;
-        let padded_width = ctx.padded_width as usize;
-
-        for base_y in (0..height).step_by(4) {
-            let y_end = (base_y + 4).min(height);
-            let stripe_height = y_end - base_y;
-
-            for x in 0..width {
-                let top_idx = (base_y + COEFFICIENTS_PADDING as usize) * padded_width
-                    + x
-                    + COEFFICIENTS_PADDING as usize;
-
-                if stripe_height == 4
-                    && cleanup_run_length_candidate(ctx, top_idx, padded_width, base_y)
-                {
-                    // The four contiguous samples are all cleanup candidates
-                    // with zero context, so Annex D permits the RLC context.
-                    let bit = decoder.read_bit(ctx.arithmetic_decoder_context(17));
-                    if bit == 0 {
-                        continue;
-                    }
-
-                    let first_significant = (decoder.read_bit(ctx.arithmetic_decoder_context(18))
-                        << 1)
-                        | decoder.read_bit(ctx.arithmetic_decoder_context(18));
-                    let first_significant = first_significant as usize;
-                    let significant_y = base_y + first_significant;
-                    let significant_idx = top_idx + first_significant * padded_width;
-                    ctx.push_magnitude_bit_index(significant_idx, 1);
-                    decode_sign_bit_arithmetic(significant_idx, significant_y, ctx, decoder);
-                    ctx.set_significant_index(significant_idx, padded_width);
-
-                    let mut idx = significant_idx + padded_width;
-                    for y in significant_y + 1..y_end {
-                        cleanup_coefficient_arithmetic(ctx, decoder, idx, y, padded_width);
-                        idx += padded_width;
-                    }
-                    continue;
-                }
-
-                let mut idx = top_idx;
-                for y in base_y..y_end {
-                    cleanup_coefficient_arithmetic(ctx, decoder, idx, y, padded_width);
-                    idx += padded_width;
-                }
-            }
-        }
-    }
-
-    /// Perform the significance propagation pass (Section D.3.1).
-    ///
-    /// See also the flow chart in Figure 7.4 in the JPEG2000 book.
-    fn significance_propagation_pass_arithmetic(
-        ctx: &mut BitPlaneDecodeContext,
-        decoder: &mut ArithmeticDecoder<'_>,
-    ) {
-        let width = ctx.width as usize;
-        let height = ctx.height as usize;
-        let padded_width = ctx.padded_width as usize;
-
-        for base_y in (0..height).step_by(4) {
-            let y_end = (base_y + 4).min(height);
-            for x in 0..width {
-                let mut idx = (base_y + COEFFICIENTS_PADDING as usize) * padded_width
-                    + x
-                    + COEFFICIENTS_PADDING as usize;
-
-                for y in base_y..y_end {
-                    let state = ctx.coefficient_states[idx].0;
-                    let neighbors = ctx.neighborhood_significance_states_index(idx, y);
-
-                    // "The significance propagation pass only includes bits of coefficients
-                    // that were insignificant (the significance state has yet to be set)
-                    // and have a non-zero context."
-                    if state & SIGNIFICANCE_MASK == 0 && neighbors != 0 {
-                        let ctx_label =
-                            context_label_zero_coding_from_neighbors(neighbors, ctx.sub_band_type);
-                        let bit = decoder.read_bit(ctx.arithmetic_decoder_context(ctx_label));
-                        ctx.push_magnitude_bit_index(idx, bit);
-                        ctx.coefficient_states[idx].0 |= HAS_ZERO_CODING_MASK;
-
-                        // "If the value of this bit is 1 then the significance
-                        // state is set to 1 and the immediate next bit to be decoded is
-                        // the sign bit for the coefficient. Otherwise, the significance
-                        // state remains 0."
-                        if bit == 1 {
-                            decode_sign_bit_arithmetic(idx, y, ctx, decoder);
-                            ctx.set_significant_index(idx, padded_width);
-                        }
-                    }
-
-                    idx += padded_width;
-                }
-            }
-        }
-    }
-
-    /// Perform the magnitude refinement pass, specified in Section D.3.3.
-    ///
-    /// See also the flow chart in Figure 7.5 in the JPEG2000 book.
-    fn magnitude_refinement_pass_arithmetic(
-        ctx: &mut BitPlaneDecodeContext,
-        decoder: &mut ArithmeticDecoder<'_>,
-    ) {
-        let width = ctx.width as usize;
-        let height = ctx.height as usize;
-        let padded_width = ctx.padded_width as usize;
-
-        for base_y in (0..height).step_by(4) {
-            let y_end = (base_y + 4).min(height);
-            for x in 0..width {
-                let mut idx = (base_y + COEFFICIENTS_PADDING as usize) * padded_width
-                    + x
-                    + COEFFICIENTS_PADDING as usize;
-
-                for y in base_y..y_end {
-                    let state = ctx.coefficient_states[idx].0;
-
-                    if state & SIGNIFICANCE_MASK != 0 && state & HAS_ZERO_CODING_MASK == 0 {
-                        let neighbors = ctx.neighborhood_significance_states_index(idx, y);
-                        let ctx_label =
-                            context_label_magnitude_refinement_coding_from_state(state, neighbors);
-                        let bit = decoder.read_bit(ctx.arithmetic_decoder_context(ctx_label));
-                        ctx.push_magnitude_bit_index(idx, bit);
-                        ctx.coefficient_states[idx].0 |= HAS_MAGNITUDE_REFINEMENT_MASK;
-                    }
-
-                    idx += padded_width;
-                }
-            }
-        }
-    }
-
+impl SafeScalarTier1 {
     fn cleanup_pass_bypass(
         ctx: &mut BitPlaneDecodeContext,
         decoder: &mut BypassDecoder<'_>,
@@ -986,8 +900,181 @@ impl Tier1PassDecoder for SafeScalarTier1 {
     }
 }
 
+fn cleanup_pass_arithmetic_with_neighbors<const NORMAL_NEIGHBORS: bool>(
+    ctx: &mut BitPlaneDecodeContext,
+    decoder: &mut ArithmeticDecoder<'_>,
+) {
+    let width = ctx.width as usize;
+    let height = ctx.height as usize;
+    let padded_width = ctx.padded_width as usize;
+
+    for base_y in (0..height).step_by(4) {
+        let y_end = (base_y + 4).min(height);
+        let stripe_height = y_end - base_y;
+
+        for x in 0..width {
+            let top_idx = (base_y + COEFFICIENTS_PADDING as usize) * padded_width
+                + x
+                + COEFFICIENTS_PADDING as usize;
+
+            if stripe_height == 4
+                && cleanup_run_length_candidate_with_neighbors::<NORMAL_NEIGHBORS>(
+                    ctx,
+                    top_idx,
+                    padded_width,
+                    base_y,
+                )
+            {
+                // The four contiguous samples are all cleanup candidates
+                // with zero context, so Annex D permits the RLC context.
+                let bit = decoder.read_bit(ctx.arithmetic_decoder_context(17));
+                if bit == 0 {
+                    continue;
+                }
+
+                let first_significant = (decoder.read_bit(ctx.arithmetic_decoder_context(18)) << 1)
+                    | decoder.read_bit(ctx.arithmetic_decoder_context(18));
+                let first_significant = first_significant as usize;
+                let significant_y = base_y + first_significant;
+                let significant_idx = top_idx + first_significant * padded_width;
+                ctx.push_magnitude_bit_index(significant_idx, 1);
+                decode_sign_bit_arithmetic_with_neighbors::<NORMAL_NEIGHBORS>(
+                    significant_idx,
+                    significant_y,
+                    ctx,
+                    decoder,
+                );
+                ctx.set_significant_index_for_path::<NORMAL_NEIGHBORS>(
+                    significant_idx,
+                    padded_width,
+                );
+
+                let mut idx = significant_idx + padded_width;
+                for y in significant_y + 1..y_end {
+                    cleanup_coefficient_arithmetic_with_neighbors::<NORMAL_NEIGHBORS>(
+                        ctx,
+                        decoder,
+                        idx,
+                        y,
+                        padded_width,
+                    );
+                    idx += padded_width;
+                }
+                continue;
+            }
+
+            let mut idx = top_idx;
+            for y in base_y..y_end {
+                cleanup_coefficient_arithmetic_with_neighbors::<NORMAL_NEIGHBORS>(
+                    ctx,
+                    decoder,
+                    idx,
+                    y,
+                    padded_width,
+                );
+                idx += padded_width;
+            }
+        }
+    }
+}
+
+fn significance_propagation_pass_arithmetic_with_neighbors<const NORMAL_NEIGHBORS: bool>(
+    ctx: &mut BitPlaneDecodeContext,
+    decoder: &mut ArithmeticDecoder<'_>,
+) {
+    let width = ctx.width as usize;
+    let height = ctx.height as usize;
+    let padded_width = ctx.padded_width as usize;
+
+    for base_y in (0..height).step_by(4) {
+        let y_end = (base_y + 4).min(height);
+        for x in 0..width {
+            let mut idx = (base_y + COEFFICIENTS_PADDING as usize) * padded_width
+                + x
+                + COEFFICIENTS_PADDING as usize;
+
+            for y in base_y..y_end {
+                let state = ctx.coefficient_states[idx].0;
+                let neighbors =
+                    neighborhood_significance_states_for_path::<NORMAL_NEIGHBORS>(ctx, idx, y);
+
+                // "The significance propagation pass only includes bits of coefficients
+                // that were insignificant (the significance state has yet to be set)
+                // and have a non-zero context."
+                if state & SIGNIFICANCE_MASK == 0 && neighbors != 0 {
+                    let ctx_label =
+                        context_label_zero_coding_from_neighbors(neighbors, ctx.sub_band_type);
+                    let bit = decoder.read_bit(ctx.arithmetic_decoder_context(ctx_label));
+                    ctx.push_magnitude_bit_index(idx, bit);
+                    ctx.coefficient_states[idx].0 |= HAS_ZERO_CODING_MASK;
+
+                    // "If the value of this bit is 1 then the significance
+                    // state is set to 1 and the immediate next bit to be decoded is
+                    // the sign bit for the coefficient. Otherwise, the significance
+                    // state remains 0."
+                    if bit == 1 {
+                        decode_sign_bit_arithmetic_with_neighbors::<NORMAL_NEIGHBORS>(
+                            idx, y, ctx, decoder,
+                        );
+                        ctx.set_significant_index_for_path::<NORMAL_NEIGHBORS>(idx, padded_width);
+                    }
+                }
+
+                idx += padded_width;
+            }
+        }
+    }
+}
+
+fn magnitude_refinement_pass_arithmetic_with_neighbors<const NORMAL_NEIGHBORS: bool>(
+    ctx: &mut BitPlaneDecodeContext,
+    decoder: &mut ArithmeticDecoder<'_>,
+) {
+    let width = ctx.width as usize;
+    let height = ctx.height as usize;
+    let padded_width = ctx.padded_width as usize;
+
+    for base_y in (0..height).step_by(4) {
+        let y_end = (base_y + 4).min(height);
+        for x in 0..width {
+            let mut idx = (base_y + COEFFICIENTS_PADDING as usize) * padded_width
+                + x
+                + COEFFICIENTS_PADDING as usize;
+
+            for y in base_y..y_end {
+                let state = ctx.coefficient_states[idx].0;
+
+                if state & SIGNIFICANCE_MASK != 0 && state & HAS_ZERO_CODING_MASK == 0 {
+                    let neighbors =
+                        neighborhood_significance_states_for_path::<NORMAL_NEIGHBORS>(ctx, idx, y);
+                    let ctx_label =
+                        context_label_magnitude_refinement_coding_from_state(state, neighbors);
+                    let bit = decoder.read_bit(ctx.arithmetic_decoder_context(ctx_label));
+                    ctx.push_magnitude_bit_index(idx, bit);
+                    ctx.coefficient_states[idx].0 |= HAS_MAGNITUDE_REFINEMENT_MASK;
+                }
+
+                idx += padded_width;
+            }
+        }
+    }
+}
+
 #[inline(always)]
-fn cleanup_run_length_candidate(
+fn neighborhood_significance_states_for_path<const NORMAL_NEIGHBORS: bool>(
+    ctx: &BitPlaneDecodeContext,
+    idx: usize,
+    y: usize,
+) -> u8 {
+    if NORMAL_NEIGHBORS {
+        ctx.normal_neighborhood_significance_states_index(idx)
+    } else {
+        ctx.neighborhood_significance_states_index(idx, y)
+    }
+}
+
+#[inline(always)]
+fn cleanup_run_length_candidate_with_neighbors<const NORMAL_NEIGHBORS: bool>(
     ctx: &BitPlaneDecodeContext,
     top_idx: usize,
     padded_width: usize,
@@ -996,7 +1083,7 @@ fn cleanup_run_length_candidate(
     let mut idx = top_idx;
     for y in base_y..base_y + 4 {
         if ctx.coefficient_states[idx].0 & (SIGNIFICANCE_MASK | HAS_ZERO_CODING_MASK) != 0
-            || ctx.neighborhood_significance_states_index(idx, y) != 0
+            || neighborhood_significance_states_for_path::<NORMAL_NEIGHBORS>(ctx, idx, y) != 0
         {
             return false;
         }
@@ -1007,7 +1094,7 @@ fn cleanup_run_length_candidate(
 }
 
 #[inline(always)]
-fn cleanup_coefficient_arithmetic(
+fn cleanup_coefficient_arithmetic_with_neighbors<const NORMAL_NEIGHBORS: bool>(
     ctx: &mut BitPlaneDecodeContext,
     decoder: &mut ArithmeticDecoder<'_>,
     idx: usize,
@@ -1015,16 +1102,26 @@ fn cleanup_coefficient_arithmetic(
     padded_width: usize,
 ) {
     if ctx.coefficient_states[idx].0 & (SIGNIFICANCE_MASK | HAS_ZERO_CODING_MASK) == 0 {
-        let neighbors = ctx.neighborhood_significance_states_index(idx, y);
+        let neighbors = neighborhood_significance_states_for_path::<NORMAL_NEIGHBORS>(ctx, idx, y);
         let ctx_label = context_label_zero_coding_from_neighbors(neighbors, ctx.sub_band_type);
         let bit = decoder.read_bit(ctx.arithmetic_decoder_context(ctx_label));
         ctx.push_magnitude_bit_index(idx, bit);
 
         if bit == 1 {
-            decode_sign_bit_arithmetic(idx, y, ctx, decoder);
-            ctx.set_significant_index(idx, padded_width);
+            decode_sign_bit_arithmetic_with_neighbors::<NORMAL_NEIGHBORS>(idx, y, ctx, decoder);
+            ctx.set_significant_index_for_path::<NORMAL_NEIGHBORS>(idx, padded_width);
         }
     }
+}
+
+#[inline(always)]
+fn cleanup_run_length_candidate(
+    ctx: &BitPlaneDecodeContext,
+    top_idx: usize,
+    padded_width: usize,
+    base_y: usize,
+) -> bool {
+    cleanup_run_length_candidate_with_neighbors::<false>(ctx, top_idx, padded_width, base_y)
 }
 
 #[inline(always)]
@@ -1127,15 +1224,15 @@ const ZERO_CTX_HH_LOOKUP: [u8; 256] = [
     8, 8, 8, 8, 8, 8,
 ];
 
-/// Decode a sign bit (Section D.3.2).
 #[inline(always)]
-fn decode_sign_bit_arithmetic(
+fn decode_sign_bit_arithmetic_with_neighbors<const NORMAL_NEIGHBORS: bool>(
     idx: usize,
     y: usize,
     ctx: &mut BitPlaneDecodeContext,
     decoder: &mut ArithmeticDecoder<'_>,
 ) {
-    let (ctx_label, xor_bit) = context_label_sign_coding_index(idx, y, ctx);
+    let (ctx_label, xor_bit) =
+        context_label_sign_coding_index_with_neighbors::<NORMAL_NEIGHBORS>(idx, y, ctx);
     let sign_bit = decoder.read_bit(ctx.arithmetic_decoder_context(ctx_label)) ^ xor_bit as u32;
     ctx.set_sign_index(idx, sign_bit as u8);
 }
@@ -1180,6 +1277,37 @@ fn context_label_sign_coding_index(idx: usize, y: usize, ctx: &BitPlaneDecodeCon
     // representation that indicates whether the top/left/right/bottom sign is
     // positive, negative, or insignificant. We need two bits for this.
     // 00 represents insignificant, 01 positive and 10 negative.
+    let signs = (top_sign << 6) | (left_sign << 4) | (right_sign << 2) | bottom_sign;
+    let negative_significances = significances & signs;
+    let positive_significances = significances & !signs;
+    let merged_significances = (negative_significances << 1) | positive_significances;
+
+    SIGN_CONTEXT_LOOKUP[merged_significances as usize]
+}
+
+#[inline(always)]
+fn context_label_sign_coding_index_with_neighbors<const NORMAL_NEIGHBORS: bool>(
+    idx: usize,
+    y: usize,
+    ctx: &BitPlaneDecodeContext,
+) -> (u8, u8) {
+    if NORMAL_NEIGHBORS {
+        context_label_sign_coding_index_normal(idx, ctx)
+    } else {
+        context_label_sign_coding_index(idx, y, ctx)
+    }
+}
+
+#[inline(always)]
+fn context_label_sign_coding_index_normal(idx: usize, ctx: &BitPlaneDecodeContext) -> (u8, u8) {
+    let significances = ctx.normal_neighborhood_significance_states_index(idx) & 0b0101_0101;
+    let padded_width = ctx.padded_width as usize;
+
+    let top_sign = ctx.sign_index(idx - padded_width);
+    let left_sign = ctx.sign_index(idx - 1);
+    let right_sign = ctx.sign_index(idx + 1);
+    let bottom_sign = ctx.sign_index(idx + padded_width);
+
     let signs = (top_sign << 6) | (left_sign << 4) | (right_sign << 2) | bottom_sign;
     let negative_significances = significances & signs;
     let positive_significances = significances & !signs;
@@ -1396,6 +1524,122 @@ mod tests {
                 coefficients[index], decoded[index]
             );
         }
+    }
+
+    #[test]
+    fn normal_neighborhood_significance_fast_path_returns_unmasked_neighbors() {
+        let mut ctx = BitPlaneDecodeContext {
+            width: 1,
+            height: 8,
+            padded_width: 3,
+            style: CodeBlockStyle {
+                vertically_causal_context: true,
+                ..CodeBlockStyle::default()
+            },
+            ..BitPlaneDecodeContext::default()
+        };
+        ctx.neighbor_significances.resize(
+            ctx.padded_width as usize * 10,
+            NeighborSignificances::default(),
+        );
+
+        let y = 3;
+        let idx = (y + COEFFICIENTS_PADDING as usize) * ctx.padded_width as usize
+            + COEFFICIENTS_PADDING as usize;
+        ctx.neighbor_significances[idx].set_top();
+        ctx.neighbor_significances[idx].set_bottom();
+
+        assert_eq!(ctx.neighborhood_significance_states_index(idx, y), 1 << 6);
+        assert_eq!(
+            ctx.normal_neighborhood_significance_states_index(idx),
+            (1 << 6) | 1
+        );
+    }
+
+    #[test]
+    fn normal_sign_context_matches_generic_non_vertical_context() {
+        let mut ctx = BitPlaneDecodeContext {
+            width: 3,
+            height: 3,
+            padded_width: 5,
+            style: CodeBlockStyle::default(),
+            ..BitPlaneDecodeContext::default()
+        };
+        let len = ctx.padded_width as usize * (ctx.height as usize + 2);
+        ctx.coefficients.resize(len, Coefficient::default());
+        ctx.neighbor_significances
+            .resize(len, NeighborSignificances::default());
+
+        let y = 1;
+        let idx = (y + COEFFICIENTS_PADDING as usize) * ctx.padded_width as usize
+            + COEFFICIENTS_PADDING as usize
+            + 1;
+        let padded_width = ctx.padded_width as usize;
+
+        ctx.neighbor_significances[idx].set_top();
+        ctx.neighbor_significances[idx].set_left();
+        ctx.neighbor_significances[idx].set_right();
+        ctx.neighbor_significances[idx].set_bottom();
+        ctx.set_sign_index(idx - padded_width, 1);
+        ctx.set_sign_index(idx - 1, 0);
+        ctx.set_sign_index(idx + 1, 1);
+        ctx.set_sign_index(idx + padded_width, 0);
+
+        assert_eq!(
+            context_label_sign_coding_index_normal(idx, &ctx),
+            context_label_sign_coding_index(idx, y, &ctx)
+        );
+    }
+
+    #[test]
+    fn normal_set_significant_index_matches_generic_neighbor_updates() {
+        let mut generic = BitPlaneDecodeContext {
+            width: 3,
+            height: 3,
+            padded_width: 5,
+            style: CodeBlockStyle::default(),
+            ..BitPlaneDecodeContext::default()
+        };
+        let len = generic.padded_width as usize * (generic.height as usize + 2);
+        generic
+            .coefficient_states
+            .resize(len, CoefficientState::default());
+        generic
+            .neighbor_significances
+            .resize(len, NeighborSignificances::default());
+        let mut normal = BitPlaneDecodeContext {
+            width: generic.width,
+            height: generic.height,
+            padded_width: generic.padded_width,
+            style: generic.style,
+            coefficient_states: generic.coefficient_states.clone(),
+            neighbor_significances: generic.neighbor_significances.clone(),
+            ..BitPlaneDecodeContext::default()
+        };
+
+        let padded_width = generic.padded_width as usize;
+        let idx =
+            (1 + COEFFICIENTS_PADDING as usize) * padded_width + COEFFICIENTS_PADDING as usize + 1;
+
+        generic.set_significant_index(idx, padded_width);
+        normal.set_significant_index_normal(idx, padded_width);
+
+        assert_eq!(
+            normal.coefficient_states[idx].0,
+            generic.coefficient_states[idx].0
+        );
+        assert_eq!(
+            normal
+                .neighbor_significances
+                .iter()
+                .map(|neighbors| neighbors.0)
+                .collect::<Vec<_>>(),
+            generic
+                .neighbor_significances
+                .iter()
+                .map(|neighbors| neighbors.0)
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

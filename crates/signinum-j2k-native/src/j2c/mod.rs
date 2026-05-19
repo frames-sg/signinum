@@ -13,7 +13,7 @@ pub(crate) mod ht_block_decode;
 pub(crate) mod ht_block_encode;
 pub(crate) mod ht_encode_tables;
 pub(crate) mod ht_tables;
-mod idwt;
+pub(crate) mod idwt;
 mod mct;
 pub(crate) mod packet_encode;
 mod progression;

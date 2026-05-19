@@ -237,23 +237,22 @@ reduced-resolution requests share the same core contract: the ROI is expressed
 in source coordinates, and the returned decoded rectangle covers the
 floor-start/ceil-end projection onto the requested reduced-resolution grid.
 
-The current MetalDirect path is first-class for grayscale J2K/HTJ2K full-tile
-decode and grayscale ROI+scaled tile batches. Marker parsing and plan building
+The current MetalDirect path is first-class for grayscale and RGB J2K/HTJ2K
+full-tile decode and ROI+scaled tile batches. Marker parsing and plan building
 stay on CPU; supported classic Tier-1 or HT cleanup block jobs, grouped
-sub-band decode, IDWT, and final store/pack run as one Metal command sequence
-and return resident Metal surfaces. Distinct grayscale WSI-style ROI+scaled
-batches are coalesced across separate codestreams. Cropped ROI+scaled plans
-prune code-block jobs outside the requested store windows, compact retained
-HTJ2K coded payloads, and crop every required IDWT output level. Cropped IDWT
-outputs carry input-window origins and strides through the resident band graph,
-so intermediate levels can feed later cropped levels without returning to broad
-intermediate buffers.
+sub-band decode, IDWT, optional MCT, and final store/pack run as one Metal
+command sequence and return resident Metal surfaces. Distinct grayscale and RGB
+WSI-style ROI+scaled batches are coalesced across separate codestreams. Cropped
+ROI+scaled plans prune code-block jobs outside the requested store windows,
+compact retained HTJ2K coded payloads, and crop every required IDWT output
+level. Cropped IDWT outputs carry input-window origins and strides through the
+resident band graph, so intermediate levels can feed later cropped levels
+without returning to broad intermediate buffers.
 
-Unsupported formats, unsupported codestream features, RGB ROI+scaled paths, and
-non-macOS hosts fall back through the CPU reconstruction and device-surface
-upload path according to the requested backend. Explicit Metal requests fail
-for unsupported Metal shapes; `Auto` is intentionally limited to measured
-grayscale batch cases.
+Unsupported formats, unsupported codestream features, and non-macOS hosts fall
+back through the CPU reconstruction and device-surface upload path according to
+the requested backend. Explicit Metal requests fail for unsupported Metal
+shapes; `Auto` is intentionally limited to measured grayscale/RGB batch cases.
 
 ## WSI/DICOM conversion policy
 

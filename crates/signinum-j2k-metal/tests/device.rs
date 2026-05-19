@@ -66,6 +66,24 @@ fn fixture_ht_gray8_sized(width: u32, height: u32) -> Vec<u8> {
     encode_htj2k(&pixels, width, height, 1, 8, false, &options).expect("encode sized ht gray8")
 }
 
+fn fixture_rgb8_sized(width: u32, height: u32) -> Vec<u8> {
+    let mut pixels = Vec::with_capacity(width as usize * height as usize * 3);
+    for y in 0..height {
+        for x in 0..width {
+            pixels.push(((x * 3 + y * 5) & 0xFF) as u8);
+            pixels.push(((x * 7 + y * 11 + 13) & 0xFF) as u8);
+            pixels.push(((x * 17 + y * 19 + 29) & 0xFF) as u8);
+        }
+    }
+    let options = EncodeOptions {
+        reversible: true,
+        num_decomposition_levels: 3,
+        guard_bits: 2,
+        ..EncodeOptions::default()
+    };
+    encode(&pixels, width, height, 3, 8, false, &options).expect("encode sized rgb8")
+}
+
 fn fixture_ht_gray8_unsupported_direct_width() -> Vec<u8> {
     let width = 512u32;
     let height = 8u32;
@@ -1210,6 +1228,64 @@ fn submitted_auto_region_scaled_ht_grayscale_1024_batch16_uses_one_metal_batch()
 }
 
 #[test]
+fn submitted_auto_region_scaled_rgb_1024_batch16_uses_hybrid_metal() {
+    let bytes = fixture_rgb8_sized(1024, 1024);
+    let roi = Rect {
+        x: 128,
+        y: 128,
+        w: 512,
+        h: 256,
+    };
+    let scale = Downscale::Quarter;
+    let scaled = roi.scaled_covering(scale);
+    let mut ctx = signinum_core::DecoderContext::<J2kContext>::new();
+    let mut session = MetalSession::default();
+    let mut pool = J2kScratchPool::new();
+    let submissions = (0..16)
+        .map(|_| {
+            Codec::submit_tile_region_scaled_to_device(
+                &mut ctx,
+                &mut session,
+                &mut pool,
+                &bytes,
+                PixelFormat::Rgb8,
+                roi,
+                scale,
+                BackendRequest::Auto,
+            )
+            .expect("submit auto region-scaled RGB tile")
+        })
+        .collect::<Vec<_>>();
+
+    let mut host_decoder = J2kDecoder::new(&bytes).expect("host decoder");
+    let stride = scaled.w as usize * PixelFormat::Rgb8.bytes_per_pixel();
+    let mut host = vec![0u8; stride * scaled.h as usize];
+    host_decoder
+        .decode_region_scaled_into(
+            &mut J2kScratchPool::new(),
+            &mut host,
+            stride,
+            PixelFormat::Rgb8,
+            roi,
+            scale,
+        )
+        .expect("host region-scaled RGB decode");
+
+    for submission in submissions {
+        let surface = submission.wait().expect("auto region-scaled RGB surface");
+        assert_eq!(surface.backend_kind(), BackendKind::Metal);
+        assert_eq!(surface.residency(), SurfaceResidency::MetalResidentDecode);
+        assert_eq!(surface.dimensions(), (scaled.w, scaled.h));
+        assert_eq!(surface.as_bytes(), host.as_slice());
+    }
+    assert_eq!(
+        session.submissions(),
+        1,
+        "1024-class auto ROI+scaled RGB tile batches should use one resident hybrid Metal batch"
+    );
+}
+
+#[test]
 fn submitted_auto_region_scaled_ht_grayscale_batch16_is_not_order_dependent() {
     let small_bytes = fixture_ht_gray8_sized(64, 64);
     let large_bytes = fixture_ht_gray8_sized(1024, 1024);
@@ -1573,6 +1649,53 @@ fn explicit_metal_region_scaled_grayscale_matches_host_decode() {
 }
 
 #[test]
+fn explicit_metal_region_scaled_grayscale_large_cropped_matches_host_decode() {
+    let bytes = fixture_gray8_sized(1024, 1024);
+    let roi = Rect {
+        x: 128,
+        y: 128,
+        w: 512,
+        h: 512,
+    };
+
+    for scale in [Downscale::Half, Downscale::None] {
+        let scaled = roi.scaled_covering(scale);
+        let mut host_decoder = J2kDecoder::new(&bytes).expect("host decoder");
+        let mut host = vec![0u8; scaled.w as usize * scaled.h as usize];
+        host_decoder
+            .decode_region_scaled_into(
+                &mut J2kScratchPool::new(),
+                &mut host,
+                scaled.w as usize,
+                PixelFormat::Gray8,
+                roi,
+                scale,
+            )
+            .expect("host region scaled decode");
+
+        let mut decoder = J2kDecoder::new(&bytes).expect("decoder");
+        let surface = decoder
+            .decode_region_scaled_to_device(PixelFormat::Gray8, roi, scale, BackendRequest::Metal)
+            .expect("explicit Metal region scaled decode");
+        assert_eq!(surface.backend_kind(), BackendKind::Metal);
+        assert_eq!(surface.dimensions(), (scaled.w, scaled.h));
+        if surface.as_bytes() != host.as_slice() {
+            let mismatch = surface
+                .as_bytes()
+                .iter()
+                .zip(&host)
+                .position(|(actual, expected)| actual != expected)
+                .expect("mismatched buffers should have a differing byte");
+            panic!(
+                "scale={scale:?} first mismatch at byte {mismatch}: metal={} host={}",
+                surface.as_bytes()[mismatch],
+                host[mismatch]
+            );
+        }
+    }
+}
+
+#[test]
 fn explicit_metal_region_scaled_htj2k_grayscale_matches_host_decode() {
     let bytes = fixture_ht_gray8();
     let roi = Rect {
@@ -1641,28 +1764,145 @@ fn explicit_metal_region_scaled_htj2k_falls_back_when_direct_width_is_unsupporte
 }
 
 #[test]
-fn explicit_metal_region_scaled_rgb_is_rejected_instead_of_cpu_staging() {
-    let bytes = fixture_rgb8();
+fn explicit_metal_region_scaled_rgb_matches_host_decode() {
+    let bytes = fixture_direct_rgb8_variant(3);
+    let roi = Rect {
+        x: 1,
+        y: 2,
+        w: 5,
+        h: 4,
+    };
+    let scale = Downscale::Half;
+    let scaled = roi.scaled_covering(scale);
+
+    let mut host_decoder = J2kDecoder::new(&bytes).expect("host decoder");
+    let stride = scaled.w as usize * PixelFormat::Rgb8.bytes_per_pixel();
+    let mut host = vec![0u8; stride * scaled.h as usize];
+    host_decoder
+        .decode_region_scaled_into(
+            &mut J2kScratchPool::new(),
+            &mut host,
+            stride,
+            PixelFormat::Rgb8,
+            roi,
+            scale,
+        )
+        .expect("host region scaled RGB decode");
+
+    let mut decoder = J2kDecoder::new(&bytes).expect("decoder");
+    let surface = decoder
+        .decode_region_scaled_to_device(PixelFormat::Rgb8, roi, scale, BackendRequest::Metal)
+        .expect("explicit Metal region scaled RGB decode");
+    assert_eq!(surface.backend_kind(), BackendKind::Metal);
+    assert_eq!(surface.residency(), SurfaceResidency::MetalResidentDecode);
+    assert_eq!(surface.dimensions(), (scaled.w, scaled.h));
+    assert_eq!(surface.as_bytes(), host.as_slice());
+
+    let mut host_decoder = J2kDecoder::new(&bytes).expect("rgba8 host decoder");
+    let stride = scaled.w as usize * PixelFormat::Rgba8.bytes_per_pixel();
+    let mut host = vec![0u8; stride * scaled.h as usize];
+    host_decoder
+        .decode_region_scaled_into(
+            &mut J2kScratchPool::new(),
+            &mut host,
+            stride,
+            PixelFormat::Rgba8,
+            roi,
+            scale,
+        )
+        .expect("host region scaled RGBA decode");
+
+    let mut decoder = J2kDecoder::new(&bytes).expect("rgba8 decoder");
+    let surface = decoder
+        .decode_region_scaled_to_device(PixelFormat::Rgba8, roi, scale, BackendRequest::Metal)
+        .expect("explicit Metal region scaled RGBA decode");
+    assert_eq!(surface.backend_kind(), BackendKind::Metal);
+    assert_eq!(surface.residency(), SurfaceResidency::MetalResidentDecode);
+    assert_eq!(surface.dimensions(), (scaled.w, scaled.h));
+    assert_eq!(surface.as_bytes(), host.as_slice());
+
+    let bytes = fixture_rgb12();
     let roi = Rect {
         x: 0,
         y: 0,
-        w: 1,
+        w: 2,
         h: 1,
     };
-    let mut decoder = J2kDecoder::new(&bytes).expect("decoder");
-    let Err(error) = decoder.decode_region_scaled_to_device(
-        PixelFormat::Rgb8,
-        roi,
-        Downscale::None,
-        BackendRequest::Metal,
-    ) else {
-        panic!("explicit Metal RGB ROI+scaled should not hide a CPU-staged path")
+    let scale = Downscale::Half;
+    let scaled = roi.scaled_covering(scale);
+    let mut host_decoder = J2kDecoder::new(&bytes).expect("rgb16 host decoder");
+    let stride = scaled.w as usize * PixelFormat::Rgb16.bytes_per_pixel();
+    let mut host = vec![0u8; stride * scaled.h as usize];
+    host_decoder
+        .decode_region_scaled_into(
+            &mut J2kScratchPool::new(),
+            &mut host,
+            stride,
+            PixelFormat::Rgb16,
+            roi,
+            scale,
+        )
+        .expect("host region scaled RGB16 decode");
+
+    let mut decoder = J2kDecoder::new(&bytes).expect("rgb16 decoder");
+    let surface = decoder
+        .decode_region_scaled_to_device(PixelFormat::Rgb16, roi, scale, BackendRequest::Metal)
+        .expect("explicit Metal region scaled RGB16 decode");
+    assert_eq!(surface.backend_kind(), BackendKind::Metal);
+    assert_eq!(surface.residency(), SurfaceResidency::MetalResidentDecode);
+    assert_eq!(surface.dimensions(), (scaled.w, scaled.h));
+    assert_eq!(surface.as_bytes(), host.as_slice());
+}
+
+#[test]
+fn explicit_metal_region_scaled_rgb_large_cropped_matches_host_decode() {
+    let bytes = fixture_rgb8_sized(1024, 1024);
+    let roi = Rect {
+        x: 128,
+        y: 128,
+        w: 512,
+        h: 512,
     };
-    assert!(matches!(
-        error,
-        Error::UnsupportedMetalRequest { reason }
-            if reason.contains("ROI+scaled") && reason.contains("Gray8/Gray16")
-    ));
+
+    for scale in [Downscale::Half, Downscale::None] {
+        let scaled = roi.scaled_covering(scale);
+        for fmt in [PixelFormat::Rgb8, PixelFormat::Rgba8] {
+            let mut host_decoder = J2kDecoder::new(&bytes).expect("host decoder");
+            let stride = scaled.w as usize * fmt.bytes_per_pixel();
+            let mut host = vec![0u8; stride * scaled.h as usize];
+            host_decoder
+                .decode_region_scaled_into(
+                    &mut J2kScratchPool::new(),
+                    &mut host,
+                    stride,
+                    fmt,
+                    roi,
+                    scale,
+                )
+                .expect("host region scaled RGB decode");
+
+            let mut decoder = J2kDecoder::new(&bytes).expect("decoder");
+            let surface = decoder
+                .decode_region_scaled_to_device(fmt, roi, scale, BackendRequest::Metal)
+                .expect("explicit Metal region scaled RGB decode");
+            assert_eq!(surface.backend_kind(), BackendKind::Metal);
+            assert_eq!(surface.residency(), SurfaceResidency::MetalResidentDecode);
+            assert_eq!(surface.dimensions(), (scaled.w, scaled.h));
+            if surface.as_bytes() != host.as_slice() {
+                let mismatch = surface
+                    .as_bytes()
+                    .iter()
+                    .zip(&host)
+                    .position(|(actual, expected)| actual != expected)
+                    .expect("mismatched buffers should have a differing byte");
+                panic!(
+                    "fmt={fmt:?} scale={scale:?} first mismatch at byte {mismatch}: metal={} host={}",
+                    surface.as_bytes()[mismatch],
+                    host[mismatch]
+                );
+            }
+        }
+    }
 }
 
 #[test]
@@ -1755,4 +1995,22 @@ fn explicit_metal_tile_unsupported_rgba16_is_rejected() {
             surface.backend_kind()
         ),
     }
+}
+
+#[test]
+fn hybrid_ht_cpuupload_uses_worker_local_decode_workspace() {
+    let source = include_str!("../src/compute.rs");
+
+    assert!(
+        source.contains("decode_prepared_ht_jobs_on_cpu_with_workspace"),
+        "HT CPUUpload decode must expose a workspace-aware helper"
+    );
+    assert!(
+        source.contains("HtCodeBlockDecodeWorkspace::default()"),
+        "parallel HT CPUUpload decode must initialize worker-local HT decode workspaces"
+    );
+    assert!(
+        source.contains("decode_ht_code_block_scalar_with_workspace"),
+        "HT CPUUpload decode must call the scratch-reusing scalar helper"
+    );
 }

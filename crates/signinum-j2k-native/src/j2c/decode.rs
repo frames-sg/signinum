@@ -119,20 +119,7 @@ pub(crate) fn decode<'a>(
     }
 
     if profile_enabled {
-        profile::emit_profile_row(
-            "decode",
-            "cpu",
-            &[
-                ("parse_tiles_us", profile_timings.parse_tiles_us),
-                ("build_us", profile_timings.build_us),
-                ("segment_us", profile_timings.segment_us),
-                ("codeblock_us", profile_timings.codeblock_us),
-                ("idwt_us", profile_timings.idwt_us),
-                ("store_us", profile_timings.store_us),
-                ("mct_us", profile_timings.mct_us),
-                ("total_us", profile::elapsed_us(total_start)),
-            ],
-        );
+        emit_decode_profile_row(tile_ctx, &profile_timings, total_start);
     }
 
     Ok(())
@@ -159,10 +146,12 @@ pub(crate) fn build_direct_grayscale_plan<'a>(
         ));
     }
     ctx.tile_decode_context.channel_data.clear();
-    ctx.tile_decode_context.output_region = None;
     ctx.storage.reset();
 
     build::build(tile, &mut ctx.storage)?;
+    if let Some(output_region) = ctx.tile_decode_context.output_region {
+        ctx.storage.roi_plan = RoiPlan::build(tile, header, &ctx.storage, output_region);
+    }
 
     let iter_input = IteratorInput::new(tile);
     let progression_iterator: Box<dyn Iterator<Item = ProgressionData>> =
@@ -218,12 +207,6 @@ pub(crate) fn build_direct_color_plan<'a>(
             "direct color plan only supports three-component RGB codestreams"
         ));
     }
-    if header.skipped_resolution_levels != 0 {
-        bail!(DecodingError::UnsupportedFeature(
-            "direct color plan only supports full-resolution decode"
-        ));
-    }
-
     let transform = tile.component_infos[0].wavelet_transform();
     if tile.mct
         && (transform != tile.component_infos[1].wavelet_transform()
@@ -233,10 +216,12 @@ pub(crate) fn build_direct_color_plan<'a>(
     }
 
     ctx.tile_decode_context.channel_data.clear();
-    ctx.tile_decode_context.output_region = None;
     ctx.storage.reset();
 
     build::build(tile, &mut ctx.storage)?;
+    if let Some(output_region) = ctx.tile_decode_context.output_region {
+        ctx.storage.roi_plan = RoiPlan::build(tile, header, &ctx.storage, output_region);
+    }
 
     let iter_input = IteratorInput::new(tile);
     let progression_iterator: Box<dyn Iterator<Item = ProgressionData>> =
@@ -330,6 +315,7 @@ fn build_component_plan_from_storage(
         for sub_band_idx in sub_band_iter {
             if let Some(step) = build_grayscale_sub_band_step(
                 &storage.sub_bands[sub_band_idx],
+                sub_band_idx,
                 next_band_id,
                 resolution,
                 component_info,
@@ -425,6 +411,7 @@ fn build_component_plan_from_storage(
 
 fn build_grayscale_sub_band_step(
     sub_band: &SubBand,
+    sub_band_idx: usize,
     band_id: J2kDirectBandId,
     resolution: u8,
     component_info: &ComponentInfo,
@@ -490,6 +477,9 @@ fn build_grayscale_sub_band_step(
                 .clone()
                 .map(|idx| &storage.code_blocks[idx])
             {
+                if !code_block_required_by_index(storage, sub_band_idx, code_block) {
+                    continue;
+                }
                 let actual_bitplanes = if header.strict {
                     num_bitplanes
                         .checked_sub(code_block.missing_bit_planes)
@@ -585,6 +575,9 @@ fn build_grayscale_sub_band_step(
             .clone()
             .map(|idx| &storage.code_blocks[idx])
         {
+            if !code_block_required_by_index(storage, sub_band_idx, code_block) {
+                continue;
+            }
             let (combined_data, segments) = collect_classic_code_block_data(
                 code_block,
                 &component_info.coding_style.parameters.code_block_style,
@@ -749,6 +742,7 @@ pub(crate) struct DecodeDebugCounters {
     pub(crate) decoded_code_blocks: usize,
     pub(crate) skipped_code_blocks: usize,
     pub(crate) idwt_output_samples: usize,
+    pub(crate) ht_phase_stats: ht_block_decode::HtBlockDecodeStats,
 }
 
 /// CPU parallelism policy for native JPEG 2000 decode.
@@ -839,6 +833,7 @@ fn decode_tile<'a, 'b>(
         header,
         ht_decoder,
         cpu_decode_parallelism,
+        profile_enabled,
     )?;
     profile_timings.codeblock_us += profile::elapsed_us(stage_start);
 
@@ -883,6 +878,62 @@ struct DecodeProfileTimings {
     idwt_us: u128,
     store_us: u128,
     mct_us: u128,
+}
+
+#[cold]
+#[inline(never)]
+fn emit_decode_profile_row(
+    tile_ctx: &TileDecodeContext,
+    profile_timings: &DecodeProfileTimings,
+    total_start: Option<profile::ProfileInstant>,
+) {
+    profile::emit_profile_row(
+        "decode",
+        "cpu",
+        &[
+            ("parse_tiles_us", profile_timings.parse_tiles_us),
+            ("build_us", profile_timings.build_us),
+            ("segment_us", profile_timings.segment_us),
+            ("codeblock_us", profile_timings.codeblock_us),
+            ("ht_blocks", tile_ctx.debug_counters.ht_phase_stats.blocks),
+            (
+                "ht_refinement_blocks",
+                tile_ctx.debug_counters.ht_phase_stats.refinement_blocks,
+            ),
+            (
+                "ht_cleanup_bytes",
+                tile_ctx.debug_counters.ht_phase_stats.cleanup_bytes,
+            ),
+            (
+                "ht_refinement_bytes",
+                tile_ctx.debug_counters.ht_phase_stats.refinement_bytes,
+            ),
+            (
+                "ht_cleanup_us",
+                tile_ctx.debug_counters.ht_phase_stats.ht_cleanup_us,
+            ),
+            (
+                "ht_mag_sgn_us",
+                tile_ctx.debug_counters.ht_phase_stats.ht_mag_sgn_us,
+            ),
+            (
+                "ht_sigma_us",
+                tile_ctx.debug_counters.ht_phase_stats.ht_sigma_us,
+            ),
+            (
+                "ht_sigprop_us",
+                tile_ctx.debug_counters.ht_phase_stats.ht_sigprop_us,
+            ),
+            (
+                "ht_magref_us",
+                tile_ctx.debug_counters.ht_phase_stats.ht_magref_us,
+            ),
+            ("idwt_us", profile_timings.idwt_us),
+            ("store_us", profile_timings.store_us),
+            ("mct_us", profile_timings.mct_us),
+            ("total_us", profile::elapsed_us(total_start)),
+        ],
+    );
 }
 
 /// All decompositions for a single tile.
@@ -1034,6 +1085,7 @@ fn decode_component_tile_bit_planes<'a>(
     header: &Header<'_>,
     ht_decoder: &mut Option<&mut dyn HtCodeBlockDecoder>,
     cpu_decode_parallelism: CpuDecodeParallelism,
+    profile_enabled: bool,
 ) -> Result<()> {
     for (tile_decompositions_idx, component_info) in tile.component_infos.iter().enumerate() {
         // Only decode the resolution levels we actually care about.
@@ -1053,6 +1105,7 @@ fn decode_component_tile_bit_planes<'a>(
                     header,
                     ht_decoder,
                     cpu_decode_parallelism,
+                    profile_enabled,
                 )?;
             }
         }
@@ -1070,6 +1123,7 @@ fn decode_sub_band_bitplanes(
     header: &Header<'_>,
     ht_decoder: &mut Option<&mut dyn HtCodeBlockDecoder>,
     cpu_decode_parallelism: CpuDecodeParallelism,
+    profile_enabled: bool,
 ) -> Result<()> {
     let sub_band = storage.sub_bands[sub_band_idx].clone();
 
@@ -1127,6 +1181,7 @@ fn decode_sub_band_bitplanes(
             ht_decoder,
             num_bitplanes,
             dequantization_step,
+            profile_enabled,
         )?;
         return Ok(());
     }
@@ -1506,6 +1561,7 @@ fn decode_sub_band_ht_blocks(
     ht_decoder: &mut Option<&mut dyn HtCodeBlockDecoder>,
     num_bitplanes: u8,
     dequantization_step: f32,
+    profile_enabled: bool,
 ) -> Result<()> {
     let stripe_causal = component_info
         .coding_style
@@ -1627,13 +1683,15 @@ fn decode_sub_band_ht_blocks(
                 continue;
             }
             tile_ctx.debug_counters.decoded_code_blocks += 1;
-            ht_block_decode::decode(
+            ht_block_decode::decode_with_stats(
                 code_block,
                 num_bitplanes,
                 stripe_causal,
                 &mut tile_ctx.ht_block_decode_context,
                 storage,
                 header.strict,
+                Some(&mut tile_ctx.debug_counters.ht_phase_stats),
+                profile_enabled,
             )?;
 
             let x_offset = code_block.rect.x0 - sub_band.rect.x0;

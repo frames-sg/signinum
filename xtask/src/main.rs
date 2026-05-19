@@ -451,12 +451,16 @@ mod tests {
     #[test]
     fn compare_estimates_flags_median_regression_above_threshold() {
         let baseline = BenchEstimate {
-            id: "j2k_public_decode/rgb8_full_128x128".to_string(),
+            id: "j2k_public_decode/htj2k_gray8_full_512x512".to_string(),
             median_ns: 1_000.0,
+            median_lower_ns: 990.0,
+            median_upper_ns: 1_000.0,
         };
         let current = BenchEstimate {
             id: baseline.id.clone(),
             median_ns: 1_120.0,
+            median_lower_ns: 1_120.0,
+            median_upper_ns: 1_130.0,
         };
 
         let outcomes = compare_estimates(&[baseline], &[current], 10.0).unwrap();
@@ -464,10 +468,12 @@ mod tests {
         assert_eq!(
             outcomes,
             vec![RegressionOutcome {
-                id: "j2k_public_decode/rgb8_full_128x128".to_string(),
+                id: "j2k_public_decode/htj2k_gray8_full_512x512".to_string(),
                 baseline_ns: 1_000.0,
                 current_ns: 1_120.0,
                 delta_percent: 12.0,
+                enforced: true,
+                threshold_exceeded: true,
                 regressed: true,
             }]
         );
@@ -478,10 +484,14 @@ mod tests {
         let baseline = BenchEstimate {
             id: "tier1_bitplane_decode/decode_64x64/default".to_string(),
             median_ns: 2_000.0,
+            median_lower_ns: 1_990.0,
+            median_upper_ns: 2_000.0,
         };
         let current = BenchEstimate {
             id: baseline.id.clone(),
             median_ns: 2_200.0,
+            median_lower_ns: 2_200.0,
+            median_upper_ns: 2_210.0,
         };
 
         let outcomes = compare_estimates(&[baseline], &[current], 10.0).unwrap();
@@ -493,8 +503,10 @@ mod tests {
     #[test]
     fn compare_estimates_reports_missing_current_result() {
         let baseline = BenchEstimate {
-            id: "j2k_public_decode_gray/gray8_full_128x128".to_string(),
+            id: "j2k_public_decode/htj2k_gray8_full_512x512".to_string(),
             median_ns: 500.0,
+            median_lower_ns: 490.0,
+            median_upper_ns: 510.0,
         };
 
         let err = compare_estimates(&[baseline], &[], 10.0).unwrap_err();
@@ -503,6 +515,43 @@ mod tests {
             err.contains("missing current benchmark result"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn compare_estimates_requires_confident_material_regression() {
+        let tiny_baseline = BenchEstimate {
+            id: "htj2k_refinement_block_decode/ds0_ht_09_b11_sigprop".to_string(),
+            median_ns: 100.0,
+            median_lower_ns: 99.0,
+            median_upper_ns: 101.0,
+        };
+        let tiny_current = BenchEstimate {
+            id: tiny_baseline.id.clone(),
+            median_ns: 130.0,
+            median_lower_ns: 129.0,
+            median_upper_ns: 131.0,
+        };
+        let noisy_baseline = BenchEstimate {
+            id: "j2k_public_decode_gray/gray8_full_128x128".to_string(),
+            median_ns: 610_000.0,
+            median_lower_ns: 606_000.0,
+            median_upper_ns: 615_000.0,
+        };
+        let noisy_current = BenchEstimate {
+            id: noisy_baseline.id.clone(),
+            median_ns: 673_000.0,
+            median_lower_ns: 664_000.0,
+            median_upper_ns: 681_000.0,
+        };
+
+        let outcomes = compare_estimates(
+            &[tiny_baseline, noisy_baseline],
+            &[tiny_current, noisy_current],
+            10.0,
+        )
+        .unwrap();
+
+        assert!(outcomes.iter().all(|outcome| !outcome.regressed));
     }
 
     #[test]
@@ -517,7 +566,7 @@ mod tests {
         fs::create_dir_all(&estimate_path).unwrap();
         fs::write(
             estimate_path.join("estimates.json"),
-            r#"{"median":{"point_estimate":321.5}}"#,
+            r#"{"median":{"point_estimate":321.5,"confidence_interval":{"lower_bound":321.5,"upper_bound":321.5}}}"#,
         )
         .unwrap();
 
@@ -528,6 +577,8 @@ mod tests {
             vec![BenchEstimate {
                 id: "j2k_public_decode/rgb8_full_128x128".to_string(),
                 median_ns: 321.5,
+                median_lower_ns: 321.5,
+                median_upper_ns: 321.5,
             }]
         );
         let _ = fs::remove_dir_all(root);
@@ -539,15 +590,40 @@ mod tests {
         let source = root.join("source");
         let target = root.join("target");
         let public_bench = "crates/signinum-j2k/benches/public_api.rs";
+        let metal_common_bench = "crates/signinum-j2k-metal/benches/common/mod.rs";
+        let metal_compare_bench = "crates/signinum-j2k-metal/benches/compare.rs";
         let native_bench = "crates/signinum-j2k-native/benches/tier1_bitplane.rs";
+        let native_sigprop_bench = "crates/signinum-j2k-native/benches/htj2k_sigprop_phase.rs";
+        let native_fixture =
+            "crates/signinum-j2k-native/fixtures/htj2k/openhtj2k_ds0_ht_09_b11.j2k";
         fs::create_dir_all(source.join("crates/signinum-j2k/benches")).unwrap();
+        fs::create_dir_all(source.join("crates/signinum-j2k-metal/benches/common")).unwrap();
         fs::create_dir_all(source.join("crates/signinum-j2k-native/benches")).unwrap();
+        fs::create_dir_all(source.join("crates/signinum-j2k-native/fixtures/htj2k")).unwrap();
         fs::create_dir_all(target.join("crates/signinum-j2k/benches")).unwrap();
+        fs::create_dir_all(target.join("crates/signinum-j2k-metal/benches/common")).unwrap();
         fs::create_dir_all(target.join("crates/signinum-j2k-native/benches")).unwrap();
+        fs::create_dir_all(target.join("crates/signinum-j2k-native/fixtures/htj2k")).unwrap();
         fs::write(source.join(public_bench), "current public bench").unwrap();
+        fs::write(
+            source.join(metal_common_bench),
+            "current metal common bench",
+        )
+        .unwrap();
+        fs::write(
+            source.join(metal_compare_bench),
+            "current metal compare bench",
+        )
+        .unwrap();
         fs::write(source.join(native_bench), "current native bench").unwrap();
+        fs::write(source.join(native_sigprop_bench), "current sigprop bench").unwrap();
+        fs::write(source.join(native_fixture), "current fixture").unwrap();
         fs::write(target.join(public_bench), "old public bench").unwrap();
+        fs::write(target.join(metal_common_bench), "old metal common bench").unwrap();
+        fs::write(target.join(metal_compare_bench), "old metal compare bench").unwrap();
         fs::write(target.join(native_bench), "old native bench").unwrap();
+        fs::write(target.join(native_sigprop_bench), "old sigprop bench").unwrap();
+        fs::write(target.join(native_fixture), "old fixture").unwrap();
 
         sync_benchmark_sources(&source, &target).unwrap();
 
@@ -556,8 +632,24 @@ mod tests {
             "current public bench"
         );
         assert_eq!(
+            fs::read_to_string(target.join(metal_common_bench)).unwrap(),
+            "current metal common bench"
+        );
+        assert_eq!(
+            fs::read_to_string(target.join(metal_compare_bench)).unwrap(),
+            "current metal compare bench"
+        );
+        assert_eq!(
             fs::read_to_string(target.join(native_bench)).unwrap(),
             "current native bench"
+        );
+        assert_eq!(
+            fs::read_to_string(target.join(native_sigprop_bench)).unwrap(),
+            "current sigprop bench"
+        );
+        assert_eq!(
+            fs::read_to_string(target.join(native_fixture)).unwrap(),
+            "current fixture"
         );
         let _ = fs::remove_dir_all(root);
     }

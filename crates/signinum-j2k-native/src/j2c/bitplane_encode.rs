@@ -216,7 +216,8 @@ pub(crate) fn encode_code_block_with_style(
     let (magnitudes, mut states) = prepare_padded_coefficients(coefficients, w, h, pw);
     let mut neighbors = vec![0u8; magnitudes.len()]; // Packed neighbor significances
 
-    let mut encoder = ArithmeticEncoder::new();
+    let mut encoder =
+        ArithmeticEncoder::with_capacity(arithmetic_encoder_capacity(w, h, num_bitplanes as usize));
     let mut contexts = [ArithmeticEncoderContext::default(); 19];
     reset_contexts(&mut contexts);
 
@@ -595,6 +596,15 @@ fn reset_contexts(contexts: &mut [ArithmeticEncoderContext; 19]) {
     contexts[18].reset_with_index(46);
 }
 
+fn arithmetic_encoder_capacity(width: usize, height: usize, bitplanes: usize) -> usize {
+    1 + width
+        .saturating_mul(height)
+        .saturating_mul(bitplanes)
+        .checked_div(16)
+        .unwrap_or(usize::MAX)
+        .max(32)
+}
+
 fn encode_segmentation_symbols(
     encoder: &mut ArithmeticEncoder,
     contexts: &mut [ArithmeticEncoderContext; 19],
@@ -664,13 +674,57 @@ fn significance_propagation_pass(
     sub_band_type: SubBandType,
     style: &CodeBlockStyle,
 ) {
+    if style.vertically_causal_context {
+        significance_propagation_pass_impl::<true>(
+            magnitudes,
+            states,
+            neighbors,
+            coded_indices,
+            encoder,
+            contexts,
+            w,
+            h,
+            pw,
+            bit_mask,
+            sub_band_type,
+        );
+    } else {
+        significance_propagation_pass_impl::<false>(
+            magnitudes,
+            states,
+            neighbors,
+            coded_indices,
+            encoder,
+            contexts,
+            w,
+            h,
+            pw,
+            bit_mask,
+            sub_band_type,
+        );
+    }
+}
+
+fn significance_propagation_pass_impl<const VERTICAL_CAUSAL: bool>(
+    magnitudes: &[u32],
+    states: &mut [u8],
+    neighbors: &mut [u8],
+    coded_indices: &mut Vec<usize>,
+    encoder: &mut ArithmeticEncoder,
+    contexts: &mut [ArithmeticEncoderContext; 19],
+    w: usize,
+    h: usize,
+    pw: usize,
+    bit_mask: u32,
+    sub_band_type: SubBandType,
+) {
     for y_base in (0..h).step_by(4) {
         for x in 0..w {
             let y_end = (y_base + 4).min(h);
             for y in y_base..y_end {
                 let idx = (y + 1) * pw + (x + 1);
                 let is_significant = states[idx] & SIGNIFICANT != 0;
-                let neighbor_sig = effective_neighbor_sig(neighbors[idx], y, h, style);
+                let neighbor_sig = effective_neighbor_sig::<VERTICAL_CAUSAL>(neighbors[idx], y, h);
                 let has_sig_neighbors = neighbor_sig != 0;
 
                 if !is_significant && has_sig_neighbors {
@@ -680,7 +734,9 @@ fn significance_propagation_pass(
                     mark_coded_in_current_pass(idx, states, coded_indices);
 
                     if bit == 1 {
-                        encode_sign(idx, neighbors, states, encoder, contexts, pw, y, h, style);
+                        encode_sign::<VERTICAL_CAUSAL>(
+                            idx, neighbors, states, encoder, contexts, pw, y, h,
+                        );
                         set_significant(idx, states, neighbors, pw);
                     }
                 }
@@ -701,13 +757,51 @@ fn significance_propagation_pass_raw(
     bit_mask: u32,
     style: &CodeBlockStyle,
 ) {
+    if style.vertically_causal_context {
+        significance_propagation_pass_raw_impl::<true>(
+            magnitudes,
+            states,
+            neighbors,
+            coded_indices,
+            writer,
+            w,
+            h,
+            pw,
+            bit_mask,
+        );
+    } else {
+        significance_propagation_pass_raw_impl::<false>(
+            magnitudes,
+            states,
+            neighbors,
+            coded_indices,
+            writer,
+            w,
+            h,
+            pw,
+            bit_mask,
+        );
+    }
+}
+
+fn significance_propagation_pass_raw_impl<const VERTICAL_CAUSAL: bool>(
+    magnitudes: &[u32],
+    states: &mut [u8],
+    neighbors: &mut [u8],
+    coded_indices: &mut Vec<usize>,
+    writer: &mut BitWriter,
+    w: usize,
+    h: usize,
+    pw: usize,
+    bit_mask: u32,
+) {
     for y_base in (0..h).step_by(4) {
         for x in 0..w {
             let y_end = (y_base + 4).min(h);
             for y in y_base..y_end {
                 let idx = (y + 1) * pw + (x + 1);
                 let is_significant = states[idx] & SIGNIFICANT != 0;
-                let neighbor_sig = effective_neighbor_sig(neighbors[idx], y, h, style);
+                let neighbor_sig = effective_neighbor_sig::<VERTICAL_CAUSAL>(neighbors[idx], y, h);
                 if !is_significant && neighbor_sig != 0 {
                     let bit = (magnitudes[idx] & bit_mask != 0) as u32;
                     writer.write_bit(bit);
@@ -735,6 +829,28 @@ fn magnitude_refinement_pass(
     bit_mask: u32,
     style: &CodeBlockStyle,
 ) {
+    if style.vertically_causal_context {
+        magnitude_refinement_pass_impl::<true>(
+            magnitudes, states, neighbors, encoder, contexts, w, h, pw, bit_mask,
+        );
+    } else {
+        magnitude_refinement_pass_impl::<false>(
+            magnitudes, states, neighbors, encoder, contexts, w, h, pw, bit_mask,
+        );
+    }
+}
+
+fn magnitude_refinement_pass_impl<const VERTICAL_CAUSAL: bool>(
+    magnitudes: &[u32],
+    states: &mut [u8],
+    neighbors: &mut [u8],
+    encoder: &mut ArithmeticEncoder,
+    contexts: &mut [ArithmeticEncoderContext; 19],
+    w: usize,
+    h: usize,
+    pw: usize,
+    bit_mask: u32,
+) {
     for y_base in (0..h).step_by(4) {
         for x in 0..w {
             let y_end = (y_base + 4).min(h);
@@ -746,7 +862,7 @@ fn magnitude_refinement_pass(
                 if is_significant && !coded_this_pass {
                     let ctx_label = magnitude_refinement_ctx(
                         states[idx],
-                        effective_neighbor_sig(neighbors[idx], y, h, style),
+                        effective_neighbor_sig::<VERTICAL_CAUSAL>(neighbors[idx], y, h),
                     );
                     let bit = (magnitudes[idx] & bit_mask != 0) as u32;
                     encoder.encode(bit, &mut contexts[ctx_label as usize]);
@@ -768,6 +884,27 @@ fn magnitude_refinement_pass_raw(
     bit_mask: u32,
     style: &CodeBlockStyle,
 ) {
+    if style.vertically_causal_context {
+        magnitude_refinement_pass_raw_impl::<true>(
+            magnitudes, states, neighbors, writer, w, h, pw, bit_mask,
+        );
+    } else {
+        magnitude_refinement_pass_raw_impl::<false>(
+            magnitudes, states, neighbors, writer, w, h, pw, bit_mask,
+        );
+    }
+}
+
+fn magnitude_refinement_pass_raw_impl<const VERTICAL_CAUSAL: bool>(
+    magnitudes: &[u32],
+    states: &mut [u8],
+    neighbors: &mut [u8],
+    writer: &mut BitWriter,
+    w: usize,
+    h: usize,
+    pw: usize,
+    bit_mask: u32,
+) {
     for y_base in (0..h).step_by(4) {
         for x in 0..w {
             let y_end = (y_base + 4).min(h);
@@ -775,7 +912,7 @@ fn magnitude_refinement_pass_raw(
                 let idx = (y + 1) * pw + (x + 1);
                 let is_significant = states[idx] & SIGNIFICANT != 0;
                 let coded_this_pass = states[idx] & CODED_IN_CURRENT_PASS != 0;
-                let _neighbor_sig = effective_neighbor_sig(neighbors[idx], y, h, style);
+                let _neighbor_sig = effective_neighbor_sig::<VERTICAL_CAUSAL>(neighbors[idx], y, h);
                 if is_significant && !coded_this_pass {
                     let bit = (magnitudes[idx] & bit_mask != 0) as u32;
                     writer.write_bit(bit);
@@ -800,6 +937,47 @@ fn cleanup_pass(
     sub_band_type: SubBandType,
     style: &CodeBlockStyle,
 ) {
+    if style.vertically_causal_context {
+        cleanup_pass_impl::<true>(
+            magnitudes,
+            states,
+            neighbors,
+            encoder,
+            contexts,
+            w,
+            h,
+            pw,
+            bit_mask,
+            sub_band_type,
+        );
+    } else {
+        cleanup_pass_impl::<false>(
+            magnitudes,
+            states,
+            neighbors,
+            encoder,
+            contexts,
+            w,
+            h,
+            pw,
+            bit_mask,
+            sub_band_type,
+        );
+    }
+}
+
+fn cleanup_pass_impl<const VERTICAL_CAUSAL: bool>(
+    magnitudes: &[u32],
+    states: &mut [u8],
+    neighbors: &mut [u8],
+    encoder: &mut ArithmeticEncoder,
+    contexts: &mut [ArithmeticEncoderContext; 19],
+    w: usize,
+    h: usize,
+    pw: usize,
+    bit_mask: u32,
+    sub_band_type: SubBandType,
+) {
     for y_base in (0..h).step_by(4) {
         for x in 0..w {
             let y_end = (y_base + 4).min(h);
@@ -811,7 +989,7 @@ fn cleanup_pass(
                 for y in y_base..y_end {
                     let idx = (y + 1) * pw + (x + 1);
                     if states[idx] & (SIGNIFICANT | CODED_IN_CURRENT_PASS) != 0
-                        || effective_neighbor_sig(neighbors[idx], y, h, style) != 0
+                        || effective_neighbor_sig::<VERTICAL_CAUSAL>(neighbors[idx], y, h) != 0
                     {
                         all_zero_uncoded = false;
                         break;
@@ -838,7 +1016,9 @@ fn cleanup_pass(
                         // Encode sign for the first significant
                         let y = y_base + pos;
                         let idx = (y + 1) * pw + (x + 1);
-                        encode_sign(idx, neighbors, states, encoder, contexts, pw, y, h, style);
+                        encode_sign::<VERTICAL_CAUSAL>(
+                            idx, neighbors, states, encoder, contexts, pw, y, h,
+                        );
                         set_significant(idx, states, neighbors, pw);
 
                         // Continue cleanup for remaining samples in stripe
@@ -846,14 +1026,14 @@ fn cleanup_pass(
                             let idx = (y + 1) * pw + (x + 1);
                             if states[idx] & (SIGNIFICANT | CODED_IN_CURRENT_PASS) == 0 {
                                 let ctx_label = zero_coding_ctx(
-                                    effective_neighbor_sig(neighbors[idx], y, h, style),
+                                    effective_neighbor_sig::<VERTICAL_CAUSAL>(neighbors[idx], y, h),
                                     sub_band_type,
                                 );
                                 let bit = (magnitudes[idx] & bit_mask != 0) as u32;
                                 encoder.encode(bit, &mut contexts[ctx_label as usize]);
                                 if bit == 1 {
-                                    encode_sign(
-                                        idx, neighbors, states, encoder, contexts, pw, y, h, style,
+                                    encode_sign::<VERTICAL_CAUSAL>(
+                                        idx, neighbors, states, encoder, contexts, pw, y, h,
                                     );
                                     set_significant(idx, states, neighbors, pw);
                                 }
@@ -873,13 +1053,15 @@ fn cleanup_pass(
                 let idx = (y + 1) * pw + (x + 1);
                 if states[idx] & (SIGNIFICANT | CODED_IN_CURRENT_PASS) == 0 {
                     let ctx_label = zero_coding_ctx(
-                        effective_neighbor_sig(neighbors[idx], y, h, style),
+                        effective_neighbor_sig::<VERTICAL_CAUSAL>(neighbors[idx], y, h),
                         sub_band_type,
                     );
                     let bit = (magnitudes[idx] & bit_mask != 0) as u32;
                     encoder.encode(bit, &mut contexts[ctx_label as usize]);
                     if bit == 1 {
-                        encode_sign(idx, neighbors, states, encoder, contexts, pw, y, h, style);
+                        encode_sign::<VERTICAL_CAUSAL>(
+                            idx, neighbors, states, encoder, contexts, pw, y, h,
+                        );
                         set_significant(idx, states, neighbors, pw);
                     }
                 }
@@ -893,7 +1075,7 @@ fn cleanup_pass(
 /// The sign context is computed exactly as the decoder does it:
 /// combine significance and sign of the 4 cardinal neighbors into a
 /// merged byte and look up SIGN_CONTEXT_LOOKUP.
-fn encode_sign(
+fn encode_sign<const VERTICAL_CAUSAL: bool>(
     idx: usize,
     neighbors: &[u8],
     states: &[u8],
@@ -902,10 +1084,10 @@ fn encode_sign(
     pw: usize,
     y: usize,
     h: usize,
-    style: &CodeBlockStyle,
 ) {
     // Get cardinal-neighbor significances: T(6), L(4), R(2), B(0)
-    let significances = effective_neighbor_sig(neighbors[idx], y, h, style) & 0b0101_0101;
+    let significances =
+        effective_neighbor_sig::<VERTICAL_CAUSAL>(neighbors[idx], y, h) & 0b0101_0101;
 
     // Get sign of each cardinal neighbor (0=positive, 1=negative).
     // Only meaningful for significant neighbors; insignificant neighbors get 0.
@@ -924,7 +1106,7 @@ fn encode_sign(
     } else {
         0
     };
-    let bottom_sign = if style.vertically_causal_context && neighbor_in_next_stripe(y, h) {
+    let bottom_sign = if VERTICAL_CAUSAL && neighbor_in_next_stripe(y, h) {
         0
     } else if states[idx + pw] & SIGNIFICANT != 0 {
         ((states[idx + pw] & NEGATIVE) != 0) as u8
@@ -957,9 +1139,13 @@ fn neighbor_in_next_stripe(y: usize, height: usize) -> bool {
     y + 1 < height && ((y + 1) >> 2) > (y >> 2)
 }
 
-#[inline]
-fn effective_neighbor_sig(neighbor_sig: u8, y: usize, height: usize, style: &CodeBlockStyle) -> u8 {
-    if style.vertically_causal_context && neighbor_in_next_stripe(y, height) {
+#[inline(always)]
+fn effective_neighbor_sig<const VERTICAL_CAUSAL: bool>(
+    neighbor_sig: u8,
+    y: usize,
+    height: usize,
+) -> u8 {
+    if VERTICAL_CAUSAL && neighbor_in_next_stripe(y, height) {
         neighbor_sig & 0b1111_0100
     } else {
         neighbor_sig

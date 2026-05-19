@@ -6,6 +6,7 @@ use super::build::CodeBlock;
 use super::decode::DecompositionStorage;
 use super::ht_tables::{UVLC_TABLE0, UVLC_TABLE1, VLC_TABLE0, VLC_TABLE1};
 use crate::error::{bail, DecodingError, Result};
+use crate::profile;
 
 #[derive(Default)]
 pub(crate) struct HtBlockDecodeContext {
@@ -30,11 +31,129 @@ impl HtBlockDecodeContext {
 }
 
 #[derive(Default)]
-struct HtBlockDecodeScratch {
+pub(crate) struct HtBlockDecodeScratch {
     cleanup: Vec<u16>,
     v_n: Vec<u32>,
     sigma: Vec<u16>,
     prev_row_sig: Vec<u16>,
+}
+
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HtBlockDecodeStats {
+    pub(crate) blocks: u128,
+    pub(crate) refinement_blocks: u128,
+    pub(crate) cleanup_bytes: u128,
+    pub(crate) refinement_bytes: u128,
+    pub(crate) ht_cleanup_us: u128,
+    pub(crate) ht_mag_sgn_us: u128,
+    pub(crate) ht_sigma_us: u128,
+    pub(crate) ht_sigprop_us: u128,
+    pub(crate) ht_magref_us: u128,
+}
+
+impl HtBlockDecodeStats {
+    fn record_block(&mut self, cleanup_bytes: usize, refinement_bytes: usize) {
+        self.blocks += 1;
+        self.cleanup_bytes += cleanup_bytes as u128;
+        if refinement_bytes > 0 {
+            self.refinement_blocks += 1;
+            self.refinement_bytes += refinement_bytes as u128;
+        }
+    }
+}
+
+pub(crate) const PHASE_LIMIT_CLEANUP: u8 = 0;
+pub(crate) const PHASE_LIMIT_SIGPROP: u8 = 1;
+pub(crate) const PHASE_LIMIT_MAGREF: u8 = 2;
+
+const SIGPROP_SPREAD_MASKS: [u32; 16] = [
+    0x33, 0x76, 0xEC, 0xC8, 0x330, 0x760, 0xEC0, 0xC80, 0x3300, 0x7600, 0xEC00, 0xC800, 0x33000,
+    0x76000, 0xEC000, 0xC8000,
+];
+
+trait HtDecodeObserver {
+    #[inline(always)]
+    fn record_block(&mut self, _cleanup_bytes: usize, _refinement_bytes: usize) {}
+
+    #[inline(always)]
+    fn phase_start(&self) -> Option<profile::ProfileInstant> {
+        None
+    }
+
+    #[inline(always)]
+    fn add_cleanup_us(&mut self, _start: Option<profile::ProfileInstant>) {}
+
+    #[inline(always)]
+    fn add_mag_sgn_us(&mut self, _start: Option<profile::ProfileInstant>) {}
+
+    #[inline(always)]
+    fn add_sigma_us(&mut self, _start: Option<profile::ProfileInstant>) {}
+
+    #[inline(always)]
+    fn add_sigprop_us(&mut self, _start: Option<profile::ProfileInstant>) {}
+
+    #[inline(always)]
+    fn add_magref_us(&mut self, _start: Option<profile::ProfileInstant>) {}
+}
+
+struct NoHtDecodeStats;
+
+impl HtDecodeObserver for NoHtDecodeStats {}
+
+struct RecordingHtDecodeStats<'a> {
+    stats: &'a mut HtBlockDecodeStats,
+    profile_enabled: bool,
+}
+
+impl HtDecodeObserver for RecordingHtDecodeStats<'_> {
+    #[inline(always)]
+    fn record_block(&mut self, cleanup_bytes: usize, refinement_bytes: usize) {
+        self.stats.record_block(cleanup_bytes, refinement_bytes);
+    }
+
+    #[inline(always)]
+    fn phase_start(&self) -> Option<profile::ProfileInstant> {
+        if self.profile_enabled {
+            profile::profile_now(true)
+        } else {
+            None
+        }
+    }
+
+    #[inline(always)]
+    fn add_cleanup_us(&mut self, start: Option<profile::ProfileInstant>) {
+        if self.profile_enabled {
+            self.stats.ht_cleanup_us += profile::elapsed_us(start);
+        }
+    }
+
+    #[inline(always)]
+    fn add_mag_sgn_us(&mut self, start: Option<profile::ProfileInstant>) {
+        if self.profile_enabled {
+            self.stats.ht_mag_sgn_us += profile::elapsed_us(start);
+        }
+    }
+
+    #[inline(always)]
+    fn add_sigma_us(&mut self, start: Option<profile::ProfileInstant>) {
+        if self.profile_enabled {
+            self.stats.ht_sigma_us += profile::elapsed_us(start);
+        }
+    }
+
+    #[inline(always)]
+    fn add_sigprop_us(&mut self, start: Option<profile::ProfileInstant>) {
+        if self.profile_enabled {
+            self.stats.ht_sigprop_us += profile::elapsed_us(start);
+        }
+    }
+
+    #[inline(always)]
+    fn add_magref_us(&mut self, start: Option<profile::ProfileInstant>) {
+        if self.profile_enabled {
+            self.stats.ht_magref_us += profile::elapsed_us(start);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -65,6 +184,7 @@ impl HtBlockDecodeScratch {
     }
 }
 
+#[inline(always)]
 fn zeroed_u16_scratch(buffer: &mut Vec<u16>, len: usize) -> &mut [u16] {
     if buffer.len() < len {
         buffer.resize(len, 0);
@@ -74,11 +194,30 @@ fn zeroed_u16_scratch(buffer: &mut Vec<u16>, len: usize) -> &mut [u16] {
     &mut buffer[..len]
 }
 
+#[cfg(test)]
 fn zeroed_u32_scratch(buffer: &mut Vec<u32>, len: usize) -> &mut [u32] {
     if buffer.len() < len {
         buffer.resize(len, 0);
     }
     buffer[..len].fill(0);
+
+    &mut buffer[..len]
+}
+
+#[inline(always)]
+fn resized_u16_scratch(buffer: &mut Vec<u16>, len: usize) -> &mut [u16] {
+    if buffer.len() < len {
+        buffer.resize(len, 0);
+    }
+
+    &mut buffer[..len]
+}
+
+#[inline(always)]
+fn resized_u32_scratch(buffer: &mut Vec<u32>, len: usize) -> &mut [u32] {
+    if buffer.len() < len {
+        buffer.resize(len, 0);
+    }
 
     &mut buffer[..len]
 }
@@ -94,13 +233,15 @@ pub(crate) fn coefficient_to_i32(value: u32, k_max: u8) -> i32 {
     }
 }
 
-pub(crate) fn decode(
+pub(crate) fn decode_with_stats(
     code_block: &CodeBlock,
     total_bitplanes: u8,
     stripe_causal: bool,
     ctx: &mut HtBlockDecodeContext,
     storage: &DecompositionStorage<'_>,
     strict: bool,
+    stats: Option<&mut HtBlockDecodeStats>,
+    profile_enabled: bool,
 ) -> Result<()> {
     ctx.reset(code_block);
 
@@ -134,9 +275,9 @@ pub(crate) fn decode(
         return Ok(());
     }
 
-    let combined = collect_code_block_data(code_block, storage)?;
-    decode_combined_validated_with_scratch(
-        &combined,
+    let segments = collect_code_block_segments(code_block, storage)?;
+    decode_segments_validated_with_scratch_for_phase::<PHASE_LIMIT_MAGREF>(
+        &segments,
         code_block.missing_bit_planes,
         total_bitplanes,
         code_block.number_of_coding_passes,
@@ -147,6 +288,8 @@ pub(crate) fn decode(
         code_block.rect.height(),
         code_block.rect.width(),
         &mut ctx.scratch,
+        stats,
+        profile_enabled,
     )
 }
 
@@ -156,15 +299,154 @@ pub(crate) struct CombinedCodeBlockData {
     pub(crate) refinement_length: u32,
 }
 
-pub(crate) fn collect_code_block_data(
+pub(crate) struct HtCodeBlockSegments<'a> {
+    pub(crate) cleanup: &'a [u8],
+    pub(crate) refinement: &'a [u8],
+}
+
+impl<'a> HtCodeBlockSegments<'a> {
+    pub(crate) fn from_combined_payload(
+        data: &'a [u8],
+        cleanup_length: u32,
+        refinement_length: u32,
+    ) -> Result<Self> {
+        let cleanup_len = cleanup_length as usize;
+        let refinement_len = refinement_length as usize;
+        let total_len = cleanup_len
+            .checked_add(refinement_len)
+            .ok_or(DecodingError::CodeBlockDecodeFailure)?;
+        if data.len() < total_len {
+            bail!(DecodingError::CodeBlockDecodeFailure);
+        }
+
+        Ok(Self {
+            cleanup: &data[..cleanup_len],
+            refinement: &data[cleanup_len..total_len],
+        })
+    }
+}
+
+pub(crate) struct HtSigPropBenchmarkState {
+    refinement_data: Vec<u8>,
+    sigma: Vec<u16>,
+    prev_row_sig: Vec<u16>,
+    width: u32,
+    height: u32,
+    stride: u32,
+    mstr: usize,
+    stripe_causal: bool,
+    p: u32,
+}
+
+impl HtSigPropBenchmarkState {
+    pub(crate) fn output_len(&self) -> usize {
+        if self.height == 0 {
+            0
+        } else {
+            (self.stride as usize * (self.height as usize - 1)) + self.width as usize
+        }
+    }
+}
+
+pub(crate) fn prepare_sigprop_benchmark_state(
+    segments: &HtCodeBlockSegments<'_>,
+    missing_bit_planes: u8,
+    total_bitplanes: u8,
+    number_of_coding_passes: u8,
+    stripe_causal: bool,
+    strict: bool,
+    width: u32,
+    height: u32,
+    stride: u32,
+) -> Result<HtSigPropBenchmarkState> {
+    if !validate_combined_decode(
+        missing_bit_planes,
+        total_bitplanes,
+        number_of_coding_passes,
+        strict,
+    )? {
+        bail!(DecodingError::CodeBlockDecodeFailure);
+    }
+    if number_of_coding_passes < 2 || segments.refinement.is_empty() || missing_bit_planes > 28 {
+        bail!(DecodingError::CodeBlockDecodeFailure);
+    }
+
+    let lcup = segments.cleanup.len();
+    let scup = cleanup_segment_suffix_length(segments.cleanup, lcup)
+        .ok_or(DecodingError::CodeBlockDecodeFailure)?;
+    let sstr = cleanup_symbol_stride(width);
+    let quad_rows = height.div_ceil(2) as usize;
+    let mut cleanup = vec![0u16; sstr * (quad_rows + 1)];
+    decode_cleanup_symbols(
+        segments.cleanup,
+        lcup,
+        scup,
+        width,
+        height,
+        sstr,
+        &mut cleanup,
+    )
+    .ok_or(DecodingError::CodeBlockDecodeFailure)?;
+
+    let mstr = sigma_stride(width);
+    let sigma_rows = height.div_ceil(4) as usize + 1;
+    let mut sigma = vec![0u16; sigma_rows * mstr];
+    build_sigma_from_cleanup_phase(&cleanup, &mut sigma, width, height, sstr, mstr)
+        .ok_or(DecodingError::CodeBlockDecodeFailure)?;
+
+    Ok(HtSigPropBenchmarkState {
+        refinement_data: segments.refinement.to_vec(),
+        sigma,
+        prev_row_sig: vec![0u16; width.div_ceil(4) as usize + 8],
+        width,
+        height,
+        stride,
+        mstr,
+        stripe_causal,
+        p: 30 - u32::from(missing_bit_planes),
+    })
+}
+
+pub(crate) fn decode_sigprop_benchmark_state(
+    state: &mut HtSigPropBenchmarkState,
+    decoded_data: &mut [u32],
+) -> Result<()> {
+    if decoded_data.len() < state.output_len() {
+        bail!(DecodingError::CodeBlockDecodeFailure);
+    }
+
+    apply_significance_propagation_phase(
+        &state.refinement_data,
+        &state.sigma,
+        decoded_data,
+        state.width,
+        state.height,
+        state.stride,
+        state.mstr,
+        state.stripe_causal,
+        state.p,
+        &mut state.prev_row_sig,
+    )
+    .ok_or(DecodingError::CodeBlockDecodeFailure.into())
+}
+
+#[cfg(test)]
+impl CombinedCodeBlockData {
+    pub(crate) fn segments(&self) -> Result<HtCodeBlockSegments<'_>> {
+        HtCodeBlockSegments::from_combined_payload(
+            &self.data,
+            self.cleanup_length,
+            self.refinement_length,
+        )
+    }
+}
+
+pub(crate) fn collect_code_block_segments<'a>(
     code_block: &CodeBlock,
-    storage: &DecompositionStorage<'_>,
-) -> Result<CombinedCodeBlockData> {
-    let mut data = Vec::new();
-    let mut cleanup_length = 0;
-    let mut refinement_length = 0;
-    let mut saw_cleanup = false;
-    let mut saw_refinement = false;
+    storage: &'a DecompositionStorage<'a>,
+) -> Result<HtCodeBlockSegments<'a>> {
+    let mut cleanup = None;
+    let mut refinement = None;
 
     for layer in &storage.layers[code_block.layers.start..code_block.layers.end] {
         let Some(range) = layer.segments.clone() else {
@@ -173,15 +455,11 @@ pub(crate) fn collect_code_block_data(
 
         for segment in &storage.segments[range] {
             match segment.idx {
-                0 if !saw_cleanup => {
-                    cleanup_length = segment.data_length;
-                    data.extend_from_slice(segment.data);
-                    saw_cleanup = true;
+                0 if cleanup.is_none() => {
+                    cleanup = Some(segment.data);
                 }
-                1 if !saw_refinement => {
-                    refinement_length = segment.data_length;
-                    data.extend_from_slice(segment.data);
-                    saw_refinement = true;
+                1 if refinement.is_none() => {
+                    refinement = Some(segment.data);
                 }
                 _ => bail!(DecodingError::UnsupportedFeature(
                     "unexpected HTJ2K segment layout"
@@ -190,9 +468,28 @@ pub(crate) fn collect_code_block_data(
         }
     }
 
-    if !saw_cleanup {
+    let Some(cleanup) = cleanup else {
         bail!(DecodingError::CodeBlockDecodeFailure);
-    }
+    };
+
+    Ok(HtCodeBlockSegments {
+        cleanup,
+        refinement: refinement.unwrap_or(&[]),
+    })
+}
+
+pub(crate) fn collect_code_block_data<'a>(
+    code_block: &CodeBlock,
+    storage: &'a DecompositionStorage<'a>,
+) -> Result<CombinedCodeBlockData> {
+    let segments = collect_code_block_segments(code_block, storage)?;
+    let cleanup_length =
+        u32::try_from(segments.cleanup.len()).map_err(|_| DecodingError::CodeBlockDecodeFailure)?;
+    let refinement_length = u32::try_from(segments.refinement.len())
+        .map_err(|_| DecodingError::CodeBlockDecodeFailure)?;
+    let mut data = Vec::with_capacity(segments.cleanup.len() + segments.refinement.len());
+    data.extend_from_slice(segments.cleanup);
+    data.extend_from_slice(segments.refinement);
 
     Ok(CombinedCodeBlockData {
         data,
@@ -201,32 +498,9 @@ pub(crate) fn collect_code_block_data(
     })
 }
 
-pub(crate) fn decode_combined(
-    combined: &CombinedCodeBlockData,
-    missing_bit_planes: u8,
-    number_of_coding_passes: u8,
-    width: u32,
-    height: u32,
-    stride: u32,
-    stripe_causal: bool,
-    decoded_data: &mut [u32],
-) -> Result<()> {
-    let mut scratch = HtBlockDecodeScratch::default();
-    decode_combined_with_scratch(
-        combined,
-        missing_bit_planes,
-        number_of_coding_passes,
-        width,
-        height,
-        stride,
-        stripe_causal,
-        decoded_data,
-        &mut scratch,
-    )
-}
-
-fn decode_combined_with_scratch(
-    combined: &CombinedCodeBlockData,
+#[inline(always)]
+fn decode_segments_with_scratch_for_phase<const PHASE_LIMIT: u8>(
+    segments: &HtCodeBlockSegments<'_>,
     missing_bit_planes: u8,
     number_of_coding_passes: u8,
     width: u32,
@@ -235,21 +509,182 @@ fn decode_combined_with_scratch(
     stripe_causal: bool,
     decoded_data: &mut [u32],
     scratch: &mut HtBlockDecodeScratch,
+    stats: Option<&mut HtBlockDecodeStats>,
+    profile_enabled: bool,
 ) -> Result<()> {
-    decode_impl(
-        &combined.data,
+    let decoded = if let Some(stats) = stats {
+        let mut observer = RecordingHtDecodeStats {
+            stats,
+            profile_enabled,
+        };
+        decode_impl::<PHASE_LIMIT, _>(
+            segments.cleanup,
+            segments.refinement,
+            decoded_data,
+            missing_bit_planes as u32,
+            number_of_coding_passes as u32,
+            width,
+            height,
+            stride,
+            stripe_causal,
+            scratch,
+            &mut observer,
+        )
+    } else {
+        let mut observer = NoHtDecodeStats;
+        decode_impl::<PHASE_LIMIT, _>(
+            segments.cleanup,
+            segments.refinement,
+            decoded_data,
+            missing_bit_planes as u32,
+            number_of_coding_passes as u32,
+            width,
+            height,
+            stride,
+            stripe_causal,
+            scratch,
+            &mut observer,
+        )
+    };
+
+    decoded.ok_or(DecodingError::CodeBlockDecodeFailure.into())
+}
+
+#[cfg(test)]
+pub(crate) fn decode_segments_validated(
+    segments: &HtCodeBlockSegments<'_>,
+    missing_bit_planes: u8,
+    total_bitplanes: u8,
+    number_of_coding_passes: u8,
+    stripe_causal: bool,
+    strict: bool,
+    decoded_data: &mut [u32],
+    width: u32,
+    height: u32,
+    stride: u32,
+) -> Result<()> {
+    decode_segments_validated_for_phase::<PHASE_LIMIT_MAGREF>(
+        segments,
+        missing_bit_planes,
+        total_bitplanes,
+        number_of_coding_passes,
+        stripe_causal,
+        strict,
         decoded_data,
-        missing_bit_planes as u32,
-        number_of_coding_passes as u32,
-        combined.cleanup_length,
-        combined.refinement_length,
+        width,
+        height,
+        stride,
+    )
+}
+
+#[inline(always)]
+#[cfg(test)]
+pub(crate) fn decode_segments_validated_for_phase<const PHASE_LIMIT: u8>(
+    segments: &HtCodeBlockSegments<'_>,
+    missing_bit_planes: u8,
+    total_bitplanes: u8,
+    number_of_coding_passes: u8,
+    stripe_causal: bool,
+    strict: bool,
+    decoded_data: &mut [u32],
+    width: u32,
+    height: u32,
+    stride: u32,
+) -> Result<()> {
+    if !validate_combined_decode(
+        missing_bit_planes,
+        total_bitplanes,
+        number_of_coding_passes,
+        strict,
+    )? {
+        return Ok(());
+    }
+
+    let mut scratch = HtBlockDecodeScratch::default();
+    decode_segments_with_scratch_for_phase::<PHASE_LIMIT>(
+        segments,
+        missing_bit_planes,
+        number_of_coding_passes,
         width,
         height,
         stride,
         stripe_causal,
-        scratch,
+        decoded_data,
+        &mut scratch,
+        None,
+        false,
     )
-    .ok_or(DecodingError::CodeBlockDecodeFailure.into())
+}
+
+#[cfg(test)]
+fn decode_segments_validated_with_scratch(
+    segments: &HtCodeBlockSegments<'_>,
+    missing_bit_planes: u8,
+    total_bitplanes: u8,
+    number_of_coding_passes: u8,
+    stripe_causal: bool,
+    strict: bool,
+    decoded_data: &mut [u32],
+    width: u32,
+    height: u32,
+    stride: u32,
+    scratch: &mut HtBlockDecodeScratch,
+) -> Result<()> {
+    decode_segments_validated_with_scratch_for_phase::<PHASE_LIMIT_MAGREF>(
+        segments,
+        missing_bit_planes,
+        total_bitplanes,
+        number_of_coding_passes,
+        stripe_causal,
+        strict,
+        decoded_data,
+        width,
+        height,
+        stride,
+        scratch,
+        None,
+        false,
+    )
+}
+
+#[inline(always)]
+pub(crate) fn decode_segments_validated_with_scratch_for_phase<const PHASE_LIMIT: u8>(
+    segments: &HtCodeBlockSegments<'_>,
+    missing_bit_planes: u8,
+    total_bitplanes: u8,
+    number_of_coding_passes: u8,
+    stripe_causal: bool,
+    strict: bool,
+    decoded_data: &mut [u32],
+    width: u32,
+    height: u32,
+    stride: u32,
+    scratch: &mut HtBlockDecodeScratch,
+    stats: Option<&mut HtBlockDecodeStats>,
+    profile_enabled: bool,
+) -> Result<()> {
+    if !validate_combined_decode(
+        missing_bit_planes,
+        total_bitplanes,
+        number_of_coding_passes,
+        strict,
+    )? {
+        return Ok(());
+    }
+
+    decode_segments_with_scratch_for_phase::<PHASE_LIMIT>(
+        segments,
+        missing_bit_planes,
+        number_of_coding_passes,
+        width,
+        height,
+        stride,
+        stripe_causal,
+        decoded_data,
+        scratch,
+        stats,
+        profile_enabled,
+    )
 }
 
 fn validate_combined_decode(
@@ -287,6 +722,7 @@ fn validate_combined_decode(
     Ok(number_of_coding_passes != 0 && actual_bitplanes != 0)
 }
 
+#[cfg(test)]
 pub(crate) fn decode_combined_validated(
     combined: &CombinedCodeBlockData,
     missing_bit_planes: u8,
@@ -299,27 +735,22 @@ pub(crate) fn decode_combined_validated(
     height: u32,
     stride: u32,
 ) -> Result<()> {
-    if !validate_combined_decode(
+    let segments = combined.segments()?;
+    decode_segments_validated(
+        &segments,
         missing_bit_planes,
         total_bitplanes,
         number_of_coding_passes,
+        stripe_causal,
         strict,
-    )? {
-        return Ok(());
-    }
-
-    decode_combined(
-        combined,
-        missing_bit_planes,
-        number_of_coding_passes,
+        decoded_data,
         width,
         height,
         stride,
-        stripe_causal,
-        decoded_data,
     )
 }
 
+#[cfg(test)]
 fn decode_combined_validated_with_scratch(
     combined: &CombinedCodeBlockData,
     missing_bit_planes: u8,
@@ -333,24 +764,18 @@ fn decode_combined_validated_with_scratch(
     stride: u32,
     scratch: &mut HtBlockDecodeScratch,
 ) -> Result<()> {
-    if !validate_combined_decode(
+    let segments = combined.segments()?;
+    decode_segments_validated_with_scratch(
+        &segments,
         missing_bit_planes,
         total_bitplanes,
         number_of_coding_passes,
+        stripe_causal,
         strict,
-    )? {
-        return Ok(());
-    }
-
-    decode_combined_with_scratch(
-        combined,
-        missing_bit_planes,
-        number_of_coding_passes,
+        decoded_data,
         width,
         height,
         stride,
-        stripe_causal,
-        decoded_data,
         scratch,
     )
 }
@@ -528,11 +953,11 @@ impl<'a> ReverseBitReader<'a> {
         }
     }
 
-    fn new_mrp(data: &'a [u8], lcup: usize, len2: usize) -> Self {
+    fn new_mrp(data: &'a [u8]) -> Self {
         Self {
             data,
-            pos: (lcup + len2) as isize - 1,
-            remaining: len2,
+            pos: data.len() as isize - 1,
+            remaining: data.len(),
             tmp: 0,
             bits: 0,
             unstuff: true,
@@ -573,6 +998,7 @@ impl<'a> ReverseBitReader<'a> {
     }
 }
 
+#[inline(always)]
 fn read_u32_pair(values: &[u16], index: usize) -> u32 {
     u32::from(values[index]) | (u32::from(values[index + 1]) << 16)
 }
@@ -777,7 +1203,7 @@ fn decode_cleanup_symbols(
     Some(())
 }
 
-#[inline(never)]
+#[inline(always)]
 fn build_sigma_from_cleanup_phase(
     cleanup: &[u16],
     sigma: &mut [u16],
@@ -824,11 +1250,9 @@ fn build_sigma_from_cleanup_phase(
     Some(())
 }
 
-#[inline(never)]
+#[inline(always)]
 fn apply_significance_propagation_phase(
-    coded_data: &[u8],
-    lcup: usize,
-    len2: usize,
+    refinement_data: &[u8],
     sigma: &[u16],
     decoded_data: &mut [u32],
     width: u32,
@@ -839,14 +1263,13 @@ fn apply_significance_propagation_phase(
     p: u32,
     prev_row_sig: &mut [u16],
 ) -> Option<()> {
-    if coded_data.len() < lcup.saturating_add(len2)
-        || prev_row_sig.len() < width.div_ceil(4) as usize + 8
-    {
+    if prev_row_sig.len() < width.div_ceil(4) as usize + 8 {
         return None;
     }
 
     prev_row_sig.fill(0);
-    let mut sigprop = ForwardBitReader::<0>::new(&coded_data[lcup..lcup + len2]);
+    let mut sigprop = ForwardBitReader::<0>::new(refinement_data);
+    let stride_us = stride as usize;
 
     for y in (0..height).step_by(4) {
         let mut pattern = 0xFFFFu32;
@@ -891,108 +1314,42 @@ fn apply_significance_propagation_phase(
             mbr &= col_pattern;
             mbr &= !cs;
 
-            let mut new_sig = mbr;
-            if new_sig != 0 {
+            let mut new_sig = 0u32;
+            if mbr != 0 {
                 let mut cwd = sigprop.fetch();
                 let mut cnt = 0u32;
-                let mut col_mask = 0xFu32;
                 let inv_sig = !cs & col_pattern;
+                let mut candidates = mbr;
+                let mut processed = 0u32;
 
-                for i in (0..16).step_by(4) {
-                    if (col_mask & new_sig) == 0 {
-                        col_mask <<= 4;
-                        continue;
+                while candidates != 0 {
+                    let bit = candidates.trailing_zeros();
+                    let sample_mask = 1u32 << bit;
+                    candidates &= !sample_mask;
+                    processed |= sample_mask;
+
+                    if (cwd & 1) != 0 {
+                        new_sig |= sample_mask;
+                        candidates |= SIGPROP_SPREAD_MASKS[bit as usize] & inv_sig & !processed;
                     }
-
-                    let mut sample_mask = 0x1111u32 & col_mask;
-                    if (new_sig & sample_mask) != 0 {
-                        new_sig &= !sample_mask;
-                        if (cwd & 1) != 0 {
-                            let t = 0x33u32 << i;
-                            new_sig |= t & inv_sig;
-                        }
-                        cwd >>= 1;
-                        cnt += 1;
-                    }
-
-                    sample_mask <<= 1;
-                    if (new_sig & sample_mask) != 0 {
-                        new_sig &= !sample_mask;
-                        if (cwd & 1) != 0 {
-                            let t = 0x76u32 << i;
-                            new_sig |= t & inv_sig;
-                        }
-                        cwd >>= 1;
-                        cnt += 1;
-                    }
-
-                    sample_mask <<= 1;
-                    if (new_sig & sample_mask) != 0 {
-                        new_sig &= !sample_mask;
-                        if (cwd & 1) != 0 {
-                            let t = 0xECu32 << i;
-                            new_sig |= t & inv_sig;
-                        }
-                        cwd >>= 1;
-                        cnt += 1;
-                    }
-
-                    sample_mask <<= 1;
-                    if (new_sig & sample_mask) != 0 {
-                        new_sig &= !sample_mask;
-                        if (cwd & 1) != 0 {
-                            let t = 0xC8u32 << i;
-                            new_sig |= t & inv_sig;
-                        }
-                        cwd >>= 1;
-                        cnt += 1;
-                    }
-
-                    col_mask <<= 4;
+                    cwd >>= 1;
+                    cnt += 1;
                 }
 
                 if new_sig != 0 {
-                    let mut dp = dpp + x as usize;
                     let value = 3u32 << (p - 2);
-                    let mut col_mask = 0xFu32;
+                    let block_base = dpp + x as usize;
+                    let mut sign_bits = new_sig;
 
-                    for _ in 0..4 {
-                        if (col_mask & new_sig) == 0 {
-                            col_mask <<= 4;
-                            dp += 1;
-                            continue;
-                        }
+                    while sign_bits != 0 {
+                        let bit = sign_bits.trailing_zeros();
+                        let sample_mask = 1u32 << bit;
+                        sign_bits &= !sample_mask;
 
-                        let mut sample_mask = 0x1111u32 & col_mask;
-                        if (new_sig & sample_mask) != 0 {
-                            decoded_data[dp] = (cwd << 31) | value;
-                            cwd >>= 1;
-                            cnt += 1;
-                        }
-
-                        sample_mask <<= 1;
-                        if (new_sig & sample_mask) != 0 {
-                            decoded_data[dp + stride as usize] = (cwd << 31) | value;
-                            cwd >>= 1;
-                            cnt += 1;
-                        }
-
-                        sample_mask <<= 1;
-                        if (new_sig & sample_mask) != 0 {
-                            decoded_data[dp + 2 * stride as usize] = (cwd << 31) | value;
-                            cwd >>= 1;
-                            cnt += 1;
-                        }
-
-                        sample_mask <<= 1;
-                        if (new_sig & sample_mask) != 0 {
-                            decoded_data[dp + 3 * stride as usize] = (cwd << 31) | value;
-                            cwd >>= 1;
-                            cnt += 1;
-                        }
-
-                        col_mask <<= 4;
-                        dp += 1;
+                        let offset = (bit >> 2) as usize + ((bit & 3) as usize * stride_us);
+                        decoded_data[block_base + offset] = ((cwd & 1) << 31) | value;
+                        cwd >>= 1;
+                        cnt += 1;
                     }
                 }
 
@@ -1016,11 +1373,9 @@ fn apply_significance_propagation_phase(
     Some(())
 }
 
-#[inline(never)]
+#[inline(always)]
 fn apply_magnitude_refinement_phase(
-    coded_data: &[u8],
-    lcup: usize,
-    len2: usize,
+    refinement_data: &[u8],
     sigma: &[u16],
     decoded_data: &mut [u32],
     width: u32,
@@ -1029,11 +1384,11 @@ fn apply_magnitude_refinement_phase(
     mstr: usize,
     p: u32,
 ) -> Option<()> {
-    if p < 2 || coded_data.len() < lcup.saturating_add(len2) {
+    if p < 2 {
         return None;
     }
 
-    let mut magref = ReverseBitReader::new_mrp(coded_data, lcup, len2);
+    let mut magref = ReverseBitReader::new_mrp(refinement_data);
     let half = 1u32 << (p - 2);
 
     for y in (0..height).step_by(4) {
@@ -1204,20 +1559,23 @@ fn decode_magnitude_sign_phase(
     Some(())
 }
 
-fn decode_impl(
-    coded_data: &[u8],
+#[inline(always)]
+fn decode_impl<const PHASE_LIMIT: u8, O: HtDecodeObserver>(
+    cleanup_data: &[u8],
+    refinement_data: &[u8],
     decoded_data: &mut [u32],
     missing_msbs: u32,
     mut num_passes: u32,
-    lengths1: u32,
-    lengths2: u32,
     width: u32,
     height: u32,
     stride: u32,
     stripe_causal: bool,
     scratch_buffers: &mut HtBlockDecodeScratch,
+    observer: &mut O,
 ) -> Option<()> {
-    if num_passes > 1 && lengths2 == 0 {
+    observer.record_block(cleanup_data.len(), refinement_data.len());
+
+    if num_passes > 1 && refinement_data.is_empty() {
         num_passes = 1;
     }
 
@@ -1234,24 +1592,26 @@ fn decode_impl(
     }
 
     let p = 30 - missing_msbs;
-    let lcup = lengths1 as usize;
-    let len2 = lengths2 as usize;
+    let lcup = cleanup_data.len();
 
-    if lcup < 2 || coded_data.len() < lcup.saturating_add(len2) {
+    if lcup < 2 {
         return None;
     }
 
-    let scup = cleanup_segment_suffix_length(coded_data, lcup)?;
+    let scup = cleanup_segment_suffix_length(cleanup_data, lcup)?;
 
     let quad_rows = height.div_ceil(2) as usize;
     let sstr = cleanup_symbol_stride(width);
     let scratch = zeroed_u16_scratch(&mut scratch_buffers.cleanup, sstr * (quad_rows + 1));
-    decode_cleanup_symbols(coded_data, lcup, scup, width, height, sstr, scratch)?;
+    let phase_start = observer.phase_start();
+    decode_cleanup_symbols(cleanup_data, lcup, scup, width, height, sstr, scratch)?;
+    observer.add_cleanup_us(phase_start);
 
     let v_n_width = width.div_ceil(2) as usize + 2;
-    let v_n_scratch = zeroed_u32_scratch(&mut scratch_buffers.v_n, v_n_width);
+    let v_n_scratch = resized_u32_scratch(&mut scratch_buffers.v_n, v_n_width);
+    let phase_start = observer.phase_start();
     decode_magnitude_sign_phase(
-        coded_data,
+        cleanup_data,
         lcup,
         scup,
         scratch,
@@ -1263,21 +1623,27 @@ fn decode_impl(
         sstr,
         v_n_scratch,
     )?;
+    observer.add_mag_sgn_us(phase_start);
+
+    if PHASE_LIMIT == PHASE_LIMIT_CLEANUP {
+        return Some(());
+    }
 
     if num_passes > 1 {
         let sigma_rows = height.div_ceil(4) as usize + 1;
         let mstr = sigma_stride(width);
         let sigma = zeroed_u16_scratch(&mut scratch_buffers.sigma, sigma_rows * mstr);
+        let phase_start = observer.phase_start();
         build_sigma_from_cleanup_phase(scratch, sigma, width, height, sstr, mstr)?;
+        observer.add_sigma_us(phase_start);
 
-        let prev_row_sig = zeroed_u16_scratch(
+        let prev_row_sig = resized_u16_scratch(
             &mut scratch_buffers.prev_row_sig,
             width.div_ceil(4) as usize + 8,
         );
+        let phase_start = observer.phase_start();
         apply_significance_propagation_phase(
-            coded_data,
-            lcup,
-            len2,
+            refinement_data,
             sigma,
             decoded_data,
             width,
@@ -1288,12 +1654,16 @@ fn decode_impl(
             p,
             prev_row_sig,
         )?;
+        observer.add_sigprop_us(phase_start);
+
+        if PHASE_LIMIT == PHASE_LIMIT_SIGPROP {
+            return Some(());
+        }
 
         if num_passes > 2 {
+            let phase_start = observer.phase_start();
             apply_magnitude_refinement_phase(
-                coded_data,
-                lcup,
-                len2,
+                refinement_data,
                 sigma,
                 decoded_data,
                 width,
@@ -1302,6 +1672,7 @@ fn decode_impl(
                 mstr,
                 p,
             )?;
+            observer.add_magref_us(phase_start);
         }
     }
 
@@ -1329,18 +1700,19 @@ mod tests {
 
         let mut decoded = vec![0u32; original.len()];
         let mut scratch = HtBlockDecodeScratch::default();
-        let decoded_ok = decode_impl(
+        let mut observer = NoHtDecodeStats;
+        let decoded_ok = decode_impl::<PHASE_LIMIT_MAGREF, _>(
             &encoded.data,
+            &[],
             &mut decoded,
             u32::from(encoded.num_zero_bitplanes),
             u32::from(encoded.num_coding_passes),
-            encoded.data.len() as u32,
-            0,
             4,
             4,
             4,
             false,
             &mut scratch,
+            &mut observer,
         );
         assert!(decoded_ok.is_some(), "encoded={:02x?}", encoded.data);
 
@@ -1360,18 +1732,19 @@ mod tests {
 
         let mut decoded = vec![0u32; original.len()];
         let mut scratch = HtBlockDecodeScratch::default();
-        let decoded_ok = decode_impl(
+        let mut observer = NoHtDecodeStats;
+        let decoded_ok = decode_impl::<PHASE_LIMIT_MAGREF, _>(
             &encoded.data,
+            &[],
             &mut decoded,
             u32::from(encoded.num_zero_bitplanes),
             u32::from(encoded.num_coding_passes),
-            encoded.data.len() as u32,
-            0,
             4,
             4,
             4,
             false,
             &mut scratch,
+            &mut observer,
         );
         assert!(decoded_ok.is_some(), "encoded={:02x?}", encoded.data);
 
@@ -1491,8 +1864,6 @@ mod tests {
 
         apply_significance_propagation_phase(
             &[],
-            0,
-            0,
             &sigma,
             &mut decoded,
             width,
@@ -1504,21 +1875,96 @@ mod tests {
             &mut prev_row_sig,
         )
         .expect("empty sigma sigprop");
-        apply_magnitude_refinement_phase(
-            &[],
-            0,
-            0,
-            &sigma,
-            &mut decoded,
-            width,
-            height,
-            stride,
-            mstr,
-            5,
-        )
-        .expect("empty sigma magref");
+        apply_magnitude_refinement_phase(&[], &sigma, &mut decoded, width, height, stride, mstr, 5)
+            .expect("empty sigma magref");
 
         assert_eq!(decoded, expected);
+    }
+
+    #[test]
+    fn sigprop_spread_masks_follow_column_major_scan_order() {
+        let row_patterns = [0x33u32, 0x76, 0xEC, 0xC8];
+
+        for bit in 0..16 {
+            let expected = row_patterns[bit & 3] << (bit & !3);
+            assert_eq!(SIGPROP_SPREAD_MASKS[bit], expected, "bit={bit}");
+            assert_eq!(SIGPROP_SPREAD_MASKS[bit] & ((1u32 << bit) - 1), 0);
+        }
+    }
+
+    #[test]
+    fn combined_data_exposes_borrowed_segment_slices() {
+        let combined = CombinedCodeBlockData {
+            data: vec![0x11, 0x22, 0x33, 0x44, 0x55],
+            cleanup_length: 3,
+            refinement_length: 2,
+        };
+
+        let segments = combined.segments().expect("split combined data");
+
+        assert_eq!(segments.cleanup, &[0x11, 0x22, 0x33]);
+        assert_eq!(segments.refinement, &[0x44, 0x55]);
+    }
+
+    #[test]
+    fn borrowed_segments_decode_matches_owned_combined_decode() {
+        let width = 16u32;
+        let height = 16u32;
+        let original: Vec<i32> = (0..(width * height))
+            .map(|i| {
+                let value = (i as i32 % 47) - 23;
+                if i % 5 == 0 {
+                    0
+                } else {
+                    value
+                }
+            })
+            .collect();
+        let total_bitplanes = 6u8;
+        let encoded =
+            encode_code_block(&original, width, height, total_bitplanes).expect("encode HT block");
+        let combined = CombinedCodeBlockData {
+            data: encoded.data.clone(),
+            cleanup_length: encoded.data.len() as u32,
+            refinement_length: 0,
+        };
+        let segments = HtCodeBlockSegments {
+            cleanup: &encoded.data,
+            refinement: &[],
+        };
+        let mut owned_decoded = vec![0u32; original.len()];
+        let mut borrowed_decoded = vec![0u32; original.len()];
+        let mut scratch = HtBlockDecodeScratch::default();
+
+        decode_combined_validated(
+            &combined,
+            encoded.num_zero_bitplanes,
+            total_bitplanes,
+            encoded.num_coding_passes,
+            false,
+            true,
+            &mut owned_decoded,
+            width,
+            height,
+            width,
+        )
+        .expect("decode owned combined payload");
+        decode_segments_validated_with_scratch(
+            &segments,
+            encoded.num_zero_bitplanes,
+            total_bitplanes,
+            encoded.num_coding_passes,
+            false,
+            true,
+            &mut borrowed_decoded,
+            width,
+            height,
+            width,
+            &mut scratch,
+        )
+        .expect("decode borrowed payload segments");
+
+        assert_eq!(borrowed_decoded, owned_decoded);
     }
 
     #[test]

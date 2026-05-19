@@ -33,6 +33,14 @@ criterion = { workspace = true }
 name = "tier1_bitplane"
 harness = false
 
+[[bench]]
+name = "htj2k_sigprop_phase"
+harness = false
+
+[[bench]]
+name = "direct_cpu"
+harness = false
+
 [lints.rust]
 unsafe_code = "forbid"
 unreachable_pub = "warn"

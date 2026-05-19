@@ -23,6 +23,10 @@ cc = "1.2"
 name = "jp2k_batch_compare"
 path = "src/bin/jp2k_batch_compare.rs"
 
+[[bin]]
+name = "jp2k_roi_batch_compare"
+path = "src/bin/jp2k_roi_batch_compare.rs"
+
 [lints.rust]
 unsafe_code = "allow"
 unsafe_op_in_unsafe_fn = "deny"

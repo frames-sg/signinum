@@ -21,19 +21,22 @@ use metal::{
     ComputeCommandEncoderRef, ComputePipelineState, Device, MTLCommandQueue, MTLResourceOptions,
     MTLSize,
 };
+#[cfg(target_os = "macos")]
+use rayon::prelude::*;
 use signinum_core::{PixelFormat, Rect};
 #[cfg(target_os = "macos")]
 use signinum_j2k_native::HtCodeBlockDecoder;
 use signinum_j2k_native::{
-    ht_uvlc_encode_table, ht_uvlc_table0, ht_uvlc_table1, ht_vlc_encode_table0,
-    ht_vlc_encode_table1, ht_vlc_table0, ht_vlc_table1, ColorSpace as NativeColorSpace,
-    DecodedComponents as NativeDecodedComponents, EncodeProgressionOrder, EncodedHtJ2kCodeBlock,
-    EncodedJ2kCodeBlock, HtCodeBlockDecodeJob, HtSubBandDecodeJob, J2kCodeBlockDecodeJob,
-    J2kCodeBlockSegment, J2kDirectBandId, J2kDirectColorPlan, J2kDirectGrayscalePlan,
+    decode_ht_code_block_scalar_with_workspace, decode_j2k_code_block_scalar, ht_uvlc_encode_table,
+    ht_uvlc_table0, ht_uvlc_table1, ht_vlc_encode_table0, ht_vlc_encode_table1, ht_vlc_table0,
+    ht_vlc_table1, ColorSpace as NativeColorSpace, DecodedComponents as NativeDecodedComponents,
+    EncodeProgressionOrder, EncodedHtJ2kCodeBlock, EncodedJ2kCodeBlock, HtCodeBlockDecodeJob,
+    HtCodeBlockDecodeWorkspace, HtSubBandDecodeJob, J2kCodeBlockDecodeJob, J2kCodeBlockSegment,
+    J2kCodeBlockStyle, J2kDirectBandId, J2kDirectColorPlan, J2kDirectGrayscalePlan,
     J2kDirectGrayscaleStep, J2kDirectIdwtStep, J2kDirectStoreStep, J2kForwardDwt53Level,
     J2kForwardDwt53Output, J2kHtCodeBlockEncodeJob, J2kInverseMctJob,
     J2kPacketizationBlockCodingMode, J2kPacketizationEncodeJob, J2kPacketizationPacketDescriptor,
-    J2kSingleDecompositionIdwtJob, J2kStoreComponentJob, J2kSubBandDecodeJob,
+    J2kSingleDecompositionIdwtJob, J2kStoreComponentJob, J2kSubBandDecodeJob, J2kSubBandType,
     J2kTier1CodeBlockEncodeJob, J2kWaveletTransform,
 };
 #[cfg(target_os = "macos")]
@@ -52,6 +55,16 @@ use crate::{Error, Surface};
 #[cfg(all(target_os = "macos", test))]
 static HT_BATCH_COEFFICIENT_COPY_BLITS: AtomicUsize = AtomicUsize::new(0);
 #[cfg(all(target_os = "macos", test))]
+static HYBRID_STACKED_COMPONENT_BATCHES: AtomicUsize = AtomicUsize::new(0);
+#[cfg(all(target_os = "macos", test))]
+static HYBRID_CPU_DECODE_WORKER_INITS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(all(target_os = "macos", test))]
+static HYBRID_CPU_DECODE_INPUTS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(all(target_os = "macos", test))]
+static FLATTENED_HYBRID_CPU_DECODE_BATCHES: AtomicUsize = AtomicUsize::new(0);
+#[cfg(all(target_os = "macos", test))]
+static DIRECT_TIER1_INPUT_BUFFER_PREPARES: AtomicUsize = AtomicUsize::new(0);
+#[cfg(all(target_os = "macos", test))]
 std::thread_local! {
     static PRIVATE_BUFFER_POOL_MISSES: Cell<usize> = const { Cell::new(0) };
     static LOSSLESS_DEINTERLEAVE_RCT_FUSED_DISPATCHES: Cell<usize> = const { Cell::new(0) };
@@ -67,6 +80,56 @@ pub(crate) fn reset_ht_batch_coefficient_copy_blits_for_test() {
 #[cfg(all(target_os = "macos", test))]
 pub(crate) fn ht_batch_coefficient_copy_blits_for_test() -> usize {
     HT_BATCH_COEFFICIENT_COPY_BLITS.load(Ordering::Relaxed)
+}
+
+#[cfg(all(target_os = "macos", test))]
+pub(crate) fn reset_direct_tier1_input_buffer_prepares_for_test() {
+    DIRECT_TIER1_INPUT_BUFFER_PREPARES.store(0, Ordering::Relaxed);
+}
+
+#[cfg(all(target_os = "macos", test))]
+pub(crate) fn direct_tier1_input_buffer_prepares_for_test() -> usize {
+    DIRECT_TIER1_INPUT_BUFFER_PREPARES.load(Ordering::Relaxed)
+}
+
+#[cfg(all(target_os = "macos", test))]
+pub(crate) fn reset_hybrid_stacked_component_batches_for_test() {
+    HYBRID_STACKED_COMPONENT_BATCHES.store(0, Ordering::Relaxed);
+}
+
+#[cfg(all(target_os = "macos", test))]
+pub(crate) fn hybrid_stacked_component_batches_for_test() -> usize {
+    HYBRID_STACKED_COMPONENT_BATCHES.load(Ordering::Relaxed)
+}
+
+#[cfg(all(target_os = "macos", test))]
+pub(crate) fn reset_hybrid_cpu_decode_worker_inits_for_test() {
+    HYBRID_CPU_DECODE_WORKER_INITS.store(0, Ordering::Relaxed);
+}
+
+#[cfg(all(target_os = "macos", test))]
+pub(crate) fn hybrid_cpu_decode_worker_inits_for_test() -> usize {
+    HYBRID_CPU_DECODE_WORKER_INITS.load(Ordering::Relaxed)
+}
+
+#[cfg(all(target_os = "macos", test))]
+pub(crate) fn reset_hybrid_cpu_decode_inputs_for_test() {
+    HYBRID_CPU_DECODE_INPUTS.store(0, Ordering::Relaxed);
+}
+
+#[cfg(all(target_os = "macos", test))]
+pub(crate) fn hybrid_cpu_decode_inputs_for_test() -> usize {
+    HYBRID_CPU_DECODE_INPUTS.load(Ordering::Relaxed)
+}
+
+#[cfg(all(target_os = "macos", test))]
+pub(crate) fn reset_flattened_hybrid_cpu_decode_batches_for_test() {
+    FLATTENED_HYBRID_CPU_DECODE_BATCHES.store(0, Ordering::Relaxed);
+}
+
+#[cfg(all(target_os = "macos", test))]
+pub(crate) fn flattened_hybrid_cpu_decode_batches_for_test() -> usize {
+    FLATTENED_HYBRID_CPU_DECODE_BATCHES.load(Ordering::Relaxed)
 }
 
 #[cfg(all(target_os = "macos", test))]
@@ -1055,6 +1118,7 @@ struct J2kStoreParams {
 struct J2kRepeatedStoreParams {
     input_width: u32,
     input_height: u32,
+    input_instance_stride: u32,
     source_x: u32,
     source_y: u32,
     copy_width: u32,
@@ -1591,6 +1655,7 @@ struct MetalRuntime {
     ht_vlc_encode_table0: Buffer,
     ht_vlc_encode_table1: Buffer,
     ht_uvlc_encode_table: Buffer,
+    tier1_dummy_buffer: Buffer,
     private_buffer_pool: Mutex<HashMap<usize, Vec<Buffer>>>,
 }
 
@@ -1829,6 +1894,7 @@ impl MetalRuntime {
                 size_of_val(ht_uvlc_encode_table()) as u64,
                 MTLResourceOptions::StorageModeShared,
             ),
+            tier1_dummy_buffer: device.new_buffer(1, MTLResourceOptions::StorageModeShared),
             private_buffer_pool: Mutex::new(HashMap::new()),
         })
     }
@@ -2239,10 +2305,62 @@ struct DirectScratchBuffer {
 }
 
 #[cfg(target_os = "macos")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DirectTier1Mode {
+    Metal,
+    CpuUpload,
+}
+
+#[cfg(all(target_os = "macos", test))]
+fn record_direct_tier1_input_buffer_prepare() {
+    DIRECT_TIER1_INPUT_BUFFER_PREPARES.fetch_add(1, Ordering::Relaxed);
+}
+
+#[cfg(all(target_os = "macos", not(test)))]
+fn record_direct_tier1_input_buffer_prepare() {}
+
+#[cfg(target_os = "macos")]
+fn prepare_direct_tier1_input_buffer<T>(
+    runtime: &MetalRuntime,
+    data: &[T],
+    mode: DirectTier1Mode,
+) -> Buffer {
+    match mode {
+        DirectTier1Mode::Metal => {
+            record_direct_tier1_input_buffer_prepare();
+            borrow_slice_buffer(&runtime.device, data)
+        }
+        DirectTier1Mode::CpuUpload => runtime.tier1_dummy_buffer.clone(),
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+struct DirectHybridStageTimings {
+    cpu_tier1: u128,
+    coefficient_upload: u128,
+    metal_idwt_encode: u128,
+    metal_store_encode: u128,
+    metal_mct_pack_encode: u128,
+    command_wait: u128,
+    gpu_command: u128,
+}
+
+#[cfg(target_os = "macos")]
+const HYBRID_CPU_DECODE_MIN_INPUTS_PER_TASK: usize = 2;
+#[cfg(target_os = "macos")]
+const HYBRID_FLAT_CPU_TIER1_MIN_DIM: u32 = 1024;
+#[cfg(target_os = "macos")]
+const HYBRID_FLAT_CPU_TIER1_MIN_COUNT: usize = 16;
+#[cfg(target_os = "macos")]
+const HYBRID_FLAT_CPU_TIER1_ENV: &str = "SIGNINUM_J2K_HYBRID_FLAT_CPU_TIER1";
+
+#[cfg(target_os = "macos")]
 #[derive(Clone)]
 pub(crate) struct PreparedDirectGrayscalePlan {
     dimensions: (u32, u32),
     bit_depth: u8,
+    tier1_prepare_mode: DirectTier1Mode,
     steps: Vec<PreparedDirectGrayscaleStep>,
     classic_groups: Vec<PreparedClassicSubBandGroup>,
     ht_groups: Vec<PreparedHtSubBandGroup>,
@@ -2320,9 +2438,16 @@ struct PreparedHtSubBand {
     width: u32,
     height: u32,
     coded_data: Vec<u8>,
-    coded_buffer: Buffer,
+    coded_buffer: Option<Buffer>,
     jobs: Vec<J2kHtCleanupBatchJob>,
-    jobs_buffer: Buffer,
+    jobs_buffer: Option<Buffer>,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone)]
+struct HtCodedArena {
+    data: Vec<u8>,
+    buffer: Buffer,
 }
 
 #[cfg(target_os = "macos")]
@@ -2331,8 +2456,7 @@ struct PreparedHtSubBandGroup {
     start_step: usize,
     end_step: usize,
     total_coefficients: usize,
-    coded_data: Vec<u8>,
-    coded_buffer: Buffer,
+    coded_arena: HtCodedArena,
     jobs: Vec<J2kHtCleanupBatchJob>,
     jobs_buffer: Buffer,
     members: Vec<PreparedHtSubBandGroupMember>,
@@ -2715,6 +2839,7 @@ fn mct_transform_code(transform: J2kWaveletTransform) -> u32 {
 #[cfg(target_os = "macos")]
 fn prepare_classic_sub_band(
     job: &signinum_j2k_native::J2kOwnedSubBandPlan,
+    tier1_prepare_mode: DirectTier1Mode,
 ) -> Result<PreparedClassicSubBand, Error> {
     let mut jobs = Vec::with_capacity(job.jobs.len());
     let mut coded_data = Vec::new();
@@ -2777,9 +2902,11 @@ fn prepare_classic_sub_band(
     }
 
     with_runtime(|runtime| {
-        let coded_buffer = borrow_slice_buffer(&runtime.device, &coded_data);
-        let jobs_buffer = borrow_slice_buffer(&runtime.device, &jobs);
-        let segments_buffer = borrow_slice_buffer(&runtime.device, &segments);
+        let coded_buffer =
+            prepare_direct_tier1_input_buffer(runtime, &coded_data, tier1_prepare_mode);
+        let jobs_buffer = prepare_direct_tier1_input_buffer(runtime, &jobs, tier1_prepare_mode);
+        let segments_buffer =
+            prepare_direct_tier1_input_buffer(runtime, &segments, tier1_prepare_mode);
         Ok(PreparedClassicSubBand {
             band_id: job.band_id,
             width: job.width,
@@ -2798,6 +2925,7 @@ fn prepare_classic_sub_band(
 #[cfg(target_os = "macos")]
 fn prepare_classic_sub_band_groups(
     steps: &[PreparedDirectGrayscaleStep],
+    tier1_prepare_mode: DirectTier1Mode,
 ) -> Result<Vec<PreparedClassicSubBandGroup>, Error> {
     let mut groups = Vec::new();
     let mut step_idx = 0;
@@ -2811,7 +2939,10 @@ fn prepare_classic_sub_band_groups(
         }
         if sub_bands.len() > 1 {
             groups.push(prepare_classic_sub_band_group(
-                start_step, step_idx, &sub_bands,
+                start_step,
+                step_idx,
+                &sub_bands,
+                tier1_prepare_mode,
             )?);
         }
         if step_idx == start_step {
@@ -2826,6 +2957,7 @@ fn prepare_classic_sub_band_group(
     start_step: usize,
     end_step: usize,
     sub_bands: &[&PreparedClassicSubBand],
+    tier1_prepare_mode: DirectTier1Mode,
 ) -> Result<PreparedClassicSubBandGroup, Error> {
     let mut members = Vec::with_capacity(sub_bands.len());
     let mut jobs = Vec::new();
@@ -2904,9 +3036,11 @@ fn prepare_classic_sub_band_group(
     }
 
     with_runtime(|runtime| {
-        let coded_buffer = borrow_slice_buffer(&runtime.device, &coded_data);
-        let jobs_buffer = borrow_slice_buffer(&runtime.device, &jobs);
-        let segments_buffer = borrow_slice_buffer(&runtime.device, &segments);
+        let coded_buffer =
+            prepare_direct_tier1_input_buffer(runtime, &coded_data, tier1_prepare_mode);
+        let jobs_buffer = prepare_direct_tier1_input_buffer(runtime, &jobs, tier1_prepare_mode);
+        let segments_buffer =
+            prepare_direct_tier1_input_buffer(runtime, &segments, tier1_prepare_mode);
         Ok(PreparedClassicSubBandGroup {
             start_step,
             end_step,
@@ -2926,6 +3060,7 @@ fn prepare_classic_sub_band_group(
 #[cfg(target_os = "macos")]
 fn prepare_ht_sub_band(
     job: &signinum_j2k_native::HtOwnedSubBandPlan,
+    _tier1_prepare_mode: DirectTier1Mode,
 ) -> Result<PreparedHtSubBand, Error> {
     let mut jobs = Vec::with_capacity(job.jobs.len());
     let mut coded_data = Vec::new();
@@ -2959,24 +3094,21 @@ fn prepare_ht_sub_band(
         });
     }
 
-    with_runtime(|runtime| {
-        let coded_buffer = borrow_slice_buffer(&runtime.device, &coded_data);
-        let jobs_buffer = borrow_slice_buffer(&runtime.device, &jobs);
-        Ok(PreparedHtSubBand {
-            band_id: job.band_id,
-            width: job.width,
-            height: job.height,
-            coded_data,
-            coded_buffer,
-            jobs,
-            jobs_buffer,
-        })
+    Ok(PreparedHtSubBand {
+        band_id: job.band_id,
+        width: job.width,
+        height: job.height,
+        coded_data,
+        coded_buffer: None,
+        jobs,
+        jobs_buffer: None,
     })
 }
 
 #[cfg(target_os = "macos")]
 fn prepare_ht_sub_band_groups(
     steps: &[PreparedDirectGrayscaleStep],
+    tier1_prepare_mode: DirectTier1Mode,
 ) -> Result<Vec<PreparedHtSubBandGroup>, Error> {
     let mut groups = Vec::new();
     let mut step_idx = 0;
@@ -2988,7 +3120,12 @@ fn prepare_ht_sub_band_groups(
             step_idx += 1;
         }
         if sub_bands.len() > 1 {
-            groups.push(prepare_ht_sub_band_group(start_step, step_idx, &sub_bands)?);
+            groups.push(prepare_ht_sub_band_group(
+                start_step,
+                step_idx,
+                &sub_bands,
+                tier1_prepare_mode,
+            )?);
         }
         if step_idx == start_step {
             step_idx += 1;
@@ -3002,6 +3139,7 @@ fn prepare_ht_sub_band_group(
     start_step: usize,
     end_step: usize,
     sub_bands: &[&PreparedHtSubBand],
+    tier1_prepare_mode: DirectTier1Mode,
 ) -> Result<PreparedHtSubBandGroup, Error> {
     let mut members = Vec::with_capacity(sub_bands.len());
     let mut jobs = Vec::new();
@@ -3053,14 +3191,17 @@ fn prepare_ht_sub_band_group(
     }
 
     with_runtime(|runtime| {
-        let coded_buffer = borrow_slice_buffer(&runtime.device, &coded_data);
-        let jobs_buffer = borrow_slice_buffer(&runtime.device, &jobs);
+        let coded_buffer =
+            prepare_direct_tier1_input_buffer(runtime, &coded_data, tier1_prepare_mode);
+        let jobs_buffer = prepare_direct_tier1_input_buffer(runtime, &jobs, tier1_prepare_mode);
         Ok(PreparedHtSubBandGroup {
             start_step,
             end_step,
             total_coefficients: output_base,
-            coded_data,
-            coded_buffer,
+            coded_arena: HtCodedArena {
+                data: coded_data,
+                buffer: coded_buffer,
+            },
             jobs,
             jobs_buffer,
             members,
@@ -3069,20 +3210,83 @@ fn prepare_ht_sub_band_group(
 }
 
 #[cfg(target_os = "macos")]
+fn prepare_ungrouped_ht_sub_band_buffers(
+    steps: &mut [PreparedDirectGrayscaleStep],
+    groups: &[PreparedHtSubBandGroup],
+    tier1_prepare_mode: DirectTier1Mode,
+) -> Result<(), Error> {
+    if tier1_prepare_mode != DirectTier1Mode::Metal {
+        return Ok(());
+    }
+
+    for (step_idx, step) in steps.iter_mut().enumerate() {
+        let PreparedDirectGrayscaleStep::HtSubBand(sub_band) = step else {
+            continue;
+        };
+        if groups
+            .iter()
+            .any(|group| group.start_step <= step_idx && step_idx < group.end_step)
+        {
+            sub_band.coded_buffer = None;
+            sub_band.jobs_buffer = None;
+            continue;
+        }
+        with_runtime(|runtime| {
+            sub_band.coded_buffer = Some(prepare_direct_tier1_input_buffer(
+                runtime,
+                &sub_band.coded_data,
+                tier1_prepare_mode,
+            ));
+            sub_band.jobs_buffer = Some(prepare_direct_tier1_input_buffer(
+                runtime,
+                &sub_band.jobs,
+                tier1_prepare_mode,
+            ));
+            Ok(())
+        })?;
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn prepared_ht_buffer<'a>(buffer: Option<&'a Buffer>, label: &str) -> Result<&'a Buffer, Error> {
+    buffer.ok_or_else(|| Error::MetalKernel {
+        message: format!("HTJ2K MetalDirect ungrouped sub-band is missing prepared {label} buffer"),
+    })
+}
+
+#[cfg(target_os = "macos")]
 pub(crate) fn prepare_direct_grayscale_plan(
     plan: &J2kDirectGrayscalePlan,
+) -> Result<PreparedDirectGrayscalePlan, Error> {
+    prepare_direct_grayscale_plan_with_tier1_mode(plan, DirectTier1Mode::Metal)
+}
+
+#[cfg(target_os = "macos")]
+fn prepare_direct_grayscale_plan_for_cpu_upload(
+    plan: &J2kDirectGrayscalePlan,
+) -> Result<PreparedDirectGrayscalePlan, Error> {
+    prepare_direct_grayscale_plan_with_tier1_mode(plan, DirectTier1Mode::CpuUpload)
+}
+
+#[cfg(target_os = "macos")]
+fn prepare_direct_grayscale_plan_with_tier1_mode(
+    plan: &J2kDirectGrayscalePlan,
+    tier1_prepare_mode: DirectTier1Mode,
 ) -> Result<PreparedDirectGrayscalePlan, Error> {
     let mut steps = Vec::with_capacity(plan.steps.len());
     for step in &plan.steps {
         match step {
             J2kDirectGrayscaleStep::ClassicSubBand(sub_band) => {
                 steps.push(PreparedDirectGrayscaleStep::ClassicSubBand(
-                    prepare_classic_sub_band(sub_band)?,
+                    prepare_classic_sub_band(sub_band, tier1_prepare_mode)?,
                 ));
             }
             J2kDirectGrayscaleStep::HtSubBand(sub_band) => {
                 steps.push(PreparedDirectGrayscaleStep::HtSubBand(prepare_ht_sub_band(
                     sub_band,
+                    tier1_prepare_mode,
                 )?));
             }
             J2kDirectGrayscaleStep::Idwt(idwt) => {
@@ -3096,11 +3300,13 @@ pub(crate) fn prepare_direct_grayscale_plan(
             }
         }
     }
-    let classic_groups = prepare_classic_sub_band_groups(&steps)?;
-    let ht_groups = prepare_ht_sub_band_groups(&steps)?;
+    let classic_groups = prepare_classic_sub_band_groups(&steps, tier1_prepare_mode)?;
+    let ht_groups = prepare_ht_sub_band_groups(&steps, tier1_prepare_mode)?;
+    prepare_ungrouped_ht_sub_band_buffers(&mut steps, &ht_groups, tier1_prepare_mode)?;
     Ok(PreparedDirectGrayscalePlan {
         dimensions: plan.dimensions,
         bit_depth: plan.bit_depth,
+        tier1_prepare_mode,
         steps,
         classic_groups,
         ht_groups,
@@ -3255,10 +3461,13 @@ fn prune_prepared_direct_grayscale_plan_to_store_windows(
                 );
                 if sub_band.jobs.len() != before {
                     sub_band.zero_fill = true;
-                    with_runtime(|runtime| {
-                        sub_band.jobs_buffer = borrow_slice_buffer(&runtime.device, &sub_band.jobs);
-                        Ok(())
-                    })?;
+                    if plan.tier1_prepare_mode == DirectTier1Mode::Metal {
+                        with_runtime(|runtime| {
+                            sub_band.jobs_buffer =
+                                borrow_slice_buffer(&runtime.device, &sub_band.jobs);
+                            Ok(())
+                        })?;
+                    }
                 }
             }
             PreparedDirectGrayscaleStep::HtSubBand(sub_band) => {
@@ -3268,7 +3477,7 @@ fn prune_prepared_direct_grayscale_plan_to_store_windows(
                     required.get(&sub_band.band_id).copied(),
                 );
                 if sub_band.jobs.len() != before {
-                    compact_ht_sub_band_coded_data(sub_band)?;
+                    compact_ht_sub_band_coded_data(sub_band, plan.tier1_prepare_mode)?;
                 }
             }
             PreparedDirectGrayscaleStep::Idwt(_) | PreparedDirectGrayscaleStep::Store(_) => {}
@@ -3276,8 +3485,13 @@ fn prune_prepared_direct_grayscale_plan_to_store_windows(
     }
 
     apply_prepared_direct_idwt_output_windows(plan, &idwt_output_windows)?;
-    plan.classic_groups = prepare_classic_sub_band_groups(&plan.steps)?;
-    plan.ht_groups = prepare_ht_sub_band_groups(&plan.steps)?;
+    plan.classic_groups = prepare_classic_sub_band_groups(&plan.steps, plan.tier1_prepare_mode)?;
+    plan.ht_groups = prepare_ht_sub_band_groups(&plan.steps, plan.tier1_prepare_mode)?;
+    prepare_ungrouped_ht_sub_band_buffers(
+        &mut plan.steps,
+        &plan.ht_groups,
+        plan.tier1_prepare_mode,
+    )?;
     Ok(())
 }
 
@@ -3346,10 +3560,10 @@ fn idwt_input_windows_from_slices(
     hh: &DirectBandSlice,
 ) -> PreparedIdwtInputWindows {
     PreparedIdwtInputWindows {
-        ll: ll.window,
-        hl: hl.window,
-        lh: lh.window,
-        hh: hh.window,
+        ll: BandRequiredRegion::full(ll.window.width(), ll.window.height()),
+        hl: BandRequiredRegion::full(hl.window.width(), hl.window.height()),
+        lh: BandRequiredRegion::full(lh.window.width(), lh.window.height()),
+        hh: BandRequiredRegion::full(hh.window.width(), hh.window.height()),
     }
 }
 
@@ -3454,8 +3668,8 @@ fn add_required_region(
 #[cfg(target_os = "macos")]
 fn idwt_required_output_margin(transform: J2kWaveletTransform) -> u32 {
     match transform {
-        J2kWaveletTransform::Reversible53 => 4,
-        J2kWaveletTransform::Irreversible97 => 12,
+        J2kWaveletTransform::Reversible53 => 16,
+        J2kWaveletTransform::Irreversible97 => 40,
     }
 }
 
@@ -3577,7 +3791,10 @@ fn retain_ht_jobs_for_required_region(
 }
 
 #[cfg(target_os = "macos")]
-fn compact_ht_sub_band_coded_data(sub_band: &mut PreparedHtSubBand) -> Result<(), Error> {
+fn compact_ht_sub_band_coded_data(
+    sub_band: &mut PreparedHtSubBand,
+    _tier1_prepare_mode: DirectTier1Mode,
+) -> Result<(), Error> {
     let previous = std::mem::take(&mut sub_band.coded_data);
     let mut compacted = Vec::new();
 
@@ -3599,11 +3816,9 @@ fn compact_ht_sub_band_coded_data(sub_band: &mut PreparedHtSubBand) -> Result<()
     }
 
     sub_band.coded_data = compacted;
-    with_runtime(|runtime| {
-        sub_band.coded_buffer = borrow_slice_buffer(&runtime.device, &sub_band.coded_data);
-        sub_band.jobs_buffer = borrow_slice_buffer(&runtime.device, &sub_band.jobs);
-        Ok(())
-    })
+    sub_band.coded_buffer = None;
+    sub_band.jobs_buffer = None;
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -3677,10 +3892,28 @@ fn crop_direct_store_step_to_output_region(
 pub(crate) fn prepare_direct_color_plan(
     plan: &J2kDirectColorPlan,
 ) -> Result<PreparedDirectColorPlan, Error> {
+    prepare_direct_color_plan_with_tier1_mode(plan, DirectTier1Mode::Metal)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn prepare_direct_color_plan_for_cpu_upload(
+    plan: &J2kDirectColorPlan,
+) -> Result<PreparedDirectColorPlan, Error> {
+    prepare_direct_color_plan_with_tier1_mode(plan, DirectTier1Mode::CpuUpload)
+}
+
+#[cfg(target_os = "macos")]
+fn prepare_direct_color_plan_with_tier1_mode(
+    plan: &J2kDirectColorPlan,
+    tier1_prepare_mode: DirectTier1Mode,
+) -> Result<PreparedDirectColorPlan, Error> {
     let component_plans = plan
         .component_plans
         .iter()
-        .map(prepare_direct_grayscale_plan)
+        .map(|component| match tier1_prepare_mode {
+            DirectTier1Mode::Metal => prepare_direct_grayscale_plan(component),
+            DirectTier1Mode::CpuUpload => prepare_direct_grayscale_plan_for_cpu_upload(component),
+        })
         .collect::<Result<Vec<_>, _>>()?;
     if component_plans.len() != 3 {
         return Err(Error::MetalKernel {
@@ -3697,6 +3930,35 @@ pub(crate) fn prepare_direct_color_plan(
         transform: plan.transform,
         component_plans,
     })
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn crop_prepared_direct_color_plan_to_output_region(
+    plan: &mut PreparedDirectColorPlan,
+    region: Rect,
+) -> Result<(), Error> {
+    if region.w == 0 || region.h == 0 {
+        return Err(Error::MetalKernel {
+            message: "J2K MetalDirect region-scaled color plan has an empty output region"
+                .to_string(),
+        });
+    }
+
+    for component_plan in &mut plan.component_plans {
+        crop_prepared_direct_grayscale_plan_to_output_region(component_plan, region)?;
+        if component_plan.dimensions != (region.w, region.h) {
+            return Err(Error::MetalKernel {
+                message: format!(
+                    "J2K MetalDirect color component crop produced {:?}, expected {:?}",
+                    component_plan.dimensions,
+                    (region.w, region.h)
+                ),
+            });
+        }
+    }
+
+    plan.dimensions = (region.w, region.h);
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -3993,11 +4255,931 @@ fn encode_prepared_direct_grayscale_plan_in_command_buffer(
 }
 
 #[cfg(target_os = "macos")]
+fn decode_prepared_classic_sub_band_on_cpu(
+    sub_band: &PreparedClassicSubBand,
+) -> Result<Vec<f32>, Error> {
+    let len = checked_coefficient_len(
+        sub_band.width,
+        sub_band.height,
+        "classic J2K MetalDirect hybrid sub-band size overflow",
+    )?;
+    let mut output = vec![0.0_f32; len];
+    decode_prepared_classic_jobs_on_cpu(
+        &sub_band.coded_data,
+        &sub_band.segments,
+        &sub_band.jobs,
+        &mut output,
+    )?;
+    Ok(output)
+}
+
+#[cfg(target_os = "macos")]
+fn decode_prepared_classic_sub_band_group_on_cpu(
+    group: &PreparedClassicSubBandGroup,
+) -> Result<Vec<f32>, Error> {
+    let mut output = vec![0.0_f32; group.total_coefficients];
+    decode_prepared_classic_jobs_on_cpu(
+        &group.coded_data,
+        &group.segments,
+        &group.jobs,
+        &mut output,
+    )?;
+    Ok(output)
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+struct ClassicCpuDecodeScratch {
+    segments: Vec<J2kCodeBlockSegment>,
+}
+
+#[cfg(target_os = "macos")]
+fn decode_prepared_classic_jobs_on_cpu(
+    coded_data: &[u8],
+    segments: &[J2kClassicSegment],
+    jobs: &[J2kClassicCleanupBatchJob],
+    output: &mut [f32],
+) -> Result<(), Error> {
+    let mut scratch = ClassicCpuDecodeScratch::default();
+    decode_prepared_classic_jobs_on_cpu_with_scratch(
+        coded_data,
+        segments,
+        jobs,
+        output,
+        &mut scratch,
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn decode_prepared_classic_jobs_on_cpu_with_scratch(
+    coded_data: &[u8],
+    segments: &[J2kClassicSegment],
+    jobs: &[J2kClassicCleanupBatchJob],
+    output: &mut [f32],
+    scratch: &mut ClassicCpuDecodeScratch,
+) -> Result<(), Error> {
+    for job in jobs {
+        let start = job.output_offset as usize;
+        let segment_window = prepared_classic_segment_window(segments, job)?;
+        scratch.segments.clear();
+        scratch.segments.reserve(segment_window.len());
+        for segment in segment_window {
+            scratch.segments.push(prepared_classic_segment(segment)?);
+        }
+        let decode_job = prepared_classic_decode_job(coded_data, &scratch.segments, job)?;
+        let required_len = required_classic_output_len(decode_job)?;
+        let end = start
+            .checked_add(required_len)
+            .ok_or_else(|| Error::MetalKernel {
+                message: "classic J2K MetalDirect hybrid output offset overflow".to_string(),
+            })?;
+        let Some(output_window) = output.get_mut(start..end) else {
+            return Err(Error::MetalKernel {
+                message: "classic J2K MetalDirect hybrid output slice is too small".to_string(),
+            });
+        };
+        decode_j2k_code_block_scalar(decode_job, output_window).map_err(native_decode_error)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn prepared_classic_segment_window<'a>(
+    segments: &'a [J2kClassicSegment],
+    job: &J2kClassicCleanupBatchJob,
+) -> Result<&'a [J2kClassicSegment], Error> {
+    let segment_start = job.segment_offset as usize;
+    let segment_end = segment_start
+        .checked_add(job.segment_count as usize)
+        .ok_or_else(|| Error::MetalKernel {
+            message: "classic J2K MetalDirect hybrid segment span overflow".to_string(),
+        })?;
+    segments
+        .get(segment_start..segment_end)
+        .ok_or_else(|| Error::MetalKernel {
+            message: "classic J2K MetalDirect hybrid segment span is invalid".to_string(),
+        })
+}
+
+#[cfg(target_os = "macos")]
+fn prepared_classic_decode_job<'a>(
+    coded_data: &'a [u8],
+    segments: &'a [J2kCodeBlockSegment],
+    job: &J2kClassicCleanupBatchJob,
+) -> Result<J2kCodeBlockDecodeJob<'a>, Error> {
+    Ok(J2kCodeBlockDecodeJob {
+        data: coded_data,
+        segments,
+        width: job.width,
+        height: job.height,
+        output_stride: job.output_stride as usize,
+        missing_bit_planes: checked_u8(job.missing_msbs, "classic missing bit planes")?,
+        number_of_coding_passes: checked_u8(job.number_of_coding_passes, "classic coding passes")?,
+        total_bitplanes: checked_u8(job.total_bitplanes, "classic total bitplanes")?,
+        sub_band_type: prepared_classic_sub_band_type(job.sub_band_type)?,
+        style: prepared_classic_style(job.style_flags),
+        strict: job.strict != 0,
+        dequantization_step: job.dequantization_step,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn prepared_classic_segment(segment: &J2kClassicSegment) -> Result<J2kCodeBlockSegment, Error> {
+    Ok(J2kCodeBlockSegment {
+        data_offset: segment.data_offset,
+        data_length: segment.data_length,
+        start_coding_pass: checked_u8(segment.start_coding_pass, "classic segment start pass")?,
+        end_coding_pass: checked_u8(segment.end_coding_pass, "classic segment end pass")?,
+        use_arithmetic: segment.use_arithmetic != 0,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn prepared_classic_sub_band_type(value: u32) -> Result<J2kSubBandType, Error> {
+    match value {
+        0 => Ok(J2kSubBandType::LowLow),
+        1 => Ok(J2kSubBandType::HighLow),
+        2 => Ok(J2kSubBandType::LowHigh),
+        3 => Ok(J2kSubBandType::HighHigh),
+        _ => Err(Error::MetalKernel {
+            message: format!("classic J2K MetalDirect hybrid sub-band type {value} is invalid"),
+        }),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn prepared_classic_style(flags: u32) -> J2kCodeBlockStyle {
+    J2kCodeBlockStyle {
+        selective_arithmetic_coding_bypass: (flags
+            & J2K_CLASSIC_STYLE_SELECTIVE_ARITHMETIC_CODING_BYPASS)
+            != 0,
+        reset_context_probabilities: (flags & J2K_CLASSIC_STYLE_RESET_CONTEXT_PROBABILITIES) != 0,
+        termination_on_each_pass: (flags & J2K_CLASSIC_STYLE_TERMINATION_ON_EACH_PASS) != 0,
+        vertically_causal_context: (flags & J2K_CLASSIC_STYLE_VERTICALLY_CAUSAL_CONTEXT) != 0,
+        segmentation_symbols: (flags & J2K_CLASSIC_STYLE_SEGMENTATION_SYMBOLS) != 0,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn decode_prepared_ht_sub_band_on_cpu(sub_band: &PreparedHtSubBand) -> Result<Vec<f32>, Error> {
+    let len = checked_coefficient_len(
+        sub_band.width,
+        sub_band.height,
+        "HTJ2K MetalDirect hybrid sub-band size overflow",
+    )?;
+    let mut output = vec![0.0_f32; len];
+    decode_prepared_ht_jobs_on_cpu(&sub_band.coded_data, &sub_band.jobs, &mut output)?;
+    Ok(output)
+}
+
+#[cfg(target_os = "macos")]
+fn decode_prepared_ht_sub_band_group_on_cpu(
+    group: &PreparedHtSubBandGroup,
+) -> Result<Vec<f32>, Error> {
+    let mut output = vec![0.0_f32; group.total_coefficients];
+    decode_prepared_ht_jobs_on_cpu(&group.coded_arena.data, &group.jobs, &mut output)?;
+    Ok(output)
+}
+
+#[cfg(target_os = "macos")]
+fn decode_prepared_ht_jobs_on_cpu(
+    coded_data: &[u8],
+    jobs: &[J2kHtCleanupBatchJob],
+    output: &mut [f32],
+) -> Result<(), Error> {
+    let mut workspace = HtCodeBlockDecodeWorkspace::default();
+    decode_prepared_ht_jobs_on_cpu_with_workspace(coded_data, jobs, output, &mut workspace)
+}
+
+#[cfg(target_os = "macos")]
+fn decode_prepared_ht_jobs_on_cpu_with_workspace(
+    coded_data: &[u8],
+    jobs: &[J2kHtCleanupBatchJob],
+    output: &mut [f32],
+    workspace: &mut HtCodeBlockDecodeWorkspace,
+) -> Result<(), Error> {
+    for job in jobs {
+        let start = job.output_offset as usize;
+        let decode_job = prepared_ht_decode_job(coded_data, job)?;
+        let required_len = required_ht_output_len(decode_job)?;
+        let end = start
+            .checked_add(required_len)
+            .ok_or_else(|| Error::MetalKernel {
+                message: "HTJ2K MetalDirect hybrid output offset overflow".to_string(),
+            })?;
+        let Some(output_window) = output.get_mut(start..end) else {
+            return Err(Error::MetalKernel {
+                message: "HTJ2K MetalDirect hybrid output slice is too small".to_string(),
+            });
+        };
+        decode_ht_code_block_scalar_with_workspace(decode_job, output_window, workspace)
+            .map_err(native_decode_error)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+struct ClassicCpuDecodeInput<'a> {
+    coded_data: &'a [u8],
+    segments: &'a [J2kClassicSegment],
+    jobs: &'a [J2kClassicCleanupBatchJob],
+    output_len: usize,
+}
+
+#[cfg(target_os = "macos")]
+struct HtCpuDecodeInput<'a> {
+    coded_data: &'a [u8],
+    jobs: &'a [J2kHtCleanupBatchJob],
+    output_len: usize,
+}
+
+#[cfg(target_os = "macos")]
+fn decode_classic_inputs_on_cpu_parallel(
+    inputs: &[ClassicCpuDecodeInput<'_>],
+) -> Result<Vec<f32>, Error> {
+    record_hybrid_cpu_decode_inputs(inputs.len());
+    let Some(output_len) = packed_cpu_decode_output_len(
+        inputs.iter().map(|input| input.output_len),
+        "classic J2K MetalDirect hybrid batch",
+    )?
+    else {
+        return Ok(Vec::new());
+    };
+    let mut coefficients = packed_cpu_decode_coefficients(inputs.len(), output_len)?;
+    coefficients
+        .par_chunks_mut(output_len)
+        .zip(inputs.par_iter())
+        .with_min_len(HYBRID_CPU_DECODE_MIN_INPUTS_PER_TASK)
+        .try_for_each_init(
+            || {
+                record_hybrid_cpu_decode_worker_init();
+                ClassicCpuDecodeScratch::default()
+            },
+            |scratch, (output, input)| {
+                decode_prepared_classic_jobs_on_cpu_with_scratch(
+                    input.coded_data,
+                    input.segments,
+                    input.jobs,
+                    output,
+                    scratch,
+                )
+            },
+        )?;
+    Ok(coefficients)
+}
+
+#[cfg(target_os = "macos")]
+fn decode_ht_inputs_on_cpu_parallel(inputs: &[HtCpuDecodeInput<'_>]) -> Result<Vec<f32>, Error> {
+    record_hybrid_cpu_decode_inputs(inputs.len());
+    let Some(output_len) = packed_cpu_decode_output_len(
+        inputs.iter().map(|input| input.output_len),
+        "HTJ2K MetalDirect hybrid batch",
+    )?
+    else {
+        return Ok(Vec::new());
+    };
+    let mut coefficients = packed_cpu_decode_coefficients(inputs.len(), output_len)?;
+    coefficients
+        .par_chunks_mut(output_len)
+        .zip(inputs.par_iter())
+        .with_min_len(HYBRID_CPU_DECODE_MIN_INPUTS_PER_TASK)
+        .try_for_each_init(
+            || {
+                record_hybrid_cpu_decode_worker_init();
+                HtCodeBlockDecodeWorkspace::default()
+            },
+            |workspace, (output, input)| {
+                decode_prepared_ht_jobs_on_cpu_with_workspace(
+                    input.coded_data,
+                    input.jobs,
+                    output,
+                    workspace,
+                )
+            },
+        )?;
+    Ok(coefficients)
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct FlattenedCpuTier1Key {
+    component_idx: usize,
+    step_idx: usize,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy)]
+enum FlattenedCpuTier1Source<'a> {
+    Classic {
+        coded_data: &'a [u8],
+        segments: &'a [J2kClassicSegment],
+        jobs: &'a [J2kClassicCleanupBatchJob],
+    },
+    Ht {
+        coded_data: &'a [u8],
+        jobs: &'a [J2kHtCleanupBatchJob],
+    },
+}
+
+#[cfg(target_os = "macos")]
+struct FlattenedCpuTier1BucketSpec<'a> {
+    key: FlattenedCpuTier1Key,
+    output_len: usize,
+    inputs: Vec<FlattenedCpuTier1Source<'a>>,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone)]
+struct FlattenedCpuTier1Bucket {
+    buffer: Buffer,
+    output_len: usize,
+    input_count: usize,
+}
+
+#[cfg(target_os = "macos")]
+struct FlattenedCpuTier1Cache {
+    buckets: HashMap<FlattenedCpuTier1Key, FlattenedCpuTier1Bucket>,
+}
+
+#[cfg(target_os = "macos")]
+impl FlattenedCpuTier1Cache {
+    fn buffer_for(
+        &self,
+        component_idx: usize,
+        step_idx: usize,
+        output_len: usize,
+        input_count: usize,
+    ) -> Result<Buffer, Error> {
+        let key = FlattenedCpuTier1Key {
+            component_idx,
+            step_idx,
+        };
+        let bucket = self.buckets.get(&key).ok_or_else(|| Error::MetalKernel {
+            message: format!(
+                "J2K MetalDirect flattened hybrid cache is missing component {component_idx} step {step_idx}"
+            ),
+        })?;
+        if bucket.output_len != output_len || bucket.input_count != input_count {
+            return Err(Error::MetalKernel {
+                message: format!(
+                    "J2K MetalDirect flattened hybrid cache shape mismatch at component {component_idx} step {step_idx}"
+                ),
+            });
+        }
+        Ok(bucket.buffer.clone())
+    }
+}
+
+#[cfg(target_os = "macos")]
+struct FlattenedCpuTier1WorkItem<'a> {
+    output_len: usize,
+    output: FlattenedCpuTier1Output,
+    source: FlattenedCpuTier1Source<'a>,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy)]
+struct FlattenedCpuTier1Output(*mut f32);
+
+// SAFETY: Work items are constructed from non-overlapping ranges in preallocated
+// packed coefficient slabs. Each pointer is written exactly once before the
+// owning Vec is moved or exposed again.
+#[cfg(target_os = "macos")]
+unsafe impl Send for FlattenedCpuTier1Output {}
+
+#[cfg(target_os = "macos")]
+unsafe impl Sync for FlattenedCpuTier1Output {}
+
+#[cfg(target_os = "macos")]
+impl FlattenedCpuTier1Output {
+    unsafe fn as_slice_mut<'a>(self, len: usize) -> &'a mut [f32] {
+        unsafe { std::slice::from_raw_parts_mut(self.0, len) }
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+struct FlattenedCpuTier1DecodeScratch {
+    classic: ClassicCpuDecodeScratch,
+}
+
+#[cfg(target_os = "macos")]
+fn build_flattened_cpu_tier1_cache(
+    runtime: &MetalRuntime,
+    plans: &[Arc<PreparedDirectColorPlan>],
+    stage_timings: &mut DirectHybridStageTimings,
+    retained_buffers: &mut Vec<Buffer>,
+    retained_cpu_coefficients: &mut Vec<Vec<f32>>,
+) -> Result<FlattenedCpuTier1Cache, Error> {
+    let specs = collect_flattened_cpu_tier1_bucket_specs(plans)?;
+    let decode_started = metal_profile_stages_enabled().then(Instant::now);
+    let decoded_buckets = decode_flattened_cpu_tier1_buckets(&specs)?;
+    if let Some(started) = decode_started {
+        stage_timings.cpu_tier1 += elapsed_us(started);
+    }
+
+    let upload_started = metal_profile_stages_enabled().then(Instant::now);
+    let mut buckets = HashMap::with_capacity(specs.len());
+    for (spec, coefficients) in specs.iter().zip(decoded_buckets) {
+        let input_count = spec.inputs.len();
+        let buffer = upload_cpu_decoded_coefficients(
+            runtime,
+            coefficients,
+            retained_buffers,
+            retained_cpu_coefficients,
+        );
+        buckets.insert(
+            spec.key,
+            FlattenedCpuTier1Bucket {
+                buffer,
+                output_len: spec.output_len,
+                input_count,
+            },
+        );
+    }
+    if let Some(started) = upload_started {
+        stage_timings.coefficient_upload += elapsed_us(started);
+    }
+
+    Ok(FlattenedCpuTier1Cache { buckets })
+}
+
+#[cfg(target_os = "macos")]
+fn collect_flattened_cpu_tier1_bucket_specs(
+    plans: &[Arc<PreparedDirectColorPlan>],
+) -> Result<Vec<FlattenedCpuTier1BucketSpec<'_>>, Error> {
+    let Some(first) = plans.first() else {
+        return Ok(Vec::new());
+    };
+    let mut specs = Vec::new();
+
+    for component_idx in 0..3 {
+        let component_plans = plans
+            .iter()
+            .map(|plan| &plan.component_plans[component_idx])
+            .collect::<Vec<_>>();
+        let Some(first_component) = component_plans.first().copied() else {
+            continue;
+        };
+        let broadcast_tier1_inputs = component_plans
+            .iter()
+            .all(|plan| std::ptr::eq(*plan, first_component));
+        let mut step_idx = 0;
+        while step_idx < first.component_plans[component_idx].steps.len() {
+            if let Some(group) = first_component.classic_group_starting_at(step_idx) {
+                let inputs = component_plans
+                    .iter()
+                    .take(if broadcast_tier1_inputs {
+                        1
+                    } else {
+                        component_plans.len()
+                    })
+                    .map(|plan| {
+                        let group = plan.classic_group_starting_at(step_idx).ok_or_else(|| {
+                            Error::MetalKernel {
+                                message: "J2K MetalDirect flattened hybrid missing classic group"
+                                    .to_string(),
+                            }
+                        })?;
+                        Ok(FlattenedCpuTier1Source::Classic {
+                            coded_data: &group.coded_data,
+                            segments: &group.segments,
+                            jobs: &group.jobs,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, Error>>()?;
+                specs.push(FlattenedCpuTier1BucketSpec {
+                    key: FlattenedCpuTier1Key {
+                        component_idx,
+                        step_idx,
+                    },
+                    output_len: group.total_coefficients,
+                    inputs,
+                });
+                step_idx = group.end_step;
+                continue;
+            }
+
+            if let Some(group) = first_component.ht_group_starting_at(step_idx) {
+                let inputs = component_plans
+                    .iter()
+                    .take(if broadcast_tier1_inputs {
+                        1
+                    } else {
+                        component_plans.len()
+                    })
+                    .map(|plan| {
+                        let group = plan.ht_group_starting_at(step_idx).ok_or_else(|| {
+                            Error::MetalKernel {
+                                message: "J2K MetalDirect flattened hybrid missing HT group"
+                                    .to_string(),
+                            }
+                        })?;
+                        Ok(FlattenedCpuTier1Source::Ht {
+                            coded_data: &group.coded_arena.data,
+                            jobs: &group.jobs,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, Error>>()?;
+                specs.push(FlattenedCpuTier1BucketSpec {
+                    key: FlattenedCpuTier1Key {
+                        component_idx,
+                        step_idx,
+                    },
+                    output_len: group.total_coefficients,
+                    inputs,
+                });
+                step_idx = group.end_step;
+                continue;
+            }
+
+            match &first_component.steps[step_idx] {
+                PreparedDirectGrayscaleStep::ClassicSubBand(sub_band) => {
+                    let output_len = checked_coefficient_len(
+                        sub_band.width,
+                        sub_band.height,
+                        "classic J2K MetalDirect flattened hybrid sub-band size overflow",
+                    )?;
+                    let inputs = component_plans
+                        .iter()
+                        .take(if broadcast_tier1_inputs {
+                            1
+                        } else {
+                            component_plans.len()
+                        })
+                        .map(|plan| match &plan.steps[step_idx] {
+                            PreparedDirectGrayscaleStep::ClassicSubBand(other) => {
+                                Ok(FlattenedCpuTier1Source::Classic {
+                                    coded_data: &other.coded_data,
+                                    segments: &other.segments,
+                                    jobs: &other.jobs,
+                                })
+                            }
+                            _ => Err(Error::MetalKernel {
+                                message:
+                                    "J2K MetalDirect flattened hybrid missing classic sub-band"
+                                        .to_string(),
+                            }),
+                        })
+                        .collect::<Result<Vec<_>, Error>>()?;
+                    specs.push(FlattenedCpuTier1BucketSpec {
+                        key: FlattenedCpuTier1Key {
+                            component_idx,
+                            step_idx,
+                        },
+                        output_len,
+                        inputs,
+                    });
+                }
+                PreparedDirectGrayscaleStep::HtSubBand(sub_band) => {
+                    let output_len = checked_coefficient_len(
+                        sub_band.width,
+                        sub_band.height,
+                        "HTJ2K MetalDirect flattened hybrid sub-band size overflow",
+                    )?;
+                    let inputs = component_plans
+                        .iter()
+                        .take(if broadcast_tier1_inputs {
+                            1
+                        } else {
+                            component_plans.len()
+                        })
+                        .map(|plan| match &plan.steps[step_idx] {
+                            PreparedDirectGrayscaleStep::HtSubBand(other) => {
+                                Ok(FlattenedCpuTier1Source::Ht {
+                                    coded_data: &other.coded_data,
+                                    jobs: &other.jobs,
+                                })
+                            }
+                            _ => Err(Error::MetalKernel {
+                                message: "J2K MetalDirect flattened hybrid missing HT sub-band"
+                                    .to_string(),
+                            }),
+                        })
+                        .collect::<Result<Vec<_>, Error>>()?;
+                    specs.push(FlattenedCpuTier1BucketSpec {
+                        key: FlattenedCpuTier1Key {
+                            component_idx,
+                            step_idx,
+                        },
+                        output_len,
+                        inputs,
+                    });
+                }
+                PreparedDirectGrayscaleStep::Idwt(_) | PreparedDirectGrayscaleStep::Store(_) => {}
+            }
+            step_idx += 1;
+        }
+    }
+
+    Ok(specs)
+}
+
+#[cfg(target_os = "macos")]
+fn decode_flattened_cpu_tier1_buckets(
+    specs: &[FlattenedCpuTier1BucketSpec<'_>],
+) -> Result<Vec<Vec<f32>>, Error> {
+    let mut buckets = specs
+        .iter()
+        .map(|spec| packed_cpu_decode_coefficients(spec.inputs.len(), spec.output_len))
+        .collect::<Result<Vec<_>, Error>>()?;
+    let mut work_items = Vec::new();
+    for (bucket_idx, spec) in specs.iter().enumerate() {
+        for (input_idx, source) in spec.inputs.iter().copied().enumerate() {
+            let start =
+                input_idx
+                    .checked_mul(spec.output_len)
+                    .ok_or_else(|| Error::MetalKernel {
+                        message: "J2K MetalDirect flattened hybrid bucket offset overflow"
+                            .to_string(),
+                    })?;
+            let end = start
+                .checked_add(spec.output_len)
+                .ok_or_else(|| Error::MetalKernel {
+                    message: "J2K MetalDirect flattened hybrid bucket end overflow".to_string(),
+                })?;
+            if end > buckets[bucket_idx].len() {
+                return Err(Error::MetalKernel {
+                    message: "J2K MetalDirect flattened hybrid bucket slice is too small"
+                        .to_string(),
+                });
+            }
+            let output =
+                FlattenedCpuTier1Output(unsafe { buckets[bucket_idx].as_mut_ptr().add(start) });
+            work_items.push(FlattenedCpuTier1WorkItem {
+                output_len: spec.output_len,
+                output,
+                source,
+            });
+        }
+    }
+
+    record_flattened_hybrid_cpu_decode_batch();
+    record_hybrid_cpu_decode_inputs(work_items.len());
+
+    decode_flattened_cpu_tier1_work_items_chunked(&work_items)?;
+
+    Ok(buckets)
+}
+
+#[cfg(target_os = "macos")]
+fn decode_flattened_cpu_tier1_work_items_chunked(
+    work_items: &[FlattenedCpuTier1WorkItem<'_>],
+) -> Result<(), Error> {
+    if work_items.is_empty() {
+        return Ok(());
+    }
+
+    let worker_count = hybrid_cpu_decode_worker_count(work_items.len());
+    let chunk_size = work_items.len().div_ceil(worker_count);
+    std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(worker_count);
+        for chunk in work_items.chunks(chunk_size) {
+            handles.push(scope.spawn(move || {
+                record_hybrid_cpu_decode_worker_init();
+                let mut scratch = FlattenedCpuTier1DecodeScratch::default();
+                for item in chunk {
+                    decode_flattened_cpu_tier1_work_item(item, &mut scratch)?;
+                }
+                Ok(())
+            }));
+        }
+
+        for handle in handles {
+            match handle.join() {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => return Err(error),
+                Err(payload) => std::panic::resume_unwind(payload),
+            }
+        }
+        Ok(())
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn hybrid_cpu_decode_worker_count(item_count: usize) -> usize {
+    let available = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+    let useful = item_count
+        .div_ceil(HYBRID_CPU_DECODE_MIN_INPUTS_PER_TASK.max(1))
+        .max(1);
+    available.min(useful).max(1)
+}
+
+#[cfg(target_os = "macos")]
+fn decode_flattened_cpu_tier1_work_item(
+    item: &FlattenedCpuTier1WorkItem<'_>,
+    scratch: &mut FlattenedCpuTier1DecodeScratch,
+) -> Result<(), Error> {
+    let output = unsafe { item.output.as_slice_mut(item.output_len) };
+    match item.source {
+        FlattenedCpuTier1Source::Classic {
+            coded_data,
+            segments,
+            jobs,
+        } => decode_prepared_classic_jobs_on_cpu_with_scratch(
+            coded_data,
+            segments,
+            jobs,
+            output,
+            &mut scratch.classic,
+        ),
+        FlattenedCpuTier1Source::Ht { coded_data, jobs } => {
+            decode_prepared_ht_jobs_on_cpu(coded_data, jobs, output)
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn packed_cpu_decode_output_len(
+    output_lens: impl IntoIterator<Item = usize>,
+    label: &str,
+) -> Result<Option<usize>, Error> {
+    let mut output_lens = output_lens.into_iter();
+    let Some(output_len) = output_lens.next() else {
+        return Ok(None);
+    };
+    if output_len == 0 {
+        return Ok(None);
+    }
+    if output_lens.any(|other| other != output_len) {
+        return Err(Error::MetalKernel {
+            message: format!("{label} has mixed coefficient lengths"),
+        });
+    }
+    Ok(Some(output_len))
+}
+
+#[cfg(target_os = "macos")]
+fn packed_cpu_decode_coefficients(count: usize, output_len: usize) -> Result<Vec<f32>, Error> {
+    let total_len = count
+        .checked_mul(output_len)
+        .ok_or_else(|| Error::MetalKernel {
+            message: "J2K MetalDirect hybrid packed coefficient length overflows usize".to_string(),
+        })?;
+    Ok(vec![0.0_f32; total_len])
+}
+
+#[cfg(target_os = "macos")]
+fn flattened_hybrid_cpu_tier1_enabled() -> bool {
+    std::env::var_os(HYBRID_FLAT_CPU_TIER1_ENV).is_some_and(|value| {
+        let value = value.to_string_lossy();
+        !value.is_empty() && value != "0" && value != "false"
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn should_flatten_hybrid_cpu_tier1_color_batch(plans: &[Arc<PreparedDirectColorPlan>]) -> bool {
+    let Some(first) = plans.first() else {
+        return false;
+    };
+    plans.len() >= HYBRID_FLAT_CPU_TIER1_MIN_COUNT
+        && first.dimensions.0.max(first.dimensions.1) >= HYBRID_FLAT_CPU_TIER1_MIN_DIM
+        && !plans.iter().all(|plan| Arc::ptr_eq(plan, first))
+}
+
+#[cfg(target_os = "macos")]
+fn prepared_ht_decode_job<'a>(
+    coded_data: &'a [u8],
+    job: &J2kHtCleanupBatchJob,
+) -> Result<HtCodeBlockDecodeJob<'a>, Error> {
+    let start = job.coded_offset as usize;
+    let len = job.coded_len as usize;
+    let end = start.checked_add(len).ok_or_else(|| Error::MetalKernel {
+        message: "HTJ2K MetalDirect hybrid coded span overflow".to_string(),
+    })?;
+    let Some(data) = coded_data.get(start..end) else {
+        return Err(Error::MetalKernel {
+            message: "HTJ2K MetalDirect hybrid coded span is invalid".to_string(),
+        });
+    };
+
+    Ok(HtCodeBlockDecodeJob {
+        data,
+        cleanup_length: job.cleanup_length,
+        refinement_length: job.refinement_length,
+        width: job.width,
+        height: job.height,
+        output_stride: job.output_stride as usize,
+        missing_bit_planes: checked_u8(job.missing_msbs, "HTJ2K missing bit planes")?,
+        number_of_coding_passes: checked_u8(job.number_of_coding_passes, "HTJ2K coding passes")?,
+        num_bitplanes: checked_u8(job.num_bitplanes, "HTJ2K total bitplanes")?,
+        stripe_causal: job.stripe_causal != 0,
+        strict: true,
+        dequantization_step: job.dequantization_step,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn checked_coefficient_len(width: u32, height: u32, message: &str) -> Result<usize, Error> {
+    (width as usize)
+        .checked_mul(height as usize)
+        .ok_or_else(|| Error::MetalKernel {
+            message: message.to_string(),
+        })
+}
+
+#[cfg(target_os = "macos")]
+fn checked_u8(value: u32, label: &str) -> Result<u8, Error> {
+    u8::try_from(value).map_err(|_| Error::MetalKernel {
+        message: format!("J2K MetalDirect hybrid {label} exceeds u8"),
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn native_decode_error(error: signinum_j2k_native::DecodeError) -> Error {
+    Error::Decode(signinum_j2k::J2kError::Backend(error.to_string()))
+}
+
+#[cfg(target_os = "macos")]
+fn upload_cpu_decoded_coefficients(
+    runtime: &MetalRuntime,
+    mut coefficients: Vec<f32>,
+    retained_buffers: &mut Vec<Buffer>,
+    retained_cpu_coefficients: &mut Vec<Vec<f32>>,
+) -> Buffer {
+    let buffer = borrow_mut_slice_buffer(&runtime.device, &mut coefficients);
+    retained_buffers.push(buffer.clone());
+    retained_cpu_coefficients.push(coefficients);
+    buffer
+}
+
+#[cfg(target_os = "macos")]
+fn elapsed_us(started: Instant) -> u128 {
+    started.elapsed().as_micros()
+}
+
+#[cfg(target_os = "macos")]
+fn emit_direct_hybrid_stage_timings(
+    timings: &DirectHybridStageTimings,
+    fmt: PixelFormat,
+    batch_count: usize,
+) {
+    if !metal_profile_stages_enabled() {
+        return;
+    }
+
+    let fmt_s = format!("{fmt:?}");
+    let batch_count_s = batch_count.to_string();
+    for (stage, elapsed_us) in [
+        ("cpu_tier1", timings.cpu_tier1),
+        ("coefficient_upload", timings.coefficient_upload),
+        ("metal_idwt_encode", timings.metal_idwt_encode),
+        ("metal_store_encode", timings.metal_store_encode),
+        ("metal_mct_pack_encode", timings.metal_mct_pack_encode),
+        ("command_wait", timings.command_wait),
+        ("gpu_command", timings.gpu_command),
+    ] {
+        let elapsed_us_s = elapsed_us.to_string();
+        eprintln!(
+            "signinum_profile codec=j2k op=decode path=metal_direct_hybrid stage={stage} fmt={fmt_s} batch_count={batch_count_s} elapsed_us={elapsed_us_s}"
+        );
+    }
+}
+
+#[cfg(all(target_os = "macos", test))]
+fn record_hybrid_stacked_component_batch(tier1_mode: DirectTier1Mode) {
+    if tier1_mode == DirectTier1Mode::CpuUpload {
+        HYBRID_STACKED_COMPONENT_BATCHES.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[cfg(all(target_os = "macos", not(test)))]
+fn record_hybrid_stacked_component_batch(_tier1_mode: DirectTier1Mode) {}
+
+#[cfg(all(target_os = "macos", test))]
+fn record_hybrid_cpu_decode_worker_init() {
+    HYBRID_CPU_DECODE_WORKER_INITS.fetch_add(1, Ordering::Relaxed);
+}
+
+#[cfg(all(target_os = "macos", not(test)))]
+fn record_hybrid_cpu_decode_worker_init() {}
+
+#[cfg(all(target_os = "macos", test))]
+fn record_hybrid_cpu_decode_inputs(count: usize) {
+    HYBRID_CPU_DECODE_INPUTS.fetch_add(count, Ordering::Relaxed);
+}
+
+#[cfg(all(target_os = "macos", not(test)))]
+fn record_hybrid_cpu_decode_inputs(_count: usize) {}
+
+#[cfg(all(target_os = "macos", test))]
+fn record_flattened_hybrid_cpu_decode_batch() {
+    FLATTENED_HYBRID_CPU_DECODE_BATCHES.fetch_add(1, Ordering::Relaxed);
+}
+
+#[cfg(all(target_os = "macos", not(test)))]
+fn record_flattened_hybrid_cpu_decode_batch() {}
+
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
 fn encode_prepared_direct_component_plane_in_command_buffer(
     runtime: &MetalRuntime,
     command_buffer: &CommandBufferRef,
     plan: &PreparedDirectGrayscalePlan,
+    tier1_mode: DirectTier1Mode,
+    stage_timings: &mut DirectHybridStageTimings,
     retained_buffers: &mut Vec<Buffer>,
+    retained_cpu_coefficients: &mut Vec<Vec<f32>>,
     status_checks: &mut Vec<DirectStatusCheck>,
     scratch_buffers: &mut Vec<DirectScratchBuffer>,
 ) -> Result<Buffer, Error> {
@@ -4006,101 +5188,199 @@ fn encode_prepared_direct_component_plane_in_command_buffer(
         let mut bands = Vec::<DirectBandSlice>::new();
         let mut final_plane = None;
         let mut step_idx = 0;
+        let profile_stages = metal_profile_stages_enabled();
 
         while step_idx < plan.steps.len() {
             if let Some(group) = plan.classic_group_starting_at(step_idx) {
-                let output = take_f32_scratch_buffer(runtime, group.total_coefficients);
-                let (buffers, status_check) =
-                    encode_prepared_classic_sub_band_group_to_buffer_in_encoder(
-                        runtime,
-                        encoder,
-                        group,
-                        &output.buffer,
-                        scratch_buffers,
-                    )?;
-                retained_buffers.extend(buffers);
-                status_checks.push(status_check);
+                let buffer = match tier1_mode {
+                    DirectTier1Mode::Metal => {
+                        let output = take_f32_scratch_buffer(runtime, group.total_coefficients);
+                        let (buffers, status_check) =
+                            encode_prepared_classic_sub_band_group_to_buffer_in_encoder(
+                                runtime,
+                                encoder,
+                                group,
+                                &output.buffer,
+                                scratch_buffers,
+                            )?;
+                        retained_buffers.extend(buffers);
+                        status_checks.push(status_check);
+                        let buffer = output.buffer.clone();
+                        scratch_buffers.push(output);
+                        buffer
+                    }
+                    DirectTier1Mode::CpuUpload => {
+                        let decode_started = profile_stages.then(Instant::now);
+                        let coefficients = decode_prepared_classic_sub_band_group_on_cpu(group)?;
+                        if let Some(started) = decode_started {
+                            stage_timings.cpu_tier1 += elapsed_us(started);
+                        }
+                        let upload_started = profile_stages.then(Instant::now);
+                        let buffer = upload_cpu_decoded_coefficients(
+                            runtime,
+                            coefficients,
+                            retained_buffers,
+                            retained_cpu_coefficients,
+                        );
+                        if let Some(started) = upload_started {
+                            stage_timings.coefficient_upload += elapsed_us(started);
+                        }
+                        buffer
+                    }
+                };
                 for member in &group.members {
                     bands.push(DirectBandSlice {
                         band_id: member.band_id,
-                        buffer: output.buffer.clone(),
+                        buffer: buffer.clone(),
                         offset_bytes: member.offset_elements * size_of::<f32>(),
                         window: member.window,
                     });
                 }
-                scratch_buffers.push(output);
                 step_idx = group.end_step;
                 continue;
             }
 
             if let Some(group) = plan.ht_group_starting_at(step_idx) {
-                let output = take_f32_scratch_buffer(runtime, group.total_coefficients);
-                let (buffers, status_check) =
-                    encode_prepared_ht_sub_band_group_to_buffer_in_encoder(
-                        runtime,
-                        encoder,
-                        group,
-                        &output.buffer,
-                    )?;
-                retained_buffers.extend(buffers);
-                status_checks.push(status_check);
+                let buffer = match tier1_mode {
+                    DirectTier1Mode::Metal => {
+                        let output = take_f32_scratch_buffer(runtime, group.total_coefficients);
+                        let (buffers, status_check) =
+                            encode_prepared_ht_sub_band_group_to_buffer_in_encoder(
+                                runtime,
+                                encoder,
+                                group,
+                                &output.buffer,
+                            )?;
+                        retained_buffers.extend(buffers);
+                        status_checks.push(status_check);
+                        let buffer = output.buffer.clone();
+                        scratch_buffers.push(output);
+                        buffer
+                    }
+                    DirectTier1Mode::CpuUpload => {
+                        let decode_started = profile_stages.then(Instant::now);
+                        let coefficients = decode_prepared_ht_sub_band_group_on_cpu(group)?;
+                        if let Some(started) = decode_started {
+                            stage_timings.cpu_tier1 += elapsed_us(started);
+                        }
+                        let upload_started = profile_stages.then(Instant::now);
+                        let buffer = upload_cpu_decoded_coefficients(
+                            runtime,
+                            coefficients,
+                            retained_buffers,
+                            retained_cpu_coefficients,
+                        );
+                        if let Some(started) = upload_started {
+                            stage_timings.coefficient_upload += elapsed_us(started);
+                        }
+                        buffer
+                    }
+                };
                 for member in &group.members {
                     bands.push(DirectBandSlice {
                         band_id: member.band_id,
-                        buffer: output.buffer.clone(),
+                        buffer: buffer.clone(),
                         offset_bytes: member.offset_elements * size_of::<f32>(),
                         window: member.window,
                     });
                 }
-                scratch_buffers.push(output);
                 step_idx = group.end_step;
                 continue;
             }
 
             match &plan.steps[step_idx] {
                 PreparedDirectGrayscaleStep::ClassicSubBand(sub_band) => {
-                    let output = take_f32_scratch_buffer(
-                        runtime,
-                        sub_band.width as usize * sub_band.height as usize,
-                    );
-                    let (buffers, status_check) =
-                        encode_prepared_classic_sub_band_to_buffer_in_encoder(
-                            runtime,
-                            encoder,
-                            sub_band,
-                            &output.buffer,
-                            scratch_buffers,
-                        )?;
-                    retained_buffers.extend(buffers);
-                    status_checks.push(status_check);
+                    let buffer = match tier1_mode {
+                        DirectTier1Mode::Metal => {
+                            let output = take_f32_scratch_buffer(
+                                runtime,
+                                sub_band.width as usize * sub_band.height as usize,
+                            );
+                            let (buffers, status_check) =
+                                encode_prepared_classic_sub_band_to_buffer_in_encoder(
+                                    runtime,
+                                    encoder,
+                                    sub_band,
+                                    &output.buffer,
+                                    scratch_buffers,
+                                )?;
+                            retained_buffers.extend(buffers);
+                            status_checks.push(status_check);
+                            let buffer = output.buffer.clone();
+                            scratch_buffers.push(output);
+                            buffer
+                        }
+                        DirectTier1Mode::CpuUpload => {
+                            let decode_started = profile_stages.then(Instant::now);
+                            let coefficients = decode_prepared_classic_sub_band_on_cpu(sub_band)?;
+                            if let Some(started) = decode_started {
+                                stage_timings.cpu_tier1 += elapsed_us(started);
+                            }
+                            let upload_started = profile_stages.then(Instant::now);
+                            let buffer = upload_cpu_decoded_coefficients(
+                                runtime,
+                                coefficients,
+                                retained_buffers,
+                                retained_cpu_coefficients,
+                            );
+                            if let Some(started) = upload_started {
+                                stage_timings.coefficient_upload += elapsed_us(started);
+                            }
+                            buffer
+                        }
+                    };
                     bands.push(DirectBandSlice {
                         band_id: sub_band.band_id,
-                        buffer: output.buffer.clone(),
+                        buffer,
                         offset_bytes: 0,
                         window: BandRequiredRegion::full(sub_band.width, sub_band.height),
                     });
-                    scratch_buffers.push(output);
                 }
                 PreparedDirectGrayscaleStep::HtSubBand(sub_band) => {
-                    let output = take_f32_scratch_buffer(
-                        runtime,
-                        sub_band.width as usize * sub_band.height as usize,
-                    );
-                    let (buffers, status_check) = encode_prepared_ht_sub_band_to_buffer_in_encoder(
-                        runtime,
-                        encoder,
-                        sub_band,
-                        &output.buffer,
-                    )?;
-                    retained_buffers.extend(buffers);
-                    status_checks.push(status_check);
+                    let buffer = match tier1_mode {
+                        DirectTier1Mode::Metal => {
+                            let output = take_f32_scratch_buffer(
+                                runtime,
+                                sub_band.width as usize * sub_band.height as usize,
+                            );
+                            let (buffers, status_check) =
+                                encode_prepared_ht_sub_band_to_buffer_in_encoder(
+                                    runtime,
+                                    encoder,
+                                    sub_band,
+                                    &output.buffer,
+                                )?;
+                            retained_buffers.extend(buffers);
+                            status_checks.push(status_check);
+                            let buffer = output.buffer.clone();
+                            scratch_buffers.push(output);
+                            buffer
+                        }
+                        DirectTier1Mode::CpuUpload => {
+                            let decode_started = profile_stages.then(Instant::now);
+                            let coefficients = decode_prepared_ht_sub_band_on_cpu(sub_band)?;
+                            if let Some(started) = decode_started {
+                                stage_timings.cpu_tier1 += elapsed_us(started);
+                            }
+                            let upload_started = profile_stages.then(Instant::now);
+                            let buffer = upload_cpu_decoded_coefficients(
+                                runtime,
+                                coefficients,
+                                retained_buffers,
+                                retained_cpu_coefficients,
+                            );
+                            if let Some(started) = upload_started {
+                                stage_timings.coefficient_upload += elapsed_us(started);
+                            }
+                            buffer
+                        }
+                    };
                     bands.push(DirectBandSlice {
                         band_id: sub_band.band_id,
-                        buffer: output.buffer.clone(),
+                        buffer,
                         offset_bytes: 0,
                         window: BandRequiredRegion::full(sub_band.width, sub_band.height),
                     });
-                    scratch_buffers.push(output);
                 }
                 PreparedDirectGrayscaleStep::Idwt(idwt) => {
                     let ll =
@@ -4116,6 +5396,7 @@ fn encode_prepared_direct_component_plane_in_command_buffer(
                         idwt_input_windows_from_slices(&ll, &hl, &lh, &hh),
                     );
                     let output = take_f32_scratch_buffer(runtime, prepared_idwt_output_len(idwt));
+                    let encode_started = profile_stages.then(Instant::now);
                     match idwt.step.transform {
                         J2kWaveletTransform::Reversible53 => {
                             dispatch_reversible53_single_decomposition_buffers_in_encoder_with_offsets(
@@ -4154,6 +5435,9 @@ fn encode_prepared_direct_component_plane_in_command_buffer(
                             );
                         }
                     }
+                    if let Some(started) = encode_started {
+                        stage_timings.metal_idwt_encode += elapsed_us(started);
+                    }
                     bands.push(DirectBandSlice {
                         band_id: idwt.step.output_band_id,
                         buffer: output.buffer.clone(),
@@ -4169,6 +5453,7 @@ fn encode_prepared_direct_component_plane_in_command_buffer(
                         runtime,
                         store.output_width as usize * store.output_height as usize,
                     );
+                    let encode_started = profile_stages.then(Instant::now);
                     dispatch_store_component_buffer_in_encoder_with_offsets(
                         runtime,
                         encoder,
@@ -4188,6 +5473,9 @@ fn encode_prepared_direct_component_plane_in_command_buffer(
                             addend: store.addend,
                         },
                     );
+                    if let Some(started) = encode_started {
+                        stage_timings.metal_store_encode += elapsed_us(started);
+                    }
                     final_plane = Some(output.buffer.clone());
                     scratch_buffers.push(output);
                 }
@@ -4288,8 +5576,10 @@ pub(crate) fn execute_prepared_direct_grayscale_plan_batch(
     with_runtime(|runtime| {
         let command_buffer = runtime.queue.new_command_buffer();
         let mut retained_buffers = Vec::new();
+        let mut retained_cpu_coefficients = Vec::<Vec<f32>>::new();
         let mut status_checks = Vec::new();
         let mut scratch_buffers = Vec::new();
+        let mut stage_timings = DirectHybridStageTimings::default();
         let mut surfaces = Vec::with_capacity(plans.len());
 
         let component_plan_refs = plans.iter().map(Arc::as_ref).collect::<Vec<_>>();
@@ -4298,7 +5588,12 @@ pub(crate) fn execute_prepared_direct_grayscale_plan_batch(
                 runtime,
                 command_buffer,
                 &component_plan_refs,
+                0,
+                None,
+                DirectTier1Mode::Metal,
+                &mut stage_timings,
                 &mut retained_buffers,
+                &mut retained_cpu_coefficients,
                 &mut status_checks,
                 &mut scratch_buffers,
             )?;
@@ -4337,6 +5632,7 @@ pub(crate) fn execute_prepared_direct_grayscale_plan_batch(
             validate_direct_status(status_check)?;
         }
         drop(retained_buffers);
+        drop(retained_cpu_coefficients);
         recycle_scratch_buffers(runtime, scratch_buffers);
         Ok(surfaces)
     })
@@ -4368,12 +5664,71 @@ pub(crate) fn execute_prepared_direct_color_plan_batch(
     plans: &[Arc<PreparedDirectColorPlan>],
     fmt: PixelFormat,
 ) -> Result<Vec<Surface>, Error> {
+    execute_direct_color_plan_batch_with_tier1(plans, fmt, DirectTier1Mode::Metal)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn execute_hybrid_cpu_tier1_direct_color_plan(
+    plan: &PreparedDirectColorPlan,
+    fmt: PixelFormat,
+) -> Result<Surface, Error> {
+    let plans = [Arc::new(plan.clone())];
+    let mut surfaces = execute_hybrid_cpu_tier1_direct_color_plan_batch(&plans, fmt)?;
+    surfaces.pop().ok_or_else(|| Error::MetalKernel {
+        message: "J2K MetalDirect hybrid color plan produced no surface".to_string(),
+    })
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn execute_hybrid_cpu_tier1_direct_color_plan_with_device(
+    plan: &PreparedDirectColorPlan,
+    fmt: PixelFormat,
+    device: &Device,
+) -> Result<Surface, Error> {
+    with_runtime_for_device(device, |_| {
+        execute_hybrid_cpu_tier1_direct_color_plan(plan, fmt)
+    })
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn execute_hybrid_cpu_tier1_direct_color_plan_batch(
+    plans: &[Arc<PreparedDirectColorPlan>],
+    fmt: PixelFormat,
+) -> Result<Vec<Surface>, Error> {
+    execute_direct_color_plan_batch_with_tier1(plans, fmt, DirectTier1Mode::CpuUpload)
+}
+
+#[cfg(target_os = "macos")]
+fn execute_direct_color_plan_batch_with_tier1(
+    plans: &[Arc<PreparedDirectColorPlan>],
+    fmt: PixelFormat,
+    tier1_mode: DirectTier1Mode,
+) -> Result<Vec<Surface>, Error> {
+    execute_direct_color_plan_batch_with_tier1_options(plans, fmt, tier1_mode, false)
+}
+
+#[cfg(all(target_os = "macos", test))]
+fn execute_flattened_hybrid_cpu_tier1_direct_color_plan_batch_for_test(
+    plans: &[Arc<PreparedDirectColorPlan>],
+    fmt: PixelFormat,
+) -> Result<Vec<Surface>, Error> {
+    execute_direct_color_plan_batch_with_tier1_options(plans, fmt, DirectTier1Mode::CpuUpload, true)
+}
+
+#[cfg(target_os = "macos")]
+fn execute_direct_color_plan_batch_with_tier1_options(
+    plans: &[Arc<PreparedDirectColorPlan>],
+    fmt: PixelFormat,
+    tier1_mode: DirectTier1Mode,
+    force_flattened_cpu_tier1: bool,
+) -> Result<Vec<Surface>, Error> {
     if plans.is_empty() {
         return Ok(Vec::new());
     }
-    if plans
-        .iter()
-        .any(|plan| !prepared_direct_color_plan_supports_runtime(plan, fmt))
+    if tier1_mode == DirectTier1Mode::Metal
+        && plans
+            .iter()
+            .any(|plan| !prepared_direct_color_plan_supports_runtime(plan, fmt))
     {
         return Err(Error::MetalKernel {
             message: "unsupported classic kernel input in direct component plan".to_string(),
@@ -4383,24 +5738,45 @@ pub(crate) fn execute_prepared_direct_color_plan_batch(
     with_runtime(|runtime| {
         let command_buffer = runtime.queue.new_command_buffer();
         let mut retained_buffers = Vec::new();
+        let mut retained_cpu_coefficients = Vec::<Vec<f32>>::new();
         let mut status_checks = Vec::new();
         let mut scratch_buffers = Vec::new();
+        let mut stage_timings = DirectHybridStageTimings::default();
+        let profile_hybrid_stages =
+            tier1_mode == DirectTier1Mode::CpuUpload && metal_profile_stages_enabled();
 
         if fmt == PixelFormat::Rgb8 {
             if let Some(surfaces) = try_encode_stacked_mct_rgb8_direct_color_batch(
                 runtime,
                 command_buffer,
                 plans,
+                tier1_mode,
+                force_flattened_cpu_tier1,
+                &mut stage_timings,
                 &mut retained_buffers,
+                &mut retained_cpu_coefficients,
                 &mut status_checks,
                 &mut scratch_buffers,
             )? {
                 command_buffer.commit();
+                let wait_started = profile_hybrid_stages.then(Instant::now);
                 command_buffer.wait_until_completed();
+                if let Some(started) = wait_started {
+                    stage_timings.command_wait += elapsed_us(started);
+                }
+                if profile_hybrid_stages {
+                    if let Some(duration) = completed_command_buffer_gpu_duration(command_buffer) {
+                        stage_timings.gpu_command += duration.as_micros();
+                    }
+                }
                 for status_check in status_checks {
                     validate_direct_status(status_check)?;
                 }
+                if tier1_mode == DirectTier1Mode::CpuUpload {
+                    emit_direct_hybrid_stage_timings(&stage_timings, fmt, plans.len());
+                }
                 drop(retained_buffers);
+                drop(retained_cpu_coefficients);
                 recycle_scratch_buffers(runtime, scratch_buffers);
                 return Ok(surfaces);
             }
@@ -4414,7 +5790,10 @@ pub(crate) fn execute_prepared_direct_color_plan_batch(
                 command_buffer,
                 plan,
                 fmt,
+                tier1_mode,
+                &mut stage_timings,
                 &mut retained_buffers,
+                &mut retained_cpu_coefficients,
                 &mut status_checks,
                 &mut scratch_buffers,
             )?;
@@ -4422,11 +5801,24 @@ pub(crate) fn execute_prepared_direct_color_plan_batch(
         }
 
         command_buffer.commit();
+        let wait_started = profile_hybrid_stages.then(Instant::now);
         command_buffer.wait_until_completed();
+        if let Some(started) = wait_started {
+            stage_timings.command_wait += elapsed_us(started);
+        }
+        if profile_hybrid_stages {
+            if let Some(duration) = completed_command_buffer_gpu_duration(command_buffer) {
+                stage_timings.gpu_command += duration.as_micros();
+            }
+        }
         for status_check in status_checks {
             validate_direct_status(status_check)?;
         }
+        if tier1_mode == DirectTier1Mode::CpuUpload {
+            emit_direct_hybrid_stage_timings(&stage_timings, fmt, plans.len());
+        }
         drop(retained_buffers);
+        drop(retained_cpu_coefficients);
         recycle_scratch_buffers(runtime, scratch_buffers);
         Ok(surfaces)
     })
@@ -4438,12 +5830,16 @@ fn signed_sample_bias(bit_depth: u8) -> f32 {
 }
 
 #[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
 fn encode_prepared_direct_color_plan_in_command_buffer(
     runtime: &MetalRuntime,
     command_buffer: &CommandBufferRef,
     plan: &PreparedDirectColorPlan,
     fmt: PixelFormat,
+    tier1_mode: DirectTier1Mode,
+    stage_timings: &mut DirectHybridStageTimings,
     retained_buffers: &mut Vec<Buffer>,
+    retained_cpu_coefficients: &mut Vec<Vec<f32>>,
     status_checks: &mut Vec<DirectStatusCheck>,
     scratch_buffers: &mut Vec<DirectScratchBuffer>,
 ) -> Result<Surface, Error> {
@@ -4462,25 +5858,34 @@ fn encode_prepared_direct_color_plan_in_command_buffer(
             runtime,
             command_buffer,
             component_plan,
+            tier1_mode,
+            stage_timings,
             retained_buffers,
+            retained_cpu_coefficients,
             status_checks,
             scratch_buffers,
         )?);
     }
 
     if plan.mct && fmt == PixelFormat::Rgb8 {
-        return Ok(encode_mct_rgb8_to_surface_in_command_buffer(
+        let encode_started = metal_profile_stages_enabled().then(Instant::now);
+        let surface = encode_mct_rgb8_to_surface_in_command_buffer(
             runtime,
             command_buffer,
             [&planes[0], &planes[1], &planes[2]],
             plan.dimensions,
             plan.bit_depths,
             plan.transform,
-        ));
+        );
+        if let Some(started) = encode_started {
+            stage_timings.metal_mct_pack_encode += elapsed_us(started);
+        }
+        return Ok(surface);
     }
 
     if plan.mct {
         let len = plan.dimensions.0 as usize * plan.dimensions.1 as usize;
+        let encode_started = metal_profile_stages_enabled().then(Instant::now);
         status_checks.push(dispatch_inverse_mct_buffers_in_command_buffer(
             runtime,
             command_buffer,
@@ -4493,6 +5898,9 @@ fn encode_prepared_direct_color_plan_in_command_buffer(
                 signed_sample_bias(plan.bit_depths[2]),
             ],
         )?);
+        if let Some(started) = encode_started {
+            stage_timings.metal_mct_pack_encode += elapsed_us(started);
+        }
     }
 
     let stage = PlaneStage {
@@ -4513,7 +5921,13 @@ fn encode_prepared_direct_color_plan_in_command_buffer(
             None,
         ],
     };
-    encode_plane_stage_to_surface_in_command_buffer(runtime, command_buffer, &stage, fmt)
+    let encode_started = metal_profile_stages_enabled().then(Instant::now);
+    let surface =
+        encode_plane_stage_to_surface_in_command_buffer(runtime, command_buffer, &stage, fmt);
+    if let Some(started) = encode_started {
+        stage_timings.metal_mct_pack_encode += elapsed_us(started);
+    }
+    surface
 }
 
 #[cfg(target_os = "macos")]
@@ -4593,11 +6007,16 @@ struct StackedDirectComponentPlane {
 }
 
 #[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
 fn try_encode_stacked_mct_rgb8_direct_color_batch(
     runtime: &MetalRuntime,
     command_buffer: &CommandBufferRef,
     plans: &[Arc<PreparedDirectColorPlan>],
+    tier1_mode: DirectTier1Mode,
+    force_flattened_cpu_tier1: bool,
+    stage_timings: &mut DirectHybridStageTimings,
     retained_buffers: &mut Vec<Buffer>,
+    retained_cpu_coefficients: &mut Vec<Vec<f32>>,
     status_checks: &mut Vec<DirectStatusCheck>,
     scratch_buffers: &mut Vec<DirectScratchBuffer>,
 ) -> Result<Option<Vec<Surface>>, Error> {
@@ -4618,6 +6037,22 @@ fn try_encode_stacked_mct_rgb8_direct_color_batch(
         return Ok(None);
     }
 
+    let flattened_cpu_tier1_cache = if tier1_mode == DirectTier1Mode::CpuUpload
+        && (force_flattened_cpu_tier1
+            || flattened_hybrid_cpu_tier1_enabled()
+            || should_flatten_hybrid_cpu_tier1_color_batch(plans))
+    {
+        Some(build_flattened_cpu_tier1_cache(
+            runtime,
+            plans,
+            stage_timings,
+            retained_buffers,
+            retained_cpu_coefficients,
+        )?)
+    } else {
+        None
+    };
+
     let mut stacked_planes = Vec::with_capacity(3);
     for component_idx in 0..3 {
         let component_plan_refs = plans
@@ -4631,7 +6066,12 @@ fn try_encode_stacked_mct_rgb8_direct_color_batch(
             runtime,
             command_buffer,
             &component_plan_refs,
+            component_idx,
+            flattened_cpu_tier1_cache.as_ref(),
+            tier1_mode,
+            stage_timings,
             retained_buffers,
+            retained_cpu_coefficients,
             status_checks,
             scratch_buffers,
         )?);
@@ -4644,6 +6084,7 @@ fn try_encode_stacked_mct_rgb8_direct_color_batch(
         return Ok(None);
     }
 
+    let encode_started = metal_profile_stages_enabled().then(Instant::now);
     let surfaces = encode_batched_mct_rgb8_to_surfaces_in_command_buffer(
         runtime,
         command_buffer,
@@ -4657,6 +6098,9 @@ fn try_encode_stacked_mct_rgb8_direct_color_batch(
         first.bit_depths,
         first.transform,
     )?;
+    if let Some(started) = encode_started {
+        stage_timings.metal_mct_pack_encode += elapsed_us(started);
+    }
     Ok(Some(surfaces))
 }
 
@@ -4752,6 +6196,41 @@ fn supports_stacked_direct_component_plane_batch(plans: &[&PreparedDirectGraysca
     true
 }
 
+#[cfg(all(target_os = "macos", test))]
+fn prepared_direct_color_tier1_input_count(plan: &PreparedDirectColorPlan) -> usize {
+    plan.component_plans
+        .iter()
+        .map(prepared_direct_component_tier1_input_count)
+        .sum()
+}
+
+#[cfg(all(target_os = "macos", test))]
+fn prepared_direct_component_tier1_input_count(plan: &PreparedDirectGrayscalePlan) -> usize {
+    let mut count = 0;
+    let mut step_idx = 0;
+    while step_idx < plan.steps.len() {
+        if let Some(group) = plan.classic_group_starting_at(step_idx) {
+            count += 1;
+            step_idx = group.end_step;
+            continue;
+        }
+        if let Some(group) = plan.ht_group_starting_at(step_idx) {
+            count += 1;
+            step_idx = group.end_step;
+            continue;
+        }
+        if matches!(
+            &plan.steps[step_idx],
+            PreparedDirectGrayscaleStep::ClassicSubBand(_)
+                | PreparedDirectGrayscaleStep::HtSubBand(_)
+        ) {
+            count += 1;
+        }
+        step_idx += 1;
+    }
+    count
+}
+
 #[cfg(target_os = "macos")]
 fn prepared_direct_color_plan_supports_runtime(
     plan: &PreparedDirectColorPlan,
@@ -4769,24 +6248,27 @@ fn prepared_direct_color_plan_supports_runtime(
 
 #[cfg(target_os = "macos")]
 fn prepared_direct_component_plan_supports_runtime(plan: &PreparedDirectGrayscalePlan) -> bool {
-    plan.steps.iter().all(|step| match step {
-        PreparedDirectGrayscaleStep::ClassicSubBand(sub_band) => sub_band
-            .jobs
+    plan.tier1_prepare_mode == DirectTier1Mode::Metal
+        && plan.steps.iter().all(|step| match step {
+            PreparedDirectGrayscaleStep::ClassicSubBand(sub_band) => sub_band
+                .jobs
+                .iter()
+                .all(|job| classic_prepared_job_supports_runtime(job, &sub_band.segments)),
+            PreparedDirectGrayscaleStep::HtSubBand(sub_band) => {
+                sub_band.jobs.iter().all(ht_prepared_job_supports_runtime)
+            }
+            PreparedDirectGrayscaleStep::Idwt(_) | PreparedDirectGrayscaleStep::Store(_) => true,
+        })
+        && plan.classic_groups.iter().all(|group| {
+            group
+                .jobs
+                .iter()
+                .all(|job| classic_prepared_job_supports_runtime(job, &group.segments))
+        })
+        && plan
+            .ht_groups
             .iter()
-            .all(|job| classic_prepared_job_supports_runtime(job, &sub_band.segments)),
-        PreparedDirectGrayscaleStep::HtSubBand(sub_band) => {
-            sub_band.jobs.iter().all(ht_prepared_job_supports_runtime)
-        }
-        PreparedDirectGrayscaleStep::Idwt(_) | PreparedDirectGrayscaleStep::Store(_) => true,
-    }) && plan.classic_groups.iter().all(|group| {
-        group
-            .jobs
-            .iter()
-            .all(|job| classic_prepared_job_supports_runtime(job, &group.segments))
-    }) && plan
-        .ht_groups
-        .iter()
-        .all(|group| group.jobs.iter().all(ht_prepared_job_supports_runtime))
+            .all(|group| group.jobs.iter().all(ht_prepared_job_supports_runtime))
 }
 
 #[cfg(target_os = "macos")]
@@ -4952,11 +6434,17 @@ fn store_shapes_match(first: &J2kDirectStoreStep, other: &J2kDirectStoreStep) ->
 }
 
 #[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
 fn encode_stacked_direct_component_plane_batch(
     runtime: &MetalRuntime,
     command_buffer: &CommandBufferRef,
     plans: &[&PreparedDirectGrayscalePlan],
+    component_idx: usize,
+    flattened_cpu_tier1_cache: Option<&FlattenedCpuTier1Cache>,
+    tier1_mode: DirectTier1Mode,
+    stage_timings: &mut DirectHybridStageTimings,
     retained_buffers: &mut Vec<Buffer>,
+    retained_cpu_coefficients: &mut Vec<Vec<f32>>,
     status_checks: &mut Vec<DirectStatusCheck>,
     scratch_buffers: &mut Vec<DirectScratchBuffer>,
 ) -> Result<StackedDirectComponentPlane, Error> {
@@ -4967,9 +6455,12 @@ fn encode_stacked_direct_component_plane_batch(
     };
 
     let count = plans.len();
+    let broadcast_tier1_inputs = tier1_mode == DirectTier1Mode::CpuUpload
+        && plans.iter().all(|plan| std::ptr::eq(*plan, *first));
     let mut band_sets = vec![Vec::<DirectBandSlice>::new(); count];
     let mut final_plane = None;
     let mut step_idx = 0;
+    let profile_stages = tier1_mode == DirectTier1Mode::CpuUpload && metal_profile_stages_enabled();
 
     while step_idx < first.steps.len() {
         if let Some(group) = first.classic_group_starting_at(step_idx) {
@@ -4980,30 +6471,86 @@ fn encode_stacked_direct_component_plane_batch(
                         .expect("preflight validated classic group")
                 })
                 .collect::<Vec<_>>();
-            let output = take_f32_scratch_buffer(runtime, group.total_coefficients * count);
-            let (buffers, status_check) =
-                encode_distinct_classic_sub_band_groups_to_buffer_in_command_buffer(
-                    runtime,
-                    command_buffer,
-                    &groups,
-                    &output.buffer,
-                    scratch_buffers,
-                )?;
-            retained_buffers.extend(buffers);
-            status_checks.push(status_check);
+            let buffer = match tier1_mode {
+                DirectTier1Mode::Metal => {
+                    let output = take_f32_scratch_buffer(runtime, group.total_coefficients * count);
+                    let (buffers, status_check) =
+                        encode_distinct_classic_sub_band_groups_to_buffer_in_command_buffer(
+                            runtime,
+                            command_buffer,
+                            &groups,
+                            &output.buffer,
+                            scratch_buffers,
+                        )?;
+                    retained_buffers.extend(buffers);
+                    status_checks.push(status_check);
+                    let buffer = output.buffer.clone();
+                    scratch_buffers.push(output);
+                    buffer
+                }
+                DirectTier1Mode::CpuUpload => {
+                    let input_groups = if broadcast_tier1_inputs {
+                        &groups[..1]
+                    } else {
+                        &groups
+                    };
+                    if let Some(cache) = flattened_cpu_tier1_cache {
+                        cache.buffer_for(
+                            component_idx,
+                            step_idx,
+                            group.total_coefficients,
+                            input_groups.len(),
+                        )?
+                    } else {
+                        let inputs = input_groups
+                            .iter()
+                            .map(|group| ClassicCpuDecodeInput {
+                                coded_data: &group.coded_data,
+                                segments: &group.segments,
+                                jobs: &group.jobs,
+                                output_len: group.total_coefficients,
+                            })
+                            .collect::<Vec<_>>();
+                        let decode_started = profile_stages.then(Instant::now);
+                        let coefficients = decode_classic_inputs_on_cpu_parallel(&inputs)?;
+                        if let Some(started) = decode_started {
+                            stage_timings.cpu_tier1 += elapsed_us(started);
+                        }
+                        let upload_started = profile_stages.then(Instant::now);
+                        let buffer = upload_cpu_decoded_coefficients(
+                            runtime,
+                            coefficients,
+                            retained_buffers,
+                            retained_cpu_coefficients,
+                        );
+                        if let Some(started) = upload_started {
+                            stage_timings.coefficient_upload += elapsed_us(started);
+                        }
+                        buffer
+                    }
+                }
+            };
             let stride_bytes = group.total_coefficients * size_of::<f32>();
             for (instance_idx, bands) in band_sets.iter_mut().enumerate() {
-                for member in &groups[instance_idx].members {
+                let source_group = if broadcast_tier1_inputs {
+                    groups[0]
+                } else {
+                    groups[instance_idx]
+                };
+                let instance_offset = if broadcast_tier1_inputs {
+                    0
+                } else {
+                    instance_idx * stride_bytes
+                };
+                for member in &source_group.members {
                     bands.push(DirectBandSlice {
                         band_id: member.band_id,
-                        buffer: output.buffer.clone(),
-                        offset_bytes: instance_idx * stride_bytes
-                            + member.offset_elements * size_of::<f32>(),
+                        buffer: buffer.clone(),
+                        offset_bytes: instance_offset + member.offset_elements * size_of::<f32>(),
                         window: member.window,
                     });
                 }
             }
-            scratch_buffers.push(output);
             step_idx = group.end_step;
             continue;
         }
@@ -5016,29 +6563,84 @@ fn encode_stacked_direct_component_plane_batch(
                         .expect("preflight validated HT group")
                 })
                 .collect::<Vec<_>>();
-            let output = take_f32_scratch_buffer(runtime, group.total_coefficients * count);
-            let (buffers, status_check) =
-                encode_distinct_ht_sub_band_groups_to_buffer_in_command_buffer(
-                    runtime,
-                    command_buffer,
-                    &groups,
-                    &output.buffer,
-                )?;
-            retained_buffers.extend(buffers);
-            status_checks.push(status_check);
+            let buffer = match tier1_mode {
+                DirectTier1Mode::Metal => {
+                    let output = take_f32_scratch_buffer(runtime, group.total_coefficients * count);
+                    let (buffers, status_check) =
+                        encode_distinct_ht_sub_band_groups_to_buffer_in_command_buffer(
+                            runtime,
+                            command_buffer,
+                            &groups,
+                            &output.buffer,
+                        )?;
+                    retained_buffers.extend(buffers);
+                    status_checks.push(status_check);
+                    let buffer = output.buffer.clone();
+                    scratch_buffers.push(output);
+                    buffer
+                }
+                DirectTier1Mode::CpuUpload => {
+                    let input_groups = if broadcast_tier1_inputs {
+                        &groups[..1]
+                    } else {
+                        &groups
+                    };
+                    if let Some(cache) = flattened_cpu_tier1_cache {
+                        cache.buffer_for(
+                            component_idx,
+                            step_idx,
+                            group.total_coefficients,
+                            input_groups.len(),
+                        )?
+                    } else {
+                        let inputs = input_groups
+                            .iter()
+                            .map(|group| HtCpuDecodeInput {
+                                coded_data: &group.coded_arena.data,
+                                jobs: &group.jobs,
+                                output_len: group.total_coefficients,
+                            })
+                            .collect::<Vec<_>>();
+                        let decode_started = profile_stages.then(Instant::now);
+                        let coefficients = decode_ht_inputs_on_cpu_parallel(&inputs)?;
+                        if let Some(started) = decode_started {
+                            stage_timings.cpu_tier1 += elapsed_us(started);
+                        }
+                        let upload_started = profile_stages.then(Instant::now);
+                        let buffer = upload_cpu_decoded_coefficients(
+                            runtime,
+                            coefficients,
+                            retained_buffers,
+                            retained_cpu_coefficients,
+                        );
+                        if let Some(started) = upload_started {
+                            stage_timings.coefficient_upload += elapsed_us(started);
+                        }
+                        buffer
+                    }
+                }
+            };
             let stride_bytes = group.total_coefficients * size_of::<f32>();
             for (instance_idx, bands) in band_sets.iter_mut().enumerate() {
-                for member in &groups[instance_idx].members {
+                let source_group = if broadcast_tier1_inputs {
+                    groups[0]
+                } else {
+                    groups[instance_idx]
+                };
+                let instance_offset = if broadcast_tier1_inputs {
+                    0
+                } else {
+                    instance_idx * stride_bytes
+                };
+                for member in &source_group.members {
                     bands.push(DirectBandSlice {
                         band_id: member.band_id,
-                        buffer: output.buffer.clone(),
-                        offset_bytes: instance_idx * stride_bytes
-                            + member.offset_elements * size_of::<f32>(),
+                        buffer: buffer.clone(),
+                        offset_bytes: instance_offset + member.offset_elements * size_of::<f32>(),
                         window: member.window,
                     });
                 }
             }
-            scratch_buffers.push(output);
             step_idx = group.end_step;
             continue;
         }
@@ -5053,30 +6655,87 @@ fn encode_stacked_direct_component_plane_batch(
                     })
                     .collect::<Vec<_>>();
                 let per_instance_len = sub_band.width as usize * sub_band.height as usize;
-                let output = take_f32_scratch_buffer(runtime, per_instance_len * count);
-                let (buffers, status_check) =
-                    encode_distinct_classic_sub_bands_to_buffer_in_command_buffer(
-                        runtime,
-                        command_buffer,
-                        &sub_bands,
-                        &output.buffer,
-                        scratch_buffers,
-                    )?;
-                retained_buffers.extend(buffers);
-                status_checks.push(status_check);
+                let buffer = match tier1_mode {
+                    DirectTier1Mode::Metal => {
+                        let output = take_f32_scratch_buffer(runtime, per_instance_len * count);
+                        let (buffers, status_check) =
+                            encode_distinct_classic_sub_bands_to_buffer_in_command_buffer(
+                                runtime,
+                                command_buffer,
+                                &sub_bands,
+                                &output.buffer,
+                                scratch_buffers,
+                            )?;
+                        retained_buffers.extend(buffers);
+                        status_checks.push(status_check);
+                        let buffer = output.buffer.clone();
+                        scratch_buffers.push(output);
+                        buffer
+                    }
+                    DirectTier1Mode::CpuUpload => {
+                        let input_sub_bands = if broadcast_tier1_inputs {
+                            &sub_bands[..1]
+                        } else {
+                            &sub_bands
+                        };
+                        if let Some(cache) = flattened_cpu_tier1_cache {
+                            cache.buffer_for(
+                                component_idx,
+                                step_idx,
+                                per_instance_len,
+                                input_sub_bands.len(),
+                            )?
+                        } else {
+                            let inputs = input_sub_bands
+                                .iter()
+                                .map(|sub_band| ClassicCpuDecodeInput {
+                                    coded_data: &sub_band.coded_data,
+                                    segments: &sub_band.segments,
+                                    jobs: &sub_band.jobs,
+                                    output_len: per_instance_len,
+                                })
+                                .collect::<Vec<_>>();
+                            let decode_started = profile_stages.then(Instant::now);
+                            let coefficients = decode_classic_inputs_on_cpu_parallel(&inputs)?;
+                            if let Some(started) = decode_started {
+                                stage_timings.cpu_tier1 += elapsed_us(started);
+                            }
+                            let upload_started = profile_stages.then(Instant::now);
+                            let buffer = upload_cpu_decoded_coefficients(
+                                runtime,
+                                coefficients,
+                                retained_buffers,
+                                retained_cpu_coefficients,
+                            );
+                            if let Some(started) = upload_started {
+                                stage_timings.coefficient_upload += elapsed_us(started);
+                            }
+                            buffer
+                        }
+                    }
+                };
                 let stride_bytes = per_instance_len * size_of::<f32>();
                 for (instance_idx, bands) in band_sets.iter_mut().enumerate() {
+                    let source_sub_band = if broadcast_tier1_inputs {
+                        sub_bands[0]
+                    } else {
+                        sub_bands[instance_idx]
+                    };
+                    let instance_offset = if broadcast_tier1_inputs {
+                        0
+                    } else {
+                        instance_idx * stride_bytes
+                    };
                     bands.push(DirectBandSlice {
-                        band_id: sub_bands[instance_idx].band_id,
-                        buffer: output.buffer.clone(),
-                        offset_bytes: instance_idx * stride_bytes,
+                        band_id: source_sub_band.band_id,
+                        buffer: buffer.clone(),
+                        offset_bytes: instance_offset,
                         window: BandRequiredRegion::full(
-                            sub_bands[instance_idx].width,
-                            sub_bands[instance_idx].height,
+                            source_sub_band.width,
+                            source_sub_band.height,
                         ),
                     });
                 }
-                scratch_buffers.push(output);
             }
             PreparedDirectGrayscaleStep::HtSubBand(sub_band) => {
                 let sub_bands = plans
@@ -5087,33 +6746,90 @@ fn encode_stacked_direct_component_plane_batch(
                     })
                     .collect::<Vec<_>>();
                 let per_instance_len = sub_band.width as usize * sub_band.height as usize;
-                let output = take_f32_scratch_buffer(runtime, per_instance_len * count);
-                let (buffers, status_check) =
-                    encode_distinct_ht_sub_bands_to_buffer_in_command_buffer(
-                        runtime,
-                        command_buffer,
-                        &sub_bands,
-                        &output.buffer,
-                    )?;
-                retained_buffers.extend(buffers);
-                status_checks.push(status_check);
+                let buffer = match tier1_mode {
+                    DirectTier1Mode::Metal => {
+                        let output = take_f32_scratch_buffer(runtime, per_instance_len * count);
+                        let (buffers, status_check) =
+                            encode_distinct_ht_sub_bands_to_buffer_in_command_buffer(
+                                runtime,
+                                command_buffer,
+                                &sub_bands,
+                                &output.buffer,
+                            )?;
+                        retained_buffers.extend(buffers);
+                        status_checks.push(status_check);
+                        let buffer = output.buffer.clone();
+                        scratch_buffers.push(output);
+                        buffer
+                    }
+                    DirectTier1Mode::CpuUpload => {
+                        let input_sub_bands = if broadcast_tier1_inputs {
+                            &sub_bands[..1]
+                        } else {
+                            &sub_bands
+                        };
+                        if let Some(cache) = flattened_cpu_tier1_cache {
+                            cache.buffer_for(
+                                component_idx,
+                                step_idx,
+                                per_instance_len,
+                                input_sub_bands.len(),
+                            )?
+                        } else {
+                            let inputs = input_sub_bands
+                                .iter()
+                                .map(|sub_band| HtCpuDecodeInput {
+                                    coded_data: &sub_band.coded_data,
+                                    jobs: &sub_band.jobs,
+                                    output_len: per_instance_len,
+                                })
+                                .collect::<Vec<_>>();
+                            let decode_started = profile_stages.then(Instant::now);
+                            let coefficients = decode_ht_inputs_on_cpu_parallel(&inputs)?;
+                            if let Some(started) = decode_started {
+                                stage_timings.cpu_tier1 += elapsed_us(started);
+                            }
+                            let upload_started = profile_stages.then(Instant::now);
+                            let buffer = upload_cpu_decoded_coefficients(
+                                runtime,
+                                coefficients,
+                                retained_buffers,
+                                retained_cpu_coefficients,
+                            );
+                            if let Some(started) = upload_started {
+                                stage_timings.coefficient_upload += elapsed_us(started);
+                            }
+                            buffer
+                        }
+                    }
+                };
                 let stride_bytes = per_instance_len * size_of::<f32>();
                 for (instance_idx, bands) in band_sets.iter_mut().enumerate() {
+                    let source_sub_band = if broadcast_tier1_inputs {
+                        sub_bands[0]
+                    } else {
+                        sub_bands[instance_idx]
+                    };
+                    let instance_offset = if broadcast_tier1_inputs {
+                        0
+                    } else {
+                        instance_idx * stride_bytes
+                    };
                     bands.push(DirectBandSlice {
-                        band_id: sub_bands[instance_idx].band_id,
-                        buffer: output.buffer.clone(),
-                        offset_bytes: instance_idx * stride_bytes,
+                        band_id: source_sub_band.band_id,
+                        buffer: buffer.clone(),
+                        offset_bytes: instance_offset,
                         window: BandRequiredRegion::full(
-                            sub_bands[instance_idx].width,
-                            sub_bands[instance_idx].height,
+                            source_sub_band.width,
+                            source_sub_band.height,
                         ),
                     });
                 }
-                scratch_buffers.push(output);
             }
             PreparedDirectGrayscaleStep::Idwt(idwt) => {
                 let per_instance_len = prepared_idwt_output_len(idwt);
                 let output = take_f32_scratch_buffer(runtime, per_instance_len * count);
+                let encode_started = profile_stages.then(Instant::now);
                 match idwt.step.transform {
                     J2kWaveletTransform::Reversible53 => {
                         let (ll, low_low_stride) = lookup_repeated_direct_band_layout_entry(
@@ -5214,6 +6930,9 @@ fn encode_stacked_direct_component_plane_batch(
                         }
                     }
                 }
+                if let Some(started) = encode_started {
+                    stage_timings.metal_idwt_encode += elapsed_us(started);
+                }
                 let stride_bytes = per_instance_len * size_of::<f32>();
                 for (instance_idx, bands) in band_sets.iter_mut().enumerate() {
                     let PreparedDirectGrayscaleStep::Idwt(step) =
@@ -5231,18 +6950,24 @@ fn encode_stacked_direct_component_plane_batch(
                 scratch_buffers.push(output);
             }
             PreparedDirectGrayscaleStep::Store(store) => {
-                let (input, _) =
-                    lookup_direct_band_slice(&band_sets[0], store.input_band_id, store.input_rect)?;
+                let (input, input_instance_stride) = lookup_repeated_direct_band_layout_entry(
+                    &band_sets,
+                    store.input_band_id,
+                    store.input_rect,
+                )?;
                 let per_instance_len = store.output_width as usize * store.output_height as usize;
                 let output = take_f32_scratch_buffer(runtime, per_instance_len * count);
+                let encode_started = profile_stages.then(Instant::now);
                 dispatch_store_component_repeated_in_command_buffer(
                     runtime,
                     command_buffer,
-                    &input,
+                    &input.buffer,
+                    input.offset_bytes,
                     &output.buffer,
                     J2kRepeatedStoreParams {
                         input_width: store.input_rect.width(),
                         input_height: store.input_rect.height(),
+                        input_instance_stride,
                         source_x: store.source_x,
                         source_y: store.source_y,
                         copy_width: store.copy_width,
@@ -5258,6 +6983,9 @@ fn encode_stacked_direct_component_plane_batch(
                         })?,
                     },
                 );
+                if let Some(started) = encode_started {
+                    stage_timings.metal_store_encode += elapsed_us(started);
+                }
                 final_plane = Some(output.buffer.clone());
                 scratch_buffers.push(output);
             }
@@ -5268,6 +6996,7 @@ fn encode_stacked_direct_component_plane_batch(
     let buffer = final_plane.ok_or_else(|| Error::MetalKernel {
         message: "J2K MetalDirect color component batch did not produce a final plane".to_string(),
     })?;
+    record_hybrid_stacked_component_batch(tier1_mode);
     Ok(StackedDirectComponentPlane {
         buffer,
         dimensions: first.dimensions,
@@ -5595,10 +7324,19 @@ fn encode_repeated_direct_grayscale_plan_in_command_buffer(
                             runtime,
                             command_buffer,
                             &input,
+                            0,
                             &output.buffer,
                             J2kRepeatedStoreParams {
                                 input_width: store.input_rect.width(),
                                 input_height: store.input_rect.height(),
+                                input_instance_stride: store
+                                    .input_rect
+                                    .width()
+                                    .checked_mul(store.input_rect.height())
+                                    .ok_or_else(|| Error::MetalKernel {
+                                        message: "J2K MetalDirect repeated store input stride overflows u32"
+                                            .to_string(),
+                                    })?,
                                 source_x: store.source_x,
                                 source_y: store.source_y,
                                 copy_width: store.copy_width,
@@ -7964,12 +9702,13 @@ fn dispatch_store_component_repeated_in_command_buffer(
     runtime: &MetalRuntime,
     command_buffer: &CommandBufferRef,
     input: &Buffer,
+    input_offset_bytes: usize,
     output: &Buffer,
     params: J2kRepeatedStoreParams,
 ) {
     let encoder = command_buffer.new_compute_command_encoder();
     encoder.set_compute_pipeline_state(&runtime.store_component_repeated);
-    encoder.set_buffer(0, Some(input), 0);
+    encoder.set_buffer(0, Some(input), input_offset_bytes as u64);
     encoder.set_buffer(1, Some(output), 0);
     encoder.set_bytes(
         2,
@@ -9475,7 +11214,7 @@ fn encode_distinct_ht_sub_band_groups_to_buffer_in_command_buffer(
             .iter()
             .enumerate()
             .map(|(index, group)| DistinctHtBatch {
-                coded_data: &group.coded_data,
+                coded_data: &group.coded_arena.data,
                 jobs: &group.jobs,
                 output_base: index * per_instance_len,
             }),
@@ -9948,8 +11687,8 @@ fn encode_repeated_ht_sub_band_to_buffer_in_command_buffer(
         .ok_or_else(|| Error::MetalKernel {
             message: "HTJ2K MetalDirect repeated job count overflow".to_string(),
         })?;
-    let coded_buffer = job.coded_buffer.clone();
-    let jobs_buffer = job.jobs_buffer.clone();
+    let coded_buffer = prepared_ht_buffer(job.coded_buffer.as_ref(), "coded")?.clone();
+    let jobs_buffer = prepared_ht_buffer(job.jobs_buffer.as_ref(), "jobs")?.clone();
     let status_check = dispatch_ht_cleanup_repeated_batched_in_command_buffer(
         runtime,
         command_buffer,
@@ -9991,7 +11730,7 @@ fn encode_repeated_ht_sub_band_group_to_buffer_in_command_buffer(
         .ok_or_else(|| Error::MetalKernel {
             message: "HTJ2K MetalDirect repeated grouped job count overflow".to_string(),
         })?;
-    let coded_buffer = group.coded_buffer.clone();
+    let coded_buffer = group.coded_arena.buffer.clone();
     let jobs_buffer = group.jobs_buffer.clone();
     let status_check = dispatch_ht_cleanup_repeated_batched_in_command_buffer(
         runtime,
@@ -10032,8 +11771,8 @@ fn encode_prepared_ht_sub_band_to_buffer_in_encoder(
         ));
     }
 
-    let coded_buffer = job.coded_buffer.clone();
-    let jobs_buffer = job.jobs_buffer.clone();
+    let coded_buffer = prepared_ht_buffer(job.coded_buffer.as_ref(), "coded")?.clone();
+    let jobs_buffer = prepared_ht_buffer(job.jobs_buffer.as_ref(), "jobs")?.clone();
     let status_check = dispatch_ht_cleanup_batched_in_encoder(
         runtime,
         encoder,
@@ -10067,7 +11806,7 @@ fn encode_prepared_ht_sub_band_group_to_buffer_in_encoder(
         ));
     }
 
-    let coded_buffer = group.coded_buffer.clone();
+    let coded_buffer = group.coded_arena.buffer.clone();
     let jobs_buffer = group.jobs_buffer.clone();
     let status_check = dispatch_ht_cleanup_batched_in_encoder(
         runtime,
@@ -14913,21 +16652,39 @@ pub(crate) fn decode_ht_cleanup_sub_band(
 mod tests {
     use super::{
         classic_batch_uses_plain_fast_path, classic_repeated_uses_plain_fast_path,
-        crop_prepared_direct_grayscale_plan_to_output_region, decode_scaled_to_surface,
+        crop_prepared_direct_grayscale_plan_to_output_region,
+        decode_prepared_classic_sub_band_on_cpu, decode_scaled_to_surface,
+        direct_tier1_input_buffer_prepares_for_test,
+        execute_flattened_hybrid_cpu_tier1_direct_color_plan_batch_for_test,
+        execute_hybrid_cpu_tier1_direct_color_plan_batch,
+        flattened_hybrid_cpu_decode_batches_for_test, hybrid_cpu_decode_inputs_for_test,
+        hybrid_cpu_decode_worker_inits_for_test, hybrid_stacked_component_batches_for_test,
         j2k_pack_kernel_name_for, j2k_pack_scale_arrays, output_shape_for,
-        prepare_direct_grayscale_plan, prepared_direct_grayscale_plan_compute_encoder_count,
-        prepared_idwt_output_len, prepared_repeated_direct_ht_cleanup_dispatch_count,
-        repeated_gray_store_is_contiguous_full_surface, runtime_initialization_error,
-        supports_stacked_direct_component_plane_batch, with_runtime_for_device,
-        J2kClassicCleanupBatchJob, J2kClassicSegment, J2kRepeatedGrayStoreParams, MetalRuntime,
+        prepare_direct_color_plan, prepare_direct_color_plan_for_cpu_upload,
+        prepare_direct_grayscale_plan, prepared_direct_color_tier1_input_count,
+        prepared_direct_grayscale_plan_compute_encoder_count, prepared_idwt_output_len,
+        prepared_repeated_direct_ht_cleanup_dispatch_count,
+        repeated_gray_store_is_contiguous_full_surface,
+        reset_direct_tier1_input_buffer_prepares_for_test,
+        reset_flattened_hybrid_cpu_decode_batches_for_test,
+        reset_hybrid_cpu_decode_inputs_for_test, reset_hybrid_cpu_decode_worker_inits_for_test,
+        reset_hybrid_stacked_component_batches_for_test, runtime_initialization_error,
+        should_flatten_hybrid_cpu_tier1_color_batch, supports_stacked_direct_component_plane_batch,
+        with_runtime_for_device, J2kClassicCleanupBatchJob, J2kClassicSegment,
+        J2kRepeatedGrayStoreParams, MetalRuntime, PreparedClassicSubBand, PreparedDirectColorPlan,
         PreparedDirectGrayscaleStep,
     };
     use metal::Device;
     use signinum_core::PixelFormat;
     use signinum_j2k_native::{
-        encode, encode_htj2k, ColorSpace as NativeColorSpace, DecodeSettings, DecoderContext,
-        EncodeOptions, Image,
+        decode_j2k_sub_band_scalar, encode, encode_htj2k, ColorSpace as NativeColorSpace,
+        DecodeSettings, DecoderContext, EncodeOptions, Image, J2kCodeBlockBatchJob,
+        J2kCodeBlockDecodeJob, J2kDirectGrayscaleStep as NativeDirectGrayscaleStep,
+        J2kOwnedCodeBlockBatchJob, J2kOwnedSubBandPlan, J2kSubBandDecodeJob, J2kWaveletTransform,
     };
+    use std::sync::{Arc, Mutex};
+
+    static HYBRID_COUNTER_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn rgb16_with_alpha_is_rejected() {
@@ -15093,6 +16850,173 @@ mod tests {
     }
 
     #[test]
+    fn grouped_ht_direct_plan_uses_one_group_coded_arena() {
+        let pixels: Vec<u8> = (0..64).collect();
+        let options = EncodeOptions {
+            reversible: true,
+            num_decomposition_levels: 1,
+            ..EncodeOptions::default()
+        };
+        let bytes = encode_htj2k(&pixels, 8, 8, 1, 8, false, &options).expect("encode ht gray8");
+        let image = Image::new(&bytes, &DecodeSettings::default()).expect("image");
+        let mut context = DecoderContext::default();
+        let plan = image
+            .build_direct_grayscale_plan_with_context(&mut context)
+            .expect("direct grayscale plan");
+
+        reset_direct_tier1_input_buffer_prepares_for_test();
+        let prepared = prepare_direct_grayscale_plan(&plan).expect("prepared direct plan");
+        assert_eq!(
+            prepared.ht_groups.len(),
+            1,
+            "fixture must exercise one grouped HT dispatch"
+        );
+        let group = &prepared.ht_groups[0];
+        assert!(!group.coded_arena.data.is_empty());
+        assert_eq!(
+            direct_tier1_input_buffer_prepares_for_test(),
+            2,
+            "grouped HT dispatch should prepare one coded arena buffer and one job buffer"
+        );
+
+        for step in &prepared.steps[group.start_step..group.end_step] {
+            let PreparedDirectGrayscaleStep::HtSubBand(sub_band) = step else {
+                panic!("HT group should only span HT sub-band steps");
+            };
+            assert!(sub_band.coded_buffer.is_none());
+            assert!(sub_band.jobs_buffer.is_none());
+        }
+    }
+
+    #[test]
+    fn prepared_classic_sub_band_decodes_on_cpu_for_hybrid_upload() {
+        let pixels: Vec<u8> = (0..64).collect();
+        let options = EncodeOptions {
+            reversible: true,
+            num_decomposition_levels: 1,
+            ..EncodeOptions::default()
+        };
+        let bytes = encode(&pixels, 8, 8, 1, 8, false, &options).expect("encode classic gray8");
+        let image = Image::new(&bytes, &DecodeSettings::default()).expect("image");
+        let mut context = DecoderContext::default();
+        let plan = image
+            .build_direct_grayscale_plan_with_context(&mut context)
+            .expect("direct grayscale plan");
+        let prepared = prepare_direct_grayscale_plan(&plan).expect("prepared direct plan");
+        let native_sub_band = first_native_classic_sub_band(&plan);
+        let prepared_sub_band = first_prepared_classic_sub_band(&prepared);
+
+        let expected = decode_native_classic_sub_band(native_sub_band);
+        let actual = decode_prepared_classic_sub_band_on_cpu(prepared_sub_band)
+            .expect("prepared CPU decode");
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn cpu_upload_color_prepare_skips_tier1_metal_input_buffers() {
+        if Device::system_default().is_none() {
+            eprintln!("skipping CPUUpload prepare test: no Metal device");
+            return;
+        }
+
+        let pixels = signinum_test_support::gradient_u8(32, 32, 3);
+        let options = EncodeOptions {
+            reversible: true,
+            num_decomposition_levels: 2,
+            ..EncodeOptions::default()
+        };
+        let bytes = encode(&pixels, 32, 32, 3, 8, false, &options).expect("encode rgb8");
+        let image = Image::new(&bytes, &DecodeSettings::default()).expect("image");
+        let mut context = DecoderContext::default();
+        let plan = image
+            .build_direct_color_plan_with_context(&mut context)
+            .expect("direct color plan");
+
+        reset_direct_tier1_input_buffer_prepares_for_test();
+        let metal_prepared = prepare_direct_color_plan(&plan).expect("Metal prepared color plan");
+        assert_eq!(metal_prepared.component_plans.len(), 3);
+        assert!(
+            direct_tier1_input_buffer_prepares_for_test() > 0,
+            "normal Metal preparation should build Tier-1 input buffers"
+        );
+
+        reset_direct_tier1_input_buffer_prepares_for_test();
+        let cpu_upload_prepared =
+            prepare_direct_color_plan_for_cpu_upload(&plan).expect("CPUUpload prepared color plan");
+        assert_eq!(cpu_upload_prepared.component_plans.len(), 3);
+        assert_eq!(
+            direct_tier1_input_buffer_prepares_for_test(),
+            0,
+            "CPUUpload preparation should keep coded Tier-1 payloads on CPU and skip Metal input buffers"
+        );
+    }
+
+    fn first_native_classic_sub_band(
+        plan: &signinum_j2k_native::J2kDirectGrayscalePlan,
+    ) -> &J2kOwnedSubBandPlan {
+        plan.steps
+            .iter()
+            .find_map(|step| match step {
+                NativeDirectGrayscaleStep::ClassicSubBand(sub_band) => Some(sub_band),
+                _ => None,
+            })
+            .expect("classic sub-band step")
+    }
+
+    fn first_prepared_classic_sub_band(
+        plan: &super::PreparedDirectGrayscalePlan,
+    ) -> &PreparedClassicSubBand {
+        plan.steps
+            .iter()
+            .find_map(|step| match step {
+                PreparedDirectGrayscaleStep::ClassicSubBand(sub_band) => Some(sub_band),
+                _ => None,
+            })
+            .expect("prepared classic sub-band step")
+    }
+
+    fn decode_native_classic_sub_band(plan: &J2kOwnedSubBandPlan) -> Vec<f32> {
+        let mut output = vec![0.0_f32; plan.width as usize * plan.height as usize];
+        let jobs = plan
+            .jobs
+            .iter()
+            .map(|job| J2kCodeBlockBatchJob {
+                output_x: job.output_x,
+                output_y: job.output_y,
+                code_block: native_classic_job(job),
+            })
+            .collect::<Vec<_>>();
+        decode_j2k_sub_band_scalar(
+            J2kSubBandDecodeJob {
+                width: plan.width,
+                height: plan.height,
+                jobs: &jobs,
+            },
+            &mut output,
+        )
+        .expect("native scalar classic sub-band decode");
+        output
+    }
+
+    fn native_classic_job(job: &J2kOwnedCodeBlockBatchJob) -> J2kCodeBlockDecodeJob<'_> {
+        J2kCodeBlockDecodeJob {
+            data: &job.data,
+            segments: &job.segments,
+            width: job.width,
+            height: job.height,
+            output_stride: job.output_stride,
+            missing_bit_planes: job.missing_bit_planes,
+            number_of_coding_passes: job.number_of_coding_passes,
+            total_bitplanes: job.total_bitplanes,
+            sub_band_type: job.sub_band_type,
+            style: job.style,
+            strict: job.strict,
+            dequantization_step: job.dequantization_step,
+        }
+    }
+
+    #[test]
     fn prepared_ht_direct_plan_encodes_full_decode_in_one_compute_encoder() {
         let pixels: Vec<u8> = (0..64).collect();
         let options = EncodeOptions {
@@ -15191,10 +17115,238 @@ mod tests {
     }
 
     #[test]
+    fn hybrid_rgb8_batch_uses_stacked_component_graph() {
+        let pixels = signinum_test_support::gradient_u8(32, 32, 3);
+        let options = EncodeOptions {
+            reversible: true,
+            num_decomposition_levels: 2,
+            ..EncodeOptions::default()
+        };
+        let bytes = encode(&pixels, 32, 32, 3, 8, false, &options).expect("encode rgb8");
+        let image = Image::new(&bytes, &DecodeSettings::default()).expect("image");
+        let mut context = DecoderContext::default();
+        let plan = image
+            .build_direct_color_plan_with_context(&mut context)
+            .expect("direct color plan");
+        let prepared = Arc::new(prepare_direct_color_plan(&plan).expect("prepared color plan"));
+        let _guard = HYBRID_COUNTER_TEST_LOCK
+            .lock()
+            .expect("hybrid counter lock");
+        reset_hybrid_stacked_component_batches_for_test();
+        reset_hybrid_cpu_decode_worker_inits_for_test();
+
+        let surfaces = execute_hybrid_cpu_tier1_direct_color_plan_batch(
+            &[prepared.clone(), prepared],
+            PixelFormat::Rgb8,
+        )
+        .expect("hybrid RGB8 batch");
+
+        assert_eq!(surfaces.len(), 2);
+        assert!(
+            hybrid_stacked_component_batches_for_test() >= 3,
+            "hybrid RGB batch should stack each component plane instead of encoding each tile/component serially"
+        );
+        assert!(
+            hybrid_cpu_decode_worker_inits_for_test() > 0,
+            "hybrid RGB batch should use worker-local CPU decode scratch instead of per-input decode/flatten"
+        );
+    }
+
+    #[test]
+    fn hybrid_rgb8_repeated_batch_decodes_shared_tier1_inputs_once() {
+        let pixels = signinum_test_support::gradient_u8(32, 32, 3);
+        let options = EncodeOptions {
+            reversible: true,
+            num_decomposition_levels: 2,
+            ..EncodeOptions::default()
+        };
+        let bytes = encode(&pixels, 32, 32, 3, 8, false, &options).expect("encode rgb8");
+        let image = Image::new(&bytes, &DecodeSettings::default()).expect("image");
+        let mut context = DecoderContext::default();
+        let plan = image
+            .build_direct_color_plan_with_context(&mut context)
+            .expect("direct color plan");
+        let prepared = Arc::new(prepare_direct_color_plan(&plan).expect("prepared color plan"));
+        let unique_tier1_inputs = prepared_direct_color_tier1_input_count(&prepared);
+        assert!(
+            unique_tier1_inputs > 0,
+            "fixture should have Tier-1 inputs to decode"
+        );
+        let _guard = HYBRID_COUNTER_TEST_LOCK
+            .lock()
+            .expect("hybrid counter lock");
+        reset_hybrid_cpu_decode_inputs_for_test();
+
+        let surfaces = execute_hybrid_cpu_tier1_direct_color_plan_batch(
+            &[prepared.clone(), prepared.clone(), prepared],
+            PixelFormat::Rgb8,
+        )
+        .expect("hybrid repeated RGB8 batch");
+
+        assert_eq!(surfaces.len(), 3);
+        assert_eq!(
+            hybrid_cpu_decode_inputs_for_test(),
+            unique_tier1_inputs,
+            "repeated RGB hybrid batches should decode each shared coefficient input once, not once per output surface"
+        );
+    }
+
+    #[test]
+    fn hybrid_rgb8_distinct_batch_keeps_tier1_inputs_separate() {
+        let options = EncodeOptions {
+            reversible: true,
+            num_decomposition_levels: 2,
+            ..EncodeOptions::default()
+        };
+        let bytes_a = encode(
+            &signinum_test_support::gradient_variant_u8(32, 32, 3, 0),
+            32,
+            32,
+            3,
+            8,
+            false,
+            &options,
+        )
+        .expect("encode first rgb8");
+        let bytes_b = encode(
+            &signinum_test_support::gradient_variant_u8(32, 32, 3, 7),
+            32,
+            32,
+            3,
+            8,
+            false,
+            &options,
+        )
+        .expect("encode second rgb8");
+        let image_a = Image::new(&bytes_a, &DecodeSettings::default()).expect("first image");
+        let image_b = Image::new(&bytes_b, &DecodeSettings::default()).expect("second image");
+        let mut context_a = DecoderContext::default();
+        let mut context_b = DecoderContext::default();
+        let plan_a = image_a
+            .build_direct_color_plan_with_context(&mut context_a)
+            .expect("first direct color plan");
+        let plan_b = image_b
+            .build_direct_color_plan_with_context(&mut context_b)
+            .expect("second direct color plan");
+        let prepared_a = Arc::new(prepare_direct_color_plan(&plan_a).expect("first prepared"));
+        let prepared_b = Arc::new(prepare_direct_color_plan(&plan_b).expect("second prepared"));
+        let expected_inputs = prepared_direct_color_tier1_input_count(&prepared_a)
+            + prepared_direct_color_tier1_input_count(&prepared_b);
+        let _guard = HYBRID_COUNTER_TEST_LOCK
+            .lock()
+            .expect("hybrid counter lock");
+        reset_hybrid_cpu_decode_inputs_for_test();
+
+        let surfaces = execute_hybrid_cpu_tier1_direct_color_plan_batch(
+            &[prepared_a, prepared_b],
+            PixelFormat::Rgb8,
+        )
+        .expect("hybrid distinct RGB8 batch");
+
+        assert_eq!(surfaces.len(), 2);
+        assert_ne!(
+            surfaces[0].as_bytes(),
+            surfaces[1].as_bytes(),
+            "distinct RGB inputs must not reuse the first tile's decoded coefficients"
+        );
+        assert_eq!(
+            hybrid_cpu_decode_inputs_for_test(),
+            expected_inputs,
+            "distinct RGB hybrid batches should decode each tile's own Tier-1 inputs"
+        );
+    }
+
+    #[test]
+    fn hybrid_rgb8_flattened_cpu_tier1_batch_uses_one_decode_queue() {
+        let pixels_a = signinum_test_support::gradient_variant_u8(32, 32, 3, 0);
+        let pixels_b = signinum_test_support::gradient_variant_u8(32, 32, 3, 11);
+        let options = EncodeOptions {
+            reversible: true,
+            num_decomposition_levels: 2,
+            ..EncodeOptions::default()
+        };
+        let bytes_a = encode(&pixels_a, 32, 32, 3, 8, false, &options).expect("encode first rgb8");
+        let bytes_b = encode(&pixels_b, 32, 32, 3, 8, false, &options).expect("encode second rgb8");
+        let image_a = Image::new(&bytes_a, &DecodeSettings::default()).expect("first image");
+        let image_b = Image::new(&bytes_b, &DecodeSettings::default()).expect("second image");
+        let mut context_a = DecoderContext::default();
+        let mut context_b = DecoderContext::default();
+        let plan_a = image_a
+            .build_direct_color_plan_with_context(&mut context_a)
+            .expect("first direct color plan");
+        let plan_b = image_b
+            .build_direct_color_plan_with_context(&mut context_b)
+            .expect("second direct color plan");
+        let prepared_a = Arc::new(prepare_direct_color_plan(&plan_a).expect("first prepared"));
+        let prepared_b = Arc::new(prepare_direct_color_plan(&plan_b).expect("second prepared"));
+        let expected_inputs = prepared_direct_color_tier1_input_count(&prepared_a)
+            + prepared_direct_color_tier1_input_count(&prepared_b);
+        let _guard = HYBRID_COUNTER_TEST_LOCK
+            .lock()
+            .expect("hybrid counter lock");
+        reset_hybrid_cpu_decode_inputs_for_test();
+        reset_flattened_hybrid_cpu_decode_batches_for_test();
+
+        let surfaces = execute_flattened_hybrid_cpu_tier1_direct_color_plan_batch_for_test(
+            &[prepared_a, prepared_b],
+            PixelFormat::Rgb8,
+        )
+        .expect("flattened hybrid distinct RGB8 batch");
+
+        assert_eq!(surfaces.len(), 2);
+        assert_ne!(
+            surfaces[0].as_bytes(),
+            surfaces[1].as_bytes(),
+            "flattened distinct RGB hybrid batches must keep each tile's coefficients separate"
+        );
+        assert_eq!(
+            hybrid_cpu_decode_inputs_for_test(),
+            expected_inputs,
+            "flattened RGB hybrid batches should still decode every distinct Tier-1 input"
+        );
+        assert_eq!(
+            flattened_hybrid_cpu_decode_batches_for_test(),
+            1,
+            "flattened RGB hybrid should collect Tier-1 work into one CPU decode queue"
+        );
+    }
+
+    #[test]
+    fn flattened_cpu_tier1_default_gate_targets_large_distinct_batches_only() {
+        fn color_plan(width: u32, height: u32) -> Arc<PreparedDirectColorPlan> {
+            Arc::new(PreparedDirectColorPlan {
+                dimensions: (width, height),
+                bit_depths: [8, 8, 8],
+                mct: true,
+                transform: J2kWaveletTransform::Reversible53,
+                component_plans: Vec::new(),
+            })
+        }
+
+        let repeated = vec![color_plan(1024, 1024); 16];
+        assert!(
+            !should_flatten_hybrid_cpu_tier1_color_batch(&repeated),
+            "repeated RGB batches already win through shared Tier-1 decode and should not use the flattened distinct scheduler"
+        );
+
+        let small_distinct = (0..16).map(|_| color_plan(256, 256)).collect::<Vec<_>>();
+        assert!(
+            !should_flatten_hybrid_cpu_tier1_color_batch(&small_distinct),
+            "small RGB batches measured slower with flattened Tier-1 and should stay on the grouped path"
+        );
+
+        let large_distinct = (0..16).map(|_| color_plan(1024, 1024)).collect::<Vec<_>>();
+        assert!(
+            should_flatten_hybrid_cpu_tier1_color_batch(&large_distinct),
+            "large distinct RGB explicit hybrid batches measured faster with flattened Tier-1"
+        );
+    }
+
+    #[test]
     fn cropped_region_scaled_ht_direct_plan_prunes_codeblocks_outside_output_roi() {
-        let mut pixels = Vec::with_capacity(128 * 128);
-        for y in 0..128u32 {
-            for x in 0..128u32 {
+        let mut pixels = Vec::with_capacity(256 * 256);
+        for y in 0..256u32 {
+            for x in 0..256u32 {
                 pixels.push(((x * 3 + y * 5) & 0xff) as u8);
             }
         }
@@ -15206,11 +17358,11 @@ mod tests {
             ..EncodeOptions::default()
         };
         let bytes =
-            encode_htj2k(&pixels, 128, 128, 1, 8, false, &options).expect("encode ht gray8");
+            encode_htj2k(&pixels, 256, 256, 1, 8, false, &options).expect("encode ht gray8");
         let image = Image::new(
             &bytes,
             &DecodeSettings {
-                target_resolution: Some((32, 32)),
+                target_resolution: Some((64, 64)),
                 ..DecodeSettings::default()
             },
         )
@@ -15229,10 +17381,10 @@ mod tests {
         crop_prepared_direct_grayscale_plan_to_output_region(
             &mut prepared,
             signinum_core::Rect {
-                x: 10,
-                y: 10,
-                w: 4,
-                h: 4,
+                x: 24,
+                y: 24,
+                w: 8,
+                h: 8,
             },
         )
         .expect("crop direct plan");
@@ -15246,9 +17398,9 @@ mod tests {
 
     #[test]
     fn cropped_region_scaled_ht_direct_plan_compacts_coded_payloads() {
-        let mut pixels = Vec::with_capacity(128 * 128);
-        for y in 0..128u32 {
-            for x in 0..128u32 {
+        let mut pixels = Vec::with_capacity(256 * 256);
+        for y in 0..256u32 {
+            for x in 0..256u32 {
                 pixels.push(((x * 3 + y * 5) & 0xff) as u8);
             }
         }
@@ -15260,11 +17412,11 @@ mod tests {
             ..EncodeOptions::default()
         };
         let bytes =
-            encode_htj2k(&pixels, 128, 128, 1, 8, false, &options).expect("encode ht gray8");
+            encode_htj2k(&pixels, 256, 256, 1, 8, false, &options).expect("encode ht gray8");
         let image = Image::new(
             &bytes,
             &DecodeSettings {
-                target_resolution: Some((32, 32)),
+                target_resolution: Some((64, 64)),
                 ..DecodeSettings::default()
             },
         )
@@ -15280,10 +17432,10 @@ mod tests {
         crop_prepared_direct_grayscale_plan_to_output_region(
             &mut prepared,
             signinum_core::Rect {
-                x: 10,
-                y: 10,
-                w: 4,
-                h: 4,
+                x: 24,
+                y: 24,
+                w: 8,
+                h: 8,
             },
         )
         .expect("crop direct plan");
@@ -15346,10 +17498,10 @@ mod tests {
     }
 
     #[test]
-    fn cropped_region_ht_direct_plan_crops_all_idwt_levels() {
-        let mut pixels = Vec::with_capacity(128 * 128);
-        for y in 0..128u32 {
-            for x in 0..128u32 {
+    fn cropped_region_ht_direct_plan_keeps_idwt_windows_bounded() {
+        let mut pixels = Vec::with_capacity(256 * 256);
+        for y in 0..256u32 {
+            for x in 0..256u32 {
                 pixels.push(((x * 3 + y * 5) & 0xff) as u8);
             }
         }
@@ -15361,7 +17513,7 @@ mod tests {
             ..EncodeOptions::default()
         };
         let bytes =
-            encode_htj2k(&pixels, 128, 128, 1, 8, false, &options).expect("encode ht gray8");
+            encode_htj2k(&pixels, 256, 256, 1, 8, false, &options).expect("encode ht gray8");
         let image = Image::new(&bytes, &DecodeSettings::default()).expect("image");
         let mut context = DecoderContext::default();
         let plan = image
@@ -15377,10 +17529,10 @@ mod tests {
         crop_prepared_direct_grayscale_plan_to_output_region(
             &mut prepared,
             signinum_core::Rect {
-                x: 56,
-                y: 56,
-                w: 16,
-                h: 16,
+                x: 112,
+                y: 112,
+                w: 32,
+                h: 32,
             },
         )
         .expect("crop direct plan");
@@ -15390,10 +17542,16 @@ mod tests {
         for (level_idx, (full_len, cropped_len)) in cropped_idwt_levels.iter().copied().enumerate()
         {
             assert!(
-                cropped_len > 0 && cropped_len < full_len,
-                "cropped ROI should reduce IDWT level {level_idx} output work; full={full_len}, cropped={cropped_len}"
+                cropped_len > 0 && cropped_len <= full_len,
+                "cropped ROI should keep IDWT level {level_idx} bounded; full={full_len}, cropped={cropped_len}"
             );
         }
+        assert!(
+            cropped_idwt_levels
+                .iter()
+                .any(|(full_len, cropped_len)| cropped_len < full_len),
+            "cropped ROI should reduce at least one IDWT level"
+        );
     }
 
     fn prepared_direct_grayscale_ht_job_count(plan: &super::PreparedDirectGrayscalePlan) -> usize {

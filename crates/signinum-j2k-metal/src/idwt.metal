@@ -149,19 +149,27 @@ kernel void j2k_idwt_interleave(
     if (low_y && low_x) {
         const uint band_x = full_band_x - params.ll_x;
         const uint band_y = full_band_y - params.ll_y;
-        out[out_idx] = ll[band_y * params.ll_width + band_x];
+        out[out_idx] = (band_x < params.ll_width && band_y < params.ll_height)
+            ? ll[band_y * params.ll_width + band_x]
+            : 0.0f;
     } else if (low_y) {
         const uint band_x = full_band_x - params.hl_x;
         const uint band_y = full_band_y - params.hl_y;
-        out[out_idx] = hl[band_y * params.hl_width + band_x];
+        out[out_idx] = (band_x < params.hl_width && band_y < params.hl_height)
+            ? hl[band_y * params.hl_width + band_x]
+            : 0.0f;
     } else if (low_x) {
         const uint band_x = full_band_x - params.lh_x;
         const uint band_y = full_band_y - params.lh_y;
-        out[out_idx] = lh[band_y * params.lh_width + band_x];
+        out[out_idx] = (band_x < params.lh_width && band_y < params.lh_height)
+            ? lh[band_y * params.lh_width + band_x]
+            : 0.0f;
     } else {
         const uint band_x = full_band_x - params.hh_x;
         const uint band_y = full_band_y - params.hh_y;
-        out[out_idx] = hh[band_y * params.hh_width + band_x];
+        out[out_idx] = (band_x < params.hh_width && band_y < params.hh_height)
+            ? hh[band_y * params.hh_width + band_x]
+            : 0.0f;
     }
 }
 
@@ -192,19 +200,27 @@ kernel void j2k_idwt_interleave_batched(
     if (low_y && low_x) {
         const uint band_x = full_band_x - params.ll_x;
         const uint band_y = full_band_y - params.ll_y;
-        out[out_idx] = ll[gid.z * params.ll_instance_stride + band_y * params.ll_width + band_x];
+        out[out_idx] = (band_x < params.ll_width && band_y < params.ll_height)
+            ? ll[gid.z * params.ll_instance_stride + band_y * params.ll_width + band_x]
+            : 0.0f;
     } else if (low_y) {
         const uint band_x = full_band_x - params.hl_x;
         const uint band_y = full_band_y - params.hl_y;
-        out[out_idx] = hl[gid.z * params.hl_instance_stride + band_y * params.hl_width + band_x];
+        out[out_idx] = (band_x < params.hl_width && band_y < params.hl_height)
+            ? hl[gid.z * params.hl_instance_stride + band_y * params.hl_width + band_x]
+            : 0.0f;
     } else if (low_x) {
         const uint band_x = full_band_x - params.lh_x;
         const uint band_y = full_band_y - params.lh_y;
-        out[out_idx] = lh[gid.z * params.lh_instance_stride + band_y * params.lh_width + band_x];
+        out[out_idx] = (band_x < params.lh_width && band_y < params.lh_height)
+            ? lh[gid.z * params.lh_instance_stride + band_y * params.lh_width + band_x]
+            : 0.0f;
     } else {
         const uint band_x = full_band_x - params.hh_x;
         const uint band_y = full_band_y - params.hh_y;
-        out[out_idx] = hh[gid.z * params.hh_instance_stride + band_y * params.hh_width + band_x];
+        out[out_idx] = (band_x < params.hh_width && band_y < params.hh_height)
+            ? hh[gid.z * params.hh_instance_stride + band_y * params.hh_width + band_x]
+            : 0.0f;
     }
 }
 
@@ -461,39 +477,27 @@ kernel void j2k_idwt_irreversible97_single_decomposition(
             if (low_y && low_x) {
                 const uint band_x = full_band_x - params.ll_x;
                 const uint band_y = full_band_y - params.ll_y;
-                if (band_x >= params.ll_width || band_y >= params.ll_height) {
-                    status->code = J2K_IDWT_STATUS_FAIL;
-                    status->detail = 2u;
-                    return;
-                }
-                out[out_idx] = ll[band_y * params.ll_width + band_x];
+                out[out_idx] = (band_x < params.ll_width && band_y < params.ll_height)
+                    ? ll[band_y * params.ll_width + band_x]
+                    : 0.0f;
             } else if (low_y) {
                 const uint band_x = full_band_x - params.hl_x;
                 const uint band_y = full_band_y - params.hl_y;
-                if (band_x >= params.hl_width || band_y >= params.hl_height) {
-                    status->code = J2K_IDWT_STATUS_FAIL;
-                    status->detail = 3u;
-                    return;
-                }
-                out[out_idx] = hl[band_y * params.hl_width + band_x];
+                out[out_idx] = (band_x < params.hl_width && band_y < params.hl_height)
+                    ? hl[band_y * params.hl_width + band_x]
+                    : 0.0f;
             } else if (low_x) {
                 const uint band_x = full_band_x - params.lh_x;
                 const uint band_y = full_band_y - params.lh_y;
-                if (band_x >= params.lh_width || band_y >= params.lh_height) {
-                    status->code = J2K_IDWT_STATUS_FAIL;
-                    status->detail = 4u;
-                    return;
-                }
-                out[out_idx] = lh[band_y * params.lh_width + band_x];
+                out[out_idx] = (band_x < params.lh_width && band_y < params.lh_height)
+                    ? lh[band_y * params.lh_width + band_x]
+                    : 0.0f;
             } else {
                 const uint band_x = full_band_x - params.hh_x;
                 const uint band_y = full_band_y - params.hh_y;
-                if (band_x >= params.hh_width || band_y >= params.hh_height) {
-                    status->code = J2K_IDWT_STATUS_FAIL;
-                    status->detail = 5u;
-                    return;
-                }
-                out[out_idx] = hh[band_y * params.hh_width + band_x];
+                out[out_idx] = (band_x < params.hh_width && band_y < params.hh_height)
+                    ? hh[band_y * params.hh_width + band_x]
+                    : 0.0f;
             }
         }
     }

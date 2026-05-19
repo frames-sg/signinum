@@ -1,9 +1,14 @@
-use std::path::{Path, PathBuf};
+use std::{
+    ffi::OsStr,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(have_grok)");
     println!("cargo:rerun-if-env-changed=SIGNINUM_GROK_ROOT");
     println!("cargo:rerun-if-env-changed=SIGNINUM_GROK_SOURCE");
+    println!("cargo:rerun-if-env-changed=PKG_CONFIG_PATH");
     println!("cargo:rerun-if-changed=src/grok_shim.c");
 
     if let Some(config) = grok_config() {
@@ -19,6 +24,11 @@ fn main() {
             config.lib_dir.display()
         );
         println!("cargo:rustc-link-lib=dylib=grokj2k");
+        #[cfg(target_os = "macos")]
+        println!(
+            "cargo:rustc-link-arg=-Wl,-rpath,{}",
+            config.lib_dir.display()
+        );
         #[cfg(target_os = "macos")]
         println!(
             "cargo:rustc-link-arg=-Wl,-rpath,{}",
@@ -39,13 +49,7 @@ fn stage_grok_runtime(lib_dir: &Path) -> Result<PathBuf, String> {
         PathBuf::from(std::env::var_os("OUT_DIR").ok_or_else(|| "OUT_DIR missing".to_string())?);
     #[cfg(target_os = "macos")]
     {
-        stage_family(
-            lib_dir,
-            &out_dir,
-            "libgrokj2k.20.3.0.dylib",
-            "libgrokj2k.1.dylib",
-            "libgrokj2k.dylib",
-        )?;
+        stage_grok_dylib_family(lib_dir, &out_dir)?;
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -55,26 +59,51 @@ fn stage_grok_runtime(lib_dir: &Path) -> Result<PathBuf, String> {
 }
 
 #[cfg(target_os = "macos")]
-fn stage_family(
-    lib_dir: &Path,
-    out_dir: &Path,
-    real_name: &str,
-    compat_name: &str,
-    link_name: &str,
-) -> Result<(), String> {
-    let real_src = lib_dir.join(real_name);
-    if !real_src.exists() {
-        return Err(format!("missing {real_name} in {}", lib_dir.display()));
-    }
+fn stage_grok_dylib_family(lib_dir: &Path, out_dir: &Path) -> Result<(), String> {
+    let real_src = find_grok_real_dylib(lib_dir)?;
+    let real_name = real_src
+        .file_name()
+        .and_then(OsStr::to_str)
+        .ok_or_else(|| format!("invalid Grok dylib name: {}", real_src.display()))?;
     let real_dst = out_dir.join(real_name);
     if real_dst.exists() {
         std::fs::remove_file(&real_dst)
             .map_err(|err| format!("remove {}: {err}", real_dst.display()))?;
     }
-    std::fs::copy(&real_src, &real_dst).map_err(|err| format!("copy {real_name}: {err}"))?;
-    symlink_in_dir(real_name, &out_dir.join(compat_name))?;
-    symlink_in_dir(compat_name, &out_dir.join(link_name))?;
+    std::fs::copy(&real_src, &real_dst)
+        .map_err(|err| format!("copy {}: {err}", real_src.display()))?;
+    symlink_in_dir(real_name, &out_dir.join("libgrokj2k.1.dylib"))?;
+    symlink_in_dir("libgrokj2k.1.dylib", &out_dir.join("libgrokj2k.dylib"))?;
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn find_grok_real_dylib(lib_dir: &Path) -> Result<PathBuf, String> {
+    let mut candidates = std::fs::read_dir(lib_dir)
+        .map_err(|err| format!("read Grok lib dir {}: {err}", lib_dir.display()))?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| format!("read Grok lib dir entry: {err}"))?;
+    candidates.retain(|path| {
+        path.file_name()
+            .and_then(OsStr::to_str)
+            .is_some_and(|name| {
+                name.starts_with("libgrokj2k.")
+                    && path
+                        .extension()
+                        .is_some_and(|extension| extension.eq_ignore_ascii_case("dylib"))
+                    && name != "libgrokj2k.dylib"
+                    && name != "libgrokj2k.1.dylib"
+                    && !name.contains("codec")
+            })
+    });
+    candidates.sort();
+    candidates.pop().ok_or_else(|| {
+        format!(
+            "missing versioned libgrokj2k dylib in {}",
+            lib_dir.display()
+        )
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -106,7 +135,38 @@ fn grok_config() -> Option<GrokConfig> {
             build_include,
         })
     } else {
+        pkg_config_grok_config()
+    }
+}
+
+fn pkg_config_grok_config() -> Option<GrokConfig> {
+    let include_dir = pkg_config_variable("libgrokj2k", "includedir")?;
+    let lib_dir = pkg_config_variable("libgrokj2k", "libdir")?;
+    if has_grok_artifacts(&lib_dir, &include_dir, &include_dir) {
+        Some(GrokConfig {
+            lib_dir,
+            source_include: include_dir.clone(),
+            build_include: include_dir,
+        })
+    } else {
         None
+    }
+}
+
+fn pkg_config_variable(package: &str, variable: &str) -> Option<PathBuf> {
+    let output = Command::new("pkg-config")
+        .args(["--variable", variable, package])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8(output.stdout).ok()?;
+    let value = value.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(value))
     }
 }
 

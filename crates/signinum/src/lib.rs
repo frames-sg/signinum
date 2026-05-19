@@ -177,18 +177,76 @@ pub mod j2k {
         backend: BackendKind,
         accelerator: &mut impl J2kEncodeStageAccelerator,
     ) -> Result<Option<EncodedJ2k>, J2kError> {
+        let requested_backend = options.backend;
         let device_options = J2kLosslessEncodeOptions {
             backend: EncodeBackendPreference::PreferDevice,
             ..options
         };
+        let before = accelerator.dispatch_report();
         let encoded = signinum_j2k::encode_j2k_lossless_with_accelerator(
             samples,
             &device_options,
             backend,
             accelerator,
         )?;
+        let dispatch = accelerator.dispatch_report().saturating_delta(before);
 
-        Ok((encoded.backend == backend).then_some(encoded))
+        let keep_cpu_backed_partial_auto_result =
+            requested_backend == EncodeBackendPreference::Auto && dispatch.any();
+        Ok((encoded.backend == backend || keep_cpu_backed_partial_auto_result).then_some(encoded))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[derive(Default)]
+        struct PacketizationOnlyAccelerator {
+            packetization_dispatches: usize,
+        }
+
+        impl J2kEncodeStageAccelerator for PacketizationOnlyAccelerator {
+            fn dispatch_report(&self) -> J2kEncodeDispatchReport {
+                J2kEncodeDispatchReport {
+                    packetization: self.packetization_dispatches,
+                    ..J2kEncodeDispatchReport::default()
+                }
+            }
+
+            fn encode_packetization(
+                &mut self,
+                job: signinum_j2k::J2kPacketizationEncodeJob<'_>,
+            ) -> core::result::Result<Option<Vec<u8>>, &'static str> {
+                self.packetization_dispatches = self.packetization_dispatches.saturating_add(1);
+                signinum_j2k_native::encode_j2k_packetization_scalar(job).map(Some)
+            }
+        }
+
+        #[test]
+        fn auto_keeps_cpu_backed_encode_after_partial_device_dispatch() {
+            let pixels: Vec<u8> = (0..64 * 64 * 3)
+                .map(|value| u8::try_from((value * 13) & 0xFF).expect("masked sample fits"))
+                .collect();
+            let samples =
+                J2kLosslessSamples::new(&pixels, 64, 64, 3, 8, false).expect("valid samples");
+            let mut accelerator = PacketizationOnlyAccelerator::default();
+
+            let encoded = encode_with_device_accelerator(
+                samples,
+                J2kLosslessEncodeOptions {
+                    backend: EncodeBackendPreference::Auto,
+                    validation: J2kEncodeValidation::External,
+                    ..J2kLosslessEncodeOptions::default()
+                },
+                BackendKind::Metal,
+                &mut accelerator,
+            )
+            .expect("partial accelerator encode succeeds")
+            .expect("Auto should reuse the CPU-backed codestream after partial device dispatch");
+
+            assert_eq!(encoded.backend, BackendKind::Cpu);
+            assert_eq!(accelerator.packetization_dispatches, 1);
+        }
     }
 }
 

@@ -8,7 +8,7 @@ use super::codestream::WaveletTransform;
 use super::decode::{DecompositionStorage, TileDecodeContext};
 use super::rect::IntRect;
 use super::roi;
-use crate::error::DecodingError;
+use crate::error::{bail, DecodingError};
 use crate::j2c::Header;
 use crate::math::{self, dispatch, f32x8, Level, Simd, SIMD_WIDTH};
 use crate::{
@@ -414,6 +414,70 @@ fn apply_level(
         })
     } else {
         Ok(filter_2d(input, target, decomposition, transform, storage))
+    }
+}
+
+pub(crate) fn apply_single_decomposition_idwt_job(
+    job: J2kSingleDecompositionIdwtJob<'_>,
+    target: &mut Vec<f32>,
+) -> Result<()> {
+    let rect = int_rect_from_public(job.rect);
+    validate_direct_band(job.ll)?;
+    validate_direct_band(job.hl)?;
+    validate_direct_band(job.lh)?;
+    validate_direct_band(job.hh)?;
+
+    target.clear();
+    let required_len = rect
+        .width()
+        .checked_mul(rect.height())
+        .and_then(|len| usize::try_from(len).ok())
+        .ok_or(DecodingError::CodeBlockDecodeFailure)?;
+    target.resize(required_len, 0.0);
+
+    interleave_samples_roi(
+        direct_coefficient_source(job.ll),
+        direct_coefficient_source(job.hl),
+        direct_coefficient_source(job.lh),
+        direct_coefficient_source(job.hh),
+        target,
+        rect,
+        rect,
+    );
+    if rect.width() > 0 && rect.height() > 0 {
+        let transform = wavelet_transform_from_public(job.transform);
+        filter_horizontal(target, rect, transform);
+        filter_vertical(target, rect, transform);
+    }
+    Ok(())
+}
+
+fn validate_direct_band(band: J2kIdwtBand<'_>) -> Result<()> {
+    let rect = int_rect_from_public(band.rect);
+    let required_len = rect
+        .width()
+        .checked_mul(rect.height())
+        .and_then(|len| usize::try_from(len).ok())
+        .ok_or(DecodingError::CodeBlockDecodeFailure)?;
+    if band.coefficients.len() < required_len {
+        bail!(DecodingError::CodeBlockDecodeFailure);
+    }
+    Ok(())
+}
+
+fn direct_coefficient_source(band: J2kIdwtBand<'_>) -> CoefficientSource<'_> {
+    let rect = int_rect_from_public(band.rect);
+    CoefficientSource::new(band.coefficients, rect, rect.width())
+}
+
+fn int_rect_from_public(rect: J2kRect) -> IntRect {
+    IntRect::from_ltrb(rect.x0, rect.y0, rect.x1, rect.y1)
+}
+
+fn wavelet_transform_from_public(transform: J2kWaveletTransform) -> WaveletTransform {
+    match transform {
+        J2kWaveletTransform::Reversible53 => WaveletTransform::Reversible53,
+        J2kWaveletTransform::Irreversible97 => WaveletTransform::Irreversible97,
     }
 }
 

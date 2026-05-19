@@ -91,12 +91,17 @@ use crate::jp2::{DecodedImage, ImageBoxes};
 pub mod error;
 #[macro_use]
 pub(crate) mod log;
+mod direct_cpu;
 mod direct_plan;
 pub(crate) mod math;
 pub(crate) mod profile;
 pub(crate) mod writer;
 
 use crate::math::{dispatch, f32x8, Level, Simd, SIMD_WIDTH};
+#[doc(hidden)]
+pub use direct_cpu::{
+    execute_direct_color_plan_rgb8_into, execute_direct_color_plan_rgba8_into, J2kDirectCpuScratch,
+};
 #[doc(hidden)]
 pub use direct_plan::{
     HtOwnedCodeBlockBatchJob, HtOwnedSubBandPlan, J2kDirectBandId, J2kDirectColorPlan,
@@ -166,6 +171,18 @@ pub struct HtCodeBlockDecodeJob<'a> {
     pub strict: bool,
     /// Dequantization step to apply to decoded coefficients.
     pub dequantization_step: f32,
+}
+
+/// Hidden HTJ2K scalar decode phase limit for backend experimentation.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HtCodeBlockDecodePhaseLimit {
+    /// Stop after the cleanup pass has produced coefficient magnitudes/signs.
+    Cleanup,
+    /// Stop after the significance propagation refinement pass.
+    SignificancePropagation,
+    /// Decode through the magnitude refinement pass when present.
+    MagnitudeRefinement,
 }
 
 /// Hidden HTJ2K batched code-block decode job for one sub-band.
@@ -388,6 +405,40 @@ pub struct J2kHtCodeBlockEncodeJob<'a> {
     pub height: u32,
     /// Total bitplanes for this subband/code-block.
     pub total_bitplanes: u8,
+}
+
+/// Hidden HTJ2K cleanup-encode shape counters for backend benchmarking.
+#[doc(hidden)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HtCleanupEncodeDistribution {
+    /// Total 2x2 cleanup quads visited.
+    pub total_quads: u64,
+    /// Quads encoded in the first cleanup row pair.
+    pub initial_quads: u64,
+    /// Quads encoded after the first cleanup row pair.
+    pub non_initial_quads: u64,
+    /// All-quad `rho` histogram, indexed by the low four `rho` bits.
+    pub rho_counts: [u64; 16],
+    /// First-row-pair `rho` histogram, indexed by the low four `rho` bits.
+    pub initial_rho_counts: [u64; 16],
+    /// Non-initial-row `rho` histogram, indexed by the low four `rho` bits.
+    pub non_initial_rho_counts: [u64; 16],
+    /// Non-initial-row `u_q` histogram.
+    pub non_initial_u_q_counts: [u64; 32],
+    /// Non-initial-row `e_qmax` histogram.
+    pub non_initial_e_qmax_counts: [u64; 32],
+    /// Non-initial-row `kappa` histogram.
+    pub non_initial_kappa_counts: [u64; 32],
+    /// Non-initial-row joint `rho`/`u_q` histogram.
+    pub non_initial_rho_u_q_counts: [[u64; 32]; 16],
+    /// Calls that emitted at least one magnitude/sign sample.
+    pub mag_sign_calls: u64,
+    /// Magnitude/sign call histogram, indexed by the low four `rho` bits.
+    pub mag_sign_rho_counts: [u64; 16],
+    /// Encoded magnitude/sign sample payload bit-count histogram.
+    pub mag_sign_sample_bit_counts: [u64; 32],
+    /// Number of individual magnitude/sign samples emitted.
+    pub mag_sign_encoded_samples: u64,
 }
 
 /// Hidden LRCP packetization code-block contribution for backend experimentation.
@@ -932,6 +983,17 @@ pub fn encode_ht_code_block_scalar(
     })
 }
 
+/// Hidden HTJ2K cleanup-encode distribution helper for benchmark tuning.
+#[doc(hidden)]
+pub fn collect_ht_cleanup_encode_distribution(
+    coefficients: &[i32],
+    width: u32,
+    height: u32,
+    total_bitplanes: u8,
+) -> core::result::Result<HtCleanupEncodeDistribution, &'static str> {
+    j2c::ht_block_encode::collect_encode_distribution(coefficients, width, height, total_bitplanes)
+}
+
 /// Hidden scalar Tier-2 packetization helper for backend experimentation.
 #[doc(hidden)]
 pub fn encode_j2k_packetization_scalar(
@@ -1117,6 +1179,76 @@ pub fn decode_ht_code_block_scalar(
     job: HtCodeBlockDecodeJob<'_>,
     output: &mut [f32],
 ) -> Result<()> {
+    decode_ht_code_block_scalar_for_phase::<{ j2c::ht_block_decode::PHASE_LIMIT_MAGREF }>(
+        job, output,
+    )
+}
+
+/// Hidden scalar HTJ2K decoder helper that stops after the selected phase.
+#[doc(hidden)]
+pub fn decode_ht_code_block_scalar_until_phase(
+    job: HtCodeBlockDecodeJob<'_>,
+    output: &mut [f32],
+    phase_limit: HtCodeBlockDecodePhaseLimit,
+) -> Result<()> {
+    match phase_limit {
+        HtCodeBlockDecodePhaseLimit::Cleanup => decode_ht_code_block_scalar_for_phase::<
+            { j2c::ht_block_decode::PHASE_LIMIT_CLEANUP },
+        >(job, output),
+        HtCodeBlockDecodePhaseLimit::SignificancePropagation => {
+            decode_ht_code_block_scalar_for_phase::<{ j2c::ht_block_decode::PHASE_LIMIT_SIGPROP }>(
+                job, output,
+            )
+        }
+        HtCodeBlockDecodePhaseLimit::MagnitudeRefinement => {
+            decode_ht_code_block_scalar_for_phase::<{ j2c::ht_block_decode::PHASE_LIMIT_MAGREF }>(
+                job, output,
+            )
+        }
+    }
+}
+
+/// Hidden reusable scalar HTJ2K decode workspace for backend experimentation.
+#[doc(hidden)]
+#[derive(Default)]
+pub struct HtCodeBlockDecodeWorkspace {
+    coefficients: Vec<u32>,
+    scratch: j2c::ht_block_decode::HtBlockDecodeScratch,
+}
+
+impl HtCodeBlockDecodeWorkspace {
+    /// Current coefficient buffer capacity retained by this workspace.
+    #[doc(hidden)]
+    pub fn coefficient_capacity(&self) -> usize {
+        self.coefficients.capacity()
+    }
+}
+
+/// Hidden scalar HTJ2K decoder helper that reuses caller-owned scratch buffers.
+#[doc(hidden)]
+pub fn decode_ht_code_block_scalar_with_workspace(
+    job: HtCodeBlockDecodeJob<'_>,
+    output: &mut [f32],
+    workspace: &mut HtCodeBlockDecodeWorkspace,
+) -> Result<()> {
+    decode_ht_code_block_scalar_for_phase_with_workspace::<
+        { j2c::ht_block_decode::PHASE_LIMIT_MAGREF },
+    >(job, output, workspace)
+}
+
+fn decode_ht_code_block_scalar_for_phase<const PHASE_LIMIT: u8>(
+    job: HtCodeBlockDecodeJob<'_>,
+    output: &mut [f32],
+) -> Result<()> {
+    let mut workspace = HtCodeBlockDecodeWorkspace::default();
+    decode_ht_code_block_scalar_for_phase_with_workspace::<PHASE_LIMIT>(job, output, &mut workspace)
+}
+
+fn decode_ht_code_block_scalar_for_phase_with_workspace<const PHASE_LIMIT: u8>(
+    job: HtCodeBlockDecodeJob<'_>,
+    output: &mut [f32],
+    workspace: &mut HtCodeBlockDecodeWorkspace,
+) -> Result<()> {
     let required_len = if job.height == 0 {
         0
     } else {
@@ -1134,26 +1266,31 @@ pub fn decode_ht_code_block_scalar(
         .checked_mul(job.height as usize)
         .ok_or(DecodingError::CodeBlockDecodeFailure)?;
 
-    let combined = j2c::ht_block_decode::CombinedCodeBlockData {
-        data: job.data.to_vec(),
-        cleanup_length: job.cleanup_length,
-        refinement_length: job.refinement_length,
-    };
-    let mut coefficients = vec![0u32; code_block_len];
-    j2c::ht_block_decode::decode_combined_validated(
-        &combined,
+    let segments = j2c::ht_block_decode::HtCodeBlockSegments::from_combined_payload(
+        job.data,
+        job.cleanup_length,
+        job.refinement_length,
+    )?;
+    workspace.coefficients.clear();
+    workspace.coefficients.resize(code_block_len, 0);
+    j2c::ht_block_decode::decode_segments_validated_with_scratch_for_phase::<PHASE_LIMIT>(
+        &segments,
         job.missing_bit_planes,
         job.num_bitplanes,
         job.number_of_coding_passes,
         job.stripe_causal,
         job.strict,
-        &mut coefficients,
+        &mut workspace.coefficients,
         job.width,
         job.height,
         job.width,
+        &mut workspace.scratch,
+        None,
+        false,
     )?;
 
-    for (row_idx, coeff_row) in coefficients
+    for (row_idx, coeff_row) in workspace
+        .coefficients
         .chunks_exact(code_block_stride)
         .enumerate()
         .take(job.height as usize)
@@ -1168,6 +1305,51 @@ pub fn decode_ht_code_block_scalar(
     }
 
     Ok(())
+}
+
+/// Hidden HTJ2K SigProp benchmark state for backend experimentation.
+#[doc(hidden)]
+pub struct HtSigPropBenchmarkState(j2c::ht_block_decode::HtSigPropBenchmarkState);
+
+impl HtSigPropBenchmarkState {
+    /// Coefficient buffer length required by `decode_ht_sigprop_benchmark_state`.
+    #[doc(hidden)]
+    pub fn output_len(&self) -> usize {
+        self.0.output_len()
+    }
+}
+
+/// Hidden helper that precomputes cleanup-derived SigProp inputs for benchmarks.
+#[doc(hidden)]
+pub fn prepare_ht_sigprop_benchmark_state(
+    job: HtCodeBlockDecodeJob<'_>,
+) -> Result<HtSigPropBenchmarkState> {
+    let segments = j2c::ht_block_decode::HtCodeBlockSegments::from_combined_payload(
+        job.data,
+        job.cleanup_length,
+        job.refinement_length,
+    )?;
+    let state = j2c::ht_block_decode::prepare_sigprop_benchmark_state(
+        &segments,
+        job.missing_bit_planes,
+        job.num_bitplanes,
+        job.number_of_coding_passes,
+        job.stripe_causal,
+        job.strict,
+        job.width,
+        job.height,
+        job.width,
+    )?;
+    Ok(HtSigPropBenchmarkState(state))
+}
+
+/// Hidden helper that runs only the HTJ2K significance-propagation phase.
+#[doc(hidden)]
+pub fn decode_ht_sigprop_benchmark_state(
+    state: &mut HtSigPropBenchmarkState,
+    output: &mut [u32],
+) -> Result<()> {
+    j2c::ht_block_decode::decode_sigprop_benchmark_state(&mut state.0, output)
 }
 
 /// Hidden HTJ2K VLC table 0 for backend experimentation.
@@ -1392,6 +1574,26 @@ impl<'a> Image<'a> {
         j2c::build_direct_grayscale_plan(self.codestream, &self.header, decoder_context)
     }
 
+    /// Build a hidden grayscale direct device plan for an output-space region.
+    #[doc(hidden)]
+    pub fn build_direct_grayscale_plan_region_with_context(
+        &self,
+        decoder_context: &mut DecoderContext<'a>,
+        output_region: (u32, u32, u32, u32),
+    ) -> Result<J2kDirectGrayscalePlan> {
+        if !matches!(self.color_space, ColorSpace::Gray) || self.has_alpha {
+            bail!(DecodingError::UnsupportedFeature(
+                "direct grayscale plan only supports grayscale images without alpha"
+            ));
+        }
+
+        decoder_context.set_output_region(Some(output_region));
+        let result =
+            j2c::build_direct_grayscale_plan(self.codestream, &self.header, decoder_context);
+        decoder_context.set_output_region(None);
+        result
+    }
+
     /// Build a hidden RGB direct device plan without materializing host component planes.
     #[doc(hidden)]
     pub fn build_direct_color_plan_with_context(
@@ -1405,6 +1607,25 @@ impl<'a> Image<'a> {
         }
 
         j2c::build_direct_color_plan(self.codestream, &self.header, decoder_context)
+    }
+
+    /// Build a hidden RGB direct device plan for an output-space region.
+    #[doc(hidden)]
+    pub fn build_direct_color_plan_region_with_context(
+        &self,
+        decoder_context: &mut DecoderContext<'a>,
+        output_region: (u32, u32, u32, u32),
+    ) -> Result<J2kDirectColorPlan> {
+        if !matches!(self.color_space, ColorSpace::RGB) || self.has_alpha {
+            bail!(DecodingError::UnsupportedFeature(
+                "direct color plan only supports RGB images without alpha"
+            ));
+        }
+
+        decoder_context.set_output_region(Some(output_region));
+        let result = j2c::build_direct_color_plan(self.codestream, &self.header, decoder_context);
+        decoder_context.set_output_region(None);
+        result
     }
 
     /// Decode borrowed component planes while delegating HTJ2K code-block decode.
@@ -2454,6 +2675,152 @@ mod tests {
         called: bool,
     }
 
+    #[derive(Default)]
+    struct CapturingHtDecoder {
+        called: bool,
+        blocks: usize,
+        refinement_jobs: usize,
+        max_coding_passes: u8,
+    }
+
+    impl HtCodeBlockDecoder for CapturingHtDecoder {
+        fn decode_code_block(
+            &mut self,
+            job: HtCodeBlockDecodeJob<'_>,
+            output: &mut [f32],
+        ) -> Result<()> {
+            self.called = true;
+            self.blocks += 1;
+            self.max_coding_passes = self.max_coding_passes.max(job.number_of_coding_passes);
+            if job.refinement_length > 0 {
+                self.refinement_jobs += 1;
+                assert!(
+                    job.number_of_coding_passes > 1,
+                    "refinement bytes must correspond to refinement coding passes"
+                );
+            }
+
+            decode_ht_code_block_scalar(job, output)
+        }
+    }
+
+    #[derive(Clone)]
+    struct CapturedHtDecodeJob {
+        data: Vec<u8>,
+        cleanup_length: u32,
+        refinement_length: u32,
+        width: u32,
+        height: u32,
+        output_stride: usize,
+        missing_bit_planes: u8,
+        number_of_coding_passes: u8,
+        num_bitplanes: u8,
+        stripe_causal: bool,
+        strict: bool,
+        dequantization_step: f32,
+    }
+
+    impl CapturedHtDecodeJob {
+        fn from_job(job: HtCodeBlockDecodeJob<'_>) -> Self {
+            Self {
+                data: job.data.to_vec(),
+                cleanup_length: job.cleanup_length,
+                refinement_length: job.refinement_length,
+                width: job.width,
+                height: job.height,
+                output_stride: job.output_stride,
+                missing_bit_planes: job.missing_bit_planes,
+                number_of_coding_passes: job.number_of_coding_passes,
+                num_bitplanes: job.num_bitplanes,
+                stripe_causal: job.stripe_causal,
+                strict: job.strict,
+                dequantization_step: job.dequantization_step,
+            }
+        }
+
+        fn borrowed(&self) -> HtCodeBlockDecodeJob<'_> {
+            HtCodeBlockDecodeJob {
+                data: &self.data,
+                cleanup_length: self.cleanup_length,
+                refinement_length: self.refinement_length,
+                width: self.width,
+                height: self.height,
+                output_stride: self.output_stride,
+                missing_bit_planes: self.missing_bit_planes,
+                number_of_coding_passes: self.number_of_coding_passes,
+                num_bitplanes: self.num_bitplanes,
+                stripe_causal: self.stripe_causal,
+                strict: self.strict,
+                dequantization_step: self.dequantization_step,
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct FirstHtJobDecoder {
+        job: Option<CapturedHtDecodeJob>,
+    }
+
+    impl HtCodeBlockDecoder for FirstHtJobDecoder {
+        fn decode_code_block(
+            &mut self,
+            job: HtCodeBlockDecodeJob<'_>,
+            output: &mut [f32],
+        ) -> Result<()> {
+            if self.job.is_none() {
+                self.job = Some(CapturedHtDecodeJob::from_job(job));
+            }
+            decode_ht_code_block_scalar(job, output)
+        }
+    }
+
+    struct ZeroRefinementHtDecoder;
+
+    impl HtCodeBlockDecoder for ZeroRefinementHtDecoder {
+        fn decode_code_block(
+            &mut self,
+            job: HtCodeBlockDecodeJob<'_>,
+            output: &mut [f32],
+        ) -> Result<()> {
+            let mut data = job.data.to_vec();
+            let cleanup_len = job.cleanup_length as usize;
+            let refinement_len = job.refinement_length as usize;
+            data[cleanup_len..cleanup_len + refinement_len].fill(0);
+            let zeroed = HtCodeBlockDecodeJob { data: &data, ..job };
+
+            decode_ht_code_block_scalar(zeroed, output)
+        }
+    }
+
+    #[derive(Default)]
+    struct CleanupLimitedHtDecoder {
+        blocks: usize,
+        refinement_blocks: usize,
+        cleanup_bytes: usize,
+        refinement_bytes: usize,
+    }
+
+    impl HtCodeBlockDecoder for CleanupLimitedHtDecoder {
+        fn decode_code_block(
+            &mut self,
+            job: HtCodeBlockDecodeJob<'_>,
+            output: &mut [f32],
+        ) -> Result<()> {
+            self.blocks += 1;
+            self.cleanup_bytes += job.cleanup_length as usize;
+            if job.refinement_length > 0 {
+                self.refinement_blocks += 1;
+                self.refinement_bytes += job.refinement_length as usize;
+            }
+
+            decode_ht_code_block_scalar_until_phase(
+                job,
+                output,
+                HtCodeBlockDecodePhaseLimit::Cleanup,
+            )
+        }
+    }
+
     impl HtCodeBlockDecoder for FailingClassicBatchDecoder {
         fn decode_code_block(
             &mut self,
@@ -2523,6 +2890,60 @@ mod tests {
             ..EncodeOptions::default()
         };
         encode_htj2k(&pixels, 4, 4, 1, 8, false, &options).expect("encode ht gray8")
+    }
+
+    fn fixture_ht_multi_block() -> Vec<u8> {
+        let pixels: Vec<u8> = (0..64).collect();
+        let options = EncodeOptions {
+            reversible: true,
+            num_decomposition_levels: 0,
+            code_block_width_exp: 0,
+            code_block_height_exp: 0,
+            ..EncodeOptions::default()
+        };
+        encode_htj2k(&pixels, 8, 8, 1, 8, false, &options).expect("encode multi-block HT gray8")
+    }
+
+    fn fixture_ht_rgb_multi_block() -> Vec<u8> {
+        let pixels = gradient_pixels(8, 8, 3);
+        let options = EncodeOptions {
+            reversible: true,
+            num_decomposition_levels: 0,
+            code_block_width_exp: 0,
+            code_block_height_exp: 0,
+            ..EncodeOptions::default()
+        };
+        encode_htj2k(&pixels, 8, 8, 3, 8, false, &options).expect("encode multi-block HT RGB8")
+    }
+
+    fn direct_ht_job_count(plan: &J2kDirectGrayscalePlan) -> usize {
+        plan.steps
+            .iter()
+            .map(|step| match step {
+                J2kDirectGrayscaleStep::HtSubBand(sub_band) => sub_band.jobs.len(),
+                _ => 0,
+            })
+            .sum()
+    }
+
+    fn direct_color_ht_job_count(plan: &J2kDirectColorPlan) -> usize {
+        plan.component_plans.iter().map(direct_ht_job_count).sum()
+    }
+
+    fn fixture_openhtj2k_ht_refinement() -> &'static [u8] {
+        include_bytes!("../fixtures/htj2k/openhtj2k_ds0_ht_12_b11.j2k")
+    }
+
+    fn fixture_openhtj2k_ht_refinement_pixels() -> &'static [u8] {
+        include_bytes!("../fixtures/htj2k/openhtj2k_ds0_ht_12_b11.gray")
+    }
+
+    fn fixture_openhtj2k_ht_refinement_odd() -> &'static [u8] {
+        include_bytes!("../fixtures/htj2k/openhtj2k_ds0_ht_09_b11.j2k")
+    }
+
+    fn fixture_openhtj2k_ht_refinement_odd_pixels() -> &'static [u8] {
+        include_bytes!("../fixtures/htj2k/openhtj2k_ds0_ht_09_b11.gray")
     }
 
     fn gradient_pixels(width: u32, height: u32, components: u8) -> Vec<u8> {
@@ -2803,6 +3224,199 @@ mod tests {
     }
 
     #[test]
+    fn grayscale_direct_plan_region_prunes_unneeded_ht_code_blocks() {
+        let bytes = fixture_ht_multi_block();
+        let image = Image::new(&bytes, &DecodeSettings::default()).expect("image");
+        let mut full_context = DecoderContext::default();
+        let mut roi_context = DecoderContext::default();
+
+        let full = image
+            .build_direct_grayscale_plan_with_context(&mut full_context)
+            .expect("build full direct plan");
+        let roi = image
+            .build_direct_grayscale_plan_region_with_context(&mut roi_context, (0, 0, 2, 2))
+            .expect("build ROI direct plan");
+
+        let full_jobs = direct_ht_job_count(&full);
+        let roi_jobs = direct_ht_job_count(&roi);
+        assert!(full_jobs > 1, "fixture must expose multiple HT jobs");
+        assert!(
+            roi_jobs < full_jobs,
+            "ROI direct plan must prune HT jobs before device preparation"
+        );
+    }
+
+    #[test]
+    fn color_direct_plan_region_prunes_unneeded_ht_code_blocks() {
+        let bytes = fixture_ht_rgb_multi_block();
+        let image = Image::new(&bytes, &DecodeSettings::default()).expect("image");
+        let mut full_context = DecoderContext::default();
+        let mut roi_context = DecoderContext::default();
+
+        let full = image
+            .build_direct_color_plan_with_context(&mut full_context)
+            .expect("build full RGB direct plan");
+        let roi = image
+            .build_direct_color_plan_region_with_context(&mut roi_context, (0, 0, 2, 2))
+            .expect("build ROI RGB direct plan");
+
+        let full_jobs = direct_color_ht_job_count(&full);
+        let roi_jobs = direct_color_ht_job_count(&roi);
+        assert!(full_jobs > 3, "fixture must expose multiple RGB HT jobs");
+        assert!(
+            roi_jobs < full_jobs,
+            "RGB ROI direct plan must prune HT jobs before device preparation"
+        );
+    }
+
+    #[test]
+    fn color_direct_plan_honors_target_resolution() {
+        for (name, bytes) in [
+            ("classic", {
+                let pixels = gradient_pixels(8, 8, 3);
+                let options = EncodeOptions {
+                    reversible: true,
+                    num_decomposition_levels: 2,
+                    ..EncodeOptions::default()
+                };
+                encode(&pixels, 8, 8, 3, 8, false, &options).expect("encode classic rgb8")
+            }),
+            ("htj2k", {
+                let pixels = gradient_pixels(8, 8, 3);
+                let options = EncodeOptions {
+                    reversible: true,
+                    num_decomposition_levels: 2,
+                    ..EncodeOptions::default()
+                };
+                encode_htj2k(&pixels, 8, 8, 3, 8, false, &options).expect("encode ht rgb8")
+            }),
+        ] {
+            let image = Image::new(
+                &bytes,
+                &DecodeSettings {
+                    target_resolution: Some((4, 4)),
+                    ..DecodeSettings::default()
+                },
+            )
+            .expect("scaled RGB image");
+            let mut context = DecoderContext::default();
+
+            let plan = image
+                .build_direct_color_plan_with_context(&mut context)
+                .expect("build scaled direct color plan");
+
+            assert_eq!(plan.dimensions, (4, 4), "{name}: output dimensions");
+            assert_eq!(plan.component_plans.len(), 3, "{name}: component count");
+            for component_plan in &plan.component_plans {
+                assert_eq!(component_plan.dimensions, (4, 4), "{name}: component dims");
+                assert!(component_plan.steps.iter().any(|step| matches!(
+                    step,
+                    J2kDirectGrayscaleStep::Store(store)
+                        if store.output_width == 4 && store.output_height == 4
+                )));
+            }
+            assert!(
+                context.tile_decode_context.channel_data.is_empty(),
+                "{name}: building a scaled color direct plan must not materialize host component planes"
+            );
+        }
+    }
+
+    #[test]
+    fn direct_color_cpu_rgb8_executor_matches_scaled_region_decode() {
+        for (name, bytes) in [
+            ("classic", {
+                let pixels = gradient_pixels(16, 16, 3);
+                let options = EncodeOptions {
+                    reversible: true,
+                    num_decomposition_levels: 2,
+                    ..EncodeOptions::default()
+                };
+                encode(&pixels, 16, 16, 3, 8, false, &options).expect("encode classic rgb8")
+            }),
+            ("htj2k", {
+                let pixels = gradient_pixels(16, 16, 3);
+                let options = EncodeOptions {
+                    reversible: true,
+                    num_decomposition_levels: 2,
+                    ..EncodeOptions::default()
+                };
+                encode_htj2k(&pixels, 16, 16, 3, 8, false, &options).expect("encode ht rgb8")
+            }),
+        ] {
+            let image = Image::new(
+                &bytes,
+                &DecodeSettings {
+                    target_resolution: Some((4, 4)),
+                    ..DecodeSettings::default()
+                },
+            )
+            .expect("scaled RGB image");
+            let mut expected_context = DecoderContext::default();
+            let expected_full = image
+                .decode_with_context(&mut expected_context)
+                .expect("decode scaled reference");
+            let output_region = J2kRect {
+                x0: 1,
+                y0: 1,
+                x1: 3,
+                y1: 3,
+            };
+            let mut direct_context = DecoderContext::default();
+            let plan = image
+                .build_direct_color_plan_region_with_context(
+                    &mut direct_context,
+                    (
+                        output_region.x0,
+                        output_region.y0,
+                        output_region.width(),
+                        output_region.height(),
+                    ),
+                )
+                .expect("build direct RGB region plan");
+
+            let stride = output_region.width() as usize * 3;
+            let mut direct = vec![0_u8; stride * output_region.height() as usize];
+            let mut scratch = J2kDirectCpuScratch::new();
+            execute_direct_color_plan_rgb8_into(
+                &plan,
+                output_region,
+                &mut scratch,
+                &mut direct,
+                stride,
+            )
+            .expect("execute direct RGB plan");
+
+            let mut expected = Vec::with_capacity(direct.len());
+            let full_stride = image.width() as usize * 3;
+            for y in output_region.y0..output_region.y1 {
+                let start = y as usize * full_stride + output_region.x0 as usize * 3;
+                expected.extend_from_slice(&expected_full.data[start..start + stride]);
+            }
+
+            assert_eq!(direct, expected, "{name}: direct RGB output");
+
+            let rgba_stride = output_region.width() as usize * 4;
+            let mut direct_rgba = vec![0_u8; rgba_stride * output_region.height() as usize];
+            execute_direct_color_plan_rgba8_into(
+                &plan,
+                output_region,
+                &mut scratch,
+                &mut direct_rgba,
+                rgba_stride,
+            )
+            .expect("execute direct RGBA plan");
+
+            let mut expected_rgba = Vec::with_capacity(direct_rgba.len());
+            for rgb in expected.chunks_exact(3) {
+                expected_rgba.extend_from_slice(rgb);
+                expected_rgba.push(255);
+            }
+            assert_eq!(direct_rgba, expected_rgba, "{name}: direct RGBA output");
+        }
+    }
+
+    #[test]
     fn htj2k_grayscale_direct_plan_contains_ht_sub_band_steps() {
         let bytes = fixture_ht_gray();
         let image = Image::new(&bytes, &DecodeSettings::default()).expect("image");
@@ -2843,6 +3457,225 @@ mod tests {
             error,
             DecodeError::Decoding(DecodingError::CodeBlockDecodeFailure)
         );
+    }
+
+    #[test]
+    fn openhtj2k_conformance_fixture_exercises_refinement_passes() {
+        for fixture in [
+            (
+                "ds0_ht_12_b11",
+                fixture_openhtj2k_ht_refinement(),
+                fixture_openhtj2k_ht_refinement_pixels(),
+                (3, 5),
+                8,
+                2,
+                4,
+            ),
+            (
+                "ds0_ht_09_b11",
+                fixture_openhtj2k_ht_refinement_odd(),
+                fixture_openhtj2k_ht_refinement_odd_pixels(),
+                (17, 37),
+                14,
+                14,
+                629,
+            ),
+        ] {
+            let (
+                name,
+                codestream,
+                expected_pixels,
+                dimensions,
+                blocks,
+                refinement_jobs,
+                zero_diffs,
+            ) = fixture;
+            let image = Image::new(codestream, &DecodeSettings::default()).expect("image");
+            let mut context = DecoderContext::default();
+            let mut hook = CapturingHtDecoder::default();
+
+            let components = image
+                .decode_components_with_ht_decoder(&mut context, &mut hook)
+                .expect("decode OpenHTJ2K HTJ2K fixture");
+
+            assert!(
+                hook.called,
+                "{name}: HTJ2K fixture must use HT code-block decode"
+            );
+            assert!(
+                hook.refinement_jobs > 0,
+                "{name}: OpenHTJ2K fixture must contain non-empty refinement segments"
+            );
+            assert!(
+                hook.max_coding_passes > 1,
+                "{name}: OpenHTJ2K fixture must exercise more than the cleanup pass"
+            );
+            assert_eq!(hook.blocks, blocks, "{name}: HT code-block count");
+            assert_eq!(
+                hook.refinement_jobs, refinement_jobs,
+                "{name}: refinement job count"
+            );
+            assert_eq!(hook.max_coding_passes, 3, "{name}: max HT coding passes");
+            assert_eq!(components.dimensions(), dimensions, "{name}: dimensions");
+            assert_eq!(components.planes().len(), 1, "{name}: component planes");
+
+            let decoded: Vec<u8> = components.planes()[0]
+                .samples()
+                .iter()
+                .map(|sample| sample.round().clamp(0.0, 255.0) as u8)
+                .collect();
+            assert_eq!(decoded, expected_pixels, "{name}: decoded pixels");
+
+            let mut zero_context = DecoderContext::default();
+            let mut zero_hook = ZeroRefinementHtDecoder;
+            let zeroed_components = image
+                .decode_components_with_ht_decoder(&mut zero_context, &mut zero_hook)
+                .expect("decode OpenHTJ2K fixture with zeroed refinement bytes");
+            let actual_zero_diffs = components.planes()[0]
+                .samples()
+                .iter()
+                .zip(zeroed_components.planes()[0].samples())
+                .filter(|(actual, zeroed)| (*actual - *zeroed).abs() > f32::EPSILON)
+                .count();
+            assert_eq!(
+                actual_zero_diffs, zero_diffs,
+                "{name}: zeroing refinement bytes must change decoded samples"
+            );
+        }
+    }
+
+    #[test]
+    fn openhtj2k_refinement_phase_limited_decode_differs_and_records_ht_stats() {
+        let image = Image::new(
+            fixture_openhtj2k_ht_refinement_odd(),
+            &DecodeSettings::default(),
+        )
+        .expect("image");
+        let mut full_context = DecoderContext::default();
+
+        let (full_samples, full_decoded) = {
+            let full_components = image
+                .decode_components_with_context(&mut full_context)
+                .expect("full native decode of OpenHTJ2K refinement fixture");
+            let full_samples = full_components.planes()[0].samples().to_vec();
+            let full_decoded: Vec<u8> = full_samples
+                .iter()
+                .map(|sample| sample.round().clamp(0.0, 255.0) as u8)
+                .collect();
+            (full_samples, full_decoded)
+        };
+        assert_eq!(
+            full_decoded,
+            fixture_openhtj2k_ht_refinement_odd_pixels(),
+            "full decode must match the checked-in OpenHTJ2K oracle"
+        );
+
+        let stats = full_context
+            .tile_decode_context
+            .debug_counters
+            .ht_phase_stats;
+        assert_eq!(stats.blocks, 14, "HT block count");
+        assert_eq!(stats.refinement_blocks, 14, "HT refinement block count");
+        assert!(stats.cleanup_bytes > 0, "cleanup byte total");
+        assert!(stats.refinement_bytes > 0, "refinement byte total");
+
+        let mut cleanup_context = DecoderContext::default();
+        let mut cleanup_hook = CleanupLimitedHtDecoder::default();
+        let cleanup_components = image
+            .decode_components_with_ht_decoder(&mut cleanup_context, &mut cleanup_hook)
+            .expect("cleanup-limited decode of OpenHTJ2K refinement fixture");
+        let cleanup_decoded: Vec<u8> = cleanup_components.planes()[0]
+            .samples()
+            .iter()
+            .map(|sample| sample.round().clamp(0.0, 255.0) as u8)
+            .collect();
+        let cleanup_sample_diffs = full_samples
+            .iter()
+            .zip(cleanup_components.planes()[0].samples())
+            .filter(|(full, cleanup)| (*full - *cleanup).abs() > f32::EPSILON)
+            .count();
+
+        assert!(
+            cleanup_sample_diffs > 0,
+            "cleanup-limited decode must omit refinement effects"
+        );
+        assert_eq!(
+            cleanup_decoded, full_decoded,
+            "fixture refinement differences are below final u8 clamping"
+        );
+        assert_eq!(cleanup_hook.blocks, 14, "hook HT block count");
+        assert_eq!(
+            cleanup_hook.refinement_blocks, 14,
+            "hook HT refinement block count"
+        );
+        assert!(cleanup_hook.cleanup_bytes > 0, "hook cleanup byte total");
+        assert!(
+            cleanup_hook.refinement_bytes > 0,
+            "hook refinement byte total"
+        );
+    }
+
+    #[test]
+    fn scalar_htj2k_encoder_contract_is_cleanup_only() {
+        let coefficients = (0..64)
+            .map(|index| {
+                let magnitude = (index % 7) + 1;
+                if index % 2 == 0 {
+                    magnitude
+                } else {
+                    -magnitude
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let encoded =
+            encode_ht_code_block_scalar(&coefficients, 8, 8, 8).expect("encode HT code block");
+
+        assert_eq!(
+            encoded.num_coding_passes, 1,
+            "current scalar HTJ2K encoder emits only the cleanup pass"
+        );
+        assert_eq!(
+            encoded.num_zero_bitplanes, 7,
+            "current cleanup-only HTJ2K encoder includes one bitplane"
+        );
+        assert!(
+            !encoded.data.is_empty(),
+            "non-zero cleanup-only block must still produce payload bytes"
+        );
+    }
+
+    #[test]
+    fn scalar_htj2k_decode_workspace_matches_fresh_decode_and_reuses_capacity() {
+        let image = Image::new(
+            fixture_openhtj2k_ht_refinement_odd(),
+            &DecodeSettings::default(),
+        )
+        .expect("image");
+        let mut context = DecoderContext::default();
+        let mut hook = FirstHtJobDecoder::default();
+        image
+            .decode_components_with_ht_decoder(&mut context, &mut hook)
+            .expect("decode fixture while collecting HT jobs");
+        let job = hook
+            .job
+            .as_ref()
+            .expect("fixture must expose an HT decode job")
+            .borrowed();
+        let mut fresh = vec![0.0_f32; job.width as usize * job.height as usize];
+        let mut reused = vec![0.0_f32; fresh.len()];
+        let mut workspace = HtCodeBlockDecodeWorkspace::default();
+
+        decode_ht_code_block_scalar(job, &mut fresh).expect("fresh HT decode");
+        decode_ht_code_block_scalar_with_workspace(job, &mut reused, &mut workspace)
+            .expect("workspace HT decode");
+        let first_capacity = workspace.coefficient_capacity();
+        decode_ht_code_block_scalar_with_workspace(job, &mut reused, &mut workspace)
+            .expect("second workspace HT decode");
+
+        assert_eq!(reused, fresh);
+        assert!(first_capacity >= fresh.len());
+        assert_eq!(workspace.coefficient_capacity(), first_capacity);
     }
 
     #[test]

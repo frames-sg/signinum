@@ -193,6 +193,11 @@ fn forward_lift_53(data: &mut [f32]) {
         return;
     }
 
+    if n.is_multiple_of(2) {
+        forward_lift_53_even(data);
+        return;
+    }
+
     // Step 1: Predict (high-pass) — update odd samples
     // d(i) = x(2i+1) - floor((x(2i) + x(2i+2)) / 2)
     let last_even = if n.is_multiple_of(2) { n - 2 } else { n - 1 };
@@ -212,6 +217,22 @@ fn forward_lift_53(data: &mut [f32]) {
         let left = if i > 0 { data[i - 1] } else { data[1] };
         let right = if i + 1 < n { data[i + 1] } else { left };
         data[i] += floor_f32((left + right) * 0.25 + 0.5);
+    }
+}
+
+fn forward_lift_53_even(data: &mut [f32]) {
+    let n = data.len();
+    debug_assert!(n >= 2);
+    debug_assert!(n.is_multiple_of(2));
+
+    for i in (1..n - 1).step_by(2) {
+        data[i] -= floor_f32((data[i - 1] + data[i + 1]) * 0.5);
+    }
+    data[n - 1] -= floor_f32(data[n - 2]);
+
+    data[0] += floor_f32(data[1] * 0.5 + 0.5);
+    for i in (2..n).step_by(2) {
+        data[i] += floor_f32((data[i - 1] + data[i + 1]) * 0.25 + 0.5);
     }
 }
 
@@ -290,6 +311,21 @@ mod tests {
     }
 
     #[test]
+    fn forward_53_even_fast_path_matches_reference_for_common_tile_widths() {
+        for len in [2usize, 4, 8, 64, 512] {
+            let mut expected = (0..len)
+                .map(|idx| ((idx * 37 + idx / 3) & 0xff) as f32 - 128.0)
+                .collect::<Vec<_>>();
+            let mut actual = expected.clone();
+
+            forward_lift_53_reference(&mut expected);
+            forward_lift_53_even(&mut actual);
+
+            assert_eq!(actual, expected, "len={len}");
+        }
+    }
+
+    #[test]
     fn test_forward_97_round_trip() {
         let original = vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0];
         let mut data = original.clone();
@@ -350,6 +386,30 @@ mod tests {
                 data[last_even]
             };
             data[i] += ((left + right) * 0.5).floor();
+        }
+    }
+
+    fn forward_lift_53_reference(data: &mut [f32]) {
+        let n = data.len();
+        if n < 2 {
+            return;
+        }
+
+        let last_even = if n.is_multiple_of(2) { n - 2 } else { n - 1 };
+        for i in (1..n).step_by(2) {
+            let left = data[i - 1];
+            let right = if i + 1 < n {
+                data[i + 1]
+            } else {
+                data[last_even]
+            };
+            data[i] -= ((left + right) * 0.5).floor();
+        }
+
+        for i in (0..n).step_by(2) {
+            let left = if i > 0 { data[i - 1] } else { data[1] };
+            let right = if i + 1 < n { data[i + 1] } else { left };
+            data[i] += ((left + right) * 0.25 + 0.5).floor();
         }
     }
 

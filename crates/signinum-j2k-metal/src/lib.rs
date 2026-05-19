@@ -14,6 +14,8 @@ mod direct;
 mod encode;
 #[cfg(any(test, target_os = "macos"))]
 mod ht;
+#[cfg(target_os = "macos")]
+mod hybrid;
 #[cfg(any(test, target_os = "macos"))]
 mod idwt;
 #[cfg(any(test, target_os = "macos"))]
@@ -53,6 +55,8 @@ use signinum_j2k_native::{
 use metal::{Buffer, Device, MTLResourceOptions};
 
 #[doc(hidden)]
+pub use batch::{benchmark_group_region_scaled_requests, BenchmarkGroupedRequests};
+#[doc(hidden)]
 pub use dicom::{
     extract_dicom_encapsulated_frames, extract_dicom_encapsulated_frames_with_limit,
     DicomFrameExtractError,
@@ -83,6 +87,28 @@ pub use encode::{
     SubmittedJ2kLosslessMetalBufferEncodeBatch, SubmittedJ2kLosslessMetalEncode,
     SubmittedJ2kLosslessMetalEncodeBatch,
 };
+
+#[cfg(target_os = "macos")]
+#[doc(hidden)]
+pub fn benchmark_region_scaled_direct_plan_prepare(
+    input: &[u8],
+    fmt: PixelFormat,
+    roi: Rect,
+    scale: Downscale,
+) -> Result<(), Error> {
+    hybrid::benchmark_region_scaled_direct_plan_prepare(input, fmt, roi, scale)
+}
+
+#[cfg(not(target_os = "macos"))]
+#[doc(hidden)]
+pub fn benchmark_region_scaled_direct_plan_prepare(
+    _input: &[u8],
+    _fmt: PixelFormat,
+    _roi: Rect,
+    _scale: Downscale,
+) -> Result<(), Error> {
+    Err(Error::MetalUnavailable)
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -180,7 +206,6 @@ pub enum SurfaceResidency {
 #[cfg(target_os = "macos")]
 const CPU_STAGED_METAL_REQUIRES_EXPLICIT_API: &str =
     "CPU-staged Metal upload requires the explicit CPU-staged API; BackendRequest::Metal only accepts resident Metal decode";
-
 impl Surface {
     pub fn residency(&self) -> SurfaceResidency {
         self.residency
@@ -950,21 +975,7 @@ impl<'a> J2kDecoder<'a> {
         roi: Rect,
         scale: Downscale,
     ) -> Result<Option<Surface>, Error> {
-        if !matches!(fmt, PixelFormat::Gray8 | PixelFormat::Gray16) {
-            return Ok(None);
-        }
-        let prepared = match build_region_scaled_direct_gray_plan(self.inner.bytes(), roi, scale) {
-            Ok(prepared) => prepared,
-            Err(error) if is_direct_region_scaled_runtime_fallback_error(&error) => {
-                return Ok(None);
-            }
-            Err(error) => return Err(error),
-        };
-        match crate::compute::execute_prepared_direct_grayscale_plan(&Arc::new(prepared), fmt) {
-            Ok(surface) => Ok(Some(surface)),
-            Err(error) if is_direct_region_scaled_runtime_fallback_error(&error) => Ok(None),
-            Err(error) => Err(error),
-        }
+        crate::hybrid::decode_region_scaled_direct_to_surface(self.inner.bytes(), fmt, roi, scale)
     }
 
     #[cfg(target_os = "macos")]
@@ -975,25 +986,13 @@ impl<'a> J2kDecoder<'a> {
         scale: Downscale,
         device: &Device,
     ) -> Result<Option<Surface>, Error> {
-        if !matches!(fmt, PixelFormat::Gray8 | PixelFormat::Gray16) {
-            return Ok(None);
-        }
-        let prepared = match build_region_scaled_direct_gray_plan(self.inner.bytes(), roi, scale) {
-            Ok(prepared) => prepared,
-            Err(error) if is_direct_region_scaled_runtime_fallback_error(&error) => {
-                return Ok(None);
-            }
-            Err(error) => return Err(error),
-        };
-        match crate::compute::execute_prepared_direct_grayscale_plan_with_device(
-            &Arc::new(prepared),
+        crate::hybrid::decode_region_scaled_direct_to_surface_with_device(
+            self.inner.bytes(),
             fmt,
+            roi,
+            scale,
             device,
-        ) {
-            Ok(surface) => Ok(Some(surface)),
-            Err(error) if is_direct_region_scaled_runtime_fallback_error(&error) => Ok(None),
-            Err(error) => Err(error),
-        }
+        )
     }
 
     #[cfg(target_os = "macos")]
@@ -1454,18 +1453,6 @@ impl<'a> J2kDecoder<'a> {
         if let Some(error) = routing::decision_error(route) {
             return Err(error);
         }
-        #[cfg(target_os = "macos")]
-        {
-            if matches!(route, routing::RouteDecision::MetalKernel)
-                && !matches!(fmt, PixelFormat::Gray8 | PixelFormat::Gray16)
-            {
-                return Err(Error::UnsupportedMetalRequest {
-                    reason:
-                        "J2K Metal ROI+scaled direct decode currently supports Gray8/Gray16 only",
-                });
-            }
-        }
-
         let plan = DeviceDecodePlan::for_image(
             self.inner.info().dimensions,
             DeviceDecodeRequest::RegionScaled { roi, scale },
@@ -1500,7 +1487,7 @@ impl<'a> J2kDecoder<'a> {
         }
         if !matches!(fmt, PixelFormat::Gray8 | PixelFormat::Gray16) {
             return Err(Error::UnsupportedMetalRequest {
-                reason: "J2K Metal ROI+scaled direct decode currently supports Gray8/Gray16 only",
+                reason: "J2K Metal session scaled decode currently supports Gray8/Gray16 only",
             });
         }
 
@@ -1656,12 +1643,8 @@ fn is_direct_runtime_fallback_error(error: &Error) -> bool {
                 || message.contains("unsupported HT kernel input")
                 || message.contains("direct component plan")
                 || message.contains("currently supports grayscale direct plans only")
+                || message.contains("currently supports color direct plans only")
     )
-}
-
-#[cfg(target_os = "macos")]
-fn is_direct_region_scaled_runtime_fallback_error(error: &Error) -> bool {
-    is_direct_runtime_fallback_error(error)
 }
 
 #[cfg(target_os = "macos")]
@@ -1691,72 +1674,6 @@ pub(crate) fn decode_full_grayscale_batch_direct_to_device(
         plans.push(plan);
     }
     crate::compute::execute_prepared_direct_grayscale_plan_batch(&plans, fmt)
-}
-
-#[cfg(target_os = "macos")]
-pub(crate) fn decode_region_scaled_grayscale_batch_direct_to_device(
-    requests: &[(Arc<[u8]>, Rect, Downscale)],
-    fmt: PixelFormat,
-) -> Result<Vec<Surface>, Error> {
-    if requests.is_empty() {
-        return Ok(Vec::new());
-    }
-    if !matches!(fmt, PixelFormat::Gray8 | PixelFormat::Gray16) {
-        return Err(Error::MetalKernel {
-            message: format!(
-                "J2K MetalDirect region-scaled grayscale batch does not support {fmt:?}"
-            ),
-        });
-    }
-
-    let mut plans = Vec::with_capacity(requests.len());
-    for (input, roi, scale) in requests {
-        let plan = build_region_scaled_direct_gray_plan(input.as_ref(), *roi, *scale)?;
-        plans.push(Arc::new(plan));
-    }
-    crate::compute::execute_prepared_direct_grayscale_plan_batch(&plans, fmt)
-}
-
-#[cfg(target_os = "macos")]
-fn build_region_scaled_direct_gray_plan(
-    input: &[u8],
-    roi: Rect,
-    scale: Downscale,
-) -> Result<crate::compute::PreparedDirectGrayscalePlan, Error> {
-    let decoder = J2kDecoder::new(input)?;
-    let dims = decoder.inner.info().dimensions;
-    let target_dims = (
-        dims.0.div_ceil(scale.denominator()),
-        dims.1.div_ceil(scale.denominator()),
-    );
-    let settings = NativeDecodeSettings {
-        target_resolution: Some(target_dims),
-        ..NativeDecodeSettings::default()
-    };
-    let image =
-        NativeImage::new(input, &settings).map_err(|error| J2kError::Backend(error.to_string()))?;
-    let mut context = NativeDecoderContext::default();
-    let plan = match image.build_direct_grayscale_plan_with_context(&mut context) {
-        Ok(plan) => plan,
-        Err(error) if direct::is_unsupported_direct_plan_error(&error.to_string()) => {
-            return Err(Error::MetalKernel {
-                message: format!(
-                    "explicit J2K MetalDirect region-scaled batch currently supports grayscale direct plans only: {error}"
-                ),
-            });
-        }
-        Err(error) => {
-            return Err(Error::Decode(J2kError::Backend(format!(
-                "failed to build J2K MetalDirect region-scaled grayscale plan: {error}"
-            ))));
-        }
-    };
-    let mut prepared = crate::compute::prepare_direct_grayscale_plan(&plan)?;
-    crate::compute::crop_prepared_direct_grayscale_plan_to_output_region(
-        &mut prepared,
-        roi.scaled_covering(scale),
-    )?;
-    Ok(prepared)
 }
 
 #[cfg(target_os = "macos")]
@@ -2179,5 +2096,45 @@ mod tests {
                     && reason.contains("explicit")
                     && reason.contains("Metal")
         ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn repeated_region_scaled_color_batch_reuses_prepared_plan() {
+        if Device::system_default().is_none() {
+            eprintln!("skipping repeated color plan reuse test: no Metal device");
+            return;
+        }
+
+        let pixels = signinum_test_support::gradient_u8(64, 64, 3);
+        let options = signinum_j2k_native::EncodeOptions {
+            reversible: true,
+            num_decomposition_levels: 2,
+            ..signinum_j2k_native::EncodeOptions::default()
+        };
+        let input = Arc::<[u8]>::from(
+            signinum_j2k_native::encode(&pixels, 64, 64, 3, 8, false, &options)
+                .expect("encode rgb8"),
+        );
+        let roi = Rect {
+            x: 8,
+            y: 8,
+            w: 32,
+            h: 32,
+        };
+        let scale = Downscale::Quarter;
+        let requests = vec![(input.clone(), roi, scale); 4];
+        hybrid::reset_region_scaled_color_plan_builds_for_test();
+
+        let surfaces =
+            hybrid::decode_region_scaled_color_batch_direct_to_device(&requests, PixelFormat::Rgb8)
+                .expect("repeated RGB region-scaled batch");
+
+        assert_eq!(surfaces.len(), requests.len());
+        assert_eq!(
+            hybrid::region_scaled_color_plan_builds_for_test(),
+            1,
+            "repeated RGB ROI+scaled batches should build and crop one prepared direct color plan"
+        );
     }
 }

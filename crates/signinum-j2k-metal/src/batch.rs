@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::{Arc, Mutex};
+use std::{
+    cell::OnceCell,
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
+    sync::{Arc, Mutex},
+};
 
 use signinum_core::{BackendKind, BackendRequest, DeviceSubmission, Downscale, PixelFormat, Rect};
 use signinum_j2k::{
@@ -10,10 +15,19 @@ use signinum_j2k::{
 
 use crate::{Error, J2kDecoder, MetalSession, Storage, Surface, SurfaceResidency};
 
-const AUTO_REGION_SCALED_GRAYSCALE_BATCH64_MIN_DIM: u32 = 512;
-const AUTO_REGION_SCALED_GRAYSCALE_BATCH64_MIN_COUNT: usize = 64;
-const AUTO_REGION_SCALED_GRAYSCALE_BATCH16_MIN_DIM: u32 = 1024;
-const AUTO_REGION_SCALED_GRAYSCALE_BATCH16_MIN_COUNT: usize = 16;
+const AUTO_REGION_SCALED_DIRECT_BATCH64_MIN_DIM: u32 = 512;
+const AUTO_REGION_SCALED_DIRECT_BATCH64_MIN_COUNT: usize = 64;
+const AUTO_REGION_SCALED_DIRECT_REPEATED_RGB_MIN_DIM: u32 = 512;
+const AUTO_REGION_SCALED_DIRECT_REPEATED_RGB_MIN_COUNT: usize = 2;
+const AUTO_REGION_SCALED_DIRECT_BATCH16_MIN_DIM: u32 = 1024;
+const AUTO_REGION_SCALED_DIRECT_BATCH16_MIN_COUNT: usize = 16;
+const REGION_SCALED_DIRECT_FORMATS: [PixelFormat; 5] = [
+    PixelFormat::Gray8,
+    PixelFormat::Gray16,
+    PixelFormat::Rgb8,
+    PixelFormat::Rgba8,
+    PixelFormat::Rgb16,
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BatchOp {
@@ -30,13 +44,76 @@ struct QueuedRequest {
     backend: BackendRequest,
     op: BatchOp,
     output_slot: usize,
+    max_image_dim: OnceCell<Option<u32>>,
+    input_fingerprint: OnceCell<u64>,
 }
 
 impl QueuedRequest {
     fn max_image_dim(&self) -> Option<u32> {
-        let decoder = J2kDecoder::new(self.input.as_ref()).ok()?;
-        let dims = decoder.inner.info().dimensions;
-        Some(dims.0.max(dims.1))
+        *self.max_image_dim.get_or_init(|| {
+            let decoder = J2kDecoder::new(self.input.as_ref()).ok()?;
+            let dims = decoder.inner.info().dimensions;
+            Some(dims.0.max(dims.1))
+        })
+    }
+
+    fn input_fingerprint(&self) -> u64 {
+        *self.input_fingerprint.get_or_init(|| {
+            let mut hasher = DefaultHasher::new();
+            self.input.len().hash(&mut hasher);
+            if !self.input.is_empty() {
+                let len = self.input.len();
+                for offset in [0, len / 4, len / 2, len.saturating_sub(8)] {
+                    let end = offset.saturating_add(8).min(len);
+                    self.input[offset..end].hash(&mut hasher);
+                }
+            }
+            hasher.finish()
+        })
+    }
+
+    #[cfg(test)]
+    fn max_image_dim_cache_filled_for_test(&self) -> bool {
+        self.max_image_dim.get().is_some()
+    }
+
+    #[cfg(test)]
+    fn input_fingerprint_cache_filled_for_test(&self) -> bool {
+        self.input_fingerprint.get().is_some()
+    }
+}
+
+#[doc(hidden)]
+pub struct BenchmarkGroupedRequests {
+    pub batch_count: usize,
+    pub max_batch_len: usize,
+}
+
+#[doc(hidden)]
+pub fn benchmark_group_region_scaled_requests(
+    inputs: &[Arc<[u8]>],
+    fmt: PixelFormat,
+    backend: BackendRequest,
+    roi: Rect,
+    scale: Downscale,
+) -> BenchmarkGroupedRequests {
+    let queued = inputs
+        .iter()
+        .enumerate()
+        .map(|(output_slot, input)| QueuedRequest {
+            input: input.clone(),
+            fmt,
+            backend,
+            op: BatchOp::RegionScaled { roi, scale },
+            output_slot,
+            max_image_dim: OnceCell::new(),
+            input_fingerprint: OnceCell::new(),
+        })
+        .collect::<Vec<_>>();
+    let batches = group_metal_requests(queued);
+    BenchmarkGroupedRequests {
+        batch_count: batches.len(),
+        max_batch_len: batches.iter().map(Vec::len).max().unwrap_or(0),
     }
 }
 
@@ -92,6 +169,8 @@ pub(crate) fn queue_tile_request_shared(
         backend,
         op,
         output_slot: slot,
+        max_image_dim: OnceCell::new(),
+        input_fingerprint: OnceCell::new(),
     });
     MetalSubmission {
         session: session.shared.clone(),
@@ -110,7 +189,7 @@ fn flush_if_needed(session: &mut SessionState) {
 }
 
 fn group_metal_requests(queued: Vec<QueuedRequest>) -> Vec<Vec<QueuedRequest>> {
-    coalesce_cpu_host_batches(coalesce_distinct_region_scaled_grayscale_metal_requests(
+    coalesce_cpu_host_batches(coalesce_distinct_region_scaled_direct_metal_requests(
         coalesce_distinct_full_color_metal_requests(
             coalesce_distinct_full_grayscale_metal_requests(group_repeated_full_metal_requests(
                 queued,
@@ -162,37 +241,39 @@ fn coalesce_distinct_full_grayscale_metal_requests(
     batches
 }
 
-fn coalesce_distinct_region_scaled_grayscale_metal_requests(
+fn coalesce_distinct_region_scaled_direct_metal_requests(
     repeated_batches: Vec<Vec<QueuedRequest>>,
 ) -> Vec<Vec<QueuedRequest>> {
     let mut batches = Vec::new();
-    let mut metal_gray8 = Vec::new();
-    let mut metal_gray16 = Vec::new();
-    let mut auto_gray8 = Vec::new();
-    let mut auto_gray16 = Vec::new();
+    let mut metal_by_format: [Vec<QueuedRequest>; REGION_SCALED_DIRECT_FORMATS.len()] =
+        std::array::from_fn(|_| Vec::new());
+    let mut auto_by_format: [Vec<QueuedRequest>; REGION_SCALED_DIRECT_FORMATS.len()] =
+        std::array::from_fn(|_| Vec::new());
 
     for batch in repeated_batches {
-        if batch.len() == 1 && is_region_scaled_grayscale_batch_candidate(&batch[0]) {
+        if batch.len() == 1 && is_region_scaled_direct_batch_candidate(&batch[0]) {
             let request = batch
                 .into_iter()
                 .next()
                 .expect("single-entry batch has request");
-            match (request.backend, request.fmt) {
-                (BackendRequest::Metal, PixelFormat::Gray8) => metal_gray8.push(request),
-                (BackendRequest::Metal, PixelFormat::Gray16) => metal_gray16.push(request),
-                (BackendRequest::Auto, PixelFormat::Gray8) => auto_gray8.push(request),
-                (BackendRequest::Auto, PixelFormat::Gray16) => auto_gray16.push(request),
-                _ => unreachable!("candidate backend and pixel format are restricted above"),
+            let format_idx = region_scaled_direct_format_index(request.fmt)
+                .expect("candidate pixel format is restricted above");
+            match request.backend {
+                BackendRequest::Metal => metal_by_format[format_idx].push(request),
+                BackendRequest::Auto => auto_by_format[format_idx].push(request),
+                _ => unreachable!("candidate backend is restricted above"),
             }
         } else {
             batches.push(batch);
         }
     }
 
-    push_coalesced_or_single(&mut batches, metal_gray8);
-    push_coalesced_or_single(&mut batches, metal_gray16);
-    push_auto_region_scaled_grayscale_batches(&mut batches, auto_gray8);
-    push_auto_region_scaled_grayscale_batches(&mut batches, auto_gray16);
+    for requests in metal_by_format {
+        push_coalesced_or_single(&mut batches, requests);
+    }
+    for requests in auto_by_format {
+        push_auto_region_scaled_direct_batches(&mut batches, requests);
+    }
     batches
 }
 
@@ -207,11 +288,11 @@ fn push_coalesced_or_single(batches: &mut Vec<Vec<QueuedRequest>>, requests: Vec
     }
 }
 
-fn push_auto_region_scaled_grayscale_batches(
+fn push_auto_region_scaled_direct_batches(
     batches: &mut Vec<Vec<QueuedRequest>>,
     requests: Vec<QueuedRequest>,
 ) {
-    let Some(min_dim) = auto_region_scaled_grayscale_metal_min_dim(&requests) else {
+    let Some(min_dim) = auto_region_scaled_direct_metal_min_dim(&requests) else {
         push_coalesced_or_single(batches, requests);
         return;
     };
@@ -313,7 +394,7 @@ fn can_decode_as_repeated_full_grayscale_batch(
         && is_repeated_full_grayscale_candidate(next)
         && first.fmt == next.fmt
         && first.backend == next.backend
-        && first.input.as_ref() == next.input.as_ref()
+        && same_input_bytes(first, next)
 }
 
 fn can_decode_as_repeated_full_color_batch(first: &QueuedRequest, next: &QueuedRequest) -> bool {
@@ -321,7 +402,20 @@ fn can_decode_as_repeated_full_color_batch(first: &QueuedRequest, next: &QueuedR
         && is_repeated_full_color_candidate(next)
         && first.fmt == next.fmt
         && first.backend == next.backend
-        && first.input.as_ref() == next.input.as_ref()
+        && same_input_bytes(first, next)
+}
+
+fn same_input_bytes(first: &QueuedRequest, next: &QueuedRequest) -> bool {
+    if Arc::ptr_eq(&first.input, &next.input) {
+        return true;
+    }
+    if first.input.len() != next.input.len() {
+        return false;
+    }
+    if first.input_fingerprint() != next.input_fingerprint() {
+        return false;
+    }
+    first.input.as_ref() == next.input.as_ref()
 }
 
 fn can_decode_as_repeated_full_metal_batch(first: &QueuedRequest, next: &QueuedRequest) -> bool {
@@ -362,41 +456,99 @@ fn is_distinct_full_color_metal_candidate(request: &QueuedRequest) -> bool {
         && request.backend == BackendRequest::Metal
 }
 
-fn is_region_scaled_grayscale_batch_candidate(request: &QueuedRequest) -> bool {
+fn is_region_scaled_direct_batch_candidate(request: &QueuedRequest) -> bool {
     matches!(request.op, BatchOp::RegionScaled { .. })
-        && matches!(request.fmt, PixelFormat::Gray8 | PixelFormat::Gray16)
+        && region_scaled_direct_format_index(request.fmt).is_some()
         && matches!(
             request.backend,
             BackendRequest::Auto | BackendRequest::Metal
         )
 }
 
-fn should_auto_use_metal_for_region_scaled_grayscale_batch(requests: &[QueuedRequest]) -> bool {
-    auto_region_scaled_grayscale_metal_min_dim(requests).is_some()
+fn region_scaled_direct_format_index(fmt: PixelFormat) -> Option<usize> {
+    REGION_SCALED_DIRECT_FORMATS
+        .iter()
+        .position(|candidate| *candidate == fmt)
 }
 
-fn auto_region_scaled_grayscale_metal_min_dim(requests: &[QueuedRequest]) -> Option<u32> {
+fn should_auto_use_metal_for_region_scaled_direct_batch(requests: &[QueuedRequest]) -> bool {
+    auto_region_scaled_direct_metal_min_dim(requests).is_some()
+}
+
+fn auto_region_scaled_direct_metal_min_dim(requests: &[QueuedRequest]) -> Option<u32> {
+    let first = requests.first()?;
+    let is_repeated_rgb = matches!(
+        first.fmt,
+        PixelFormat::Rgb8 | PixelFormat::Rgba8 | PixelFormat::Rgb16
+    ) && can_decode_requests_as_repeated_region_scaled_batch(requests);
+    if matches!(
+        first.fmt,
+        PixelFormat::Rgb8 | PixelFormat::Rgba8 | PixelFormat::Rgb16
+    ) {
+        if !is_repeated_rgb {
+            return None;
+        }
+        let repeated_rgb_eligible = requests
+            .iter()
+            .filter(|request| {
+                request.max_image_dim().is_some_and(|max_dim| {
+                    max_dim >= AUTO_REGION_SCALED_DIRECT_REPEATED_RGB_MIN_DIM
+                })
+            })
+            .count();
+        if repeated_rgb_eligible >= AUTO_REGION_SCALED_DIRECT_REPEATED_RGB_MIN_COUNT {
+            return Some(AUTO_REGION_SCALED_DIRECT_REPEATED_RGB_MIN_DIM);
+        }
+    }
+
     let mut count_512_class = 0usize;
     let mut count_1024_class = 0usize;
     for request in requests {
         let Some(max_dim) = request.max_image_dim() else {
             continue;
         };
-        if max_dim >= AUTO_REGION_SCALED_GRAYSCALE_BATCH64_MIN_DIM {
+        if max_dim >= AUTO_REGION_SCALED_DIRECT_BATCH64_MIN_DIM {
             count_512_class += 1;
         }
-        if max_dim >= AUTO_REGION_SCALED_GRAYSCALE_BATCH16_MIN_DIM {
+        if max_dim >= AUTO_REGION_SCALED_DIRECT_BATCH16_MIN_DIM {
             count_1024_class += 1;
         }
     }
 
-    if count_512_class >= AUTO_REGION_SCALED_GRAYSCALE_BATCH64_MIN_COUNT {
-        Some(AUTO_REGION_SCALED_GRAYSCALE_BATCH64_MIN_DIM)
-    } else if count_1024_class >= AUTO_REGION_SCALED_GRAYSCALE_BATCH16_MIN_COUNT {
-        Some(AUTO_REGION_SCALED_GRAYSCALE_BATCH16_MIN_DIM)
+    if count_512_class >= AUTO_REGION_SCALED_DIRECT_BATCH64_MIN_COUNT {
+        Some(AUTO_REGION_SCALED_DIRECT_BATCH64_MIN_DIM)
+    } else if count_1024_class >= AUTO_REGION_SCALED_DIRECT_BATCH16_MIN_COUNT {
+        Some(AUTO_REGION_SCALED_DIRECT_BATCH16_MIN_DIM)
     } else {
         None
     }
+}
+
+fn can_decode_requests_as_repeated_region_scaled_batch(requests: &[QueuedRequest]) -> bool {
+    let Some((first, rest)) = requests.split_first() else {
+        return false;
+    };
+    !rest.is_empty()
+        && rest.iter().all(|request| {
+            is_region_scaled_direct_batch_candidate(first)
+                && is_region_scaled_direct_batch_candidate(request)
+                && first.fmt == request.fmt
+                && first.backend == request.backend
+                && same_input_bytes(first, request)
+                && matches!(
+                    (first.op, request.op),
+                    (
+                        BatchOp::RegionScaled {
+                            roi: first_roi,
+                            scale: first_scale
+                        },
+                        BatchOp::RegionScaled {
+                            roi: request_roi,
+                            scale: request_scale
+                        }
+                    ) if first_roi == request_roi && first_scale == request_scale
+                )
+        })
 }
 
 fn can_decode_requests_as_repeated_full_grayscale_batch(requests: &[QueuedRequest]) -> bool {
@@ -472,7 +624,7 @@ fn process_batch(session: &mut SessionState, requests: Vec<QueuedRequest>) {
     }
 
     if requests.len() > 1 {
-        if let Some(Ok(surfaces)) = decode_distinct_region_scaled_grayscale_batch(&requests) {
+        if let Some(Ok(surfaces)) = decode_distinct_region_scaled_direct_batch(&requests) {
             if surfaces.len() == requests.len() {
                 session.submissions = session.submissions.saturating_add(1);
                 for (request, surface) in requests.into_iter().zip(surfaces) {
@@ -745,13 +897,13 @@ fn decode_distinct_full_color_batch(
     }
 }
 
-fn decode_distinct_region_scaled_grayscale_batch(
+fn decode_distinct_region_scaled_direct_batch(
     requests: &[QueuedRequest],
 ) -> Option<Result<Vec<Surface>, Error>> {
     let first = requests.first()?;
     if requests.len() <= 1
         || !requests.iter().all(|request| {
-            is_region_scaled_grayscale_batch_candidate(request)
+            is_region_scaled_direct_batch_candidate(request)
                 && request.fmt == first.fmt
                 && request.backend == first.backend
         })
@@ -759,7 +911,7 @@ fn decode_distinct_region_scaled_grayscale_batch(
         return None;
     }
     if first.backend == BackendRequest::Auto
-        && !should_auto_use_metal_for_region_scaled_grayscale_batch(requests)
+        && !should_auto_use_metal_for_region_scaled_direct_batch(requests)
     {
         return None;
     }
@@ -773,9 +925,22 @@ fn decode_distinct_region_scaled_grayscale_batch(
                 _ => unreachable!("candidate op is restricted above"),
             })
             .collect::<Vec<_>>();
-        Some(
-            crate::decode_region_scaled_grayscale_batch_direct_to_device(&request_specs, first.fmt),
-        )
+        let result = match first.fmt {
+            PixelFormat::Gray8 | PixelFormat::Gray16 => {
+                crate::hybrid::decode_region_scaled_grayscale_batch_direct_to_device(
+                    &request_specs,
+                    first.fmt,
+                )
+            }
+            PixelFormat::Rgb8 | PixelFormat::Rgba8 | PixelFormat::Rgb16 => {
+                crate::hybrid::decode_region_scaled_color_batch_direct_to_device(
+                    &request_specs,
+                    first.fmt,
+                )
+            }
+            _ => unreachable!("candidate pixel format is restricted above"),
+        };
+        Some(result)
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -808,4 +973,100 @@ fn take_surface(session: &mut SessionState, slot: usize) -> Result<Surface, Erro
         .ok_or_else(|| Error::MetalKernel {
             message: format!("missing queued J2K Metal surface for slot {slot}"),
         })?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn auto_rgb_region_scaled_request(input: Arc<[u8]>) -> QueuedRequest {
+        QueuedRequest {
+            input,
+            fmt: PixelFormat::Rgb8,
+            backend: BackendRequest::Auto,
+            op: BatchOp::RegionScaled {
+                roi: Rect {
+                    x: 128,
+                    y: 128,
+                    w: 512,
+                    h: 256,
+                },
+                scale: Downscale::Quarter,
+            },
+            output_slot: 0,
+            max_image_dim: OnceCell::new(),
+            input_fingerprint: OnceCell::new(),
+        }
+    }
+
+    fn auto_rgb_region_scaled_request_with_max_dim(
+        input: Arc<[u8]>,
+        max_image_dim: u32,
+    ) -> QueuedRequest {
+        let request = auto_rgb_region_scaled_request(input);
+        request.max_image_dim.set(Some(max_image_dim)).ok();
+        request
+    }
+
+    #[test]
+    fn auto_region_scaled_rgb_threshold_requires_repeated_inputs() {
+        let requests = (0..AUTO_REGION_SCALED_DIRECT_BATCH16_MIN_COUNT)
+            .map(|idx| auto_rgb_region_scaled_request(Arc::from([idx as u8])))
+            .collect::<Vec<_>>();
+
+        assert!(!can_decode_requests_as_repeated_region_scaled_batch(
+            &requests
+        ));
+        assert_eq!(
+            auto_region_scaled_direct_metal_min_dim(&requests),
+            None,
+            "distinct RGB ROI+scaled Auto batches must stay CPU until hybrid wins for distinct inputs"
+        );
+
+        let shared = Arc::<[u8]>::from([1_u8]);
+        let repeated = (0..AUTO_REGION_SCALED_DIRECT_BATCH16_MIN_COUNT)
+            .map(|_| auto_rgb_region_scaled_request(shared.clone()))
+            .collect::<Vec<_>>();
+        assert!(can_decode_requests_as_repeated_region_scaled_batch(
+            &repeated
+        ));
+    }
+
+    #[test]
+    fn auto_region_scaled_repeated_rgb_uses_measured_batch_two_metal_threshold() {
+        let shared = Arc::<[u8]>::from([1_u8]);
+        let repeated = (0..2)
+            .map(|_| auto_rgb_region_scaled_request_with_max_dim(shared.clone(), 512))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            auto_region_scaled_direct_metal_min_dim(&repeated),
+            Some(512),
+            "measured repeated RGB ROI+scaled batches should route to Metal from batch 2 at 512px"
+        );
+
+        let single = vec![auto_rgb_region_scaled_request_with_max_dim(shared, 512)];
+        assert_eq!(auto_region_scaled_direct_metal_min_dim(&single), None);
+    }
+
+    #[test]
+    fn queued_request_caches_image_dimension_probe() {
+        let request = auto_rgb_region_scaled_request(Arc::from([0_u8]));
+
+        assert!(!request.max_image_dim_cache_filled_for_test());
+        assert_eq!(request.max_image_dim(), None);
+        assert!(request.max_image_dim_cache_filled_for_test());
+        assert_eq!(request.max_image_dim(), None);
+    }
+
+    #[test]
+    fn repeated_input_check_uses_pointer_identity_before_fingerprint() {
+        let shared = Arc::<[u8]>::from([1_u8, 2, 3, 4]);
+        let first = auto_rgb_region_scaled_request(shared.clone());
+        let next = auto_rgb_region_scaled_request(shared);
+
+        assert!(same_input_bytes(&first, &next));
+        assert!(!first.input_fingerprint_cache_filled_for_test());
+        assert!(!next.input_fingerprint_cache_filled_for_test());
+    }
 }

@@ -9,20 +9,23 @@ use signinum_core::{
     TileBatchDecodeSubmit,
 };
 use signinum_j2k::{
-    decode_tiles_into, decode_tiles_region_scaled_into, CompressedTransferSyntax, DecoderContext,
-    Downscale, J2kContext, J2kDecoder, J2kScratchPool, PixelFormat, Rect, TileBatchOptions,
-    TileDecodeJob, TileRegionScaledDecodeJob,
+    decode_tiles_into, decode_tiles_region_scaled_into, CompressedTransferSyntax,
+    CpuDecodeParallelism, DecoderContext, Downscale, J2kContext, J2kDecoder, J2kScratchPool,
+    PixelFormat, Rect, TileBatchOptions, TileDecodeJob, TileRegionScaledDecodeJob,
 };
 use signinum_j2k_compare::{grok, openjpeg};
 use signinum_j2k_metal::{
+    benchmark_group_region_scaled_requests, benchmark_region_scaled_direct_plan_prepare,
     extract_dicom_encapsulated_frames_with_limit, Codec as MetalJ2kCodec,
-    J2kDecoder as MetalJ2kDecoder, J2kScratchPool as MetalJ2kScratchPool, MetalSession,
+    J2kDecoder as MetalJ2kDecoder, J2kScratchPool as MetalJ2kScratchPool, MetalBackendSession,
+    MetalSession,
 };
 use signinum_j2k_native::{encode, encode_htj2k, EncodeOptions};
 use std::{
     collections::BTreeSet,
     env, fs,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -410,20 +413,42 @@ fn external_tile_batch(
 
 fn ht_bench_inputs() -> Vec<BenchInput> {
     let candidates = [
-        ("htj2k_gray_1024", 1024_u32, 1024_u32),
-        ("htj2k_gray_512", 512_u32, 512_u32),
+        (
+            "htj2k_gray_1024",
+            1024_u32,
+            1024_u32,
+            1_u16,
+            DecodeMode::Gray8,
+            17_u32,
+        ),
+        (
+            "htj2k_gray_512",
+            512_u32,
+            512_u32,
+            1_u16,
+            DecodeMode::Gray8,
+            17_u32,
+        ),
+        (
+            "htj2k_rgb_512",
+            512_u32,
+            512_u32,
+            3_u16,
+            DecodeMode::Rgb8,
+            16_u32,
+        ),
     ];
 
     let mut inputs = Vec::with_capacity(candidates.len());
     let mut errors = Vec::new();
-    for (name, width, height) in candidates {
-        let pixels = ht_bench_pixels(width, height, 1);
-        match try_encode_ht(&pixels, width, height, 1, 8) {
+    for (name, width, height, components, mode, colorspace) in candidates {
+        let pixels = ht_bench_pixels(width, height, components as usize);
+        match try_encode_ht(&pixels, width, height, components as u8, 8) {
             Ok(codestream) => inputs.push(BenchInput {
                 name,
-                bytes: wrap_codestream_jp2(&codestream, width, height, 1, 8, 17),
+                bytes: wrap_codestream_jp2(&codestream, width, height, components, 8, colorspace),
                 dimensions: (width, height),
-                mode: DecodeMode::Gray8,
+                mode,
                 is_ht: true,
             }),
             Err(error) => errors.push(format!("{name}: {error}")),
@@ -461,6 +486,41 @@ pub(crate) fn signinum_inspect(bytes: &[u8]) {
     black_box(J2kDecoder::inspect(bytes).expect("signinum inspect"));
 }
 
+pub(crate) fn benchmark_region_scaled_input_arcs(
+    bytes: &[u8],
+    count: usize,
+    value_equal_distinct_arcs: bool,
+) -> Vec<Arc<[u8]>> {
+    if value_equal_distinct_arcs {
+        (0..count).map(|_| Arc::<[u8]>::from(bytes)).collect()
+    } else {
+        let input = Arc::<[u8]>::from(bytes);
+        vec![input; count]
+    }
+}
+
+pub(crate) fn signinum_benchmark_region_scaled_direct_plan_prepare(
+    input: &BenchInput,
+    edge: u32,
+    scale: Downscale,
+) -> bool {
+    let roi = centered_roi(input.dimensions, edge);
+    benchmark_region_scaled_direct_plan_prepare(&input.bytes, mode_format(input.mode), roi, scale)
+        .is_ok()
+}
+
+pub(crate) fn signinum_benchmark_group_region_scaled_requests(
+    inputs: &[Arc<[u8]>],
+    mode: DecodeMode,
+    roi: Rect,
+    scale: Downscale,
+    backend: BackendRequest,
+) {
+    let grouped =
+        benchmark_group_region_scaled_requests(inputs, mode_format(mode), backend, roi, scale);
+    black_box((grouped.batch_count, grouped.max_batch_len));
+}
+
 pub(crate) fn signinum_decode(bytes: &[u8], mode: DecodeMode) {
     let mut decoder = J2kDecoder::new(bytes).expect("signinum decoder");
     let info = decoder.info().dimensions;
@@ -469,6 +529,18 @@ pub(crate) fn signinum_decode(bytes: &[u8], mode: DecodeMode) {
     decoder
         .decode_into(&mut out, stride, fmt)
         .expect("signinum decode");
+    black_box(out);
+}
+
+pub(crate) fn signinum_decode_serial(bytes: &[u8], mode: DecodeMode) {
+    let mut decoder = J2kDecoder::new(bytes).expect("signinum decoder");
+    decoder.set_cpu_decode_parallelism(CpuDecodeParallelism::Serial);
+    let info = decoder.info().dimensions;
+    let (fmt, stride) = mode_geometry(mode, info);
+    let mut out = vec![0_u8; stride * info.1 as usize];
+    decoder
+        .decode_into(&mut out, stride, fmt)
+        .expect("signinum serial decode");
     black_box(out);
 }
 
@@ -983,6 +1055,32 @@ pub(crate) fn signinum_metal_decode_tile_batch_region_scaled(
             submission
                 .wait()
                 .expect("signinum metal tile region scaled decode")
+        })
+        .collect::<Vec<_>>();
+    black_box(surfaces);
+}
+
+pub(crate) fn signinum_cpu_staged_metal_decode_tile_batch_region_scaled(
+    bytes: &[u8],
+    mode: DecodeMode,
+    edge: u32,
+    scale: Downscale,
+    count: usize,
+) {
+    let cpu_decoder = J2kDecoder::new(bytes).expect("signinum decoder");
+    let roi = centered_roi(cpu_decoder.info().dimensions, edge);
+    let session = MetalBackendSession::system_default().expect("Metal session");
+    let surfaces = (0..count)
+        .map(|_| {
+            let mut decoder = MetalJ2kDecoder::new(bytes).expect("signinum metal decoder");
+            decoder
+                .decode_region_scaled_to_cpu_staged_metal_surface_with_session(
+                    mode_format(mode),
+                    roi,
+                    scale,
+                    &session,
+                )
+                .expect("signinum CPU-staged Metal tile region scaled decode")
         })
         .collect::<Vec<_>>();
     black_box(surfaces);
@@ -1553,7 +1651,10 @@ fn mode_format(mode: DecodeMode) -> PixelFormat {
 }
 
 fn supports_metal_region_scaled_mode(mode: DecodeMode) -> bool {
-    matches!(mode, DecodeMode::Gray8 | DecodeMode::Gray16)
+    matches!(
+        mode,
+        DecodeMode::Gray8 | DecodeMode::Gray16 | DecodeMode::Rgb8
+    )
 }
 
 fn mode_geometry(mode: DecodeMode, dims: (u32, u32)) -> (PixelFormat, usize) {

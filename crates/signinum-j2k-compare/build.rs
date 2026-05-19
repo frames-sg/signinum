@@ -1,5 +1,4 @@
 use std::{
-    ffi::OsStr,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -63,7 +62,7 @@ fn stage_grok_dylib_family(lib_dir: &Path, out_dir: &Path) -> Result<(), String>
     let real_src = find_grok_real_dylib(lib_dir)?;
     let real_name = real_src
         .file_name()
-        .and_then(OsStr::to_str)
+        .and_then(std::ffi::OsStr::to_str)
         .ok_or_else(|| format!("invalid Grok dylib name: {}", real_src.display()))?;
     let real_dst = out_dir.join(real_name);
     if real_dst.exists() {
@@ -86,7 +85,7 @@ fn find_grok_real_dylib(lib_dir: &Path) -> Result<PathBuf, String> {
         .map_err(|err| format!("read Grok lib dir entry: {err}"))?;
     candidates.retain(|path| {
         path.file_name()
-            .and_then(OsStr::to_str)
+            .and_then(std::ffi::OsStr::to_str)
             .is_some_and(|name| {
                 name.starts_with("libgrokj2k.")
                     && path

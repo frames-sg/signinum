@@ -3,13 +3,12 @@
 This changelog tracks the current release line. Historical phase notes
 and stale roadmap entries have been removed from the public documentation set.
 
-## [Unreleased]
-
-Staged workspace version: `0.11.0`.
+## [0.11.0] - 2026-09-06
 
 - Batches baseline JPEG 4:2:0 and 4:2:2 Metal texture decode through reusable component planes, with bounded scratch leases held through status consumption.
 - Keeps lossy HT Metal encode payloads resident through packetization, reuses allocation capacity, and shares immutable pipelines per device.
 - Adds the separately published `j2k-mpsgraph-support` ownership boundary for codec-independent graph submission.
+- Adds lossy HT quality-factor options, reusable HT block-encoding workspaces, prepared region decoding, and candidate-set accelerator integration.
 - Corrects the Windows OpenHTJ2K reference runtime configuration used by release validation.
 
 - Corrects TIFF `JPEGTables` assembly for abbreviated JPEG tiles, including

@@ -6,7 +6,7 @@ or test-only implementation details and must not be treated as user controls.
 
 Stability values:
 
-- Stable: supported for the published v0.10.x contract.
+- Stable: supported for the v0.11.x contract.
 - Experimental: accepted for diagnostics or adapter tuning, but may change
   before 1.0.
 - Test/CI: supported only for repository tests, CI, and release validation.

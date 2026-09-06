@@ -1,0 +1,183 @@
+version: 3
+baseline_tag: v0.10.0
+baseline_version: 0.10.0
+candidate_version: "0.11.0"
+break_ledger:
+  - id: mpsgraph-reference-helper-removal
+    kind: source
+    packages: [j2k-mpsgraph]
+    removed_items:
+      - package: j2k-mpsgraph
+        item: "pub const j2k_mpsgraph::RGB8_REFERENCE_CHANNEL_WEIGHTS: [f32; 3]"
+      - package: j2k-mpsgraph
+        item: "pub fn j2k_mpsgraph::MpsGraphProgram::identity(j2k_mpsgraph::MpsGraphTensorSpec) -> core::result::Result<Self, j2k_mpsgraph::Error>"
+      - package: j2k-mpsgraph
+        item: "pub fn j2k_mpsgraph::MpsGraphProgram::rgb8_nhwc_reference(usize, usize, usize) -> core::result::Result<Self, j2k_mpsgraph::Error>"
+      - package: j2k-mpsgraph
+        item: "pub fn j2k_mpsgraph::rgb8_nhwc_reference_cpu(&[u8], usize, usize, usize) -> core::result::Result<alloc::vec::Vec<f32>, j2k_mpsgraph::Error>"
+    summary: "Remove demonstration-specific identity/RGB8 graph builders, CPU reference calculation and channel weights from the experimental production API."
+    migration: "Construct the application graph and tensors explicitly and pass them through MpsGraphProgram::new. Keep workload-specific reference math and weights in application or test code."
+reviews:
+  j2k-core:
+    removed_fingerprint: "none"
+    added_fingerprint: "fnv1a64:86866d86e4febc37"
+    hidden_count: 223
+    hidden_fingerprint: "fnv1a64:5eeeb03b82ab7efe"
+    rationale: "Reviewed the added progressive, lossless and lossless-SV1 JPEG classifications and family predicate. CompressedTransferSyntax remains non-exhaustive; no existing ordinary signature is removed."
+    hidden_rationale: "Compared the complete hidden candidate inventory with v0.10.0; its reachable item set is unchanged."
+  j2k-profile:
+    removed_fingerprint: "none"
+    added_fingerprint: "none"
+    hidden_count: 117
+    hidden_fingerprint: "fnv1a64:a1546f56ae38f2e3"
+    rationale: "Compared the complete ordinary API with the v0.10.0 snapshot; no ordinary item is added, removed or changed."
+    hidden_rationale: "Compared the complete hidden candidate inventory with v0.10.0; its reachable item set is unchanged."
+  j2k-types:
+    removed_fingerprint: "none"
+    added_fingerprint: "none"
+    hidden_count: 103
+    hidden_fingerprint: "fnv1a64:71b5df4e9aaebdcb"
+    rationale: "Compared the complete ordinary API with the v0.10.0 snapshot; no ordinary item is added, removed or changed."
+    hidden_rationale: "The complete hidden-inventory comparison adds the HT candidate job/set records and encode_ht_code_block_sets. The accelerator trait supplies a default Ok(None) implementation, preserving existing implementors; no hidden item is removed."
+  j2k-codec-math:
+    removed_fingerprint: "none"
+    added_fingerprint: "none"
+    hidden_count: 0
+    hidden_fingerprint: "none"
+    rationale: "Compared the complete ordinary API with the v0.10.0 snapshot; no ordinary item is added, removed or changed."
+  j2k-cuda-build-support:
+    removed_fingerprint: "none"
+    added_fingerprint: "none"
+    hidden_count: 0
+    hidden_fingerprint: "none"
+    rationale: "Compared the complete ordinary API with the v0.10.0 snapshot; no ordinary item is added, removed or changed."
+  j2k-cuda-runtime:
+    removed_fingerprint: "none"
+    added_fingerprint: "none"
+    hidden_count: 251
+    hidden_fingerprint: "fnv1a64:20a941ec03c4ff5f"
+    rationale: "Compared the complete ordinary API with the v0.10.0 snapshot; no ordinary item is added, removed or changed."
+    hidden_rationale: "Compared the complete hidden candidate inventory with v0.10.0; its reachable item set is unchanged."
+  j2k-cuda-j2k-engine:
+    removed_fingerprint: "none"
+    added_fingerprint: "none"
+    hidden_count: 700
+    hidden_fingerprint: "fnv1a64:6e386ed2a046fefb"
+    rationale: "Compared the complete ordinary API with the v0.10.0 snapshot; no ordinary item is added, removed or changed."
+    hidden_rationale: "The complete hidden comparison adds exact SigProp/MagRef lengths and owned exact-parts extraction for HT code blocks; no hidden item is removed."
+  j2k-cuda-jpeg-engine:
+    removed_fingerprint: "none"
+    added_fingerprint: "none"
+    hidden_count: 176
+    hidden_fingerprint: "fnv1a64:e88101299bf042a3"
+    rationale: "Compared the complete ordinary API with the v0.10.0 snapshot; no ordinary item is added, removed or changed."
+    hidden_rationale: "Compared the complete hidden candidate inventory with v0.10.0; its reachable item set is unchanged."
+  j2k-cuda-transcode-engine:
+    removed_fingerprint: "none"
+    added_fingerprint: "none"
+    hidden_count: 84
+    hidden_fingerprint: "fnv1a64:b2fcaa9b0171aba7"
+    rationale: "Compared the complete ordinary API with the v0.10.0 snapshot; no ordinary item is added, removed or changed."
+    hidden_rationale: "Compared the complete hidden candidate inventory with v0.10.0; its reachable item set is unchanged."
+  j2k-metal-support:
+    removed_fingerprint: "none"
+    added_fingerprint: "none"
+    hidden_count: 11
+    hidden_fingerprint: "fnv1a64:02139606f1202938"
+    rationale: "Compared the complete ordinary API with the v0.10.0 snapshot; no ordinary item is added, removed or changed."
+    hidden_rationale: "Compared the complete hidden candidate inventory with v0.10.0; its reachable item set is unchanged."
+  j2k-mpsgraph-support:
+    removed_fingerprint: "none"
+    added_fingerprint: "fnv1a64:d39e3033a9bb543c"
+    hidden_count: 0
+    hidden_fingerprint: "none"
+    rationale: "Reviewed the new 19-item graph-submission surface. Unsafe submit documents graph membership, shape/dtype/device agreement, storage lifetime, exclusion of reuse, queue ordering and mutation restrictions. Completion, wait, output access and error reporting retain an explicit input owner."
+  j2k-native:
+    removed_fingerprint: "none"
+    added_fingerprint: "fnv1a64:2bdf5fa6814b7287"
+    hidden_count: 555
+    hidden_fingerprint: "fnv1a64:8bafdf926d55a460"
+    rationale: "Reviewed the additive encode_htj2k_with_qfactor entry point. Existing encode entry points and ordinary signatures remain available."
+    hidden_rationale: "The complete hidden comparison adds reusable HT workspace, prepared-region decoder and qfactor/HT candidate-set integration surfaces, including their implementation blocks. Borrowed context and sample lifetimes remain explicit; no hidden item is removed."
+  j2k-jpeg:
+    removed_fingerprint: "none"
+    added_fingerprint: "fnv1a64:60e966955569e89e"
+    hidden_count: 574
+    hidden_fingerprint: "fnv1a64:b3e5271cb5d45bac"
+    rationale: "Reviewed the additive lossless predictor inspection and APP2 ICC extraction/insertion/replacement API, including its non-exhaustive structured errors. Existing ordinary signatures remain unchanged."
+    hidden_rationale: "Compared the complete hidden candidate inventory with v0.10.0; its reachable item set is unchanged."
+  j2k-tilecodec:
+    removed_fingerprint: "none"
+    added_fingerprint: "none"
+    hidden_count: 32
+    hidden_fingerprint: "fnv1a64:eb677842559d9b0e"
+    rationale: "Compared the complete ordinary API with the v0.10.0 snapshot; no ordinary item is added, removed or changed."
+    hidden_rationale: "Compared the complete hidden candidate inventory with v0.10.0; its reachable item set is unchanged."
+  j2k:
+    removed_fingerprint: "none"
+    added_fingerprint: "fnv1a64:d208a7c7ac97301c"
+    hidden_count: 108
+    hidden_fingerprint: "fnv1a64:01e74ad6c3ff416e"
+    rationale: "Reviewed qfactor and its builder on the already non-exhaustive J2kLossyEncodeOptions. Defaults remain expressible through existing construction APIs; no ordinary signature is removed."
+    hidden_rationale: "The complete hidden-inventory comparison adds only the two HT candidate-set re-exports and removes nothing."
+  j2k-transcode:
+    removed_fingerprint: "none"
+    added_fingerprint: "none"
+    hidden_count: 458
+    hidden_fingerprint: "fnv1a64:449a76476549c1e2"
+    rationale: "Compared the complete ordinary API with the v0.10.0 snapshot; no ordinary item is added, removed or changed."
+    hidden_rationale: "Compared the complete hidden candidate inventory with v0.10.0; its reachable item set is unchanged."
+  j2k-transcode-cuda:
+    removed_fingerprint: "none"
+    added_fingerprint: "none"
+    hidden_count: 20
+    hidden_fingerprint: "fnv1a64:be22ca1d5e12b043"
+    rationale: "Compared the complete ordinary API with the v0.10.0 snapshot; no ordinary item is added, removed or changed."
+    hidden_rationale: "Compared the complete hidden candidate inventory with v0.10.0; its reachable item set is unchanged."
+  j2k-jpeg-metal:
+    removed_fingerprint: "none"
+    added_fingerprint: "none"
+    hidden_count: 83
+    hidden_fingerprint: "fnv1a64:79397ffc221464c3"
+    rationale: "Compared the complete ordinary API with the v0.10.0 snapshot; no ordinary item is added, removed or changed."
+    hidden_rationale: "Compared the complete hidden candidate inventory with v0.10.0; its reachable item set is unchanged."
+  j2k-metal:
+    removed_fingerprint: "none"
+    added_fingerprint: "none"
+    hidden_count: 318
+    hidden_fingerprint: "fnv1a64:2e8c9d558edc1839"
+    rationale: "Compared the complete ordinary API with the v0.10.0 snapshot; no ordinary item is added, removed or changed."
+    hidden_rationale: "The complete hidden comparison adds HT candidate-set encoding and its dispatch counter only; no hidden item is removed."
+  j2k-transcode-metal:
+    removed_fingerprint: "none"
+    added_fingerprint: "none"
+    hidden_count: 49
+    hidden_fingerprint: "fnv1a64:b4a8b53d5e10bb00"
+    rationale: "Compared the complete ordinary API with the v0.10.0 snapshot; no ordinary item is added, removed or changed."
+    hidden_rationale: "Compared the complete hidden candidate inventory with v0.10.0; its reachable item set is unchanged."
+  j2k-jpeg-cuda:
+    removed_fingerprint: "none"
+    added_fingerprint: "none"
+    hidden_count: 133
+    hidden_fingerprint: "fnv1a64:9aa724bde7af1618"
+    rationale: "Compared the complete ordinary API with the v0.10.0 snapshot; no ordinary item is added, removed or changed."
+    hidden_rationale: "Compared the complete hidden candidate inventory with v0.10.0; its reachable item set is unchanged."
+  j2k-cuda:
+    removed_fingerprint: "none"
+    added_fingerprint: "none"
+    hidden_count: 191
+    hidden_fingerprint: "fnv1a64:82214b7c64fc5d9c"
+    rationale: "Compared the complete ordinary API with the v0.10.0 snapshot; no ordinary item is added, removed or changed."
+    hidden_rationale: "The complete hidden comparison adds HT candidate-set encoding only; no hidden item is removed."
+  j2k-ml:
+    removed_fingerprint: "none"
+    added_fingerprint: "none"
+    hidden_count: 0
+    hidden_fingerprint: "none"
+    rationale: "Compared the complete ordinary API with the v0.10.0 snapshot; no ordinary item is added, removed or changed."
+  j2k-mpsgraph:
+    removed_fingerprint: "fnv1a64:8e146fc7af037189"
+    added_fingerprint: "none"
+    hidden_count: 0
+    hidden_fingerprint: "none"
+    rationale: "Reviewed removal of the four demonstration/reference helpers listed in the break ledger. Applications construct their own graph through MpsGraphProgram::new; the tensor adapter and submission ownership remain available."

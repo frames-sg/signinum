@@ -1,7 +1,8 @@
 # Release Policy
 
-The `j2k` 0.10.0 public crate release is published and security-supported. It is
-the latest published line and carries the release-scoped Part 1 and selected
+The current workspace version is `j2k` 0.11.0. Its publication requires the
+candidate and tag gates below. The published 0.10.0 line remains
+security-supported and carries the release-scoped Part 1 and selected
 Part 15 T.803 decoder evidence described in
 [`T.803 conformance`](t803-conformance.md).
 Runtime backend selection defaults to `Auto`; CPU remains the portable baseline
@@ -12,7 +13,8 @@ evidence.
 
 | Version | Distribution state | Security support |
 | --- | --- | --- |
-| `0.10.0` | Published on crates.io from annotated tag `v0.10.0`, with reviewed architecture-transition API evidence. | Latest supported release. |
+| `0.11.0` | Current release line. Distribution is recorded in the [GitHub release](https://github.com/frames-sg/j2k/releases/tag/v0.11.0) and [crate registry](https://crates.io/crates/j2k/0.11.0) after the required gates pass. | Security-supported. |
+| `0.10.0` | Published on crates.io from annotated tag `v0.10.0`, with reviewed architecture-transition API evidence. | Supported. |
 | `0.9.0` | Published on crates.io from annotated tag `v0.9.0`, with reviewed `objc2-metal` API-break evidence. | Supported. |
 | `0.8.1` | Previous crates.io release from annotated tag `v0.8.1`. | Supported. |
 | `0.8.0` | Previous crates.io release from annotated tag `v0.8.0`. | Supported. |
@@ -98,7 +100,18 @@ canonical defining-path changes whose supported root re-exports remain. The
 break ledger also records moving `transcode_kernels_built` from the low-level
 CUDA runtime to the CUDA transcode engine and generalizing the Metal resident
 codestream handoff to `DeviceCodestream`. This one-time transition applies only
-to the `0.10.0` release and must be disabled after publication.
+to the `0.10.0` release and is now disabled.
+
+Version `0.11.0` compares against published `v0.10.0`. Its
+[API report](release-evidence/public-api/reviewed-public-api-diff-0.11.0.md) and
+[review configuration](release-evidence/public-api/public-api-review-0.11.0.yml)
+cover the new graph-submission support crate, JPEG classification and ICC APIs,
+and lossy HT quality-factor options. The experimental MPSGraph adapter removes
+four demonstration/reference helpers; applications construct their graphs with
+`MpsGraphProgram::new` and keep reference calculations in their own test code.
+The pre-1.0 minor-version increment reflects that source-compatibility change.
+Conformance wording for this version requires its own exact-candidate evidence;
+the published 0.10.0 reports are historical evidence, not a substitute.
 
 Version `0.7.3` retained the API contract introduced by `0.7.1`, which
 intentionally contracted parts of the published pre-1.0 `0.6.2` API. It does

@@ -3,6 +3,8 @@
 use std::{borrow::Cow, ops::Range, sync::Arc};
 
 #[cfg(target_os = "macos")]
+use crate::engine::completed_metal_buffer_bytes;
+#[cfg(target_os = "macos")]
 use crate::metal_types::Buffer;
 use j2k_core::{
     copy_tight_pixels_to_strided_output, BackendKind, DeviceMemoryRange, DeviceSurface,
@@ -16,6 +18,9 @@ use crate::error::metal_kernel_support_error;
 use crate::Error;
 
 mod readback;
+#[cfg(all(test, target_os = "macos"))]
+#[path = "surface/tests.rs"]
+mod readback_regression_tests;
 
 pub use self::readback::download_surfaces_packed;
 
@@ -103,7 +108,11 @@ impl Surface {
                         self.byte_len(),
                     )
                 } {
-                    Ok(bytes) => Ok(Cow::Owned(bytes)),
+                    Ok(bytes) => {
+                        #[cfg(all(test, target_os = "macos"))]
+                        record_download_temporary_allocation_for_test();
+                        Ok(Cow::Owned(bytes))
+                    }
                     Err(
                         error @ j2k_metal_support::MetalSupportError::BufferContentsUnavailable,
                     ) => Err(metal_kernel_support_error(
@@ -129,16 +138,48 @@ impl Surface {
     }
 
     /// Copy the tightly packed surface into a caller-provided strided buffer.
+    /// Completed CPU-visible Metal storage is copied directly into the caller's
+    /// rows without an intermediate host allocation.
     pub fn download_into(&self, out: &mut [u8], stride: usize) -> Result<(), Error> {
-        let storage = self.storage_bytes()?;
-        copy_tight_pixels_to_strided_output(
-            storage.as_ref(),
-            self.dimensions,
-            self.fmt,
-            out,
-            stride,
-        )
-        .map_err(Error::from)
+        match &self.storage {
+            Storage::Host(_) => {
+                let storage = self.storage_bytes()?;
+                copy_tight_pixels_to_strided_output(
+                    storage.as_ref(),
+                    self.dimensions,
+                    self.fmt,
+                    out,
+                    stride,
+                )
+                .map_err(Error::from)
+            }
+            #[cfg(target_os = "macos")]
+            Storage::Metal(image) => {
+                // SAFETY: A returned `Surface` represents a completed decode,
+                // and safe APIs expose its resident allocation as immutable.
+                let bytes = unsafe {
+                    completed_metal_buffer_bytes(
+                        image.raw_buffer(),
+                        image.byte_offset(),
+                        self.byte_len(),
+                    )
+                }
+                .map_err(|error| match error {
+                    error @ j2k_metal_support::MetalSupportError::BufferContentsUnavailable => {
+                        metal_kernel_support_error(
+                            "J2K Metal surface buffer is not host-addressable",
+                            error,
+                        )
+                    }
+                    error => metal_kernel_support_error(
+                        format!("J2K Metal surface byte range invalid: {error}"),
+                        error,
+                    ),
+                })?;
+                copy_tight_pixels_to_strided_output(bytes, self.dimensions, self.fmt, out, stride)
+                    .map_err(Error::from)
+            }
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -248,6 +289,26 @@ impl Surface {
             storage: Storage::Metal(image),
         }
     }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+std::thread_local! {
+    static DOWNLOAD_TEMPORARY_ALLOCATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(all(test, target_os = "macos"))]
+fn reset_download_temporary_allocations_for_test() {
+    DOWNLOAD_TEMPORARY_ALLOCATIONS.with(|count| count.set(0));
+}
+
+#[cfg(all(test, target_os = "macos"))]
+fn record_download_temporary_allocation_for_test() {
+    DOWNLOAD_TEMPORARY_ALLOCATIONS.with(|count| count.set(count.get().saturating_add(1)));
+}
+
+#[cfg(all(test, target_os = "macos"))]
+fn download_temporary_allocations_for_test() -> usize {
+    DOWNLOAD_TEMPORARY_ALLOCATIONS.with(std::cell::Cell::get)
 }
 
 #[doc(hidden)]

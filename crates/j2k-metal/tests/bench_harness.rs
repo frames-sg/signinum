@@ -44,7 +44,7 @@ fn j2k_metal_declares_the_audited_routing_and_decode_stage_benches() {
 
     assert_eq!(
         cargo.matches("[[bench]]").count(),
-        5,
+        6,
         "j2k-metal must keep all audited benchmark targets"
     );
     assert!(
@@ -68,6 +68,10 @@ fn j2k_metal_declares_the_audited_routing_and_decode_stage_benches() {
     assert!(
         cargo.contains("[[bench]]\nname = \"htj2k_candidates\"\nharness = false\ntest = false"),
         "j2k-metal must keep the end-to-end HTJ2K candidate benchmark explicit"
+    );
+    assert!(
+        cargo.contains("[[bench]]\nname = \"readback\"\nharness = false\ntest = false"),
+        "j2k-metal must keep the paired public readback benchmark explicit"
     );
 
     for target in ["device_upload", "compare", "encode_stages"] {
@@ -105,6 +109,7 @@ fn j2k_metal_benches_directory_matches_the_audited_targets() {
             manifest_dir().join("benches/htj2k_candidates/case.rs"),
             manifest_dir().join("benches/htj2k_candidates/runner.rs"),
             manifest_dir().join("benches/htj2k_candidates.rs"),
+            manifest_dir().join("benches/readback.rs"),
             manifest_dir().join("benches/resident_packetization/batch_compare.rs"),
             manifest_dir().join("benches/resident_packetization/classic_chunks.rs"),
             manifest_dir().join("benches/resident_packetization/packetization.rs"),

@@ -389,6 +389,7 @@ mod tests {
     fn gpu_benchmark_workflow_verifies_both_auto_routing_lanes() {
         let workflow = include_str!("../../.github/workflows/gpu-benchmarks.yml");
         assert!(workflow.contains("options: [smoke, criterion, profile, adoption, routing]"));
+        let workflow = include_str!("../../.github/workflows/gpu-benchmarks-runner.yml");
         assert!(workflow.contains(
             "cargo bench --profile release-bench -p j2k-cuda --bench auto_routing --features cuda-runtime"
         ));

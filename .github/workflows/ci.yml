@@ -151,18 +151,18 @@ jobs:
             python3 scripts/github_actions_verify.py verify-workflow \
               --repository "${REPOSITORY}" --workflow gpu-validation.yml \
               --sha "${HEAD_SHA}" --event workflow_dispatch \
-              --required-job "CUDA quick validation" \
-              --required-job "Metal quick validation"
+              --required-job "GPU / CUDA quick validation" \
+              --required-job "GPU / Metal quick validation"
           elif [ "${CUDA_REQUIRED}" = true ]; then
             python3 scripts/github_actions_verify.py verify-workflow \
               --repository "${REPOSITORY}" --workflow gpu-validation.yml \
               --sha "${HEAD_SHA}" --event workflow_dispatch \
-              --required-job "CUDA quick validation"
+              --required-job "GPU / CUDA quick validation"
           elif [ "${METAL_REQUIRED}" = true ]; then
             python3 scripts/github_actions_verify.py verify-workflow \
               --repository "${REPOSITORY}" --workflow gpu-validation.yml \
               --sha "${HEAD_SHA}" --event workflow_dispatch \
-              --required-job "Metal quick validation"
+              --required-job "GPU / Metal quick validation"
           else
             echo "No GPU evidence is required for this pull request."
           fi

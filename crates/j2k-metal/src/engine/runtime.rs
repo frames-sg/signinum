@@ -5,7 +5,7 @@ use crate::metal_types::prelude::*;
 
 use std::{
     cell::RefCell,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, Mutex},
 };
 
 use crate::metal_types::{Buffer, CommandBufferRef, CommandQueue, Device};
@@ -24,6 +24,8 @@ mod decode;
 pub(in crate::engine) use decode::DecodeKernels;
 mod encode;
 pub(in crate::engine) use encode::EncodeKernels;
+mod kernel_cache;
+use kernel_cache::{shared_kernel_groups, KernelCachePoisoned, SharedKernelGroups};
 mod profile;
 use profile::ClassicTier1ProfileKernels;
 mod buffers;
@@ -38,10 +40,7 @@ thread_local! {
 }
 
 pub(crate) struct MetalRuntime {
-    decode: OnceLock<Result<DecodeKernels, MetalSupportError>>,
-    encode: OnceLock<Result<EncodeKernels, MetalSupportError>>,
-    profile: OnceLock<Result<ClassicTier1ProfileKernels, MetalSupportError>>,
-    buffers: OnceLock<Result<BufferKernels, MetalSupportError>>,
+    kernels: Result<Arc<SharedKernelGroups>, KernelCachePoisoned>,
 
     pub(super) device: Device,
     pub(crate) queue: CommandQueue,
@@ -78,13 +77,19 @@ impl MetalRuntime {
         device: &Device,
         queue: CommandQueue,
     ) -> Result<Self, MetalSupportError> {
+        let kernels = shared_kernel_groups(device);
+        Self::new_with_device_queue_and_kernels(device, queue, kernels)
+    }
+
+    fn new_with_device_queue_and_kernels(
+        device: &Device,
+        queue: CommandQueue,
+        kernels: Result<Arc<SharedKernelGroups>, KernelCachePoisoned>,
+    ) -> Result<Self, MetalSupportError> {
         Ok(Self {
             device: device.clone(),
             queue,
-            decode: OnceLock::new(),
-            encode: OnceLock::new(),
-            profile: OnceLock::new(),
-            buffers: OnceLock::new(),
+            kernels,
             tier1_dummy_buffer: checked_shared_buffer(device, 1)?,
             buffer_pools: MetalBufferPools::new(device),
             prepared_ht_execution_cache: Mutex::new(
@@ -93,29 +98,64 @@ impl MetalRuntime {
         })
     }
 
+    #[cfg(test)]
+    fn new_isolated() -> Result<Self, MetalSupportError> {
+        let device = system_default_device()?;
+        Self::new_isolated_with_device(&device)
+    }
+
+    #[cfg(test)]
+    fn new_isolated_with_device(device: &Device) -> Result<Self, MetalSupportError> {
+        let queue = checked_command_queue(device)?;
+        Self::new_with_device_queue_and_kernels(
+            device,
+            queue,
+            Ok(Arc::new(SharedKernelGroups::default())),
+        )
+    }
+
+    fn kernels(&self) -> Result<&SharedKernelGroups, Error> {
+        self.kernels
+            .as_deref()
+            .map_err(|_| Error::MetalStatePoisoned {
+                state: "J2K Metal shared kernel cache",
+            })
+    }
+
+    #[cfg(test)]
+    fn kernels_for_test(&self) -> &SharedKernelGroups {
+        self.kernels
+            .as_deref()
+            .expect("isolated test runtime has kernel groups")
+    }
+
     pub(in crate::engine) fn decode(&self) -> Result<&DecodeKernels, Error> {
-        self.decode
+        self.kernels()?
+            .decode
             .get_or_init(|| DecodeKernels::new(&self.device))
             .as_ref()
             .map_err(runtime_initialization_error)
     }
 
     pub(in crate::engine) fn encode(&self) -> Result<&EncodeKernels, Error> {
-        self.encode
+        self.kernels()?
+            .encode
             .get_or_init(|| EncodeKernels::new(&self.device))
             .as_ref()
             .map_err(runtime_initialization_error)
     }
 
     pub(in crate::engine) fn profile(&self) -> Result<&ClassicTier1ProfileKernels, Error> {
-        self.profile
+        self.kernels()?
+            .profile
             .get_or_init(|| ClassicTier1ProfileKernels::new(&self.device))
             .as_ref()
             .map_err(runtime_initialization_error)
     }
 
     pub(in crate::engine) fn buffers(&self) -> Result<&BufferKernels, Error> {
-        self.buffers
+        self.kernels()?
+            .buffers
             .get_or_init(|| BufferKernels::new(&self.device))
             .as_ref()
             .map_err(runtime_initialization_error)
@@ -237,7 +277,7 @@ pub(crate) fn with_isolated_runtime_for_device_for_test<R>(
     f: impl FnOnce() -> Result<R, Error>,
 ) -> Result<R, Error> {
     let runtime = Arc::new(
-        MetalRuntime::new_with_device(device)
+        MetalRuntime::new_isolated_with_device(device)
             .map_err(|error| runtime_initialization_error(&error))?,
     );
     let previous = METAL_RUNTIME_OVERRIDE.with(|slot| slot.replace(Some(runtime)));
@@ -247,32 +287,156 @@ pub(crate) fn with_isolated_runtime_for_device_for_test<R>(
 
 #[cfg(test)]
 mod resource_profile_tests {
+    use std::{
+        sync::{Arc, Barrier},
+        time::{Duration, Instant},
+    };
+
     use super::{system_default_device, MetalRuntime};
     use crate::metal_types::prelude::*;
 
     #[test]
     fn decode_initializes_only_its_own_group_and_reuses_it() {
-        let runtime = MetalRuntime::new().expect("Metal runtime");
-        assert!(runtime.decode.get().is_none());
-        assert!(runtime.encode.get().is_none());
-        assert!(runtime.profile.get().is_none());
-        assert!(runtime.buffers.get().is_none());
+        let runtime = MetalRuntime::new_isolated().expect("Metal runtime");
+        assert!(runtime.kernels_for_test().decode.get().is_none());
+        assert!(runtime.kernels_for_test().encode.get().is_none());
+        assert!(runtime.kernels_for_test().profile.get().is_none());
+        assert!(runtime.kernels_for_test().buffers.get().is_none());
         let first = runtime.decode().expect("decode kernels");
         let second = runtime.decode().expect("cached decode kernels");
         assert!(std::ptr::eq(first, second));
-        assert!(runtime.encode.get().is_none());
-        assert!(runtime.profile.get().is_none());
-        assert!(runtime.buffers.get().is_none());
+        assert!(runtime.kernels_for_test().encode.get().is_none());
+        assert!(runtime.kernels_for_test().profile.get().is_none());
+        assert!(runtime.kernels_for_test().buffers.get().is_none());
+    }
+
+    #[test]
+    fn same_device_runtimes_share_kernels_but_keep_mutable_state_isolated() {
+        let runtime_a = MetalRuntime::new().expect("first Metal runtime");
+        let runtime_b =
+            MetalRuntime::new_with_device(&runtime_a.device).expect("second Metal runtime");
+
+        assert!(std::ptr::eq(
+            runtime_a.decode().expect("first decode kernels"),
+            runtime_b.decode().expect("shared decode kernels")
+        ));
+        assert!(std::ptr::eq(
+            runtime_a.encode().expect("first encode kernels"),
+            runtime_b.encode().expect("shared encode kernels")
+        ));
+        assert!(!std::ptr::eq(
+            objc2::rc::Retained::as_ptr(&runtime_a.queue),
+            objc2::rc::Retained::as_ptr(&runtime_b.queue)
+        ));
+        assert!(!std::ptr::eq(
+            &raw const runtime_a.buffer_pools,
+            &raw const runtime_b.buffer_pools
+        ));
+        assert!(!std::ptr::eq(
+            &raw const runtime_a.prepared_ht_execution_cache,
+            &raw const runtime_b.prepared_ht_execution_cache
+        ));
+    }
+
+    #[test]
+    fn concurrent_same_device_runtimes_share_initialized_kernels() {
+        const WORKERS: usize = 4;
+
+        let start = Arc::new(Barrier::new(WORKERS));
+        let workers = (0..WORKERS)
+            .map(|_| {
+                let start = Arc::clone(&start);
+                std::thread::spawn(move || {
+                    start.wait();
+                    let runtime = MetalRuntime::new().expect("concurrent Metal runtime");
+                    runtime.decode().expect("concurrent decode kernels");
+                    runtime.encode().expect("concurrent encode kernels");
+                    runtime
+                })
+            })
+            .collect::<Vec<_>>();
+        let runtimes = workers
+            .into_iter()
+            .map(|worker| worker.join().expect("Metal runtime worker"))
+            .collect::<Vec<_>>();
+        let first_decode = runtimes[0].decode().expect("first decode kernels");
+        let first_encode = runtimes[0].encode().expect("first encode kernels");
+
+        assert!(runtimes.iter().skip(1).all(|runtime| std::ptr::eq(
+            first_decode,
+            runtime.decode().expect("shared decode kernels")
+        )));
+        assert!(runtimes.iter().skip(1).all(|runtime| std::ptr::eq(
+            first_encode,
+            runtime.encode().expect("shared encode kernels")
+        )));
+    }
+
+    #[test]
+    #[ignore = "manual Metal cold-start benchmark"]
+    fn benchmark_cold_and_repeated_session_kernel_initialization() {
+        const PAIRED_SAMPLES: u32 = 5;
+
+        let device = system_default_device().expect("Metal device");
+        let cold_start = Instant::now();
+        let anchor = MetalRuntime::new_with_device(&device).expect("cold Metal runtime");
+        let anchor_decode = anchor.decode().expect("cold decode kernels");
+        let anchor_encode = anchor.encode().expect("cold encode kernels");
+        let cold_elapsed = cold_start.elapsed();
+
+        let measure_uncached = || {
+            let start = Instant::now();
+            let runtime = MetalRuntime::new_isolated_with_device(&device)
+                .expect("uncached repeated Metal runtime");
+            let decode = runtime.decode().expect("uncached decode kernels");
+            let encode = runtime.encode().expect("uncached encode kernels");
+            let elapsed = start.elapsed();
+            assert!(!std::ptr::eq(anchor_decode, decode));
+            assert!(!std::ptr::eq(anchor_encode, encode));
+            elapsed
+        };
+        let measure_shared = || {
+            let start = Instant::now();
+            let runtime = MetalRuntime::new_with_device(&device).expect("shared Metal runtime");
+            let decode = runtime.decode().expect("shared decode kernels");
+            let encode = runtime.encode().expect("shared encode kernels");
+            let elapsed = start.elapsed();
+            assert!(std::ptr::eq(anchor_decode, decode));
+            assert!(std::ptr::eq(anchor_encode, encode));
+            elapsed
+        };
+        let mut uncached_elapsed = Duration::ZERO;
+        let mut shared_elapsed = Duration::ZERO;
+        for sample in 0..PAIRED_SAMPLES {
+            if sample.is_multiple_of(2) {
+                uncached_elapsed += measure_uncached();
+                shared_elapsed += measure_shared();
+            } else {
+                shared_elapsed += measure_shared();
+                uncached_elapsed += measure_uncached();
+            }
+        }
+
+        eprintln!(
+            "METAL_SESSION_STARTUP cold_setup_us={} uncached_mean_us={} shared_mean_us={} paired_samples={PAIRED_SAMPLES}",
+            cold_elapsed.as_micros(),
+            (uncached_elapsed / PAIRED_SAMPLES).as_micros(),
+            (shared_elapsed / PAIRED_SAMPLES).as_micros(),
+        );
     }
 
     #[test]
     fn failed_optional_groups_do_not_block_decode_or_buffer_operations() {
-        let runtime = MetalRuntime::new().expect("Metal runtime");
+        let runtime = MetalRuntime::new_isolated().expect("Metal runtime");
         let failure = j2k_metal_support::MetalSupportError::ShaderLibrary {
             message: "test optional compiler failure".into(),
         };
-        assert!(runtime.encode.set(Err(failure.clone())).is_ok());
-        assert!(runtime.profile.set(Err(failure)).is_ok());
+        assert!(runtime
+            .kernels_for_test()
+            .encode
+            .set(Err(failure.clone()))
+            .is_ok());
+        assert!(runtime.kernels_for_test().profile.set(Err(failure)).is_ok());
         runtime
             .decode()
             .expect("decode independent of optional groups");
@@ -290,8 +454,16 @@ mod resource_profile_tests {
         }
         // Failures remain cached; a later decode does not retry optional initialization.
         runtime.decode().expect("decode remains usable");
-        assert!(runtime.encode.get().is_some_and(Result::is_err));
-        assert!(runtime.profile.get().is_some_and(Result::is_err));
+        assert!(runtime
+            .kernels_for_test()
+            .encode
+            .get()
+            .is_some_and(Result::is_err));
+        assert!(runtime
+            .kernels_for_test()
+            .profile
+            .get()
+            .is_some_and(Result::is_err));
     }
 
     #[test]

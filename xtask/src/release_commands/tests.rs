@@ -29,10 +29,113 @@ fn package_consumer_smoke_rejects_invalid_routes_before_packaging() {
 
 #[test]
 fn full_gpu_workflows_compile_the_packaged_adapter_archives() {
-    let workflow = include_str!("../../../.github/workflows/gpu-validation.yml");
+    let workflow = include_str!("../../../.github/workflows/gpu-validation-runner.yml");
 
     assert!(workflow.contains("cargo xtask package-consumer-smoke --target cuda --cuda-runtime"));
     assert!(workflow.contains("cargo xtask package-consumer-smoke --target metal"));
+}
+
+#[test]
+fn gpu_dispatchers_call_immutable_reusable_workflows() {
+    for (source, runner_file) in [
+        (
+            include_str!("../../../.github/workflows/gpu-validation.yml"),
+            "gpu-validation-runner.yml",
+        ),
+        (
+            include_str!("../../../.github/workflows/gpu-benchmarks.yml"),
+            "gpu-benchmarks-runner.yml",
+        ),
+    ] {
+        let workflow: serde_yaml_ng::Value =
+            serde_yaml_ng::from_str(source).expect("workflow YAML");
+        let jobs = workflow["jobs"].as_mapping().expect("dispatcher jobs");
+        assert_eq!(
+            jobs.len(),
+            1,
+            "dispatchers delegate all jobs to the trusted workflow"
+        );
+        let job = jobs.values().next().expect("dispatcher job");
+        assert!(
+            job["runs-on"].is_null(),
+            "PR workflows cannot directly schedule self-hosted jobs"
+        );
+        let reference = job["uses"].as_str().expect("reusable workflow reference");
+        let (path, revision) = reference
+            .rsplit_once('@')
+            .expect("pinned reusable workflow");
+        assert_eq!(
+            path,
+            format!("frames-sg/j2k/.github/workflows/{runner_file}")
+        );
+        assert_eq!(revision.len(), 40);
+        assert!(revision.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_eq!(workflow["on"].as_mapping().expect("triggers").len(), 1);
+        assert!(workflow["on"]["workflow_dispatch"].is_mapping());
+    }
+}
+
+#[test]
+fn gpu_workflows_allow_only_owner_manual_runs_on_any_branch() {
+    let mut gpu_jobs = 0;
+    for source in [
+        include_str!("../../../.github/workflows/gpu-validation-runner.yml"),
+        include_str!("../../../.github/workflows/gpu-benchmarks-runner.yml"),
+    ] {
+        let workflow: serde_yaml_ng::Value =
+            serde_yaml_ng::from_str(source).expect("valid GPU workflow YAML");
+        let triggers = workflow["on"].as_mapping().expect("workflow triggers");
+        assert_eq!(
+            triggers.len(),
+            1,
+            "Runner workflows expose only the reusable entry point"
+        );
+        assert!(triggers.contains_key("workflow_call"));
+        let jobs = workflow["jobs"].as_mapping().expect("workflow jobs");
+        for (name, job) in jobs {
+            let Some(runners) = job["runs-on"].as_sequence() else {
+                continue;
+            };
+            if !runners
+                .iter()
+                .any(|runner| runner.as_str() == Some("self-hosted"))
+            {
+                continue;
+            }
+            gpu_jobs += 1;
+            for step in job["steps"].as_sequence().expect("GPU job steps") {
+                if step["uses"]
+                    .as_str()
+                    .is_some_and(|value| value.starts_with("actions/checkout@"))
+                {
+                    assert_eq!(step["with"]["ref"].as_str(), Some("${{ github.sha }}"));
+                    assert_eq!(step["with"]["persist-credentials"].as_bool(), Some(false));
+                }
+            }
+            let name = name.as_str().expect("job name");
+            let selection = match name {
+                "cuda-quick" => {
+                    "inputs.mode == 'quick' && (inputs.target == 'cuda' || inputs.target == 'all')"
+                }
+                "metal-quick" => {
+                    "inputs.mode == 'quick' && (inputs.target == 'metal' || inputs.target == 'all')"
+                }
+                "cuda-full" | "metal-full" => "inputs.mode == 'full' && inputs.target == 'all'",
+                "cuda" => "inputs.lane == 'cuda'",
+                "metal" => "inputs.lane == 'metal'",
+                _ => panic!("unreviewed self-hosted GPU job: {name}"),
+            };
+            let expected = format!(
+                "${{{{ github.repository == 'frames-sg/j2k' && github.event_name == 'workflow_dispatch' && github.actor == 'jcwal1516' && github.triggering_actor == 'jcwal1516' && ({selection}) }}}}"
+            );
+            assert_eq!(
+                job["if"].as_str(),
+                Some(expected.as_str()),
+                "{name} must accept the owner's manual runs from any branch and reject other initiators or rerun actors"
+            );
+        }
+    }
+    assert_eq!(gpu_jobs, 6, "all GPU jobs retain the trusted owner guard");
 }
 
 #[cfg(unix)]

@@ -4,6 +4,73 @@ use j2k::J2kEncodeStageAccelerator;
 use j2k_native::{CpuOnlyJ2kEncodeStageAccelerator, DecodeSettings, EncodeOptions, Image};
 
 #[test]
+fn resident_lossy_reuses_private_buffers_after_warmup() {
+    if !j2k_test_support::metal_runtime_gate(module_path!()) {
+        return;
+    }
+    let device = j2k_metal_support::system_default_device().unwrap();
+    crate::engine::with_isolated_runtime_for_device_for_test(&device, || {
+        let pixels = j2k_test_support::patterned_rgb8(65, 49);
+        let options = EncodeOptions {
+            reversible: false,
+            num_decomposition_levels: 3,
+            guard_bits: 2,
+            use_ht_block_coding: true,
+            ..EncodeOptions::default()
+        };
+        let mut accelerator = crate::MetalEncodeStageAccelerator::default();
+        let mut encode = || {
+            j2k_native::encode_with_accelerator(
+                &pixels,
+                65,
+                49,
+                3,
+                8,
+                false,
+                &options,
+                &mut accelerator,
+            )
+            .unwrap()
+        };
+        let first = encode();
+        crate::engine::reset_private_buffer_pool_misses_for_test();
+        crate::engine::reset_shared_buffer_pool_misses_for_test();
+        assert_eq!(encode(), first);
+        assert_eq!(
+            crate::engine::shared_buffer_pool_misses_for_test(),
+            0,
+            "a completed lossy encode must return shared staging and metadata for reuse"
+        );
+        assert_eq!(
+            crate::engine::private_buffer_pool_misses_for_test(),
+            0,
+            "a completed lossy encode must return its private intermediates for reuse"
+        );
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn resident_lossy_submits_one_gpu_pipeline() {
+    if !j2k_test_support::metal_runtime_gate(module_path!()) {
+        return;
+    }
+    crate::engine::reset_metal_command_buffers_for_test();
+    let pixels = j2k_test_support::patterned_rgb8(65, 49);
+    let options = EncodeOptions {
+        reversible: false,
+        num_decomposition_levels: 3,
+        guard_bits: 2,
+        use_ht_block_coding: true,
+        ..EncodeOptions::default()
+    };
+    assert_resident_matches_scalar(&pixels, 65, 49, 3, &options);
+    assert_eq!(crate::engine::metal_command_buffers_for_test(), 1,
+        "transform, HT, packet headers and parallel payload copy must precede one completion boundary");
+}
+
+#[test]
 fn resident_lossy_ht_matches_scalar_codestream_and_pixels() {
     if !j2k_test_support::metal_runtime_gate(module_path!()) {
         return;

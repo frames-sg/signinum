@@ -5,14 +5,14 @@ use super::abi::{
     J2kLossyCoefficientJob, J2kQuantizeSubbandParams,
 };
 use super::{
-    checked_buffer_slice, commit_and_wait_metal, copied_slice_buffer, ht_encode_output_capacity,
-    new_command_buffer, new_compute_command_encoder, new_shared_buffer,
-    take_recyclable_private_buffer, with_runtime, zeroed_shared_buffer, Buffer, Error,
-    J2kLosslessDeviceCodeBlock, MetalRuntime,
+    checked_buffer_slice, commit_and_wait_metal, copied_recyclable_shared_slice_buffer,
+    ht_encode_output_capacity, new_command_buffer, new_compute_command_encoder,
+    take_recyclable_private_buffer, with_runtime, Buffer, Error, J2kLosslessDeviceCodeBlock,
+    MetalRuntime,
 };
 use crate::metal_types::prelude::*;
 use j2k_metal_support::{dispatch_1d_pipeline, dispatch_2d_pipeline, dispatch_3d_pipeline};
-use j2k_native::{EncodedHtJ2kCodeBlock, J2kHtj2kTileEncodeJob, J2kSubBandType};
+use j2k_native::{J2kHtj2kTileEncodeJob, J2kSubBandType};
 
 struct LossyJobs {
     quantize: Vec<J2kLossyCoefficientJob>,
@@ -121,25 +121,28 @@ fn layout_error() -> Error {
     }
 }
 
-pub(crate) fn encode_resident_lossy_ht_blocks(
+pub(crate) fn encode_resident_lossy_ht_packet(
     job: J2kHtj2kTileEncodeJob<'_>,
     blocks: &[J2kLosslessDeviceCodeBlock],
     steps: &[(u16, u16, u8)],
-) -> Result<(Vec<EncodedHtJ2kCodeBlock>, u8), Error> {
+    packets: super::J2kResidentPacketizationEncodeJob<'_>,
+) -> Result<(Vec<u8>, u8), Error> {
     let jobs = plan_jobs(job, blocks, steps)?;
-    with_runtime(|runtime| execute(runtime, job, &jobs))
+    with_runtime(|runtime| execute(runtime, job, &jobs, packets))
 }
 
 fn execute(
     runtime: &MetalRuntime,
     job: J2kHtj2kTileEncodeJob<'_>,
     jobs: &LossyJobs,
-) -> Result<(Vec<EncodedHtJ2kCodeBlock>, u8), Error> {
+    packets: super::J2kResidentPacketizationEncodeJob<'_>,
+) -> Result<(Vec<u8>, u8), Error> {
     let plane_bytes = (job.width as usize)
         .checked_mul(job.height as usize)
         .and_then(|n| n.checked_mul(size_of::<f32>()))
         .ok_or_else(layout_error)?;
     let mut retained = Vec::new();
+    let mut shared = Vec::new();
     let mut planes = Vec::new();
     let mut scratches = Vec::new();
     for _ in 0..job.num_components {
@@ -162,17 +165,19 @@ fn execute(
             .max(1),
         &mut retained,
     )?;
-    let input = copied_slice_buffer(&runtime.device, job.pixels)?;
-    let quantize_jobs = copied_slice_buffer(&runtime.device, &jobs.quantize)?;
-    let ht_jobs = copied_slice_buffer(&runtime.device, &jobs.ht)?;
-    let output = new_shared_buffer(&runtime.device, jobs.output_bytes.max(1))?;
-    let status_buffer = zeroed_shared_buffer(
-        &runtime.device,
+    let input = copied_recyclable_shared_slice_buffer(runtime, job.pixels, &mut shared)?;
+    let quantize_jobs =
+        copied_recyclable_shared_slice_buffer(runtime, &jobs.quantize, &mut shared)?;
+    let ht_jobs = copied_recyclable_shared_slice_buffer(runtime, &jobs.ht, &mut shared)?;
+    let output = take_recyclable_private_buffer(runtime, jobs.output_bytes, &mut retained)?;
+    let status_buffer = super::zeroed_recyclable_shared_buffer(
+        runtime,
         jobs.ht
             .len()
             .checked_mul(size_of::<J2kHtEncodeStatus>())
             .ok_or_else(layout_error)?
             .max(1),
+        &mut shared,
     )?;
     let command = new_command_buffer(&runtime.queue)?;
     encode_input(runtime, &command, &input, &planes, job)?;
@@ -191,37 +196,109 @@ fn execute(
             scratch.clone()
         });
     }
-    let count = u32::try_from(jobs.ht.len()).map_err(|_| layout_error())?;
-    let encoder = new_compute_command_encoder(&command)?;
+    let ht_input = super::lossy_packet::HtPacketInput {
+        jobs: &ht_jobs,
+        payload: &output,
+        status: &status_buffer,
+        count: jobs.ht.len(),
+        capacity: jobs.output_bytes,
+    };
+    encode_quantized_ht(
+        runtime,
+        &command,
+        QuantizeInput {
+            planes: &transformed,
+            coefficients: &coefficients,
+            jobs: &quantize_jobs,
+            block_dimensions: (job.code_block_width, job.code_block_height),
+        },
+        ht_input,
+    )?;
+    let packet_output = super::lossy_packet::encode(
+        runtime,
+        &command,
+        ht_input,
+        packets,
+        &mut retained,
+        &mut shared,
+    )?;
+    // All resources are retained through the single completion boundary. On a
+    // command failure they are dropped rather than returned to a reusable pool.
+    commit_and_wait_metal(&command)?;
+    let result = read_result(jobs, &packet_output, &status_buffer);
+    let recycled_private = super::recycle_private_buffers(runtime, retained);
+    let recycled_shared = super::recycle_shared_buffers(runtime, shared);
+    // Pool-state failures take precedence: subsequent session reuse is affected.
+    recycled_private?;
+    recycled_shared?;
+    result
+}
+
+/// Validate all GPU statuses before exposing packet bytes to native assembly.
+fn read_result(
+    jobs: &LossyJobs,
+    packets: &super::lossy_packet::PacketOutput,
+    status_buffer: &Buffer,
+) -> Result<(Vec<u8>, u8), Error> {
+    let statuses = checked_buffer_slice::<J2kHtEncodeStatus>(
+        status_buffer,
+        jobs.ht.len(),
+        "Metal lossy HT statuses",
+    )?;
+    let bound =
+        super::lossy_packet::magnitude_bound(&statuses, &jobs.ht, &jobs.decomposition_levels)?;
+    Ok((packets.read()?, bound))
+}
+
+#[derive(Clone, Copy)]
+struct QuantizeInput<'a> {
+    planes: &'a [Buffer],
+    coefficients: &'a Buffer,
+    jobs: &'a Buffer,
+    block_dimensions: (u32, u32),
+}
+
+fn encode_quantized_ht(
+    runtime: &MetalRuntime,
+    command: &super::CommandBufferRef,
+    quantize: QuantizeInput<'_>,
+    ht: super::lossy_packet::HtPacketInput<'_>,
+) -> Result<(), Error> {
+    let count = u32::try_from(ht.count).map_err(|_| layout_error())?;
+    let encoder = new_compute_command_encoder(command)?;
     let kernel = &runtime.encode()?.lossy_extract_quantized_coefficients;
     encoder.setComputePipelineState(kernel);
     for index in 0usize..3 {
         encoder.set_buffer(
             index as u64,
-            Some(transformed.get(index).unwrap_or(&transformed[0])),
+            Some(quantize.planes.get(index).unwrap_or(&quantize.planes[0])),
             0,
         );
     }
-    encoder.set_buffer(3, Some(&coefficients), 0);
-    encoder.set_buffer(4, Some(&quantize_jobs), 0);
+    encoder.set_buffer(3, Some(quantize.coefficients), 0);
+    encoder.set_buffer(4, Some(quantize.jobs), 0);
     encoder.set_bytes(5, &count);
     dispatch_3d_pipeline(
         &encoder,
         kernel,
-        (job.code_block_width, job.code_block_height, count),
+        (
+            quantize.block_dimensions.0,
+            quantize.block_dimensions.1,
+            count,
+        ),
     );
     encoder.endEncoding();
-    let encoder = new_compute_command_encoder(&command)?;
+    let encoder = new_compute_command_encoder(command)?;
     let kernels = runtime.encode()?;
     encoder.setComputePipelineState(&kernels.ht_encode_code_blocks);
     for (index, buffer) in [
-        &coefficients,
-        &output,
-        &ht_jobs,
+        quantize.coefficients,
+        ht.payload,
+        ht.jobs,
         &kernels.ht_vlc_encode_table0,
         &kernels.ht_vlc_encode_table1,
         &kernels.ht_uvlc_encode_table,
-        &status_buffer,
+        ht.status,
     ]
     .into_iter()
     .enumerate()
@@ -231,44 +308,7 @@ fn execute(
     encoder.set_bytes(7, &count);
     dispatch_1d_pipeline(&encoder, &kernels.ht_encode_code_blocks, u64::from(count));
     encoder.endEncoding();
-    // All input, output and pooled intermediate owners remain live until this
-    // completion boundary, including the error path of commit_and_wait_metal.
-    commit_and_wait_metal(&command)?;
-    read_lossy_blocks(jobs, &status_buffer, &output)
-}
-
-fn read_lossy_blocks(
-    jobs: &LossyJobs,
-    status_buffer: &Buffer,
-    output: &Buffer,
-) -> Result<(Vec<EncodedHtJ2kCodeBlock>, u8), Error> {
-    let statuses = checked_buffer_slice::<J2kHtEncodeStatus>(
-        status_buffer,
-        jobs.ht.len(),
-        "Metal lossy HT statuses",
-    )?;
-    let mut encoded =
-        crate::batch_allocation::try_vec(jobs.ht.len(), "Metal lossy HT output blocks")?;
-    let mut bound = 8;
-    for ((job, status), level) in jobs
-        .ht
-        .iter()
-        .zip(statuses.iter().copied())
-        .zip(jobs.decomposition_levels.iter().copied())
-    {
-        encoded.push(super::tier1_encode::read_ht_encoded_code_block(
-            status,
-            output,
-            job.output_offset as usize,
-            job.output_capacity as usize,
-        )?);
-        bound = bound.max(j2k_native::htj2k_required_magnitude_bound(
-            u64::from(status.detail),
-            false,
-            level,
-        ));
-    }
-    Ok((encoded, bound.min(74)))
+    Ok(())
 }
 
 fn encode_input(

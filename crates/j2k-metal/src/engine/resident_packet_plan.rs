@@ -132,14 +132,21 @@ pub(super) struct ResidentBatchPacketPlan {
     pub(super) codestream_capacities: Vec<usize>,
 }
 
-/// Builds the per-tile packet/assembly plan shared by the classic and HT
-/// resident batch encode drivers (the packet-plan stage of both was
-/// token-identical apart from the values now carried in `params` and the
-/// per-family packet output capacity rule).
-#[expect(
-    clippy::too_many_lines,
-    reason = "single-pass packet planning keeps descriptor offsets and capacities consistent"
-)]
+/// Packet topology independent of transform buffers and command ownership.
+/// `codestream=None` emits packet bytes for native assembly (including lossy headers).
+pub(super) struct ResidentPacketTile<'a> {
+    pub(super) resolution_count: u32,
+    pub(super) num_layers: u8,
+    pub(super) component_count: u8,
+    pub(super) code_block_count: u32,
+    // Bound descriptor ranges by the actual retained Tier-1 table, not the declared count.
+    pub(super) available_code_blocks: usize,
+    pub(super) packet_descriptors: &'a [J2kPacketizationPacketDescriptor],
+    pub(super) resolutions: &'a [J2kResidentPacketizationResolution],
+    pub(super) codestream: Option<J2kLosslessCodestreamAssemblyJob>,
+}
+
+/// Preserve the lossless batch driver's ownership while borrowing its packet topology.
 pub(super) fn build_resident_batch_packet_plan(
     prepared_tiles: &[PreparedLosslessBatchTile],
     tile_tier1_job_bases: &[usize],
@@ -149,6 +156,34 @@ pub(super) fn build_resident_batch_packet_plan(
         &PreparedLosslessBatchTile,
         usize,
     ) -> Result<usize, Error>,
+) -> Result<ResidentBatchPacketPlan, Error> {
+    let mut tiles =
+        crate::batch_allocation::try_vec(prepared_tiles.len(), "resident packet topology views")?;
+    tiles.extend(prepared_tiles.iter().map(|tile| ResidentPacketTile {
+        resolution_count: tile.resolution_count,
+        num_layers: tile.num_layers,
+        component_count: tile.component_count,
+        code_block_count: tile.code_block_count,
+        available_code_blocks: tile.code_blocks.len(),
+        packet_descriptors: &tile.packet_descriptors,
+        resolutions: &tile.resolutions,
+        codestream: Some(tile.codestream),
+    }));
+    build_resident_packet_plan(&tiles, tile_tier1_job_bases, params, |index, _, header| {
+        tile_packet_output_capacity(index, &prepared_tiles[index], header)
+    })
+}
+
+/// Build packet metadata for resident Classic/HT payloads, with optional GPU assembly.
+#[expect(
+    clippy::too_many_lines,
+    reason = "single-pass packet planning keeps descriptor offsets and capacities consistent"
+)]
+pub(super) fn build_resident_packet_plan(
+    prepared_tiles: &[ResidentPacketTile<'_>],
+    tile_tier1_job_bases: &[usize],
+    params: ResidentBatchPacketPlanParams,
+    tile_packet_output_capacity: impl Fn(usize, &ResidentPacketTile<'_>, usize) -> Result<usize, Error>,
 ) -> Result<ResidentBatchPacketPlan, Error> {
     let batch_err = |suffix: &str| Error::MetalKernel {
         message: format!("{} Metal batch {}", params.family_name, suffix),
@@ -169,7 +204,7 @@ pub(super) fn build_resident_batch_packet_plan(
         "J2K Metal resident packet subbands",
     )?;
     let block_count = crate::batch_allocation::checked_count_sum(
-        prepared_tiles.iter().map(|tile| tile.code_blocks.len()),
+        prepared_tiles.iter().map(|tile| tile.available_code_blocks),
         "J2K Metal resident packet blocks",
     )?;
     let descriptor_count = crate::batch_allocation::checked_count_sum(
@@ -274,7 +309,7 @@ pub(super) fn build_resident_batch_packet_plan(
         let mut local_resident_block_count = 0usize;
         let mut local_payload_copy_job_capacity = 0usize;
 
-        for resolution in &tile.resolutions {
+        for resolution in tile.resolutions {
             let subband_offset = u32::try_from(local_subband_count)
                 .map_err(|_| batch_err("packet subband offset exceeds u32"))?;
             for subband in &resolution.subbands {
@@ -291,7 +326,7 @@ pub(super) fn build_resident_batch_packet_plan(
                 let code_block_end = code_block_start
                     .checked_add(code_block_count)
                     .ok_or_else(|| batch_err("packet code-block range overflow"))?;
-                if code_block_end > tile.code_blocks.len() {
+                if code_block_end > tile.available_code_blocks {
                     return Err(batch_err("packet code-block range out of bounds"));
                 }
                 for tier1_job_index in code_block_start..code_block_end {
@@ -344,7 +379,7 @@ pub(super) fn build_resident_batch_packet_plan(
             tile.packet_descriptors.len(),
             "J2K Metal resident packet state index map",
         )?;
-        for descriptor in &tile.packet_descriptors {
+        for descriptor in tile.packet_descriptors {
             let packet_index = usize::try_from(descriptor.packet_index)
                 .map_err(|_| batch_err("descriptor packet index exceeds usize"))?;
             let resolution = packet_resolutions
@@ -413,9 +448,13 @@ pub(super) fn build_resident_batch_packet_plan(
             .ok_or_else(|| batch_err("packet header capacity overflow"))?;
         let packet_output_capacity =
             tile_packet_output_capacity(tile_index, tile, header_capacity)?;
-        let codestream_capacity =
-            lossless_codestream_assembly_capacity(packet_output_capacity, tile.codestream)?;
-        let codestream_payload_offset = lossless_codestream_payload_offset(tile.codestream)?;
+        let (codestream_capacity, codestream_payload_offset) = match tile.codestream {
+            Some(job) => (
+                lossless_codestream_assembly_capacity(packet_output_capacity, job)?,
+                lossless_codestream_payload_offset(job)?,
+            ),
+            None => (packet_output_capacity, 0),
+        };
         let scratch_words = max_tree_nodes
             .checked_mul(6)
             .ok_or_else(|| batch_err("scratch size overflow"))?;
@@ -466,28 +505,30 @@ pub(super) fn build_resident_batch_packet_plan(
             scratch_node_capacity: u32::try_from(max_tree_nodes)
                 .map_err(|_| batch_err("scratch node capacity exceeds u32"))?,
         });
-        assembly_jobs.push(J2kBatchedCodestreamAssemblyJob {
-            tile_data_offset: u32::try_from(packet_output_offset)
-                .map_err(|_| batch_err("assembly packet offset exceeds u32"))?,
-            codestream_offset: u32::try_from(codestream_offset)
-                .map_err(|_| batch_err("codestream offset exceeds u32"))?,
-            width: tile.codestream.width,
-            height: tile.codestream.height,
-            num_components: u32::from(tile.codestream.component_count),
-            bit_depth: u32::from(tile.codestream.bit_depth),
-            signed_samples: u32::from(tile.codestream.signed),
-            num_decomposition_levels: u32::from(tile.codestream.num_decomposition_levels),
-            use_mct: u32::from(tile.codestream.use_mct),
-            guard_bits: u32::from(tile.codestream.guard_bits),
-            progression_order: codestream_progression_order_code(tile.codestream.progression_order),
-            write_tlm: u32::from(tile.codestream.write_tlm),
-            high_throughput: params.high_throughput,
-            code_block_style: params.code_block_style,
-            code_block_width_exp: u32::from(tile.codestream.code_block_width_exp),
-            code_block_height_exp: u32::from(tile.codestream.code_block_height_exp),
-            output_capacity: u32::try_from(codestream_capacity)
-                .map_err(|_| batch_err("codestream capacity exceeds u32"))?,
-        });
+        if let Some(codestream) = tile.codestream {
+            assembly_jobs.push(J2kBatchedCodestreamAssemblyJob {
+                tile_data_offset: u32::try_from(packet_output_offset)
+                    .map_err(|_| batch_err("assembly packet offset exceeds u32"))?,
+                codestream_offset: u32::try_from(codestream_offset)
+                    .map_err(|_| batch_err("codestream offset exceeds u32"))?,
+                width: codestream.width,
+                height: codestream.height,
+                num_components: u32::from(codestream.component_count),
+                bit_depth: u32::from(codestream.bit_depth),
+                signed_samples: u32::from(codestream.signed),
+                num_decomposition_levels: u32::from(codestream.num_decomposition_levels),
+                use_mct: u32::from(codestream.use_mct),
+                guard_bits: u32::from(codestream.guard_bits),
+                progression_order: codestream_progression_order_code(codestream.progression_order),
+                write_tlm: u32::from(codestream.write_tlm),
+                high_throughput: params.high_throughput,
+                code_block_style: params.code_block_style,
+                code_block_width_exp: u32::from(codestream.code_block_width_exp),
+                code_block_height_exp: u32::from(codestream.code_block_height_exp),
+                output_capacity: u32::try_from(codestream_capacity)
+                    .map_err(|_| batch_err("codestream capacity exceeds u32"))?,
+            });
+        }
         codestream_offsets.push(codestream_offset);
         codestream_capacities.push(codestream_capacity);
         packet_output_capacity_total = packet_output_capacity_total
@@ -534,6 +575,42 @@ mod tests {
         build_resident_batch_packet_plan, PreparedLosslessBatchTile, ResidentBatchPacketPlanParams,
     };
     use crate::Error;
+
+    #[test]
+    fn packet_ranges_are_bounded_by_actual_tier1_jobs() {
+        let resolutions = [super::J2kResidentPacketizationResolution {
+            subbands: vec![super::super::J2kResidentPacketizationSubband {
+                code_block_start: 1,
+                code_block_count: 1,
+                num_cbs_x: 1,
+                num_cbs_y: 1,
+            }],
+        }];
+        let tile = super::ResidentPacketTile {
+            resolution_count: 1,
+            num_layers: 1,
+            component_count: 1,
+            code_block_count: 2,
+            available_code_blocks: 1,
+            packet_descriptors: &[],
+            resolutions: &resolutions,
+            codestream: None,
+        };
+        let error = super::build_resident_packet_plan(
+            &[tile],
+            &[0],
+            ResidentBatchPacketPlanParams {
+                family_name: "test",
+                block_coding_mode: 1,
+                high_throughput: 1,
+                code_block_style: 0x40,
+            },
+            |_, _, _| Ok(4096),
+        )
+        .err()
+        .expect("descriptor must not index beyond the actual HT table");
+        assert!(error.to_string().contains("code-block range out of bounds"));
+    }
 
     #[test]
     fn resident_packet_plan_rejects_mismatched_tier1_job_bases() {

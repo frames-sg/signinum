@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use j2k::{J2kBlockCodingMode, J2kLosslessEncodeOptions};
-use j2k_native::{J2kHtj2kTileEncodeJob, J2kPacketizationEncodeJob};
+use j2k_native::J2kHtj2kTileEncodeJob;
 
 use super::{
-    compute, cpu_packetization_resolutions_from_lossless_device_plan,
-    packet_descriptors_for_lossless_device_order, packetization_progression_order,
+    compute, packet_descriptors_for_lossless_device_order,
+    resident_packetization_resolutions_from_lossless_device_plan,
 };
 
 pub(super) struct ResidentLossyHtTile {
@@ -105,40 +105,29 @@ pub(super) fn encode_resident_lossy_ht_tile(
             }
         }
     }
-    let (blocks, required_magnitude_bound) =
-        compute::encode_resident_lossy_ht_blocks(job, &plan.code_blocks, &steps)?;
-    let data = packetize_lossy(&plan, &blocks)?;
-    Ok(Some(ResidentLossyHtTile {
-        data,
-        required_magnitude_bound,
-        code_block_count: blocks.len(),
-    }))
-}
-
-fn packetize_lossy(
-    plan: &super::plan::LosslessDeviceEncodePlan,
-    blocks: &[j2k_native::EncodedHtJ2kCodeBlock],
-) -> Result<Vec<u8>, crate::Error> {
-    let resolutions =
-        cpu_packetization_resolutions_from_lossless_device_plan(plan, blocks.len(), blocks)?;
+    let resolutions = resident_packetization_resolutions_from_lossless_device_plan(&plan)?;
     let descriptors = packet_descriptors_for_lossless_device_order(
         plan.resolutions.len(),
         plan.components,
         plan.progression_order,
     )?;
-    let packet_job = J2kPacketizationEncodeJob {
-        resolution_count: u32::try_from(plan.resolutions.len())
+    let packets = compute::J2kResidentPacketizationEncodeJob {
+        resolution_count: u32::try_from(resolutions.len())
             .map_err(|_| plan_error("resolution count"))?,
         num_layers: 1,
-        num_components: u16::from(plan.components),
-        code_block_count: u32::try_from(blocks.len()).map_err(|_| plan_error("block count"))?,
-        progression_order: packetization_progression_order(plan.progression_order),
+        component_count: plan.components,
+        code_block_count: u32::try_from(plan.code_blocks.len())
+            .map_err(|_| plan_error("block count"))?,
         packet_descriptors: &descriptors,
         resolutions: &resolutions,
     };
-    // The explicit device route requires real Metal packetization as well as
-    // transforms and entropy coding. Reuse its validated packet encoder.
-    compute::encode_tier2_packetization(packet_job)
+    let (data, required_magnitude_bound) =
+        compute::encode_resident_lossy_ht_packet(job, &plan.code_blocks, &steps, packets)?;
+    Ok(Some(ResidentLossyHtTile {
+        data,
+        required_magnitude_bound,
+        code_block_count: plan.code_blocks.len(),
+    }))
 }
 
 fn plan_error(field: &str) -> crate::Error {

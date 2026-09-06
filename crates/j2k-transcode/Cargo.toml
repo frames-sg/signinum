@@ -22,12 +22,12 @@ dev-support = []
 
 [dependencies]
 rayon = { workspace = true }
-j2k-core = { path = "../j2k-core", version = "=0.10.0" }
-j2k-codec-math = { path = "../j2k-codec-math", version = "=0.10.0" }
-j2k-jpeg = { path = "../j2k-jpeg", version = "=0.10.0" }
-j2k = { path = "../j2k", version = "=0.10.0" }
-j2k-native = { path = "../j2k-native", version = "=0.10.0" }
-j2k-profile = { path = "../j2k-profile", version = "=0.10.0", default-features = false }
+j2k-core = { path = "../j2k-core", version = "=0.11.0" }
+j2k-codec-math = { path = "../j2k-codec-math", version = "=0.11.0" }
+j2k-jpeg = { path = "../j2k-jpeg", version = "=0.11.0" }
+j2k = { path = "../j2k", version = "=0.11.0" }
+j2k-native = { path = "../j2k-native", version = "=0.11.0" }
+j2k-profile = { path = "../j2k-profile", version = "=0.11.0", default-features = false }
 
 [dev-dependencies]
 criterion = { workspace = true }

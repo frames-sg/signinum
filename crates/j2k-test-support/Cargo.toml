@@ -16,8 +16,8 @@ path = "src/lib.rs"
 j2k-native-fixtures = ["dep:j2k-native"]
 
 [dependencies]
-j2k-core = { path = "../j2k-core", version = "=0.10.0" }
-j2k-native = { path = "../j2k-native", version = "=0.10.0", optional = true }
+j2k-core = { path = "../j2k-core", version = "=0.11.0" }
+j2k-native = { path = "../j2k-native", version = "=0.11.0", optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }

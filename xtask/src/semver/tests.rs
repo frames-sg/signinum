@@ -93,29 +93,21 @@ fn intentional_break_transition_is_exact_and_names_the_next_baseline() {
 
     assert_eq!(validate_baseline_transition("0.8.0", "0.8.1", None), Ok(()));
 
-    assert_eq!(
-        INTENTIONAL_BREAK_TRANSITION,
-        Some(BaselineTransition {
-            candidate_version: "0.10.0",
-            required_next_baseline_version: "0.10.0",
-            required_next_baseline_tag: "v0.10.0",
-        })
-    );
+    assert_eq!(INTENTIONAL_BREAK_TRANSITION, None);
 }
 
 #[test]
 fn package_partition_tracks_baselines_and_exact_first_release_packages() {
-    assert_eq!(
-        SEMVER_NEW_PACKAGES,
-        [
-            "j2k-cuda-build-support",
-            "j2k-cuda-j2k-engine",
-            "j2k-cuda-jpeg-engine",
-            "j2k-cuda-transcode-engine",
-            "j2k-mpsgraph",
-            "j2k-mpsgraph-support",
-        ]
-    );
+    assert_eq!(SEMVER_NEW_PACKAGES, ["j2k-mpsgraph-support"]);
+    for package in [
+        "j2k-cuda-build-support",
+        "j2k-cuda-j2k-engine",
+        "j2k-cuda-jpeg-engine",
+        "j2k-cuda-transcode-engine",
+        "j2k-mpsgraph",
+    ] {
+        assert!(SEMVER_BASELINE_PACKAGES.contains(&package));
+    }
     assert!(SEMVER_BASELINE_PACKAGES.contains(&"j2k-ml"));
     assert!(SEMVER_NEW_PACKAGES
         .iter()
@@ -239,7 +231,7 @@ fn published_candidate_uses_its_computed_release_type() {
 }
 
 #[test]
-fn report_has_one_published_details_section_and_active_transition() {
+fn report_has_one_published_details_section_without_consumed_transition() {
     let diff = PackageApiDiff {
         package: "alpha".to_string(),
         candidate_version: "0.7.0".to_string(),
@@ -254,18 +246,18 @@ fn report_has_one_published_details_section_and_active_transition() {
     assert_eq!(report.matches("## Published-package details").count(), 1);
     assert!(report.contains("Rustdoc-hidden candidate items: 1"));
     assert!(report.contains("Full hidden-inventory fingerprint: `fnv1a64:"));
-    assert!(report.contains("Baseline registry version: `0.9.0`"));
-    assert!(report.contains("Active intentional-break transition: only `0.10.0`"));
-    assert!(report.contains("Required next semver baseline: `v0.10.0` at version `0.10.0`"));
+    assert!(report.contains("Baseline registry version: `0.10.0`"));
+    assert!(!report.contains("Active intentional-break transition:"));
+    assert!(!report.contains("Required next semver baseline:"));
 }
 
 #[test]
 fn parses_review_config_and_rejects_unknown_fields() {
     let source = "\
 version: 3
-baseline_tag: v0.9.0
-baseline_version: 0.9.0
-candidate_version: 0.10.0
+baseline_tag: v0.10.0
+baseline_version: 0.10.0
+candidate_version: 0.11.0
 break_ledger:
   - id: strict-decode-default
     kind: behavior
@@ -292,7 +284,7 @@ reviews:
 ";
     let value: serde_yaml_ng::Value = serde_yaml_ng::from_str(source).unwrap();
     let parsed = parse_review_config(&value).unwrap();
-    assert_eq!(parsed.candidate_version, "0.10.0");
+    assert_eq!(parsed.candidate_version, "0.11.0");
     assert_eq!(parsed.break_ledger.len(), 2);
     assert_eq!(parsed.break_ledger[0].kind, BreakKind::Behavior);
     assert_eq!(parsed.break_ledger[1].kind, BreakKind::Source);

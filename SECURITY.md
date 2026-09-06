@@ -4,6 +4,7 @@
 
 | Version | Status |
 | --- | --- |
+| `0.11.x` | Candidate line; publication requires the release gates |
 | `0.10.0` | Latest published and security-supported release |
 | `0.9.0` | Previous published release line; security-supported |
 | `0.8.1` | Previous published release line; security-supported |

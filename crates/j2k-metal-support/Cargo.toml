@@ -19,7 +19,7 @@ name = "j2k_metal_support"
 path = "src/lib.rs"
 
 [dependencies]
-j2k-core = { path = "../j2k-core", version = "=0.10.0" }
+j2k-core = { path = "../j2k-core", version = "=0.11.0" }
 log = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]

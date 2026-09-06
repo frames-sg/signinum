@@ -20,11 +20,16 @@ reference_prepare_checkout \
   "v${version}" \
   "${source_commit}"
 
+# OpenHTJ2K replaces the configuration flags that carry /MD under old CMake
+# policy. Select the DLL runtime through the target property so its static
+# library matches the Rust cc shim even after that replacement.
 cmake \
   -S "${source_dir}" \
   -B "${build_dir}" \
   -DBUILD_SHARED_LIBS=OFF \
   -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_POLICY_DEFAULT_CMP0091=NEW \
+  -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL \
   -DOPENHTJ2K_QUIC=OFF
 cmake \
   --build "${build_dir}" \

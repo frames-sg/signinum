@@ -2,6 +2,8 @@
 
 //! Test-only comparisons of GPU scheduling with the same inputs and exact output.
 
+#![cfg(test)]
+
 use crate::{Codec, Decoder, MetalBackendSession, MetalBatchTextureOutput, MetalTextureTile};
 use jpeg_encoder::{ColorType, Encoder, SamplingFactor};
 use std::{cell::Cell, time::Instant};

@@ -2,22 +2,23 @@
 
 use crate::metal_types::prelude::*;
 
+use super::super::scratch_pool::BatchScratchLease;
 use objc2_metal::MTLCommandBuffer;
 #[cfg(test)]
 use std::mem::size_of;
-use std::{sync::MutexGuard, time::Instant};
+use std::time::Instant;
 
 use super::super::{
-    batch, batch_entropy_host_data, batch_output_buffer_or_new, bind_fast_decode_entropy_inputs,
-    bind_three_plane_pack, checked_u32, dispatch_1d_pipeline, dispatch_3d_pipeline,
-    fast_batch_decode_mode, fast_packet_huffman_tables, fast_subsampled_full_rgb_batch_groups,
-    fast_subsampled_packets_share_full_rgb_batch_shape, new_command_buffer,
-    new_compute_command_encoder, packed_pair_extent, surface_batch_error_results,
-    surface_batch_success_results, wait_for_completion_jpeg, BatchEntropyHostData,
-    BatchEntropyLabels, BatchedFastPacket, Buffer, CommandBufferRef, Error, FastBatchDecodeMode,
-    FastBatchTiming, FastDecodeEntropyInputs, FastSubsampledMetal, JpegDecodeStatus,
-    JpegEntropyCheckpointHost, JpegFast420BatchParams, MetalBatchScratch, MetalRuntime,
-    PixelFormat, PreparedHuffmanHost, Surface,
+    batch, batch_entropy_buffers_from_metadata, batch_entropy_metadata, batch_output_buffer_or_new,
+    bind_fast_decode_entropy_inputs, bind_three_plane_pack, checked_u32, dispatch_1d_pipeline,
+    dispatch_3d_pipeline, fast_batch_decode_mode, fast_packet_huffman_tables,
+    fast_subsampled_full_rgb_batch_groups, fast_subsampled_packets_share_full_rgb_batch_shape,
+    new_command_buffer, new_compute_command_encoder, packed_pair_extent,
+    surface_batch_error_results, surface_batch_success_results, wait_for_completion_jpeg,
+    BatchEntropyBufferKeys, BatchEntropyLabels, BatchEntropyMetadata, BatchedFastPacket, Buffer,
+    CommandBufferRef, Error, FastBatchDecodeMode, FastBatchTiming, FastDecodeEntropyInputs,
+    FastSubsampledMetal, JpegDecodeStatus, JpegEntropyCheckpointHost, JpegFast420BatchParams,
+    MetalBatchScratch, MetalRuntime, PixelFormat, PreparedHuffmanHost, Surface,
 };
 #[cfg(test)]
 use super::super::{encode_split_coeff_idct_passes, new_private_buffer, SplitCoeffIdctPasses};
@@ -141,7 +142,7 @@ pub(in crate::compute) fn try_decode_fast_subsampled_full_rgb_batch_to_surfaces_
         "JPEG Metal full RGB entropy owners",
         requests,
     )?;
-    let Some(entropy_data) = batch_entropy_host_data(
+    let Some(entropy_metadata) = batch_entropy_metadata(
         family_packets.iter().map(|packet| packet.entropy_bytes()),
         family_packets
             .iter()
@@ -168,9 +169,9 @@ pub(in crate::compute) fn try_decode_fast_subsampled_full_rgb_batch_to_surfaces_
         requests,
         &mut batch_scratch,
         output,
-        first,
+        &family_packets,
         shape,
-        &entropy_data,
+        &entropy_metadata,
     )?;
     if let Some(start) = timing_buffer_start {
         timing.buffer_alloc = start.elapsed();
@@ -260,7 +261,7 @@ struct FullRgbFinishState<'a, 'scratch, P> {
     requests: &'a [batch::QueuedRequest],
     first: &'a P,
     command_buffer: &'a CommandBufferRef,
-    batch_scratch: MutexGuard<'scratch, MetalBatchScratch>,
+    batch_scratch: BatchScratchLease<'scratch>,
     buffers: &'a FullRgbSurfaceBatchBuffers,
     shape: FullRgbSurfaceBatchShape,
     split_scratch: Option<(Buffer, Buffer)>,
@@ -368,10 +369,16 @@ fn full_rgb_surface_batch_buffers<P: FastSubsampledMetal>(
     requests: &[batch::QueuedRequest],
     batch_scratch: &mut MetalBatchScratch,
     output: Option<&crate::MetalBatchOutputBuffer>,
-    first: &P,
+    family_packets: &[&P],
     shape: FullRgbSurfaceBatchShape,
-    entropy_data: &BatchEntropyHostData,
+    entropy_metadata: &BatchEntropyMetadata,
 ) -> Result<FullRgbSurfaceBatchBuffers, Error> {
+    let first = family_packets
+        .first()
+        .copied()
+        .ok_or_else(|| Error::MetalKernel {
+            message: "JPEG Metal full RGB batch has no entropy packets".to_string(),
+        })?;
     let y_plane = batch_scratch.private_buffer(
         &runtime.device,
         P::FULL_BATCH_KEYS.y,
@@ -399,46 +406,42 @@ fn full_rgb_surface_batch_buffers<P: FastSubsampledMetal>(
         "JPEG Metal full RGB entropy and status metadata",
         requests,
     )?;
-    metadata_budget.account_capacity::<u8>(entropy_data.bytes.capacity())?;
-    metadata_budget.account_capacity::<u32>(entropy_data.offsets.capacity())?;
-    metadata_budget.account_capacity::<u32>(entropy_data.lens.capacity())?;
+    metadata_budget.account_capacity::<u32>(entropy_metadata.offsets.capacity())?;
+    metadata_budget.account_capacity::<u32>(entropy_metadata.lens.capacity())?;
     metadata_budget
-        .account_capacity::<JpegEntropyCheckpointHost>(entropy_data.checkpoints.capacity())?;
+        .account_capacity::<JpegEntropyCheckpointHost>(entropy_metadata.checkpoints.capacity())?;
     let statuses = metadata_budget.try_filled(
         shape.total_decode_threads as usize,
         JpegDecodeStatus::default(),
         "JPEG Metal full RGB decode statuses",
+    )?;
+    let status_buffer = batch_scratch.shared_buffer_with_slice(
+        &runtime.device,
+        P::FULL_BATCH_KEYS.status,
+        &statuses,
+    )?;
+    let entropy_buffers = batch_entropy_buffers_from_metadata(
+        runtime,
+        batch_scratch,
+        BatchEntropyBufferKeys {
+            payload: P::FULL_BATCH_KEYS.entropy,
+            offsets: P::FULL_BATCH_KEYS.entropy_offsets,
+            lens: P::FULL_BATCH_KEYS.entropy_lens,
+            checkpoints: P::FULL_BATCH_KEYS.entropy_checkpoints,
+        },
+        family_packets.iter().map(|packet| packet.entropy_bytes()),
+        entropy_metadata,
     )?;
     Ok(FullRgbSurfaceBatchBuffers {
         y_plane,
         cb_plane,
         cr_plane,
         out_buffer,
-        status_buffer: batch_scratch.shared_buffer_with_slice(
-            &runtime.device,
-            P::FULL_BATCH_KEYS.status,
-            &statuses,
-        )?,
-        entropy_buffer: batch_scratch.shared_buffer_with_bytes(
-            &runtime.device,
-            P::FULL_BATCH_KEYS.entropy,
-            &entropy_data.bytes,
-        )?,
-        entropy_offsets_buffer: batch_scratch.shared_buffer_with_slice(
-            &runtime.device,
-            P::FULL_BATCH_KEYS.entropy_offsets,
-            &entropy_data.offsets,
-        )?,
-        entropy_lens_buffer: batch_scratch.shared_buffer_with_slice(
-            &runtime.device,
-            P::FULL_BATCH_KEYS.entropy_lens,
-            &entropy_data.lens,
-        )?,
-        entropy_checkpoints_buffer: batch_scratch.shared_buffer_with_slice(
-            &runtime.device,
-            P::FULL_BATCH_KEYS.entropy_checkpoints,
-            &entropy_data.checkpoints,
-        )?,
+        status_buffer,
+        entropy_buffer: entropy_buffers.payload,
+        entropy_offsets_buffer: entropy_buffers.offsets,
+        entropy_lens_buffer: entropy_buffers.lens,
+        entropy_checkpoints_buffer: entropy_buffers.checkpoints,
     })
 }
 
@@ -581,7 +584,7 @@ fn finish_fast_subsampled_full_rgb_batch<P: FastSubsampledMetal>(
         requests,
         first,
         command_buffer,
-        batch_scratch,
+        batch_scratch: _batch_scratch,
         buffers,
         shape,
         split_scratch,
@@ -633,7 +636,7 @@ fn finish_fast_subsampled_full_rgb_batch<P: FastSubsampledMetal>(
         wait_for_completion_jpeg(command_buffer)?;
     }
     drop(split_scratch);
-    drop(batch_scratch);
+    // Keep scratch leased until the CPU has consumed the GPU status below.
 
     if let Some(results) =
         surface_batch_error_results(requests, &buffers.status_buffer, shape.total_decode_threads)?

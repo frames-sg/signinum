@@ -28,7 +28,7 @@ use self::allocation::{
     host_allocation_error, try_checkpoint_vec,
 };
 #[cfg(test)]
-use self::build::{decode_one_mcu, snapshot_checkpoint};
+use self::build::{decode_one_mcu, skip_one_mcu, snapshot_checkpoint};
 #[cfg(test)]
 use self::cache::{
     checked_checkpoint_reservation_peak, reconcile_actual_checkpoint_capacity,

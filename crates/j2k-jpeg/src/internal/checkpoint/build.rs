@@ -10,6 +10,8 @@ use super::eoi::validate_scan_bytes;
 use super::eoi::ValidatedScanBytes;
 use super::planning::plan_checkpoint_build_from_validated;
 use super::DeviceCheckpoint;
+use crate::entropy::block::skip_block;
+#[cfg(test)]
 use crate::entropy::block::{decode_block_with_activity, CoefficientBlock};
 use crate::entropy::sequential::PreparedDecodePlan;
 use crate::error::{JpegError, MarkerKind};
@@ -69,7 +71,6 @@ where
         .terminated_with_live_budget(*live_bytes, allocation_cap)
         .map_err(E::from)?;
     let mut br = BitReader::new(reader_bytes.as_ref());
-    let mut coeff = CoefficientBlock::default();
     let mut prev_dc = [0i32; 4];
     let mut expected_rst = 0u8;
     let mut mcus_since_restart = 0u32;
@@ -107,7 +108,7 @@ where
             }
         }
 
-        decode_one_mcu(plan, &mut br, &mut coeff, &mut prev_dc).map_err(E::from)?;
+        skip_one_mcu(plan, &mut br, &mut prev_dc).map_err(E::from)?;
         mcus_since_restart += 1;
     }
 
@@ -161,6 +162,26 @@ pub(super) fn snapshot_checkpoint(
     }
 }
 
+pub(super) fn skip_one_mcu(
+    plan: &PreparedDecodePlan,
+    br: &mut BitReader<'_>,
+    prev_dc: &mut [i32; 4],
+) -> Result<(), JpegError> {
+    // Checkpoints retain only the entropy position and DC predictors. `skip_block`
+    // performs the same Huffman validation and bit consumption without writing
+    // dequantized coefficients that this traversal would immediately discard.
+    for component in &plan.components {
+        let plane_index = component.output_index;
+        let dc_table = plan.dc_table(component)?;
+        let ac_table = plan.ac_table(component)?;
+        for _ in 0..u32::from(component.h) * u32::from(component.v) {
+            skip_block(br, dc_table, ac_table, &mut prev_dc[plane_index])?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 pub(super) fn decode_one_mcu(
     plan: &PreparedDecodePlan,
     br: &mut BitReader<'_>,

@@ -5,9 +5,8 @@
 use alloc::vec::Vec;
 
 use super::allocation::checkpoint_allocation_bytes;
-use super::build::{decode_one_mcu, snapshot_checkpoint};
+use super::build::{skip_one_mcu, snapshot_checkpoint};
 use super::{total_mcus, DeviceCheckpoint};
-use crate::entropy::block::CoefficientBlock;
 use crate::entropy::sequential::PreparedDecodePlan;
 use crate::error::JpegError;
 use crate::internal::bit_reader::{BitReader, BitReaderSnapshot};
@@ -121,11 +120,10 @@ fn extend_non_restart_checkpoints(
         },
     );
     let mut prev_dc = start.prev_dc;
-    let mut coeff = CoefficientBlock::default();
     let mut mcu_index = start.mcu_index;
 
     while mcu_index < target_checkpoint_mcu {
-        decode_one_mcu(plan, &mut br, &mut coeff, &mut prev_dc)?;
+        skip_one_mcu(plan, &mut br, &mut prev_dc)?;
         mcu_index += 1;
         if mcu_index.is_multiple_of(cadence_mcus) {
             cache

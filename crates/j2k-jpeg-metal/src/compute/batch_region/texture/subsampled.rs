@@ -284,7 +284,7 @@ fn try_decode_fast_subsampled_region_scaled_rgba_batch_to_textures<
     )?;
 
     commit_and_wait_jpeg(&command_buffer)?;
-    drop(batch_scratch);
+    // Keep scratch leased until the CPU has consumed the GPU status below.
 
     if let Some(results) =
         texture_batch_error_results(requests, &status_buffer, shape.total_decode_threads)?

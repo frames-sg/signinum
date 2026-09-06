@@ -8,10 +8,10 @@ use std::{
 };
 
 use super::pipeline_registry::JpegPipelineRegistry;
+use super::scratch_pool::{BatchScratchLease, BatchScratchPool};
 use super::viewport_cache::{
     CachedViewportPlanes, ViewportPlaneCacheGate, ViewportPlaneCacheLease,
 };
-use crate::buffers::MetalBatchScratch;
 use crate::error::{metal_runtime_support_error, Error};
 use crate::metal_types::{Buffer, CommandBuffer, CommandQueue, Device};
 use j2k_core::PixelFormat;
@@ -24,8 +24,8 @@ thread_local! {
 pub(crate) struct MetalRuntime {
     pub(in crate::compute) device: Device,
     pub(in crate::compute) queue: CommandQueue,
-    pub(in crate::compute) pipelines: JpegPipelineRegistry,
-    batch_scratch: Mutex<MetalBatchScratch>,
+    pub(in crate::compute) pipelines: Arc<JpegPipelineRegistry>,
+    batch_scratch: BatchScratchPool,
     viewport_plane_cache: Mutex<Option<CachedViewportPlanes>>,
     viewport_plane_cache_gate: Arc<ViewportPlaneCacheGate>,
 }
@@ -46,26 +46,25 @@ impl MetalRuntime {
     }
 
     pub(crate) fn new_with_device(device: Device) -> Result<Self, MetalSupportError> {
-        let pipelines = JpegPipelineRegistry::load(&device)?;
+        let pipelines = JpegPipelineRegistry::shared(&device)?;
         let queue = checked_command_queue(&device)?;
         Ok(Self {
             device,
             queue,
             pipelines,
-            batch_scratch: Mutex::new(MetalBatchScratch::default()),
+            batch_scratch: BatchScratchPool::default(),
             viewport_plane_cache: Mutex::new(None),
             viewport_plane_cache_gate: ViewportPlaneCacheGate::new(),
         })
     }
 
-    pub(in crate::compute) fn batch_scratch(
-        &self,
-    ) -> Result<MutexGuard<'_, MetalBatchScratch>, Error> {
-        self.batch_scratch
-            .lock()
-            .map_err(|_| Error::MetalStatePoisoned {
-                state: "JPEG Metal batch scratch",
-            })
+    pub(in crate::compute) fn batch_scratch(&self) -> Result<BatchScratchLease<'_>, Error> {
+        self.batch_scratch.acquire()
+    }
+
+    #[cfg(test)]
+    pub(in crate::compute) fn batch_scratch_in_use_for_test(&self) -> bool {
+        self.batch_scratch.in_use()
     }
 
     pub(in crate::compute) fn viewport_plane_cache(
@@ -148,4 +147,82 @@ pub(in crate::compute) fn private_jpeg_tile_from_fast_rgb_buffer(
         decoded.status_buffer,
         decoded.command_buffer,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scratch_slots_allow_two_independent_batches() {
+        if !j2k_test_support::metal_runtime_gate(module_path!()) {
+            return;
+        }
+        let runtime = Arc::new(MetalRuntime::new().expect("runtime"));
+        let mut first = runtime.batch_scratch().expect("first lease");
+        let first_buffer = first
+            .shared_buffer_with_bytes(&runtime.device, "concurrent status", &[1, 2])
+            .expect("first status");
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let other_runtime = Arc::clone(&runtime);
+        let worker = std::thread::spawn(move || {
+            let mut second = other_runtime.batch_scratch().expect("second lease");
+            let buffer = second
+                .shared_buffer_with_bytes(&other_runtime.device, "concurrent status", &[3, 4])
+                .expect("second status");
+            ready_tx
+                .send(objc2::rc::Retained::as_ptr(&buffer).cast::<()>() as usize)
+                .expect("ready");
+            let _ = release_rx.recv();
+        });
+        let concurrent_buffer = ready_rx.recv_timeout(std::time::Duration::from_secs(1));
+        let first_bytes =
+            crate::buffers::checked_buffer_slice::<u8>(&first_buffer, 2, "first status")
+                .expect("read own status");
+        drop(first);
+        let _ = release_tx.send(());
+        worker.join().expect("worker");
+        assert_ne!(
+            concurrent_buffer.expect(
+                "second batch must acquire independent scratch while the first is in flight"
+            ),
+            objc2::rc::Retained::as_ptr(&first_buffer).cast::<()>() as usize
+        );
+        assert_eq!(
+            first_bytes,
+            [1, 2],
+            "concurrent staging must not overwrite the first batch"
+        );
+    }
+
+    #[test]
+    fn scratch_slots_apply_backpressure_when_both_are_leased() {
+        if !j2k_test_support::metal_runtime_gate(module_path!()) {
+            return;
+        }
+        let runtime = Arc::new(MetalRuntime::new().expect("runtime"));
+        let first = runtime.batch_scratch().expect("first lease");
+        let second = runtime.batch_scratch().expect("second lease");
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let other = Arc::clone(&runtime);
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).expect("started");
+            let _third = other.batch_scratch().expect("third lease");
+            ready_tx.send(()).expect("ready");
+        });
+        started_rx.recv().expect("worker started");
+        let blocked = ready_rx.recv_timeout(std::time::Duration::from_millis(100));
+        drop(second);
+        let progressed = ready_rx.recv_timeout(std::time::Duration::from_secs(1));
+        drop(first);
+        worker.join().expect("worker");
+        progressed
+            .expect("a waiter must reuse either released slot, even while slot zero stays busy");
+        assert!(matches!(
+            blocked,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+    }
 }

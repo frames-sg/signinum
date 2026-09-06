@@ -13,7 +13,7 @@ fn patterned_index_byte(index: usize) -> u8 {
 }
 
 #[cfg(target_os = "macos")]
-fn rgb_to_rgba_opaque(rgb: &[u8]) -> Vec<u8> {
+pub(crate) fn rgb_to_rgba_opaque(rgb: &[u8]) -> Vec<u8> {
     let mut rgba = Vec::with_capacity(rgb.len() / 3 * 4);
     for pixel in rgb.chunks_exact(3) {
         rgba.extend_from_slice(pixel);
@@ -23,7 +23,7 @@ fn rgb_to_rgba_opaque(rgb: &[u8]) -> Vec<u8> {
 }
 
 #[cfg(target_os = "macos")]
-fn download_rgba8_texture(
+pub(crate) fn download_rgba8_texture(
     session: &MetalBackendSession,
     texture: &ProtocolObject<dyn MTLTexture>,
     dimensions: (u32, u32),

@@ -60,6 +60,7 @@ mod direct_buffers;
 #[cfg(target_os = "macos")]
 pub(crate) use self::direct_buffers::{
     buffer_is_cpu_visible, checked_buffer_read, checked_buffer_slice, checked_buffer_slice_at,
+    completed_metal_buffer_bytes,
 };
 #[cfg(target_os = "macos")]
 use self::direct_buffers::{
@@ -349,6 +350,8 @@ pub(crate) use self::decode_dispatch::store::decode_store_component_and_capture;
 #[cfg(target_os = "macos")]
 mod forward_transform;
 #[cfg(target_os = "macos")]
+mod lossy_packet;
+#[cfg(target_os = "macos")]
 mod lossy_prepare;
 #[cfg(target_os = "macos")]
 pub(crate) use self::forward_transform::{
@@ -356,7 +359,7 @@ pub(crate) use self::forward_transform::{
     encode_forward_dwt97,
 };
 #[cfg(target_os = "macos")]
-pub(crate) use lossy_prepare::encode_resident_lossy_ht_blocks;
+pub(crate) use lossy_prepare::encode_resident_lossy_ht_packet;
 #[cfg(target_os = "macos")]
 mod lossless_prepare;
 #[cfg(target_os = "macos")]

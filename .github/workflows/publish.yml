@@ -55,8 +55,8 @@ jobs:
             --ci-branch main \
             --aggregate-job "Release candidate aggregate" \
             --gpu-workflow gpu-validation.yml \
-            --cuda-job "CUDA full release validation" \
-            --metal-job "Metal full release validation" \
+            --cuda-job "GPU / CUDA full release validation" \
+            --metal-job "GPU / Metal full release validation" \
             --t803-scope all \
             --t803-out-dir target/t803/release-evidence
       - name: Verify downloaded T.803 report contents

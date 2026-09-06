@@ -863,12 +863,10 @@ pub(crate) fn encode_classic_tier1_code_block(
 }
 
 #[cfg(target_os = "macos")]
-pub(super) fn read_ht_encoded_code_block(
+pub(super) fn validate_ht_encoded_status(
     status: J2kHtEncodeStatus,
-    output: &Buffer,
-    output_offset: usize,
     output_capacity: usize,
-) -> Result<EncodedHtJ2kCodeBlock, Error> {
+) -> Result<usize, Error> {
     if status.code != J2K_ENCODE_STATUS_OK {
         return Err(encode_status_error(
             "HTJ2K cleanup",
@@ -884,11 +882,6 @@ pub(super) fn read_ht_encoded_code_block(
             message: "HTJ2K Metal encode length exceeds output buffer".to_string(),
         });
     }
-    let data = if data_len == 0 {
-        Vec::new()
-    } else {
-        checked_buffer_slice_at::<u8>(output, output_offset, data_len, "HTJ2K encode payload")?
-    };
     let cleanup_length = status.cleanup_length;
     let refinement_length = status
         .sigprop_length
@@ -907,6 +900,30 @@ pub(super) fn read_ht_encoded_code_block(
             message: "HTJ2K Metal segment lengths do not match output length".to_string(),
         });
     }
+    u8::try_from(status.num_coding_passes).map_err(|_| Error::MetalKernel {
+        message: "HTJ2K Metal encode pass count exceeds u8".to_string(),
+    })?;
+    u8::try_from(status.num_zero_bitplanes).map_err(|_| Error::MetalKernel {
+        message: "HTJ2K Metal encode zero bitplanes exceeds u8".to_string(),
+    })?;
+    Ok(data_len)
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn read_ht_encoded_code_block(
+    status: J2kHtEncodeStatus,
+    output: &Buffer,
+    output_offset: usize,
+    output_capacity: usize,
+) -> Result<EncodedHtJ2kCodeBlock, Error> {
+    let data_len = validate_ht_encoded_status(status, output_capacity)?;
+    let data = if data_len == 0 {
+        Vec::new()
+    } else {
+        checked_buffer_slice_at::<u8>(output, output_offset, data_len, "HTJ2K encode payload")?
+    };
+    let cleanup_length = status.cleanup_length;
+    let refinement_length = status.sigprop_length + status.magref_length;
     Ok(EncodedHtJ2kCodeBlock {
         data,
         cleanup_length,

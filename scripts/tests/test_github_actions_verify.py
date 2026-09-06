@@ -128,6 +128,18 @@ def report_archive(stem: str) -> bytes:
 
 
 class PullRequestPolicyTests(unittest.TestCase):
+    def test_reusable_runner_changes_require_both_exact_nested_jobs(self) -> None:
+        for path in (
+            ".github/workflows/gpu-validation-runner.yml",
+            ".github/workflows/gpu-benchmarks-runner.yml",
+        ):
+            with self.subTest(path=path):
+                decision = verifier.classify_gpu_paths([path])
+                self.assertEqual(
+                    decision.required_jobs,
+                    ("GPU / CUDA quick validation", "GPU / Metal quick validation"),
+                )
+
     def test_pull_request_files_are_paginated_and_renames_use_both_paths(self) -> None:
         api = FakeApi()
         first_page = [{"filename": f"docs/generated-{index}.md"} for index in range(100)]

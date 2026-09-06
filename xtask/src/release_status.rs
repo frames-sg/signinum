@@ -10,8 +10,8 @@ const CI_WORKFLOW: &str = "full-validation.yml";
 const CI_BRANCH: &str = "main";
 const RELEASE_CANDIDATE_JOB: &str = "Release candidate aggregate";
 const GPU_WORKFLOW: &str = "gpu-validation.yml";
-const CUDA_JOB: &str = "CUDA full release validation";
-const METAL_JOB: &str = "Metal full release validation";
+const CUDA_JOB: &str = "GPU / CUDA full release validation";
+const METAL_JOB: &str = "GPU / Metal full release validation";
 
 #[derive(Debug, Eq, PartialEq)]
 struct Options {

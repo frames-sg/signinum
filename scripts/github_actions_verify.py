@@ -54,16 +54,18 @@ SHARED_GPU_EXACT_PATHS = frozenset(
         ".github/workflows/full-validation.yml",
         ".github/workflows/gpu-benchmarks.yml",
         ".github/workflows/gpu-validation.yml",
+        ".github/workflows/gpu-validation-runner.yml",
+        ".github/workflows/gpu-benchmarks-runner.yml",
         ".github/workflows/publish.yml",
         "scripts/ci_plan.py",
         "scripts/github_actions_verify.py",
         "xtask/src/t803.rs",
     }
 )
-CUDA_QUICK_JOB = "CUDA quick validation"
-METAL_QUICK_JOB = "Metal quick validation"
-CUDA_JOB = "CUDA full release validation"
-METAL_JOB = "Metal full release validation"
+CUDA_QUICK_JOB = "GPU / CUDA quick validation"
+METAL_QUICK_JOB = "GPU / Metal quick validation"
+CUDA_JOB = "GPU / CUDA full release validation"
+METAL_JOB = "GPU / Metal full release validation"
 RELEASE_CANDIDATE_JOB = "Release candidate aggregate"
 
 

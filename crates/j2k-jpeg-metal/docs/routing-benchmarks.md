@@ -1,5 +1,8 @@
 # JPEG Metal Routing and Benchmarks
 
+The current batch execution design, ownership rules, measured comparisons, and
+reproduction commands are in [Decode architecture](decode-architecture.md).
+
 JPEG Metal decode should stay selective. The current Metal paths are for fast
 baseline/checkpointed packets, coalesced batches, and resident outputs. They are
 not a claim of full JPEG entropy decode coverage.

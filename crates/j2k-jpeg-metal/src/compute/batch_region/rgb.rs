@@ -380,7 +380,7 @@ pub(in crate::compute) fn try_decode_fast_subsampled_region_scaled_rgb_batch_to_
     pack_encoder.endEncoding();
 
     commit_and_wait_jpeg(&command_buffer)?;
-    drop(batch_scratch);
+    // Keep scratch leased until the CPU has consumed the GPU status below.
 
     if let Some(results) =
         region_scaled_batch_error_results(requests, &status_buffer, shape.total_decode_threads)?

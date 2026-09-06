@@ -2,7 +2,7 @@
 
 use crate::metal_types::prelude::*;
 
-use std::sync::MutexGuard;
+use super::super::scratch_pool::BatchScratchLease;
 
 use super::super::{
     batch, batch_entropy_buffers, bind_fast_decode_entropy_inputs, checked_u32,
@@ -134,7 +134,17 @@ pub(in crate::compute) fn try_decode_fast_subsampled_full_rgba_batch_to_textures
         return Ok(None);
     };
 
-    if decode_mode == FastBatchDecodeMode::Fused {
+    // Subsampled batches distribute entropy/IDCT across all tiles, then pack
+    // private component planes. This avoids the direct shader's per-tile
+    // decode and chroma-repair passes. The 4:4:4 path has no chroma repair and
+    // uses a different plane-decode ABI, so it retains its direct kernel.
+    let direct_texture = P::USE_FAST444_TEXTURE_PARAMS;
+    #[cfg(test)]
+    let direct_texture = super::super::texture_tuning::component_planes()
+        .map_or(direct_texture, |planes| {
+            !planes || P::USE_FAST444_TEXTURE_PARAMS
+        });
+    if decode_mode == FastBatchDecodeMode::Fused && direct_texture {
         return Ok(Some(
             decode_fast_subsampled_full_rgba_fused_texture_batch::<P>(FullRgbaTextureBatchCtx {
                 runtime,
@@ -193,7 +203,7 @@ struct FullRgbaTextureBatchCtx<'a, 'scratch, P> {
     requests: &'a [batch::QueuedRequest],
     first: &'a P,
     output: &'a crate::MetalBatchTextureOutput,
-    batch_scratch: MutexGuard<'scratch, MetalBatchScratch>,
+    batch_scratch: BatchScratchLease<'scratch>,
     entropy_buffers: &'a BatchEntropyBuffers,
     shape: FullRgbaTextureBatchShape,
 }
@@ -655,7 +665,7 @@ fn decode_fast_subsampled_full_rgba_fused_texture_batch<P: FastSubsampledMetal>(
     )?;
 
     commit_and_wait_jpeg(&command_buffer)?;
-    drop(batch_scratch);
+    // Keep scratch leased until the CPU has consumed the GPU status below.
     if let Some(results) =
         texture_batch_error_results(requests, &repair.status, shape.total_decode_threads)?
     {

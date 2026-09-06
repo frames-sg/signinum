@@ -7,7 +7,8 @@ use crate::error::{JpegError, MarkerKind};
 use crate::internal::bit_reader::{BitReader, BitReaderSnapshot};
 use crate::internal::checkpoint::{
     build_checkpoint_plan, build_checkpoint_plan_with_cap, checkpoint_count_summary,
-    decode_one_mcu, snapshot_checkpoint, terminated_scan_bytes, DeviceCheckpoint,
+    decode_one_mcu, skip_one_mcu, snapshot_checkpoint, terminated_scan_bytes, total_mcus,
+    DeviceCheckpoint,
 };
 
 #[test]
@@ -38,6 +39,65 @@ fn non_restart_checkpoints_resume_cleanly() {
         assert_eq!(resumed.bits_buffered, pair[1].bits_buffered);
         assert_eq!(resumed.prev_dc, pair[1].prev_dc);
         assert_eq!(resumed.expected_rst, pair[1].expected_rst);
+    }
+}
+
+#[test]
+fn checkpoint_entropy_skip_matches_full_block_decode_state() {
+    for bytes in [
+        grayscale_jpeg(24, 24),
+        j2k_test_support::minimal_baseline_420_jpeg(),
+    ] {
+        let decoder = Decoder::new(&bytes).expect("decoder");
+        let plan = &decoder.plan;
+        let scan_bytes = &decoder.bytes[plan.scan_offset..];
+        let reader_bytes = terminated_scan_bytes(scan_bytes).expect("terminated scan bytes");
+        let total_mcus = total_mcus(plan);
+        let mut decoded_reader = BitReader::new(reader_bytes.as_ref());
+        let mut skipped_reader = BitReader::new(reader_bytes.as_ref());
+        let mut decoded_prev_dc = [0i32; 4];
+        let mut skipped_prev_dc = [0i32; 4];
+        let mut coeff = CoefficientBlock::default();
+
+        for _ in 0..total_mcus {
+            decode_one_mcu(plan, &mut decoded_reader, &mut coeff, &mut decoded_prev_dc)
+                .expect("full block decode");
+            skip_one_mcu(plan, &mut skipped_reader, &mut skipped_prev_dc)
+                .expect("checkpoint entropy skip");
+
+            assert_eq!(skipped_reader.snapshot(), decoded_reader.snapshot());
+            assert_eq!(skipped_prev_dc, decoded_prev_dc);
+        }
+    }
+}
+
+#[test]
+fn checkpoint_entropy_skip_preserves_full_decode_errors() {
+    let bytes = grayscale_jpeg(8, 8);
+    let decoder = Decoder::new(&bytes).expect("decoder");
+    let plan = &decoder.plan;
+
+    for first_entropy_byte in u8::MIN..=u8::MAX {
+        let scan = [first_entropy_byte, 0xff, 0xd9];
+        let mut decoded_reader = BitReader::new(&scan);
+        let mut skipped_reader = BitReader::new(&scan);
+        let mut decoded_prev_dc = [0i32; 4];
+        let mut skipped_prev_dc = [0i32; 4];
+        let mut coeff = CoefficientBlock::default();
+
+        let decoded = decode_one_mcu(plan, &mut decoded_reader, &mut coeff, &mut decoded_prev_dc);
+        let skipped = skip_one_mcu(plan, &mut skipped_reader, &mut skipped_prev_dc);
+
+        assert_eq!(skipped, decoded, "entropy byte {first_entropy_byte:#04x}");
+        assert_eq!(
+            skipped_reader.snapshot(),
+            decoded_reader.snapshot(),
+            "entropy byte {first_entropy_byte:#04x}"
+        );
+        assert_eq!(
+            skipped_prev_dc, decoded_prev_dc,
+            "entropy byte {first_entropy_byte:#04x}"
+        );
     }
 }
 

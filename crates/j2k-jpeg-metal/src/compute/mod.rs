@@ -62,12 +62,16 @@ mod pipeline_registry;
 mod region_scaled_plan;
 #[cfg(target_os = "macos")]
 mod runtime;
+#[cfg(target_os = "macos")]
+mod scratch_pool;
 #[cfg(all(target_os = "macos", test))]
 use self::pipeline_registry::SHADER_SOURCE;
 #[cfg(target_os = "macos")]
 pub(crate) mod single_decode;
 #[cfg(target_os = "macos")]
 mod status;
+#[cfg(all(target_os = "macos", test))]
+mod texture_tuning;
 mod viewport_cache;
 #[cfg(target_os = "macos")]
 pub(crate) mod viewport_compose;
@@ -102,11 +106,11 @@ use self::batch_region::{
 };
 #[cfg(target_os = "macos")]
 use self::batch_support::{
-    batch_entropy_buffers, batch_entropy_host_data, fast420_batch_timing_enabled,
-    fast_batch_decode_mode, region_scaled_batch_error_results, surface_batch_error_results,
-    surface_batch_success_results, texture_batch_error_results, BatchEntropyBufferKeys,
-    BatchEntropyBufferPlan, BatchEntropyBuffers, BatchEntropyHostData, BatchEntropyLabels,
-    FastBatchDecodeMode, FastBatchTiming,
+    batch_entropy_buffers, batch_entropy_buffers_from_metadata, batch_entropy_metadata,
+    fast420_batch_timing_enabled, fast_batch_decode_mode, region_scaled_batch_error_results,
+    surface_batch_error_results, surface_batch_success_results, texture_batch_error_results,
+    BatchEntropyBufferKeys, BatchEntropyBufferPlan, BatchEntropyBuffers, BatchEntropyLabels,
+    BatchEntropyMetadata, FastBatchDecodeMode, FastBatchTiming,
 };
 #[cfg(all(test, target_os = "macos"))]
 use self::batch_support::{fast420_batch_timing_value_enabled, fast420_batch_timing_value_mode};

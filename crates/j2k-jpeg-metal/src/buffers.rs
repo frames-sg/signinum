@@ -154,9 +154,13 @@ pub(crate) fn new_decode_plane_buffer(
 
 #[cfg(test)]
 mod tests {
-    use j2k_metal_support::MetalSupportError;
+    use j2k_metal_support::{system_default_device, MetalSupportError};
 
-    use super::{buffer_access_error, buffer_readback_error};
+    use super::{
+        buffer_access_error, buffer_readback_error, checked_buffer_slice,
+        jpeg_shared_buffer_allocations_for_test, reset_jpeg_shared_buffer_allocations_for_test,
+        MetalBatchScratch,
+    };
     use crate::Error;
 
     #[test]
@@ -190,6 +194,101 @@ mod tests {
         assert!(error.to_string().contains("test status"));
         assert!(error.to_string().contains(&usize::MAX.to_string()));
         assert!(std::error::Error::source(&error).is_some());
+    }
+
+    #[test]
+    fn shared_scratch_stages_slices_directly_and_reuses_capacity() {
+        if !j2k_test_support::metal_runtime_gate(module_path!()) {
+            return;
+        }
+
+        let device = system_default_device().expect("Metal device");
+        let mut scratch = MetalBatchScratch::default();
+        reset_jpeg_shared_buffer_allocations_for_test();
+        let first = scratch
+            .shared_buffer_with_byte_slices(
+                &device,
+                "direct entropy staging test",
+                5,
+                [b"ab".as_slice(), b"cde".as_slice()],
+            )
+            .expect("first staging");
+        assert_eq!(
+            checked_buffer_slice::<u8>(&first, 5, "direct entropy staging test")
+                .expect("staged bytes"),
+            b"abcde"
+        );
+        let allocations = jpeg_shared_buffer_allocations_for_test();
+
+        let second = scratch
+            .shared_buffer_with_byte_slices(
+                &device,
+                "direct entropy staging test",
+                4,
+                [b"wxyz".as_slice()],
+            )
+            .expect("reused staging");
+
+        assert!(core::ptr::eq(
+            objc2::rc::Retained::as_ptr(&first),
+            objc2::rc::Retained::as_ptr(&second)
+        ));
+        assert_eq!(jpeg_shared_buffer_allocations_for_test(), allocations);
+        assert_eq!(
+            checked_buffer_slice::<u8>(&second, 4, "reused entropy staging test")
+                .expect("restaged bytes"),
+            b"wxyz"
+        );
+    }
+
+    #[test]
+    fn shared_scratch_rejects_direct_staging_length_mismatch() {
+        if !j2k_test_support::metal_runtime_gate(module_path!()) {
+            return;
+        }
+
+        let device = system_default_device().expect("Metal device");
+        let mut scratch = MetalBatchScratch::default();
+        let error = scratch
+            .shared_buffer_with_byte_slices(
+                &device,
+                "direct entropy staging mismatch test",
+                3,
+                [b"ab".as_slice()],
+            )
+            .expect_err("short staging must fail");
+
+        assert!(matches!(error, Error::MetalKernel { .. }));
+    }
+
+    #[test]
+    fn shared_scratch_direct_staging_preserves_typed_buffer_limit() {
+        if !j2k_test_support::metal_runtime_gate(module_path!()) {
+            return;
+        }
+
+        let device = system_default_device().expect("Metal device");
+        let mut scratch = MetalBatchScratch::default();
+        let requested = j2k_core::DEFAULT_MAX_HOST_ALLOCATION_BYTES + 1;
+        let error = scratch
+            .shared_buffer_with_byte_slices(
+                &device,
+                "direct entropy staging limit test",
+                requested,
+                std::iter::empty(),
+            )
+            .expect_err("oversized staging must fail");
+
+        assert!(matches!(
+            error,
+            Error::MetalSupport {
+                source: MetalSupportError::BufferAllocationTooLarge {
+                    requested: actual,
+                    ..
+                },
+                ..
+            } if actual == requested
+        ));
     }
 }
 
@@ -249,13 +348,13 @@ impl MetalBatchScratch {
         Ok(buffer)
     }
 
-    pub(crate) fn shared_buffer_with_bytes(
+    fn shared_buffer(
         &mut self,
         device: &DeviceRef,
         key: &'static str,
-        bytes: &[u8],
+        bytes: usize,
     ) -> Result<Buffer, Error> {
-        let capacity = bytes.len().max(1);
+        let capacity = bytes.max(1);
         let buffer = if let Some(entry) = self
             .shared_buffers
             .iter()
@@ -285,11 +384,59 @@ impl MetalBatchScratch {
             buffer
         };
 
+        Ok(buffer)
+    }
+
+    pub(crate) fn shared_buffer_with_bytes(
+        &mut self,
+        device: &DeviceRef,
+        key: &'static str,
+        bytes: &[u8],
+    ) -> Result<Buffer, Error> {
+        let buffer = self.shared_buffer(device, key, bytes.len())?;
+
         if !bytes.is_empty() {
             // SAFETY: This scratch buffer is exclusively leased during CPU
             // initialization and has not yet been submitted to Metal.
             unsafe { checked_buffer_write::<u8>(&buffer, 0, bytes) }
                 .map_err(|error| buffer_access_error("shared scratch upload", error))?;
+        }
+        Ok(buffer)
+    }
+
+    pub(crate) fn shared_buffer_with_byte_slices<'a>(
+        &mut self,
+        device: &DeviceRef,
+        key: &'static str,
+        total_bytes: usize,
+        slices: impl IntoIterator<Item = &'a [u8]>,
+    ) -> Result<Buffer, Error> {
+        let buffer = self.shared_buffer(device, key, total_bytes)?;
+        let mut offset = 0_usize;
+        for bytes in slices {
+            let end = offset
+                .checked_add(bytes.len())
+                .ok_or_else(|| Error::MetalKernel {
+                    message: "JPEG Metal shared scratch staging length overflowed".to_string(),
+                })?;
+            if end > total_bytes {
+                return Err(Error::MetalKernel {
+                    message: "JPEG Metal shared scratch staging length mismatch".to_string(),
+                });
+            }
+            if !bytes.is_empty() {
+                // SAFETY: This scratch buffer is exclusively leased during CPU
+                // initialization and has not yet been submitted to Metal. Each
+                // checked range is disjoint and lies below `total_bytes`.
+                unsafe { checked_buffer_write::<u8>(&buffer, offset, bytes) }
+                    .map_err(|error| buffer_access_error("shared scratch upload", error))?;
+            }
+            offset = end;
+        }
+        if offset != total_bytes {
+            return Err(Error::MetalKernel {
+                message: "JPEG Metal shared scratch staging length mismatch".to_string(),
+            });
         }
         Ok(buffer)
     }

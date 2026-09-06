@@ -113,7 +113,7 @@ pub(super) fn decode_fast_subsampled_full_rgba_staged_texture_batch<P: FastSubsa
     )?;
 
     commit_and_wait_jpeg(&command_buffer)?;
-    drop(batch_scratch);
+    // Keep scratch leased until the CPU has consumed the GPU status below.
     if let Some(results) =
         texture_batch_error_results(requests, &status_buffer, shape.total_decode_threads)?
     {

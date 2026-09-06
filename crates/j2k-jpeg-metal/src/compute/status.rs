@@ -55,6 +55,8 @@ pub(super) fn first_decode_error_status(
     buffer: &Buffer,
     count: u32,
 ) -> Result<Option<JpegDecodeStatus>, Error> {
+    #[cfg(test)]
+    tests::observe_status_read();
     let statuses =
         checked_buffer_slice::<JpegDecodeStatus>(buffer, count as usize, "decode statuses")?;
     Ok(statuses
@@ -69,5 +71,66 @@ pub(super) fn fast422_status_error(status: JpegDecodeStatus) -> Error {
             "unexpected Metal fast422 failure at entropy byte {}",
             status.position
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static STATUS_READ_OBSERVER: RefCell<Option<Box<dyn Fn()>>> = RefCell::new(None);
+    }
+
+    pub(super) fn observe_status_read() {
+        STATUS_READ_OBSERVER.with(|observer| {
+            if let Some(observer) = observer.borrow().as_ref() {
+                observer();
+            }
+        });
+    }
+
+    struct ResetObserver;
+    impl Drop for ResetObserver {
+        fn drop(&mut self) {
+            STATUS_READ_OBSERVER.with(|observer| *observer.borrow_mut() = None);
+        }
+    }
+
+    #[test]
+    fn batch_status_read_retains_scratch_ownership() {
+        if !j2k_test_support::metal_runtime_gate(module_path!()) {
+            return;
+        }
+        let session = crate::MetalBackendSession::system_default().expect("Metal session");
+        let observed_session = session.clone();
+        let reads = std::rc::Rc::new(std::cell::Cell::new(0));
+        let observed_reads = reads.clone();
+        let _reset = ResetObserver;
+        STATUS_READ_OBSERVER.with(|observer| {
+            *observer.borrow_mut() = Some(Box::new(move || {
+                let runtime = observed_session.runtime_result().as_ref().expect("runtime");
+                assert!(
+                    runtime.batch_scratch_in_use_for_test(),
+                    "another submission must not reuse scratch before status consumption"
+                );
+                observed_reads.set(observed_reads.get() + 1);
+            }));
+        });
+        let decoder =
+            crate::Decoder::new(include_bytes!("../../fixtures/jpeg/baseline_420_16x16.jpg"))
+                .expect("decoder");
+        let requests = [decoder.rgb8_metal_request(crate::batch::BatchOp::Full)];
+        let output = crate::MetalBatchTextureOutput::new_rgba8_tiles(&session, (16, 16), 1)
+            .expect("texture output");
+        super::super::batch_entry::decode_full_rgb8_batch_into_textures_with_session(
+            &requests, &output, &session,
+        )
+        .expect("texture batch")
+        .expect("supported batch");
+        super::super::batch_entry::decode_full_batch_to_surfaces_with_session(&requests, &session)
+            .expect("RGB batch")
+            .expect("supported batch");
+        assert_eq!(reads.get(), 2, "both completion paths must inspect status");
     }
 }

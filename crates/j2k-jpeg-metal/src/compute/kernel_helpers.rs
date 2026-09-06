@@ -157,6 +157,14 @@ pub(super) fn dispatch_1d_pipeline(
         pipeline.maxTotalThreadsPerThreadgroup() as u64,
         threads,
     );
+    #[cfg(test)]
+    let threadgroup_width =
+        super::texture_tuning::group_width().map_or(threadgroup_width, |width| {
+            width.clamp(
+                pipeline.threadExecutionWidth() as u64,
+                pipeline.maxTotalThreadsPerThreadgroup() as u64,
+            )
+        });
     encoder.dispatchThreads_threadsPerThreadgroup(
         MTLSize {
             width: threads.max(1) as usize,

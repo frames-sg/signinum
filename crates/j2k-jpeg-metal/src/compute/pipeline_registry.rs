@@ -2,9 +2,89 @@
 
 //! JPEG Metal shader source and immutable compute-pipeline registry.
 
+#[cfg(test)]
+mod tests;
+
+use std::{
+    collections::HashMap,
+    sync::{Arc, LazyLock, Mutex},
+};
+
 use crate::metal_types::{ComputePipelineState, Device};
 use j2k_core::PixelFormat;
 use j2k_metal_support::{MetalPipelineLoader, MetalSupportError};
+use objc2_metal::MTLDevice as _;
+
+// Registry IDs come from actual Metal devices, so this retains at most one
+// immutable pipeline set per device observed by the process. Keeping successful
+// entries resident avoids recompilation across short-lived backend sessions.
+static PIPELINE_REGISTRIES: LazyLock<PipelineRegistryCache> =
+    LazyLock::new(PipelineRegistryCache::default);
+
+struct PipelineRegistryCache {
+    slots: Mutex<HashMap<u64, Arc<PipelineRegistrySlot>>>,
+}
+
+impl Default for PipelineRegistryCache {
+    fn default() -> Self {
+        Self {
+            slots: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+struct PipelineRegistrySlot {
+    registry: Mutex<Option<Arc<JpegPipelineRegistry>>>,
+}
+
+impl Default for PipelineRegistrySlot {
+    fn default() -> Self {
+        Self {
+            registry: Mutex::new(None),
+        }
+    }
+}
+
+impl PipelineRegistryCache {
+    fn get_or_try_init(
+        &self,
+        device_registry_id: u64,
+        load: impl FnOnce() -> Result<JpegPipelineRegistry, MetalSupportError>,
+    ) -> Result<Arc<JpegPipelineRegistry>, MetalSupportError> {
+        let slot = {
+            let Ok(mut slots) = self.slots.lock() else {
+                return load().map(Arc::new);
+            };
+            if let Some(slot) = slots.get(&device_registry_id) {
+                Arc::clone(slot)
+            } else {
+                // Pipeline reuse is an optimization. If cache metadata cannot
+                // grow, preserve decode availability through an uncached load.
+                if slots.try_reserve(1).is_err() {
+                    drop(slots);
+                    return load().map(Arc::new);
+                }
+                let slot = Arc::new(PipelineRegistrySlot::default());
+                slots.insert(device_registry_id, Arc::clone(&slot));
+                slot
+            }
+        };
+        let Ok(mut cached) = slot.registry.lock() else {
+            return load().map(Arc::new);
+        };
+        if let Some(registry) = cached.as_ref() {
+            return Ok(Arc::clone(registry));
+        }
+
+        // Construction is transactional: `load` builds every pipeline in a
+        // local value, and the cache publishes it only after complete success.
+        // An error or panic cannot expose a partially initialized registry. A
+        // panic poisons this slot, so later callers safely bypass the cache.
+        let registry = Arc::new(load()?);
+        *cached = Some(Arc::clone(&registry));
+        Ok(registry)
+    }
+}
 
 pub(in crate::compute) const SHADER_SOURCE: &str = concat!(
     include_str!("../shaders_shared.metal"),
@@ -74,7 +154,17 @@ pub(in crate::compute) struct JpegPipelineRegistry {
     pub(in crate::compute) rgb8_to_rgba_texture: ComputePipelineState,
 }
 
+// SAFETY: Metal compute pipeline states are immutable after construction and
+// Metal permits their concurrent use across command queues and threads.
+unsafe impl Send for JpegPipelineRegistry {}
+// SAFETY: Shared references expose only immutable retained pipeline states.
+unsafe impl Sync for JpegPipelineRegistry {}
+
 impl JpegPipelineRegistry {
+    pub(in crate::compute) fn shared(device: &Device) -> Result<Arc<Self>, MetalSupportError> {
+        PIPELINE_REGISTRIES.get_or_try_init(device.registryID(), || Self::load(device))
+    }
+
     pub(in crate::compute) fn load(device: &Device) -> Result<Self, MetalSupportError> {
         let loader = MetalPipelineLoader::new(device, SHADER_SOURCE)?;
         let pipeline = |name: &str| loader.pipeline(name);

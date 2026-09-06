@@ -125,21 +125,11 @@ impl FastBatchTiming {
 }
 
 #[cfg(all(test, target_os = "macos"))]
+mod entropy_tests;
+
+#[cfg(all(test, target_os = "macos"))]
 mod profile_tests {
     use super::*;
-
-    fn empty_checkpoint() -> JpegEntropyCheckpointV1 {
-        JpegEntropyCheckpointV1 {
-            mcu_index: 0,
-            entropy_pos: 0,
-            bit_acc: 0,
-            bit_count: 0,
-            y_prev_dc: 0,
-            cb_prev_dc: 0,
-            cr_prev_dc: 0,
-            reserved: 0,
-        }
-    }
 
     #[test]
     fn fast_batch_profile_fields_reject_oversized_labels() {
@@ -150,34 +140,6 @@ mod profile_tests {
                 what: "field value",
                 ..
             })
-        ));
-    }
-
-    #[test]
-    fn batch_entropy_shape_mismatch_fails_before_owner_growth() {
-        let first_entropy = [1_u8];
-        let second_entropy = [2_u8];
-        let first_checkpoints = [empty_checkpoint()];
-        let second_checkpoints = [empty_checkpoint()];
-        let result = batch_entropy_host_data(
-            [&first_entropy[..], &second_entropy[..]].into_iter(),
-            [&first_checkpoints[..], &second_checkpoints[..]].into_iter(),
-            2,
-            2,
-            0,
-            BatchEntropyLabels {
-                offset: "test offset",
-                len: "test length",
-            },
-        );
-        let Err(error) = result else {
-            panic!("checkpoint count mismatch must fail");
-        };
-
-        assert!(matches!(
-            error,
-            Error::MetalKernel { message }
-                if message == "JPEG Metal batch entropy metadata shape mismatch"
         ));
     }
 }
@@ -242,22 +204,22 @@ pub(super) struct BatchEntropyLabels {
 }
 
 #[cfg(target_os = "macos")]
-pub(super) struct BatchEntropyHostData {
-    pub(super) bytes: Vec<u8>,
+pub(super) struct BatchEntropyMetadata {
+    pub(super) payload_len: usize,
     pub(super) offsets: Vec<u32>,
     pub(super) lens: Vec<u32>,
     pub(super) checkpoints: Vec<JpegEntropyCheckpointHost>,
 }
 
 #[cfg(target_os = "macos")]
-pub(super) fn batch_entropy_host_data<'a>(
+pub(super) fn batch_entropy_metadata<'a>(
     entropy_bytes_iter: impl Iterator<Item = &'a [u8]> + Clone,
     entropy_checkpoints_iter: impl Iterator<Item = &'a [JpegEntropyCheckpointV1]> + Clone,
     tile_count: usize,
     segment_count: usize,
     external_live_bytes: usize,
     labels: BatchEntropyLabels,
-) -> Result<Option<BatchEntropyHostData>, Error> {
+) -> Result<Option<BatchEntropyMetadata>, Error> {
     let total_entropy_len = entropy_bytes_iter
         .clone()
         .map(<[u8]>::len)
@@ -302,21 +264,29 @@ pub(super) fn batch_entropy_host_data<'a>(
         "JPEG Metal batch entropy host data",
         external_live_bytes,
     );
+    // Entropy stays borrowed from the retained packet owners and is copied
+    // directly into checked Metal storage. Only the newly allocated host-side
+    // offset/checkpoint vectors belong in this live host metadata budget.
     budget.preflight(&[
-        BatchMetadataRequest::of::<u8>(total_entropy_len),
         BatchMetadataRequest::of::<u32>(tile_count),
         BatchMetadataRequest::of::<u32>(tile_count),
         BatchMetadataRequest::of::<JpegEntropyCheckpointHost>(checkpoint_count),
     ])?;
-    let mut bytes = budget.try_vec(total_entropy_len, "JPEG Metal batch entropy bytes")?;
     let mut offsets = budget.try_vec(tile_count, "JPEG Metal batch entropy offsets")?;
     let mut lens = budget.try_vec(tile_count, "JPEG Metal batch entropy lengths")?;
     let mut checkpoints =
         budget.try_vec(checkpoint_count, "JPEG Metal batch entropy checkpoints")?;
+    let mut payload_offset = 0_usize;
     for (entropy_bytes, entropy_checkpoints) in entropy_bytes_iter.zip(entropy_checkpoints_iter) {
-        offsets.push(checked_u32(bytes.len(), labels.offset)?);
+        offsets.push(checked_u32(payload_offset, labels.offset)?);
         lens.push(checked_u32(entropy_bytes.len(), labels.len)?);
-        bytes.extend_from_slice(entropy_bytes);
+        payload_offset = payload_offset.checked_add(entropy_bytes.len()).ok_or(
+            j2k_core::BatchInfrastructureError::AllocationTooLarge {
+                what: "JPEG Metal batch entropy bytes",
+                requested: usize::MAX,
+                cap: j2k_core::DEFAULT_MAX_HOST_ALLOCATION_BYTES,
+            },
+        )?;
         checkpoints.extend(
             entropy_checkpoints
                 .iter()
@@ -324,9 +294,10 @@ pub(super) fn batch_entropy_host_data<'a>(
                 .map(JpegEntropyCheckpointHost::from),
         );
     }
+    debug_assert_eq!(payload_offset, total_entropy_len);
 
-    Ok(Some(BatchEntropyHostData {
-        bytes,
+    Ok(Some(BatchEntropyMetadata {
+        payload_len: total_entropy_len,
         offsets,
         lens,
         checkpoints,
@@ -346,8 +317,8 @@ pub(super) fn batch_entropy_buffers<'a>(
         "JPEG Metal batch entropy buffer owners",
         requests,
     )?;
-    let Some(host) = batch_entropy_host_data(
-        entropy_bytes_iter,
+    let Some(metadata) = batch_entropy_metadata(
+        entropy_bytes_iter.clone(),
         entropy_checkpoints_iter,
         plan.tile_count,
         plan.segment_count,
@@ -361,24 +332,37 @@ pub(super) fn batch_entropy_buffers<'a>(
         return Ok(None);
     };
 
-    Ok(Some(BatchEntropyBuffers {
-        payload: scratch.shared_buffer_with_bytes(
+    batch_entropy_buffers_from_metadata(runtime, scratch, plan.keys, entropy_bytes_iter, &metadata)
+        .map(Some)
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn batch_entropy_buffers_from_metadata<'a>(
+    runtime: &MetalRuntime,
+    scratch: &mut MetalBatchScratch,
+    keys: BatchEntropyBufferKeys,
+    entropy_bytes_iter: impl Iterator<Item = &'a [u8]>,
+    metadata: &BatchEntropyMetadata,
+) -> Result<BatchEntropyBuffers, Error> {
+    Ok(BatchEntropyBuffers {
+        payload: scratch.shared_buffer_with_byte_slices(
             &runtime.device,
-            plan.keys.payload,
-            &host.bytes,
+            keys.payload,
+            metadata.payload_len,
+            entropy_bytes_iter,
         )?,
         offsets: scratch.shared_buffer_with_slice(
             &runtime.device,
-            plan.keys.offsets,
-            &host.offsets,
+            keys.offsets,
+            &metadata.offsets,
         )?,
-        lens: scratch.shared_buffer_with_slice(&runtime.device, plan.keys.lens, &host.lens)?,
+        lens: scratch.shared_buffer_with_slice(&runtime.device, keys.lens, &metadata.lens)?,
         checkpoints: scratch.shared_buffer_with_slice(
             &runtime.device,
-            plan.keys.checkpoints,
-            &host.checkpoints,
+            keys.checkpoints,
+            &metadata.checkpoints,
         )?,
-    }))
+    })
 }
 
 #[cfg(target_os = "macos")]

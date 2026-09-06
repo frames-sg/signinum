@@ -1410,8 +1410,8 @@ fn rgb8_texture_batch_decode_avoids_private_rgba_staging_buffers() {
     }
 
     let cases = [
-        (BASELINE_420, (16, 16), 0),
-        (BASELINE_422, (16, 8), 0),
+        (BASELINE_420, (16, 16), 3),
+        (BASELINE_422, (16, 8), 3),
         (BASELINE_444, (8, 8), 0),
     ];
 
@@ -1622,7 +1622,7 @@ fn rgb8_table_mixed_fast444_texture_batch_groups_resident_dispatches() {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn rgb8_fast422_texture_batch_decode_fuses_directly_into_reusable_metal_textures() {
+fn rgb8_fast422_texture_batch_decode_uses_reusable_component_planes() {
     let Some(session) = metal_session() else {
         return;
     };
@@ -1648,14 +1648,14 @@ fn rgb8_fast422_texture_batch_decode_fuses_directly_into_reusable_metal_textures
     assert_reusable_rgba_texture_tiles(&session, &output, tiles, (16, 8), &expected_tiles);
     assert_eq!(
         compute::jpeg_private_buffer_allocations_for_test(),
-        0,
-        "fused 4:2:2 texture batch decode should not allocate private Y/Cb/Cr staging planes"
+        3,
+        "subsampled texture decode allocates only three reusable component planes"
     );
 }
 
 #[cfg(target_os = "macos")]
 #[test]
-fn rgb8_wide_fast422_texture_batch_decode_fuses_directly_into_reusable_metal_textures() {
+fn rgb8_wide_fast422_texture_batch_decode_uses_reusable_component_planes() {
     let Some(session) = metal_session() else {
         return;
     };
@@ -1697,8 +1697,8 @@ fn rgb8_wide_fast422_texture_batch_decode_fuses_directly_into_reusable_metal_tex
     assert_reusable_rgba_texture_tiles(&session, &output, tiles, dimensions, &expected_tiles);
     assert_eq!(
         compute::jpeg_private_buffer_allocations_for_test(),
-        0,
-        "wide fused 4:2:2 texture batch decode should not allocate private Y/Cb/Cr staging planes"
+        3,
+        "subsampled texture decode allocates only three reusable component planes"
     );
 }
 
@@ -1840,15 +1840,15 @@ fn rgb8_table_mixed_fast422_texture_batch_groups_resident_dispatches() {
         assert_eq!(actual_rgba.as_slice(), expected_tiles[index].as_slice());
     }
     assert_eq!(
-            compute::jpeg_private_buffer_allocations_for_test(),
-            0,
-            "table-mixed resident 4:2:2 texture dispatches should not allocate private Y/Cb/Cr staging planes"
-        );
+        compute::jpeg_private_buffer_allocations_for_test(),
+        3,
+        "subsampled texture decode allocates only three reusable component planes"
+    );
 }
 
 #[cfg(target_os = "macos")]
 #[test]
-fn rgb8_fast420_texture_batch_decode_fuses_directly_into_reusable_metal_textures() {
+fn rgb8_fast420_texture_batch_decode_uses_reusable_component_planes() {
     let Some(session) = metal_session() else {
         return;
     };
@@ -1886,14 +1886,14 @@ fn rgb8_fast420_texture_batch_decode_fuses_directly_into_reusable_metal_textures
     }
     assert_eq!(
         compute::jpeg_private_buffer_allocations_for_test(),
-        0,
-        "fused 4:2:0 texture batch decode should not allocate private Y/Cb/Cr staging planes"
+        3,
+        "subsampled texture decode allocates only three reusable component planes"
     );
 }
 
 #[cfg(target_os = "macos")]
 #[test]
-fn rgb8_wide_row_fast420_texture_batch_decode_fuses_directly_into_reusable_metal_textures() {
+fn rgb8_wide_row_fast420_texture_batch_decode_uses_reusable_component_planes() {
     let Some(session) = metal_session() else {
         return;
     };
@@ -1934,15 +1934,15 @@ fn rgb8_wide_row_fast420_texture_batch_decode_fuses_directly_into_reusable_metal
     let expected_tiles = [expected_rgba.as_slice(), expected_rgba.as_slice()];
     assert_reusable_rgba_texture_tiles(&session, &output, tiles, dimensions, &expected_tiles);
     assert_eq!(
-            compute::jpeg_private_buffer_allocations_for_test(),
-            0,
-            "wide-row fused 4:2:0 texture batch decode should not allocate private Y/Cb/Cr staging planes"
-        );
+        compute::jpeg_private_buffer_allocations_for_test(),
+        3,
+        "subsampled texture decode allocates only three reusable component planes"
+    );
 }
 
 #[cfg(target_os = "macos")]
 #[test]
-fn rgb8_multi_row_fast420_texture_batch_decode_fuses_directly_into_reusable_metal_textures() {
+fn rgb8_multi_row_fast420_texture_batch_decode_uses_reusable_component_planes() {
     let Some(session) = metal_session() else {
         return;
     };
@@ -1983,15 +1983,15 @@ fn rgb8_multi_row_fast420_texture_batch_decode_fuses_directly_into_reusable_meta
     let expected_tiles = [expected_rgba.as_slice(), expected_rgba.as_slice()];
     assert_reusable_rgba_texture_tiles(&session, &output, tiles, dimensions, &expected_tiles);
     assert_eq!(
-            compute::jpeg_private_buffer_allocations_for_test(),
-            0,
-            "multi-row fused 4:2:0 texture batch decode should not allocate private Y/Cb/Cr staging planes"
-        );
+        compute::jpeg_private_buffer_allocations_for_test(),
+        3,
+        "subsampled texture decode allocates only three reusable component planes"
+    );
 }
 
 #[cfg(target_os = "macos")]
 #[test]
-fn rgb8_multi_axis_fast420_texture_batch_decode_fuses_directly_into_reusable_metal_textures() {
+fn rgb8_multi_axis_fast420_texture_batch_decode_uses_reusable_component_planes() {
     let Some(session) = metal_session() else {
         return;
     };
@@ -2032,17 +2032,16 @@ fn rgb8_multi_axis_fast420_texture_batch_decode_fuses_directly_into_reusable_met
         let expected_tiles = [expected_rgba.as_slice(), expected_rgba.as_slice()];
         assert_reusable_rgba_texture_tiles(&session, &output, tiles, dimensions, &expected_tiles);
         assert_eq!(
-                compute::jpeg_private_buffer_allocations_for_test(),
-                0,
-                "multi-axis fused 4:2:0 texture batch decode should not allocate private Y/Cb/Cr staging planes for {dimensions:?}"
-            );
+            compute::jpeg_private_buffer_allocations_for_test(),
+            3,
+            "subsampled texture decode allocates only three reusable component planes"
+        );
     }
 }
 
 #[cfg(target_os = "macos")]
 #[test]
-fn rgb8_chunked_multi_axis_fast420_texture_batch_decode_fuses_directly_into_reusable_metal_textures(
-) {
+fn rgb8_chunked_multi_axis_fast420_texture_batch_decode_uses_reusable_component_planes() {
     let Some(session) = metal_session() else {
         return;
     };
@@ -2083,15 +2082,15 @@ fn rgb8_chunked_multi_axis_fast420_texture_batch_decode_fuses_directly_into_reus
     let expected_tiles = [expected_rgba.as_slice(), expected_rgba.as_slice()];
     assert_reusable_rgba_texture_tiles(&session, &output, tiles, dimensions, &expected_tiles);
     assert_eq!(
-            compute::jpeg_private_buffer_allocations_for_test(),
-            0,
-            "chunked multi-axis fused 4:2:0 texture batch decode should not allocate private Y/Cb/Cr staging planes"
-        );
+        compute::jpeg_private_buffer_allocations_for_test(),
+        3,
+        "subsampled texture decode allocates only three reusable component planes"
+    );
 }
 
 #[cfg(target_os = "macos")]
 #[test]
-fn rgb8_restart_fast420_texture_batch_decode_fuses_directly_into_reusable_metal_textures() {
+fn rgb8_restart_fast420_texture_batch_decode_uses_reusable_component_planes() {
     let Some(session) = metal_session() else {
         return;
     };
@@ -2132,16 +2131,15 @@ fn rgb8_restart_fast420_texture_batch_decode_fuses_directly_into_reusable_metal_
     let expected_tiles = [expected_rgba.as_slice(), expected_rgba.as_slice()];
     assert_reusable_rgba_texture_tiles(&session, &output, tiles, dimensions, &expected_tiles);
     assert_eq!(
-            compute::jpeg_private_buffer_allocations_for_test(),
-            0,
-            "restart fused 4:2:0 texture batch decode should not allocate private Y/Cb/Cr staging planes"
-        );
+        compute::jpeg_private_buffer_allocations_for_test(),
+        3,
+        "subsampled texture decode allocates only three reusable component planes"
+    );
 }
 
 #[cfg(target_os = "macos")]
 #[test]
-fn rgb8_distinct_restart_fast420_texture_batch_decode_fuses_directly_into_reusable_metal_textures()
-{
+fn rgb8_distinct_restart_fast420_texture_batch_decode_uses_reusable_component_planes() {
     let Some(session) = metal_session() else {
         return;
     };
@@ -2228,10 +2226,10 @@ fn rgb8_distinct_restart_fast420_texture_batch_decode_fuses_directly_into_reusab
         assert_eq!(actual_rgba.as_slice(), expected_tiles[index].as_slice());
     }
     assert_eq!(
-            compute::jpeg_private_buffer_allocations_for_test(),
-            0,
-            "distinct restart fused 4:2:0 texture batch decode should not allocate private Y/Cb/Cr staging planes"
-        );
+        compute::jpeg_private_buffer_allocations_for_test(),
+        3,
+        "subsampled texture decode allocates only three reusable component planes"
+    );
 }
 
 #[cfg(target_os = "macos")]
@@ -2370,8 +2368,8 @@ fn rgb8_table_mixed_restart_fast420_texture_batch_groups_resident_dispatches() {
         assert_eq!(actual_rgba.as_slice(), expected_tiles[index].as_slice());
     }
     assert_eq!(
-            compute::jpeg_private_buffer_allocations_for_test(),
-            0,
-            "table-mixed resident 4:2:0 texture dispatches should not allocate private Y/Cb/Cr staging planes"
-        );
+        compute::jpeg_private_buffer_allocations_for_test(),
+        3,
+        "subsampled texture decode allocates only three reusable component planes"
+    );
 }

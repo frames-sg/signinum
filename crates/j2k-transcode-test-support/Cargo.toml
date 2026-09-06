@@ -13,11 +13,11 @@ name = "j2k_transcode_test_support"
 path = "src/lib.rs"
 
 [dependencies]
-j2k-transcode = { path = "../j2k-transcode", version = "=0.10.0", features = ["dev-support"] }
-j2k-types = { path = "../j2k-types", version = "=0.10.0" }
+j2k-transcode = { path = "../j2k-transcode", version = "=0.11.0", features = ["dev-support"] }
+j2k-types = { path = "../j2k-types", version = "=0.11.0" }
 
 [dev-dependencies]
-j2k-native = { path = "../j2k-native", version = "=0.10.0" }
+j2k-native = { path = "../j2k-native", version = "=0.11.0" }
 
 [lints.rust]
 unsafe_code = "forbid"

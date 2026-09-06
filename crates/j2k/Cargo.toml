@@ -20,16 +20,16 @@ name = "j2k"
 path = "src/lib.rs"
 
 [dependencies]
-j2k-core = { path = "../j2k-core", version = "=0.10.0" }
-j2k-native = { path = "../j2k-native", version = "=0.10.0" }
-j2k-types = { path = "../j2k-types", version = "=0.10.0" }
+j2k-core = { path = "../j2k-core", version = "=0.11.0" }
+j2k-native = { path = "../j2k-native", version = "=0.11.0" }
+j2k-types = { path = "../j2k-types", version = "=0.11.0" }
 moxcms = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
 criterion = { workspace = true }
-j2k-native = { path = "../j2k-native", version = "=0.10.0" }
+j2k-native = { path = "../j2k-native", version = "=0.11.0" }
 j2k-test-support = { path = "../j2k-test-support", features = ["j2k-native-fixtures"] }
 
 [[bench]]

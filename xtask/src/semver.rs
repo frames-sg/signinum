@@ -25,11 +25,11 @@ use compatibility::{semver_check_args, semver_check_release_type};
 
 const CARGO_SEMVER_CHECKS_VERSION: &str = "0.48.0";
 const SEMVER_TOOLCHAIN: &str = "1.96";
-const SEMVER_BASELINE_VERSION: &str = "0.9.0";
-const SEMVER_BASELINE_TAG: &str = "v0.9.0";
-const SEMVER_BASELINE_COMMIT: &str = "b197f01ab4b9271f1cbc36921755a5b9d588bd5a";
-const API_DIFF_REPORT: &str = "docs/release-evidence/public-api/reviewed-public-api-diff-0.10.0.md";
-const API_REVIEW_CONFIG: &str = "docs/release-evidence/public-api/public-api-review-0.10.0.yml";
+const SEMVER_BASELINE_VERSION: &str = "0.10.0";
+const SEMVER_BASELINE_TAG: &str = "v0.10.0";
+const SEMVER_BASELINE_COMMIT: &str = "e19fccf26e7b12a3601eed40a2f2143d94b6c7bc";
+const API_DIFF_REPORT: &str = "docs/release-evidence/public-api/reviewed-public-api-diff-0.11.0.md";
+const API_REVIEW_CONFIG: &str = "docs/release-evidence/public-api/public-api-review-0.11.0.yml";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct BaselineTransition<'a> {
@@ -38,12 +38,7 @@ struct BaselineTransition<'a> {
     required_next_baseline_tag: &'a str,
 }
 
-const INTENTIONAL_BREAK_TRANSITION: Option<BaselineTransition<'static>> =
-    Some(BaselineTransition {
-        candidate_version: "0.10.0",
-        required_next_baseline_version: "0.10.0",
-        required_next_baseline_tag: "v0.10.0",
-    });
+const INTENTIONAL_BREAK_TRANSITION: Option<BaselineTransition<'static>> = None;
 
 const SEMVER_BASELINE_PACKAGES: &[&str] = &[
     "j2k",
@@ -64,16 +59,14 @@ const SEMVER_BASELINE_PACKAGES: &[&str] = &[
     "j2k-cuda-runtime",
     "j2k-profile",
     "j2k-ml",
-];
-
-const SEMVER_NEW_PACKAGES: &[&str] = &[
     "j2k-cuda-build-support",
     "j2k-cuda-j2k-engine",
     "j2k-cuda-jpeg-engine",
     "j2k-cuda-transcode-engine",
     "j2k-mpsgraph",
-    "j2k-mpsgraph-support",
 ];
+
+const SEMVER_NEW_PACKAGES: &[&str] = &["j2k-mpsgraph-support"];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 struct Version {

@@ -18,9 +18,9 @@ path = "src/main.rs"
 doc = false
 
 [dependencies]
-j2k  = { path = "../j2k", version = "=0.10.0" }
-j2k-jpeg = { path = "../j2k-jpeg", version = "=0.10.0" }
-j2k-transcode = { path = "../j2k-transcode", version = "=0.10.0" }
+j2k  = { path = "../j2k", version = "=0.11.0" }
+j2k-jpeg = { path = "../j2k-jpeg", version = "=0.11.0" }
+j2k-transcode = { path = "../j2k-transcode", version = "=0.11.0" }
 
 [dev-dependencies]
 j2k-test-support = { path = "../j2k-test-support" }

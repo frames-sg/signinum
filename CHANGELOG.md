@@ -5,6 +5,13 @@ and stale roadmap entries have been removed from the public documentation set.
 
 ## [Unreleased]
 
+Staged workspace version: `0.11.0`.
+
+- Batches baseline JPEG 4:2:0 and 4:2:2 Metal texture decode through reusable component planes, with bounded scratch leases held through status consumption.
+- Keeps lossy HT Metal encode payloads resident through packetization, reuses allocation capacity, and shares immutable pipelines per device.
+- Adds the separately published `j2k-mpsgraph-support` ownership boundary for codec-independent graph submission.
+- Corrects the Windows OpenHTJ2K reference runtime configuration used by release validation.
+
 - Corrects TIFF `JPEGTables` assembly for abbreviated JPEG tiles, including
   SOI/EOI-bearing tiles with external DQT/DHT definitions, missing tile or
   length-delimited `JPEGTables` EOI markers, and TIFF-defined DRI/DAC handling.

@@ -51,7 +51,7 @@ jobs:
   cuda-quick:
     name: CUDA quick validation
     needs: [validate-inputs]
-    if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.actor == 'jcwal1516' && github.triggering_actor == 'jcwal1516' && (inputs.mode == 'quick' && (inputs.target == 'cuda' || inputs.target == 'all')) }}
+    if: ${{ github.event_name == 'workflow_dispatch' && github.actor == 'jcwal1516' && github.triggering_actor == 'jcwal1516' && (inputs.mode == 'quick' && (inputs.target == 'cuda' || inputs.target == 'all')) }}
     runs-on: [self-hosted, Linux, X64, cuda]
     # Quick timing is telemetry until representative warm-cache runs establish a budget.
     timeout-minutes: 90
@@ -103,7 +103,7 @@ jobs:
   metal-quick:
     name: Metal quick validation
     needs: [validate-inputs]
-    if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.actor == 'jcwal1516' && github.triggering_actor == 'jcwal1516' && (inputs.mode == 'quick' && (inputs.target == 'metal' || inputs.target == 'all')) }}
+    if: ${{ github.event_name == 'workflow_dispatch' && github.actor == 'jcwal1516' && github.triggering_actor == 'jcwal1516' && (inputs.mode == 'quick' && (inputs.target == 'metal' || inputs.target == 'all')) }}
     runs-on: [self-hosted, macOS, ARM64, metal]
     # Keep the 15-minute target informational until runner variance is measured.
     timeout-minutes: 60
@@ -151,7 +151,7 @@ jobs:
   cuda-full:
     name: CUDA full release validation
     needs: [validate-inputs]
-    if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.actor == 'jcwal1516' && github.triggering_actor == 'jcwal1516' && (inputs.mode == 'full' && inputs.target == 'all') }}
+    if: ${{ github.event_name == 'workflow_dispatch' && github.actor == 'jcwal1516' && github.triggering_actor == 'jcwal1516' && (inputs.mode == 'full' && inputs.target == 'all') }}
     runs-on: [self-hosted, Linux, X64, cuda]
     timeout-minutes: 90
     env:
@@ -242,7 +242,7 @@ jobs:
   metal-full:
     name: Metal full release validation
     needs: [validate-inputs]
-    if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.actor == 'jcwal1516' && github.triggering_actor == 'jcwal1516' && (inputs.mode == 'full' && inputs.target == 'all') }}
+    if: ${{ github.event_name == 'workflow_dispatch' && github.actor == 'jcwal1516' && github.triggering_actor == 'jcwal1516' && (inputs.mode == 'full' && inputs.target == 'all') }}
     runs-on: [self-hosted, macOS, ARM64, metal]
     timeout-minutes: 60
     env:

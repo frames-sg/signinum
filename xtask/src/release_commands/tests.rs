@@ -35,6 +35,53 @@ fn full_gpu_workflows_compile_the_packaged_adapter_archives() {
     assert!(workflow.contains("cargo xtask package-consumer-smoke --target metal"));
 }
 
+#[test]
+fn gpu_workflows_allow_only_owner_manual_runs_on_any_branch() {
+    for source in [
+        include_str!("../../../.github/workflows/gpu-validation.yml"),
+        include_str!("../../../.github/workflows/gpu-benchmarks.yml"),
+    ] {
+        let workflow: serde_yaml_ng::Value =
+            serde_yaml_ng::from_str(source).expect("valid GPU workflow YAML");
+        let triggers = workflow["on"].as_mapping().expect("workflow triggers");
+        assert_eq!(triggers.len(), 1, "GPU jobs must remain manual-only");
+        assert!(triggers.contains_key("workflow_dispatch"));
+        let jobs = workflow["jobs"].as_mapping().expect("workflow jobs");
+        for (name, job) in jobs {
+            let Some(runners) = job["runs-on"].as_sequence() else {
+                continue;
+            };
+            if !runners
+                .iter()
+                .any(|runner| runner.as_str() == Some("self-hosted"))
+            {
+                continue;
+            }
+            let name = name.as_str().expect("job name");
+            let selection = match name {
+                "cuda-quick" => {
+                    "inputs.mode == 'quick' && (inputs.target == 'cuda' || inputs.target == 'all')"
+                }
+                "metal-quick" => {
+                    "inputs.mode == 'quick' && (inputs.target == 'metal' || inputs.target == 'all')"
+                }
+                "cuda-full" | "metal-full" => "inputs.mode == 'full' && inputs.target == 'all'",
+                "cuda" => "inputs.lane == 'cuda'",
+                "metal" => "inputs.lane == 'metal'",
+                _ => panic!("unreviewed self-hosted GPU job: {name}"),
+            };
+            let expected = format!(
+                "${{{{ github.event_name == 'workflow_dispatch' && github.actor == 'jcwal1516' && github.triggering_actor == 'jcwal1516' && ({selection}) }}}}"
+            );
+            assert_eq!(
+                job["if"].as_str(),
+                Some(expected.as_str()),
+                "{name} must accept the owner's manual runs from any branch and reject other initiators or rerun actors"
+            );
+        }
+    }
+}
+
 #[cfg(unix)]
 mod file_boundaries;
 #[cfg(unix)]

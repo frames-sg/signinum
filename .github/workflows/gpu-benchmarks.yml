@@ -54,7 +54,7 @@ jobs:
   cuda:
     name: CUDA benchmark (${{ inputs.suite }})
     needs: [validate-inputs]
-    if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.actor == 'jcwal1516' && github.triggering_actor == 'jcwal1516' && (inputs.lane == 'cuda') }}
+    if: ${{ github.event_name == 'workflow_dispatch' && github.actor == 'jcwal1516' && github.triggering_actor == 'jcwal1516' && (inputs.lane == 'cuda') }}
     runs-on: [self-hosted, Linux, X64, cuda]
     timeout-minutes: 180
     env:
@@ -178,7 +178,7 @@ jobs:
   metal:
     name: Metal benchmark (${{ inputs.suite }})
     needs: [validate-inputs]
-    if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.actor == 'jcwal1516' && github.triggering_actor == 'jcwal1516' && (inputs.lane == 'metal') }}
+    if: ${{ github.event_name == 'workflow_dispatch' && github.actor == 'jcwal1516' && github.triggering_actor == 'jcwal1516' && (inputs.lane == 'metal') }}
     runs-on: [self-hosted, macOS, ARM64, metal]
     timeout-minutes: 180
     env:

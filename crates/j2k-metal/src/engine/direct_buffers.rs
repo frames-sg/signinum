@@ -77,6 +77,42 @@ pub(crate) fn checked_buffer_slice_at<T: GpuAbi>(
         .map_err(|error| buffer_access_error(context, error))
 }
 
+#[cfg(target_os = "macos")]
+/// Borrow a validated byte range from a completed CPU-visible Metal buffer.
+///
+/// # Safety
+///
+/// All Metal writers must have completed, and the returned range must remain
+/// immutable for the lifetime of the borrow.
+pub(crate) unsafe fn completed_metal_buffer_bytes(
+    buffer: &objc2::runtime::ProtocolObject<dyn objc2_metal::MTLBuffer>,
+    byte_offset: usize,
+    byte_len: usize,
+) -> Result<&[u8], j2k_metal_support::MetalSupportError> {
+    let buffer_len = buffer.length();
+    if byte_offset
+        .checked_add(byte_len)
+        .is_none_or(|end| end > buffer_len)
+    {
+        return Err(j2k_metal_support::MetalSupportError::BufferBounds {
+            offset_bytes: byte_offset,
+            byte_len,
+            buffer_len,
+        });
+    }
+    if byte_len == 0 {
+        return Ok(&[]);
+    }
+
+    // Reuse the support boundary to validate that this buffer is CPU-visible.
+    // SAFETY: The caller guarantees completion and immutability for this range.
+    let _ = unsafe { j2k_metal_support::checked_buffer_read::<u8>(buffer, byte_offset) }?;
+    let base = buffer.contents().as_ptr().cast::<u8>();
+    // SAFETY: The full range was checked above, Metal returned CPU-visible
+    // storage, and the caller guarantees no overlapping writer.
+    Ok(unsafe { core::slice::from_raw_parts(base.add(byte_offset), byte_len) })
+}
+
 pub(crate) fn buffer_is_cpu_visible(buffer: &BufferRef) -> bool {
     matches!(
         buffer.storageMode(),

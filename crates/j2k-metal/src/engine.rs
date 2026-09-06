@@ -60,6 +60,7 @@ mod direct_buffers;
 #[cfg(target_os = "macos")]
 pub(crate) use self::direct_buffers::{
     buffer_is_cpu_visible, checked_buffer_read, checked_buffer_slice, checked_buffer_slice_at,
+    completed_metal_buffer_bytes,
 };
 #[cfg(target_os = "macos")]
 use self::direct_buffers::{

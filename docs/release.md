@@ -1,8 +1,8 @@
 # Release Policy
 
-The current workspace version is `j2k` 0.11.0. Its publication requires the
-candidate and tag gates below. The published 0.10.0 line remains
-security-supported and carries the release-scoped Part 1 and selected
+The `j2k` 0.10.0 public crate release is published and security-supported.
+The current workspace prepares 0.11.0; its publication requires the candidate
+and tag gates below. The published 0.10.0 line carries the release-scoped Part 1 and selected
 Part 15 T.803 decoder evidence described in
 [`T.803 conformance`](t803-conformance.md).
 Runtime backend selection defaults to `Auto`; CPU remains the portable baseline
@@ -267,12 +267,11 @@ cargo package --no-verify
 cargo publish --dry-run
 ```
 
-The gate lists all 24 package contents. It derives dependency closure and
+The gate lists every release package's contents. It derives dependency closure and
 registry independence from locked Cargo metadata, then constructs `.crate`
-archives with `cargo package --no-verify` for the 20 staged packages whose
-workspace dependencies are not yet available from crates.io. The four derived
-registry-independent packages (`j2k-core`, `j2k-profile`, `j2k-types`, and
-`j2k-codec-math`) run
+archives with `cargo package --no-verify` for staged packages whose
+workspace dependencies are not yet available from crates.io. Derived
+registry-independent packages run
 `cargo publish --dry-run`, including Cargo's package verification build. Manual
 publish-workflow runs remain dry-run-only: they validate the manifest and
 construct every local archive without receiving the crates.io token.
@@ -309,7 +308,7 @@ intentional partial retry, `CRATES_IO_ALLOW_PUBLISHED_RERUN=true` permits only
 the checksum-matched already-published prefix without moving the tag.
 
 After `crates-io-publish` environment approval, one runner repeats the canonical
-tag and prefix proof, packages all 23 archives, and publishes the remaining
+tag and prefix proof, packages all release archives, and publishes the remaining
 manifest entries sequentially with `cargo publish --locked -p <crate>`. Cargo's
 verification build stays enabled. There are no unconditional registry sleeps;
 only retryable transport, HTTP 429, or server failures are retried with bounded

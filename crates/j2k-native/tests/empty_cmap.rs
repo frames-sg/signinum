@@ -453,8 +453,7 @@ fn premultiplied_opacity_cdef_sets_alpha() {
     assert!(image.has_alpha());
     let error = image
         .build_component_grid_color_plan_with_context(&mut j2k_native::DecoderContext::default())
-        .err()
-        .expect("component-grid RGB planning must not drop explicit alpha");
+        .expect_err("component-grid RGB planning must not drop explicit alpha");
     assert!(matches!(
         error,
         j2k_native::DecodeError::Decoding(j2k_native::DecodingError::DirectPlanUnsupported(

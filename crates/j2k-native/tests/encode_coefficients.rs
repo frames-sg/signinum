@@ -335,8 +335,7 @@ fn component_grid_color_plan_rejects_grayscale_without_synthesizing_rgb() {
     let image = Image::new(&bytes, &DecodeSettings::default()).expect("parse grayscale fixture");
     let error = image
         .build_component_grid_color_plan_with_context(&mut DecoderContext::default())
-        .err()
-        .expect("RGB component planning must reject grayscale");
+        .expect_err("RGB component planning must reject grayscale");
     assert!(matches!(
         error,
         j2k_native::DecodeError::Decoding(j2k_native::DecodingError::DirectPlanUnsupported(
@@ -384,8 +383,7 @@ fn component_grid_plan_rejects_unrepresented_geometry() {
         .unwrap();
         let error = image
             .build_component_grid_color_plan_with_context(&mut DecoderContext::default())
-            .err()
-            .expect("unrepresented component geometry must be rejected");
+            .expect_err("unrepresented component geometry must be rejected");
         assert!(error.to_string().contains(
             "component-grid plans require a full unsigned origin-zero image without MCT"
         ));

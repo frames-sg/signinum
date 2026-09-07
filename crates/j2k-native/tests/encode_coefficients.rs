@@ -160,6 +160,24 @@ fn precomputed_encode_writes_component_sampling_in_siz() {
     assert_eq!(bytes[component_info + 8], 2);
 
     let image = Image::new(&bytes, &DecodeSettings::default()).expect("parse sampled codestream");
+    let (plan, sampling) = image
+        .build_component_grid_color_plan_with_context(&mut DecoderContext::default())
+        .expect("sampled component-grid plan");
+    assert_eq!(sampling, [(1, 1), (2, 2), (2, 2)]);
+    assert!(
+        image
+            .build_direct_color_plan_with_context(&mut DecoderContext::default())
+            .is_err(),
+        "full-resolution plan contract must remain separate from component-grid output"
+    );
+    assert_eq!(plan.dimensions, (16, 16));
+    assert_eq!(
+        plan.component_plans
+            .iter()
+            .map(|p| p.dimensions)
+            .collect::<Vec<_>>(),
+        [(16, 16), (8, 8), (8, 8)]
+    );
     let mut context = DecoderContext::default();
     let components = image
         .decode_components_with_context(&mut context)
@@ -300,6 +318,57 @@ fn raw_pixel_encode_rejects_component_sampling_without_component_sized_dwt() {
             what: "component sampling requires component-sized DWT geometry"
         }
     );
+}
+
+#[test]
+fn component_grid_plan_rejects_unrepresented_geometry() {
+    for (mct, signed, reduced, offset) in [
+        (true, false, false, false),
+        (false, true, false, false),
+        (false, false, true, false),
+        (false, false, false, true),
+    ] {
+        let mut bytes = encode(
+            &[100; 32 * 32 * 3],
+            32,
+            32,
+            3,
+            8,
+            signed,
+            &EncodeOptions {
+                use_mct: mct,
+                num_decomposition_levels: 2,
+                ..EncodeOptions::default()
+            },
+        )
+        .unwrap();
+        if offset {
+            let siz = find_marker(&bytes, 0x51).unwrap();
+            // Shift the reference grid, image origin, and tile origin together.
+            bytes[siz + 6..siz + 10].copy_from_slice(&33_u32.to_be_bytes());
+            bytes[siz + 14..siz + 18].copy_from_slice(&1_u32.to_be_bytes());
+            bytes[siz + 30..siz + 34].copy_from_slice(&1_u32.to_be_bytes());
+        }
+        let image = Image::new(
+            &bytes,
+            &DecodeSettings {
+                target_resolution: reduced.then_some((16, 16)),
+                ..DecodeSettings::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                image.build_component_grid_color_plan_with_context(&mut DecoderContext::default()),
+                Err(j2k_native::DecodeError::Decoding(
+                    j2k_native::DecodingError::DirectPlanUnsupported(
+                        j2k_native::DirectPlanUnsupportedReason::ComponentGridFullImage
+                    )
+                ))
+            ),
+            "unrepresented geometry: {mct}/{signed}/{reduced}/{offset}"
+        );
+    }
 }
 
 #[test]

@@ -28,13 +28,13 @@ cuda-oxide-jpeg-decode = []
 cuda-oxide-jpeg-encode = []
 
 [dependencies]
-j2k-codec-math = { path = "../j2k-codec-math", version = "=0.11.0" }
-j2k-core = { path = "../j2k-core", version = "=0.11.0" }
-j2k-cuda-runtime = { path = "../j2k-cuda-runtime", version = "=0.11.0" }
+j2k-codec-math = { path = "../j2k-codec-math", version = "=0.11.1" }
+j2k-core = { path = "../j2k-core", version = "=0.11.1" }
+j2k-cuda-runtime = { path = "../j2k-cuda-runtime", version = "=0.11.1" }
 
 [build-dependencies]
-j2k-codec-math = { path = "../j2k-codec-math", version = "=0.11.0" }
-j2k-cuda-build-support = { path = "../j2k-cuda-build-support", version = "=0.11.0" }
+j2k-codec-math = { path = "../j2k-codec-math", version = "=0.11.1" }
+j2k-cuda-build-support = { path = "../j2k-cuda-build-support", version = "=0.11.1" }
 
 [dev-dependencies]
 j2k-test-support = { path = "../j2k-test-support" }

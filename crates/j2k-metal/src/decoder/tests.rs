@@ -514,3 +514,6 @@ fn decoder_modules_remain_explicit_without_suppression_shortcuts() {
         parse_explicit_module(name, source);
     }
 }
+
+#[cfg(target_os = "macos")]
+mod sampled;

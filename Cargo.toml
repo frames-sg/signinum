@@ -34,7 +34,7 @@ members = [
     "xtask",
 ]
 [workspace.package]
-version = "0.11.0"
+version = "0.11.1"
 edition      = "2021"
 rust-version = "1.96"
 license      = "MIT OR Apache-2.0"

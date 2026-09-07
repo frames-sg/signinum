@@ -50,10 +50,12 @@ const J2K_METAL_REQUIRED_IGNORED_TESTS: &[&str] = &[
     "idwt::tests::metal_irreversible_idwt_perf_guard",
 ];
 
-// Capture needs an explicit output path; startup timing is a manual benchmark.
-// Correctness and concurrent kernel reuse are covered by non-ignored tests.
-// Inventory both diagnostics so new ignored tests cannot silently escape review.
+// Capture needs an explicit output path; timing diagnostics are manual benchmarks.
+// Sampled characterization additionally needs the caller-provided corpus.
+// Correctness, sampled pixel parity, and kernel reuse have non-ignored tests.
+// Inventory every diagnostic so ignored tests cannot silently escape review.
 const METAL_OPTIONAL_IGNORED_TESTS: &[&str] = &[
+    "decoder::tests::sampled::local_sampled_color_batch_characterization",
     "idwt::tests::metal_irreversible_idwt_gpu_capture",
     "engine::runtime::resource_profile_tests::benchmark_cold_and_repeated_session_kernel_initialization",
 ];

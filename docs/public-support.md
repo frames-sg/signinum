@@ -47,6 +47,15 @@ fallback. Preparation failures remain indexed per input. Device codec-status
 errors that identify a job can name its original source, while
 command-buffer failures remain group-level and discard the affected dense group.
 
+Separately, the legacy Metal full-image/tile-batch display APIs can decode
+unsigned origin-zero single-tile sampled RGB codestreams without MCT using
+resident component plans and GPU sample replication. This covers full 4:2:2 and
+4:2:0 display tiles without changing the dense owned-batch boundary above.
+`sampled_color_batch_keeps_one_resident_submission` checks exact reversible
+pixels, odd dimensions, RGB8/RGBA8/RGB16 output, and one submission per batch.
+Other component-grid geometry retains the existing fallback. See
+[the architecture rationale](architecture.md#metal-sampled-component-decode).
+
 The framework-specific contract and focused accelerator validation boundary are
 maintained in [`docs/j2k-ml.md`](j2k-ml.md). Dated hardware and throughput
 evidence is maintained separately in

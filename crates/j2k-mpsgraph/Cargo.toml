@@ -17,14 +17,14 @@ all-features = true
 targets = []
 
 [dependencies]
-j2k = { path = "../j2k", version = "=0.11.0" }
-j2k-core = { path = "../j2k-core", version = "=0.11.0" }
-j2k-metal = { path = "../j2k-metal", version = "=0.11.0" }
-j2k-metal-support = { path = "../j2k-metal-support", version = "=0.11.0" }
+j2k = { path = "../j2k", version = "=0.11.1" }
+j2k-core = { path = "../j2k-core", version = "=0.11.1" }
+j2k-metal = { path = "../j2k-metal", version = "=0.11.1" }
+j2k-metal-support = { path = "../j2k-metal-support", version = "=0.11.1" }
 thiserror = { workspace = true }
 
 [target.'cfg(all(target_arch = "aarch64", target_os = "macos"))'.dependencies]
-j2k-mpsgraph-support = { path = "../j2k-mpsgraph-support", version = "=0.11.0" }
+j2k-mpsgraph-support = { path = "../j2k-mpsgraph-support", version = "=0.11.1" }
 objc2 = { workspace = true }
 objc2-foundation = { workspace = true, features = [
     "NSArray",
@@ -37,7 +37,7 @@ objc2-metal-performance-shaders = { workspace = true }
 objc2-metal-performance-shaders-graph = { workspace = true }
 
 [dev-dependencies]
-j2k-native = { path = "../j2k-native", version = "=0.11.0" }
+j2k-native = { path = "../j2k-native", version = "=0.11.1" }
 j2k-test-support = { path = "../j2k-test-support", features = ["j2k-native-fixtures"] }
 
 [lints.rust]

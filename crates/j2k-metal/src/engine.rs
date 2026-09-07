@@ -267,7 +267,8 @@ use self::direct_plane_pack::{
 mod direct_grayscale_execute;
 #[cfg(target_os = "macos")]
 pub(crate) use self::direct_grayscale_execute::{
-    execute_hybrid_cpu_tier1_direct_color_plan, execute_hybrid_cpu_tier1_direct_color_plan_batch,
+    decode_component_grid_color_batch, execute_hybrid_cpu_tier1_direct_color_plan,
+    execute_hybrid_cpu_tier1_direct_color_plan_batch,
     execute_hybrid_cpu_tier1_direct_color_plan_with_device, execute_prepared_direct_color_plan,
     execute_prepared_direct_color_plan_batch, execute_prepared_direct_color_plan_with_device,
     execute_prepared_direct_grayscale_plan, execute_prepared_direct_grayscale_plan_batch,

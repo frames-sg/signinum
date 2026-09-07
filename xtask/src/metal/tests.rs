@@ -180,7 +180,10 @@ fn ignored_inventory_is_unique_and_has_expected_size() {
         .copied()
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(required.len(), 21);
-    assert_eq!(optional.len(), 2);
+    assert_eq!(optional.len(), 3);
+    assert!(
+        optional.contains("decoder::tests::sampled::local_sampled_color_batch_characterization")
+    );
     assert!(optional.contains(
         "engine::runtime::resource_profile_tests::benchmark_cold_and_repeated_session_kernel_initialization"
     ));

@@ -28,11 +28,11 @@ cuda-runtime = [
 ]
 
 [dependencies]
-j2k-core = { path = "../j2k-core", version = "=0.11.0" }
-j2k-cuda-jpeg-engine = { path = "../j2k-cuda-jpeg-engine", version = "=0.11.0", optional = true }
-j2k-cuda-runtime = { path = "../j2k-cuda-runtime", version = "=0.11.0", optional = true }
-j2k-jpeg = { path = "../j2k-jpeg", version = "=0.11.0" }
-j2k-profile = { path = "../j2k-profile", version = "=0.11.0" }
+j2k-core = { path = "../j2k-core", version = "=0.11.1" }
+j2k-cuda-jpeg-engine = { path = "../j2k-cuda-jpeg-engine", version = "=0.11.1", optional = true }
+j2k-cuda-runtime = { path = "../j2k-cuda-runtime", version = "=0.11.1", optional = true }
+j2k-jpeg = { path = "../j2k-jpeg", version = "=0.11.1" }
+j2k-profile = { path = "../j2k-profile", version = "=0.11.1" }
 thiserror = { workspace = true }
 
 [dev-dependencies]

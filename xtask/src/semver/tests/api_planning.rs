@@ -89,7 +89,7 @@ fn package_diff_planning_distinguishes_published_and_new_packages() {
     assert!(diffs[1].removed.is_empty());
 
     let report = render_report("0.7.4", &diffs, "0.52.0");
-    assert!(report.contains("## New packages without a 0.10.0 registry baseline"));
+    assert!(report.contains("## New packages without a 0.11.0 registry baseline"));
     assert!(report.contains("- `j2k-future` `0.7.4`: 1 ordinary public API items"));
     assert!(report.contains("### `j2k`"));
     assert!(report.contains("```text\nremoved\n```"));

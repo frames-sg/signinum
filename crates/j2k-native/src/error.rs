@@ -325,12 +325,12 @@ pub enum DirectPlanUnsupportedReason {
     ComponentIndexOutOfRange,
     /// Direct component plans require unit-sampled components.
     ComponentUnitSampled,
-    /// Component-grid plans require a full unsigned origin-zero image without MCT.
-    ComponentGridFullImage,
     /// A direct component decomposition index did not exist.
     ComponentDecompositionIndexOutOfRange,
     /// Direct device plans do not yet represent classic and HT code-blocks in one sub-band.
     MixedCodeBlockCoding,
+    /// Component-grid plans require a full unsigned origin-zero image without MCT.
+    ComponentGridFullImage,
 }
 
 impl fmt::Display for DecodeError {

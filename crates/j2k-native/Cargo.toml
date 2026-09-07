@@ -28,9 +28,9 @@ fearless_simd = { workspace = true, optional = true }
 libm = { workspace = true }
 log = { workspace = true, optional = true }
 rayon = { workspace = true, optional = true }
-j2k-profile = { path = "../j2k-profile", version = "=0.11.0", default-features = false }
-j2k-codec-math = { path = "../j2k-codec-math", version = "=0.11.0" }
-j2k-types = { path = "../j2k-types", version = "=0.11.0" }
+j2k-profile = { path = "../j2k-profile", version = "=0.11.1", default-features = false }
+j2k-codec-math = { path = "../j2k-codec-math", version = "=0.11.1" }
+j2k-types = { path = "../j2k-types", version = "=0.11.1" }
 
 [dev-dependencies]
 criterion = { workspace = true }

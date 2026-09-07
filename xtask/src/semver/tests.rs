@@ -98,7 +98,8 @@ fn intentional_break_transition_is_exact_and_names_the_next_baseline() {
 
 #[test]
 fn package_partition_tracks_baselines_and_exact_first_release_packages() {
-    assert_eq!(SEMVER_NEW_PACKAGES, ["j2k-mpsgraph-support"]);
+    assert!(SEMVER_NEW_PACKAGES.is_empty());
+    assert!(SEMVER_BASELINE_PACKAGES.contains(&"j2k-mpsgraph-support"));
     for package in [
         "j2k-cuda-build-support",
         "j2k-cuda-j2k-engine",
@@ -119,7 +120,7 @@ fn package_partition_tracks_baselines_and_exact_first_release_packages() {
         .copied()
         .collect::<Vec<_>>();
     assert!(validate_package_partition(&published).is_ok());
-    assert!(validate_package_partition(SEMVER_BASELINE_PACKAGES).is_err());
+    assert!(validate_package_partition(SEMVER_BASELINE_PACKAGES).is_ok());
 
     let mut incomplete = published.clone();
     incomplete.pop();
@@ -246,7 +247,7 @@ fn report_has_one_published_details_section_without_consumed_transition() {
     assert_eq!(report.matches("## Published-package details").count(), 1);
     assert!(report.contains("Rustdoc-hidden candidate items: 1"));
     assert!(report.contains("Full hidden-inventory fingerprint: `fnv1a64:"));
-    assert!(report.contains("Baseline registry version: `0.10.0`"));
+    assert!(report.contains("Baseline registry version: `0.11.0`"));
     assert!(!report.contains("Active intentional-break transition:"));
     assert!(!report.contains("Required next semver baseline:"));
 }
@@ -255,8 +256,8 @@ fn report_has_one_published_details_section_without_consumed_transition() {
 fn parses_review_config_and_rejects_unknown_fields() {
     let source = "\
 version: 3
-baseline_tag: v0.10.0
-baseline_version: 0.10.0
+baseline_tag: v0.11.0
+baseline_version: 0.11.0
 candidate_version: 0.11.0
 break_ledger:
   - id: strict-decode-default

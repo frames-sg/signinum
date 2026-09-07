@@ -3,6 +3,12 @@
 This changelog tracks the current release line. Historical phase notes
 and stale roadmap entries have been removed from the public documentation set.
 
+## [0.11.1] - 2026-09-06
+
+- Adds full-image and batched Metal reconstruction for sampled RGB components without MCT, including odd dimensions and 4:2:2/4:2:0 sampling.
+- Adds native component-grid planning while retaining the existing full-resolution direct-plan contract.
+- Isolates synchronous cache-build test counters from unrelated test threads.
+
 ## [0.11.0] - 2026-09-06
 
 - Batches baseline JPEG 4:2:0 and 4:2:2 Metal texture decode through reusable component planes, with bounded scratch leases held through status consumption.

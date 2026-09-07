@@ -132,11 +132,11 @@ reviews:
     hidden_rationale: "Reviewed the complete hidden Metal support inventory; retained ownership, checked allocation, command submission, and audited unsafe boundaries are unchanged from v0.9.0."
   j2k-native:
     removed_fingerprint: "fnv1a64:c43cf8aa5bb2b495"
-    added_fingerprint: "fnv1a64:8212997dbf39d3ae"
-    hidden_count: 556
-    hidden_fingerprint: "fnv1a64:fe4b2671f79a1de4"
-    rationale: "Reviewed the complete ordinary j2k-native diff: three signature paths now expose their focused j2k-types owners, matching added signatures retain their semantics, DecodePlanAllocationError gains a typed conversion, and the additive HTJ2K Qfactor entry point validates the explicit visual-quality profile. The non-exhaustive direct-plan reason gains ComponentGridFullImage for unsupported component-grid geometry; no existing variant or signature was removed."
-    hidden_rationale: "Reviewed all 556 hidden native-codec items after prepared-plan, packing, allocation, and error ownership consolidation plus bounded HT candidate encoding, reusable scalar workspace, and scoped parse-once region decode; the additive component-grid planner returns native plane dimensions plus sampling factors, preserves the existing full-resolution planner contract, and rejects signed, MCT, offset, and reduced geometry. The exact implementation-facing inventory is recorded here."
+    added_fingerprint: "fnv1a64:94b2d8d0f672d116"
+    hidden_count: 555
+    hidden_fingerprint: "fnv1a64:8bafdf926d55a460"
+    rationale: "Reviewed the complete ordinary j2k-native diff: three signature paths now expose their focused j2k-types owners, matching added signatures retain their semantics, DecodePlanAllocationError gains a typed conversion, and the additive HTJ2K Qfactor entry point validates the explicit visual-quality profile."
+    hidden_rationale: "Reviewed all 555 hidden native-codec items after prepared-plan, packing, allocation, and error ownership consolidation plus bounded HT candidate encoding, reusable scalar workspace, and scoped parse-once region decode; the exact implementation-facing inventory is recorded here."
   j2k-jpeg:
     removed_fingerprint: "none"
     added_fingerprint: "fnv1a64:60e966955569e89e"

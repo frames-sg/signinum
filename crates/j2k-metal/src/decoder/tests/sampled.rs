@@ -121,12 +121,10 @@ fn sampled_color_batch_keeps_one_resident_submission() {
 
 #[test]
 #[ignore = "release sampled DICOM decode characterization; requires J2K_SAMPLED_CORPUS"]
-#[allow(
-    clippy::assertions_on_constants,
-    reason = "opt-in performance test requires an optimized build"
-)]
-fn local_sampled_color_batch_characterization() {
-    assert!(!cfg!(debug_assertions), "run with --release");
+fn local_sampled_color_batch_characterization() -> Result<(), &'static str> {
+    if cfg!(debug_assertions) {
+        return Err("run with --release");
+    }
     assert!(j2k_test_support::metal_runtime_gate(module_path!()));
     let directory = std::env::var_os("J2K_SAMPLED_CORPUS").expect("trusted extracted DICOM tiles");
     for level in 0..3 {
@@ -144,4 +142,5 @@ fn local_sampled_color_batch_characterization() {
             eprintln!("sampled_native level={level} sample={sample} count=8 commands=1 ms={ms:.3}");
         }
     }
+    Ok(())
 }

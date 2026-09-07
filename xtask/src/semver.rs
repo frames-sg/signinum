@@ -25,11 +25,11 @@ use compatibility::{semver_check_args, semver_check_release_type};
 
 const CARGO_SEMVER_CHECKS_VERSION: &str = "0.48.0";
 const SEMVER_TOOLCHAIN: &str = "1.96";
-const SEMVER_BASELINE_VERSION: &str = "0.10.0";
-const SEMVER_BASELINE_TAG: &str = "v0.10.0";
-const SEMVER_BASELINE_COMMIT: &str = "e19fccf26e7b12a3601eed40a2f2143d94b6c7bc";
-const API_DIFF_REPORT: &str = "docs/release-evidence/public-api/reviewed-public-api-diff-0.11.0.md";
-const API_REVIEW_CONFIG: &str = "docs/release-evidence/public-api/public-api-review-0.11.0.yml";
+const SEMVER_BASELINE_VERSION: &str = "0.11.0";
+const SEMVER_BASELINE_TAG: &str = "v0.11.0";
+const SEMVER_BASELINE_COMMIT: &str = "09d746a7b040258eb5dd505b44384eec0152a8b9";
+const API_DIFF_REPORT: &str = "docs/release-evidence/public-api/reviewed-public-api-diff-0.11.1.md";
+const API_REVIEW_CONFIG: &str = "docs/release-evidence/public-api/public-api-review-0.11.1.yml";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct BaselineTransition<'a> {
@@ -64,9 +64,10 @@ const SEMVER_BASELINE_PACKAGES: &[&str] = &[
     "j2k-cuda-jpeg-engine",
     "j2k-cuda-transcode-engine",
     "j2k-mpsgraph",
+    "j2k-mpsgraph-support",
 ];
 
-const SEMVER_NEW_PACKAGES: &[&str] = &["j2k-mpsgraph-support"];
+const SEMVER_NEW_PACKAGES: &[&str] = &[];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 struct Version {

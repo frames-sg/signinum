@@ -31,16 +31,16 @@ cuda-runtime = [
 cuda-profiling = ["cuda-runtime", "j2k-cuda-runtime/cuda-profiling", "j2k-cuda-transcode-engine/cuda-profiling"]
 
 [dependencies]
-j2k-core = { path = "../j2k-core", version = "=0.11.0" }
-j2k-transcode = { path = "../j2k-transcode", version = "=0.11.0" }
-j2k-cuda-runtime = { path = "../j2k-cuda-runtime", version = "=0.11.0", optional = true }
-j2k-cuda-transcode-engine = { path = "../j2k-cuda-transcode-engine", version = "=0.11.0", optional = true }
-j2k-cuda-j2k-engine = { path = "../j2k-cuda-j2k-engine", version = "=0.11.0", optional = true }
-j2k-native = { path = "../j2k-native", version = "=0.11.0" }
+j2k-core = { path = "../j2k-core", version = "=0.11.1" }
+j2k-transcode = { path = "../j2k-transcode", version = "=0.11.1" }
+j2k-cuda-runtime = { path = "../j2k-cuda-runtime", version = "=0.11.1", optional = true }
+j2k-cuda-transcode-engine = { path = "../j2k-cuda-transcode-engine", version = "=0.11.1", optional = true }
+j2k-cuda-j2k-engine = { path = "../j2k-cuda-j2k-engine", version = "=0.11.1", optional = true }
+j2k-native = { path = "../j2k-native", version = "=0.11.1" }
 
 [dev-dependencies]
 criterion = { workspace = true }
-j2k-jpeg = { path = "../j2k-jpeg", version = "=0.11.0" }
+j2k-jpeg = { path = "../j2k-jpeg", version = "=0.11.1" }
 j2k-test-support = { path = "../j2k-test-support" }
 j2k-transcode-test-support = { path = "../j2k-transcode-test-support" }
 sha2 = { workspace = true }

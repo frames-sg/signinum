@@ -19,7 +19,7 @@ name = "j2k_tilecodec"
 path = "src/lib.rs"
 
 [dependencies]
-j2k-core = { path = "../j2k-core", version = "=0.11.0" }
+j2k-core = { path = "../j2k-core", version = "=0.11.1" }
 thiserror = { workspace = true }
 flate2 = { workspace = true }
 zstd = { workspace = true }

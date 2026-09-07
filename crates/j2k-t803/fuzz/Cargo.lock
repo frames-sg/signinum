@@ -256,7 +256,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "j2k"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "j2k-core",
  "j2k-native",
@@ -267,7 +267,7 @@ dependencies = [
 
 [[package]]
 name = "j2k-codec-math"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "j2k-types",
 ]
@@ -287,14 +287,14 @@ dependencies = [
 
 [[package]]
 name = "j2k-core"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "j2k-native"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "fearless_simd",
  "j2k-codec-math",
@@ -306,11 +306,11 @@ dependencies = [
 
 [[package]]
 name = "j2k-profile"
-version = "0.10.0"
+version = "0.11.0"
 
 [[package]]
 name = "j2k-t803"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "image",
  "j2k",
@@ -336,7 +336,7 @@ dependencies = [
 
 [[package]]
 name = "j2k-test-support"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "j2k-core",
  "serde",
@@ -346,7 +346,7 @@ dependencies = [
 
 [[package]]
 name = "j2k-types"
-version = "0.10.0"
+version = "0.11.0"
 
 [[package]]
 name = "jobserver"

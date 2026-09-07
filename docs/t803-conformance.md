@@ -1,9 +1,9 @@
 # ISO/IEC 15444-4 / ITU-T T.803 Conformance
 
-Status: **Part 1 and selected Part 15 points published for 0.9.0 with
+Status: **Part 1 and selected Part 15 points published for 0.11.0 with
 exact-clean-SHA release evidence**
 
-Published formal decoder wording for release `0.9.0`:
+Published formal decoder wording for release `0.11.0`:
 
 - `j2k` CPU IUT:
   - JPEG 2000 Part 1: **Profile-1 Cclass-1 compliant; Profile-1 Cclass-1HF compliant; Annex G JP2 reader compliant.**
@@ -18,7 +18,7 @@ The implemented harness targets ISO/IEC 15444-4:2024 / ITU-T T.803 v3. Part 4
 defines JPEG 2000 conformance-testing procedures and reference comparisons; it
 is not another codestream syntax or a performance benchmark. The wording above
 is tied to the five exact-SHA reports attached to the
-[v0.9.0 release](https://github.com/frames-sg/j2k/releases/tag/v0.9.0). All
+[v0.11.0 release](https://github.com/frames-sg/j2k/releases/tag/v0.11.0). All
 reports identify the same immutable release commit and contain no
 development-only feature evidence.
 
@@ -26,9 +26,9 @@ development-only feature evidence.
 
 | IUT | Evidence wording | Route boundary |
 | --- | --- | --- |
-| `j2k` CPU | Published `0.9.0` Part 1 Profile-1 Cclass-1, Profile-1 Cclass-1HF, and Annex G JP2 reader wording, plus selected Part 15 DS1-HM Cclass-1h at MMAGB 15, Cclass-1HFh at MMAGB 20, and Annex G JPH reader at MMAGB 15. | CPU implementation under test. |
-| `j2k-cuda` | Published `0.9.0` adapter IUT evidence for the same Part 1 and selected Part 15 points. | Parsing, Tier-1, transforms, output, and transfers are reported per case as CPU, CUDA, or not used. |
-| `j2k-metal` | Published `0.9.0` adapter IUT evidence for the same Part 1 and selected Part 15 points. | Parsing, Tier-1, transforms, output, and transfers are reported per case as CPU, Metal, or not used. |
+| `j2k` CPU | Published `0.11.0` Part 1 Profile-1 Cclass-1, Profile-1 Cclass-1HF, and Annex G JP2 reader wording, plus selected Part 15 DS1-HM Cclass-1h at MMAGB 15, Cclass-1HFh at MMAGB 20, and Annex G JPH reader at MMAGB 15. | CPU implementation under test. |
+| `j2k-cuda` | Published `0.11.0` adapter IUT evidence for the same Part 1 and selected Part 15 points. | Parsing, Tier-1, transforms, output, and transfers are reported per case as CPU, CUDA, or not used. |
+| `j2k-metal` | Published `0.11.0` adapter IUT evidence for the same Part 1 and selected Part 15 points. | Parsing, Tier-1, transforms, output, and transfers are reported per case as CPU, Metal, or not used. |
 
 CPU assistance is permitted for the adapter IUTs. Any such route is labelled
 `hybrid`; it is not described as device-native. Annex G JP2 color and component
@@ -41,6 +41,17 @@ project evidence only.
 The project does not use generic “full Part 1 compliant” or “full Part 15
 compliant” labels. Every exact Profile/Cclass/MMAGB claim must be tied to
 published reports for one immutable release SHA.
+
+## Published 0.11.0 result
+
+All five attached reports identify source commit
+`09d746a7b040258eb5dd505b44384eec0152a8b9` and pass all 160 selected decoder
+cases with zero skips. The CPU reports cover Linux x86-64, macOS arm64, and
+Windows x86-64; the CUDA and Metal reports come from real hardware. The
+release-status verifier checked all five report contents after the complete
+hosted and GPU release workflows passed. The JSON reports and their Markdown
+renderings are attached to [release 0.11.0](https://github.com/frames-sg/j2k/releases/tag/v0.11.0).
+The historical 0.9.0 details below describe that earlier release only.
 
 ## Published 0.9.0 result
 

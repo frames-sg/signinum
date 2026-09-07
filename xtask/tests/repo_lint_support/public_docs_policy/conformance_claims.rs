@@ -19,7 +19,7 @@ fn t803_candidate_claims_remain_exact_and_release_scoped() {
             FilePatternCheck::new("README.md")
                 .required(&[
                     "docs/t803-conformance.md",
-                    "Release `0.9.0` formally claims",
+                    "Release `0.11.0` formally claims",
                     "Profile-1 Cclass-1",
                     "Profile-1 Cclass-1HF",
                     "Annex G JP2 reader",
@@ -27,8 +27,8 @@ fn t803_candidate_claims_remain_exact_and_release_scoped() {
                     "Cclass-1HFh, MMAGB 20",
                     "Annex G JPH",
                     "0/160 device-native, 81/160",
-                    "b197f01ab4b9271f1cbc36921755a5b9d588bd5a",
-                    "releases/tag/v0.9.0",
+                    "09d746a7b040258eb5dd505b44384eec0152a8b9",
+                    "releases/tag/v0.11.0",
                 ])
                 .forbidden(&[
                     "full JPEG 2000 Part 1 codestream support",
@@ -43,8 +43,8 @@ fn t803_candidate_claims_remain_exact_and_release_scoped() {
             FilePatternCheck::new("docs/t803-conformance.md")
                 .required(&[
                     "ISO/IEC 15444-4:2024 / ITU-T T.803 v3",
-                    "Status: **Part 1 and selected Part 15 points published for 0.9.0",
-                    "Published formal decoder wording for release `0.9.0`:",
+                    "Status: **Part 1 and selected Part 15 points published for 0.11.0",
+                    "Published formal decoder wording for release `0.11.0`:",
                     "Profile-1 Cclass-1 compliant",
                     "Profile-1 Cclass-1HF compliant",
                     "Annex G JP2 reader compliant",
@@ -52,6 +52,8 @@ fn t803_candidate_claims_remain_exact_and_release_scoped() {
                     "Cclass-1HFh, MMAGB 20",
                     "Annex G JPH reader compliant at MMAGB 15",
                     "0/160 device-native, 81/160 hybrid, and 79/160 CPU-routed",
+                    "09d746a7b040258eb5dd505b44384eec0152a8b9",
+                    "releases/tag/v0.11.0",
                     "b197f01ab4b9271f1cbc36921755a5b9d588bd5a",
                     "releases/tag/v0.9.0",
                     "zero skips",

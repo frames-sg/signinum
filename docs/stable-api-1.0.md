@@ -44,13 +44,14 @@ The published 0.7.5 artifact recorded both ordinary and hidden-enabled passes
 with the same generator, rustdoc, and target pins. The historical 0.8.0 semver
 report compares its ordinary inventory with 0.7.5, and the 0.8.1 report
 compares that release directly with published 0.8.0. The 0.9.0 report compares
-the published release directly with published 0.8.1, and the staged 0.10.0
-report compares the candidate directly with published 0.9.0. All reports also
+the published release directly with published 0.8.1, the 0.10.0
+report compares that release directly with published 0.9.0, and the 0.11.0
+report compares against published 0.10.0. All reports also
 record each package's complete hidden-inventory count and fingerprint.
 Every semver invocation collects both live passes, compares both committed companions, and
 requires exact ordinary added/removed fingerprints plus the hidden
 count/fingerprint in
-`docs/release-evidence/public-api/public-api-review-0.10.0.yml`.
+`docs/release-evidence/public-api/public-api-review-0.11.0.yml`.
 Nonempty hidden inventories also require a package-specific hidden rationale.
 
 The 0.8.0 review file contains the reviewed 0.7.5-to-0.8.0 break ledger. The
@@ -87,16 +88,18 @@ is in the generated
 [`0.9.0` reviewed API report](release-evidence/public-api/reviewed-public-api-diff-0.9.0.md),
 with its human review in
 [`public-api-review-0.9.0.yml`](release-evidence/public-api/public-api-review-0.9.0.yml).
-The provisional 0.10.0 comparison is in the generated
+The completed 0.10.0 comparison is in the generated
 [`0.10.0` reviewed API report](release-evidence/public-api/reviewed-public-api-diff-0.10.0.md),
 with its human review in
 [`public-api-review-0.10.0.yml`](release-evidence/public-api/public-api-review-0.10.0.yml).
-It remains candidate evidence until the source is frozen and the exact-SHA
-release gates complete.
+The completed 0.11.0 comparison and its reviewed experimental MPSGraph removals
+are in the generated [API report](release-evidence/public-api/reviewed-public-api-diff-0.11.0.md)
+and [review configuration](release-evidence/public-api/public-api-review-0.11.0.yml).
+Its exact-SHA release gates passed.
 
 [v0.8.0-api-report]: https://github.com/frames-sg/j2k/blob/v0.8.0/engineering/reviewed-public-api-diff-0.8.0.md
 
-The currently published stable contract is the `0.10.x` line. Version `0.8.0`
+The currently published stable contract is the `0.11.x` line. Version `0.8.0`
 intentionally changed the strict-decoding behavior and one warning variant
 under Cargo's pre-1.0 compatibility rules. It does not claim source or behavior
 compatibility with `0.7.x`; its exact breaks and migrations are in the review
@@ -116,7 +119,7 @@ of the pre-1.0 `0.6.2` API and did not claim source compatibility with `0.6.x`.
 crate. The tier changes the support promise; it does not remove ordinary Rust
 visibility or make a public item exempt from patch-release review.
 
-All 22 published libraries are built with missing-docs enforcement, recorded in
+All published libraries are built with missing-docs enforcement, recorded in
 both the ordinary and rustdoc-hidden inventories, and checked for patch
 compatibility. A public `#[doc(hidden)]` item remains callable Rust API and is
 not private merely because rustdoc omits it. Use actual module or item privacy

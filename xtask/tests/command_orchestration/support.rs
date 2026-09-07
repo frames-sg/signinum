@@ -60,7 +60,7 @@ impl Harness {
         fs::write(
             &git,
             format!(
-                "#!/bin/sh\nprintf 'git %s\\n' \"$*\" >> '{}'\nif [ \"$1\" = status ]; then exit 0; fi\nif [ \"$1\" = config ] && [ \"$2\" = --get ] && [ \"$3\" = remote.origin.url ]; then printf '%s\\n' 'git@example.invalid:frames-sg/j2k.git'; exit 0; fi\nif [ \"$1\" = rev-parse ] && [ \"$2\" = 'v0.9.0^{{commit}}' ]; then printf '%s\\n' 'b197f01ab4b9271f1cbc36921755a5b9d588bd5a'; exit 0; fi\nif [ \"$1\" = show ] && [ \"$2\" = 'v0.9.0:docs/stable-api-1.0.public-api.txt' ]; then exec cat '{}'; fi\nif [ \"$1\" = rev-parse ] && [ \"${{2#v}}\" != \"$2\" ]; then printf 'unexpected release revision: %s\\n' \"$2\" >&2; exit 97; fi\nif [ \"$1\" = show ] && [ \"${{2#v}}\" != \"$2\" ]; then printf 'unexpected release object: %s\\n' \"$2\" >&2; exit 97; fi\nexec \"{}\" \"$@\"\n",
+                "#!/bin/sh\nprintf 'git %s\\n' \"$*\" >> '{}'\nif [ \"$1\" = status ]; then exit 0; fi\nif [ \"$1\" = config ] && [ \"$2\" = --get ] && [ \"$3\" = remote.origin.url ]; then printf '%s\\n' 'git@example.invalid:frames-sg/j2k.git'; exit 0; fi\nif [ \"$1\" = rev-parse ] && [ \"$2\" = 'v0.10.0^{{commit}}' ]; then printf '%s\\n' 'e19fccf26e7b12a3601eed40a2f2143d94b6c7bc'; exit 0; fi\nif [ \"$1\" = show ] && [ \"$2\" = 'v0.10.0:docs/stable-api-1.0.public-api.txt' ]; then exec cat '{}'; fi\nif [ \"$1\" = rev-parse ] && [ \"${{2#v}}\" != \"$2\" ]; then printf 'unexpected release revision: %s\\n' \"$2\" >&2; exit 97; fi\nif [ \"$1\" = show ] && [ \"${{2#v}}\" != \"$2\" ]; then printf 'unexpected release object: %s\\n' \"$2\" >&2; exit 97; fi\nexec \"{}\" \"$@\"\n",
                 log.display(),
                 baseline_snapshot.display(),
                 real_git.display()
@@ -302,6 +302,11 @@ fn synthetic_baseline_snapshot() -> String {
         "j2k-cuda-runtime",
         "j2k-profile",
         "j2k-ml",
+        "j2k-cuda-build-support",
+        "j2k-cuda-j2k-engine",
+        "j2k-cuda-jpeg-engine",
+        "j2k-cuda-transcode-engine",
+        "j2k-mpsgraph",
     ] {
         writeln!(
             snapshot,

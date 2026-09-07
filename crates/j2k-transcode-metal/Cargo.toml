@@ -26,11 +26,11 @@ default = []
 bench-internals = ["j2k-transcode/dev-support"]
 
 [dependencies]
-j2k-codec-math = { path = "../j2k-codec-math", version = "=0.10.0" }
-j2k-core = { path = "../j2k-core", version = "=0.10.0" }
-j2k-metal-support = { path = "../j2k-metal-support", version = "=0.10.0" }
-j2k-transcode = { path = "../j2k-transcode", version = "=0.10.0" }
-j2k-types = { path = "../j2k-types", version = "=0.10.0" }
+j2k-codec-math = { path = "../j2k-codec-math", version = "=0.11.0" }
+j2k-core = { path = "../j2k-core", version = "=0.11.0" }
+j2k-metal-support = { path = "../j2k-metal-support", version = "=0.11.0" }
+j2k-transcode = { path = "../j2k-transcode", version = "=0.11.0" }
+j2k-types = { path = "../j2k-types", version = "=0.11.0" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { workspace = true }
@@ -40,9 +40,9 @@ objc2-metal = { workspace = true }
 [dev-dependencies]
 criterion = { workspace = true }
 rayon = { workspace = true }
-j2k-native = { path = "../j2k-native", version = "=0.10.0" }
-j2k-jpeg = { path = "../j2k-jpeg", version = "=0.10.0" }
-j2k-profile = { path = "../j2k-profile", version = "=0.10.0" }
+j2k-native = { path = "../j2k-native", version = "=0.11.0" }
+j2k-jpeg = { path = "../j2k-jpeg", version = "=0.11.0" }
+j2k-profile = { path = "../j2k-profile", version = "=0.11.0" }
 j2k-test-support = { path = "../j2k-test-support" }
 j2k-transcode-test-support = { path = "../j2k-transcode-test-support" }
 

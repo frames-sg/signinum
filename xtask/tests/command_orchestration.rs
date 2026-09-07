@@ -119,8 +119,8 @@ fn release_critical_orchestrators_run_from_the_workspace_without_real_cargo() {
     assert!(log.contains("package -p j2k-cli --no-verify"));
     #[cfg(target_os = "macos")]
     {
-        assert!(log.contains("git rev-parse v0.9.0^{commit}"));
-        assert!(log.contains("git show v0.9.0:docs/stable-api-1.0.public-api.txt"));
+        assert!(log.contains("git rev-parse v0.10.0^{commit}"));
+        assert!(log.contains("git show v0.10.0:docs/stable-api-1.0.public-api.txt"));
     }
 }
 

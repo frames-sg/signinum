@@ -13,10 +13,10 @@ publish = false
 ignored = ["cc"]
 
 [dependencies]
-j2k-core = { path = "../j2k-core", version = "=0.10.0" }
-j2k-native = { path = "../j2k-native", version = "=0.10.0" }
-j2k = { path = "../j2k", version = "=0.10.0" }
-j2k-test-support = { path = "../j2k-test-support", version = "=0.10.0" }
+j2k-core = { path = "../j2k-core", version = "=0.11.0" }
+j2k-native = { path = "../j2k-native", version = "=0.11.0" }
+j2k = { path = "../j2k", version = "=0.11.0" }
+j2k-test-support = { path = "../j2k-test-support", version = "=0.11.0" }
 image = { workspace = true }
 openjpeg-sys = { workspace = true }
 

@@ -33,10 +33,11 @@ fn run_test_in_dir(test_name: &str, recording: &RecordingProgram, current_dir: &
 
 #[test]
 fn release_integrity_publish_mode_accepts_hermetic_final_metadata() {
-    let recording = metadata_program(
-        "release-integrity-publish-metadata",
-        &complete_publishable_metadata(),
-    );
+    let metadata = complete_publishable_metadata();
+    let version = metadata["packages"][0]["version"]
+        .as_str()
+        .expect("publishable fixture version");
+    let recording = metadata_program("release-integrity-publish-metadata", &metadata);
     if std::env::var_os(INTEGRITY_CHILD_ENV).is_some() {
         release_integrity(["--publish".to_string()].into_iter())
             .expect("finalized release metadata must pass publish mode");
@@ -85,12 +86,12 @@ fn release_integrity_publish_mode_accepts_hermetic_final_metadata() {
     }
     std::fs::write(
         release_root.join("Cargo.toml"),
-        "[workspace.package]\nversion = \"0.10.0\"\n",
+        format!("[workspace.package]\nversion = \"{version}\"\n"),
     )
     .expect("write workspace manifest fixture");
     std::fs::write(
         release_root.join("CHANGELOG.md"),
-        "# Changelog\n\n## [0.10.0] - 2026-08-13\n",
+        format!("# Changelog\n\n## [{version}] - 2026-08-13\n"),
     )
     .expect("write finalized changelog fixture");
 

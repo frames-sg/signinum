@@ -22,6 +22,14 @@ class OpenHtj2kReferenceTests(unittest.TestCase):
         self.assertIn("J2K_OPENHTJ2K_LIB_DIR", source)
         subprocess.run(["bash", "-n", str(SCRIPT)], check=True)
 
+    def test_reference_uses_the_shims_dynamic_msvc_runtime(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+        configure = source.split("\ncmake \\\n", 2)[1]
+        # OpenHTJ2K replaces CMAKE_CXX_FLAGS_RELEASE. Runtime selection must
+        # survive that replacement and match the Rust cc shim's /MD runtime.
+        self.assertIn("-DCMAKE_POLICY_DEFAULT_CMP0091=NEW", configure)
+        self.assertIn("-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL", configure)
+
     def test_cpu_evidence_lanes_prepare_the_reference_before_running_t803(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")
         job = workflow.split("  t803-cpu:\n", 1)[1].split("\n  metal-compile:\n", 1)[0]

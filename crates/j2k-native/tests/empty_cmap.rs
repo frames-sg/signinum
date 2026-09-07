@@ -451,6 +451,16 @@ fn premultiplied_opacity_cdef_sets_alpha() {
     let image = Image::new(&jp2, &DecodeSettings::default()).expect("JP2 parses");
 
     assert!(image.has_alpha());
+    let error = image
+        .build_component_grid_color_plan_with_context(&mut j2k_native::DecoderContext::default())
+        .err()
+        .expect("component-grid RGB planning must not drop explicit alpha");
+    assert!(matches!(
+        error,
+        j2k_native::DecodeError::Decoding(j2k_native::DecodingError::DirectPlanUnsupported(
+            j2k_native::DirectPlanUnsupportedReason::ColorRgbImageWithoutAlpha
+        ))
+    ));
     let components = image
         .decode_native_components()
         .expect("premultiplied-opacity JP2 decodes to owned planes");

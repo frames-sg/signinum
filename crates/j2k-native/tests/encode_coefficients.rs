@@ -321,6 +321,30 @@ fn raw_pixel_encode_rejects_component_sampling_without_component_sized_dwt() {
 }
 
 #[test]
+fn component_grid_color_plan_rejects_grayscale_without_synthesizing_rgb() {
+    let bytes = encode(
+        &[10, 20, 30, 40],
+        2,
+        2,
+        1,
+        8,
+        false,
+        &EncodeOptions::default(),
+    )
+    .expect("encode grayscale fixture");
+    let image = Image::new(&bytes, &DecodeSettings::default()).expect("parse grayscale fixture");
+    let error = image
+        .build_component_grid_color_plan_with_context(&mut DecoderContext::default())
+        .expect_err("RGB component planning must reject grayscale");
+    assert!(matches!(
+        error,
+        j2k_native::DecodeError::Decoding(j2k_native::DecodingError::DirectPlanUnsupported(
+            j2k_native::DirectPlanUnsupportedReason::ColorRgbImageWithoutAlpha
+        ))
+    ));
+}
+
+#[test]
 fn component_grid_plan_rejects_unrepresented_geometry() {
     for (mct, signed, reduced, offset) in [
         (true, false, false, false),
@@ -357,14 +381,20 @@ fn component_grid_plan_rejects_unrepresented_geometry() {
             },
         )
         .unwrap();
+        let error = image
+            .build_component_grid_color_plan_with_context(&mut DecoderContext::default())
+            .expect_err("unrepresented component geometry must be rejected");
+        assert!(error.to_string().contains(
+            "component-grid plans require a full unsigned origin-zero image without MCT"
+        ));
         assert!(
             matches!(
-                image.build_component_grid_color_plan_with_context(&mut DecoderContext::default()),
-                Err(j2k_native::DecodeError::Decoding(
+                error,
+                j2k_native::DecodeError::Decoding(
                     j2k_native::DecodingError::DirectPlanUnsupported(
                         j2k_native::DirectPlanUnsupportedReason::ComponentGridFullImage
                     )
-                ))
+                )
             ),
             "unrepresented geometry: {mct}/{signed}/{reduced}/{offset}"
         );

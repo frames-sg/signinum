@@ -3,7 +3,7 @@
 This changelog tracks the current release line. Historical phase notes
 and stale roadmap entries have been removed from the public documentation set.
 
-## [0.11.1] - 2026-09-06
+## [0.11.1] - 2026-09-07
 
 - Adds full-image and batched Metal reconstruction for sampled RGB components without MCT, including odd dimensions and 4:2:2/4:2:0 sampling.
 - Adds native component-grid planning while retaining the existing full-resolution direct-plan contract.

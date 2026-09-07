@@ -7,8 +7,9 @@ use j2k_jpeg::{
     adapter::{
         build_fast420_packet, build_fast422_packet, build_fast444_packet, build_gray_packet,
     },
-    encode_jpeg_baseline, Decoder, DecoderContext, JpegBackend, JpegEncodeOptions, JpegError,
-    JpegSamples, JpegSubsampling, JpegView, PixelFormat, RowSink, ScratchPool,
+    decode_tile_into_in_context_with_options, encode_jpeg_baseline, CodecContext, DecodeOptions,
+    Decoder, DecoderContext, JpegBackend, JpegEncodeOptions, JpegError, JpegSamples,
+    JpegSubsampling, JpegView, PixelFormat, RowSink, ScratchPool,
 };
 use j2k_test_support::{patterned_gray8, patterned_rgb8};
 
@@ -181,9 +182,19 @@ fn encode_rgb_with_restart(
     restart_interval: Option<u16>,
 ) -> Vec<u8> {
     let pixels = patterned_rgb8(width, height);
+    encode_rgb_pixels(&pixels, width, height, subsampling, restart_interval)
+}
+
+fn encode_rgb_pixels(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    subsampling: JpegSubsampling,
+    restart_interval: Option<u16>,
+) -> Vec<u8> {
     encode_jpeg_baseline(
         JpegSamples::Rgb8 {
-            data: &pixels,
+            data: pixels,
             width,
             height,
         },
@@ -196,6 +207,18 @@ fn encode_rgb_with_restart(
     )
     .expect("encode deterministic RGB benchmark JPEG")
     .data
+}
+
+fn alternate_patterned_rgb8(width: u32, height: u32) -> Vec<u8> {
+    let mut pixels = patterned_rgb8(width, height);
+    for (index, value) in pixels.iter_mut().enumerate() {
+        let offset = u8::try_from(index % 251)
+            .expect("modulo bounds the alternate pattern offset")
+            .wrapping_mul(29)
+            .wrapping_add(17);
+        *value = value.wrapping_add(offset);
+    }
+    pixels
 }
 
 fn decode_cases() -> Vec<DecodeCase> {
@@ -368,6 +391,100 @@ fn bench_fast_packet_prepare_with_implicit_context(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_context_reused_distinct_inputs(c: &mut Criterion) {
+    let mut group = c.benchmark_group("jpeg_cpu_decode_context_reused_distinct_inputs");
+    for dimension in [128, 256, 512] {
+        let first = encode_rgb(dimension, dimension, JpegSubsampling::Ybr420);
+        let second_pixels = alternate_patterned_rgb8(dimension, dimension);
+        let second = encode_rgb_pixels(
+            &second_pixels,
+            dimension,
+            dimension,
+            JpegSubsampling::Ybr420,
+            None,
+        );
+        assert_ne!(first, second, "benchmark inputs must have distinct bytes");
+
+        let expected = [
+            decode_buffer_output(
+                &Decoder::new(&first).expect("first benchmark JPEG must prepare"),
+                PixelFormat::Rgb8,
+            ),
+            decode_buffer_output(
+                &Decoder::new(&second).expect("second benchmark JPEG must prepare"),
+                PixelFormat::Rgb8,
+            ),
+        ];
+        assert_ne!(
+            expected[0], expected[1],
+            "distinct benchmark inputs must produce distinct pixels"
+        );
+
+        let inputs = [first, second];
+        let stride = dimension as usize * PixelFormat::Rgb8.bytes_per_pixel();
+        let mut output = zeroed_bytes(stride * dimension as usize);
+        let mut context = DecoderContext::new();
+        let mut scratch = ScratchPool::new();
+
+        // Warm the first header, then prove the second entropy payload uses the
+        // same cached plan without inspecting JPEG headers in the benchmark.
+        decode_tile_into_in_context_with_options(
+            &inputs[0],
+            &mut context,
+            &mut scratch,
+            &mut output,
+            stride,
+            PixelFormat::Rgb8,
+            DecodeOptions::default(),
+        )
+        .expect("first context benchmark validation decode must succeed");
+        assert_eq!(output, expected[0]);
+        let misses_after_first = context.cache_stats().misses;
+        decode_tile_into_in_context_with_options(
+            &inputs[1],
+            &mut context,
+            &mut scratch,
+            &mut output,
+            stride,
+            PixelFormat::Rgb8,
+            DecodeOptions::default(),
+        )
+        .expect("second context benchmark validation decode must succeed");
+        assert_eq!(output, expected[1]);
+        assert_eq!(
+            context.cache_stats().misses,
+            misses_after_first,
+            "the second input must reuse the warmed header plan"
+        );
+
+        group.throughput(Throughput::Elements(
+            u64::from(dimension) * u64::from(dimension),
+        ));
+        group.bench_function(
+            format!("rgb8_420_{dimension}x{dimension}_alternating_two_inputs"),
+            |b| {
+                let mut next_input = 0usize;
+                b.iter(|| {
+                    let index = next_input;
+                    next_input ^= 1;
+                    let outcome = decode_tile_into_in_context_with_options(
+                        std::hint::black_box(inputs[index].as_slice()),
+                        &mut context,
+                        &mut scratch,
+                        &mut output,
+                        stride,
+                        PixelFormat::Rgb8,
+                        DecodeOptions::default(),
+                    )
+                    .expect("context benchmark decode must succeed");
+                    std::hint::black_box((&output, outcome));
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
 fn bench_decode_cpu(c: &mut Criterion) {
     let cases = decode_cases();
     let mut group = c.benchmark_group("jpeg_cpu_decode_runtime");
@@ -415,6 +532,6 @@ criterion_group! {
         .sample_size(50)
         .warm_up_time(Duration::from_secs(3))
         .measurement_time(Duration::from_secs(10));
-    targets = bench_decode_cpu, bench_comparable_decode_routes, bench_fast_packet_prepare_with_implicit_context
+    targets = bench_decode_cpu, bench_comparable_decode_routes, bench_fast_packet_prepare_with_implicit_context, bench_context_reused_distinct_inputs
 }
 criterion_main!(decode_cpu_benches);

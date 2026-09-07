@@ -2348,6 +2348,7 @@ pub fn j2k_native::HtCodeBlockEncodeWorkspace::try_new() -> j2k_native::EncodeRe
 pub fn j2k_native::HtSigPropBenchmarkState::output_len(&self) -> usize
 pub fn j2k_native::Image<'_>::decoded_samples_equal(&self, &j2k_native::Image<'_>) -> j2k_native::Result<bool>
 pub fn j2k_native::Image<'_>::decoded_samples_equal_with_retained_bytes(&self, &j2k_native::Image<'_>, &alloc::vec::Vec<u8>) -> j2k_native::Result<bool>
+pub fn j2k_native::Image<'a>::build_component_grid_color_plan_with_context(&self, &mut j2k_native::DecoderContext<'a>) -> j2k_native::Result<(j2k_types::decode_plan::J2kDirectColorPlan, [(u8, u8); 3])>
 pub fn j2k_native::Image<'a>::build_direct_color_plan_region_with_context(&self, &mut j2k_native::DecoderContext<'a>, (u32, u32, u32, u32)) -> j2k_native::Result<j2k_types::decode_plan::J2kDirectColorPlan>
 pub fn j2k_native::Image<'a>::build_direct_color_plan_with_context(&self, &mut j2k_native::DecoderContext<'a>) -> j2k_native::Result<j2k_types::decode_plan::J2kDirectColorPlan>
 pub fn j2k_native::Image<'a>::build_direct_grayscale_plan_region_with_context(&self, &mut j2k_native::DecoderContext<'a>, (u32, u32, u32, u32)) -> j2k_native::Result<j2k_types::decode_plan::J2kDirectGrayscalePlan>

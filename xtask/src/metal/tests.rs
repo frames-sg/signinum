@@ -180,7 +180,10 @@ fn ignored_inventory_is_unique_and_has_expected_size() {
         .copied()
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(required.len(), 21);
-    assert_eq!(optional.len(), 1);
+    assert_eq!(optional.len(), 2);
+    assert!(optional.contains(
+        "engine::runtime::resource_profile_tests::benchmark_cold_and_repeated_session_kernel_initialization"
+    ));
     assert_eq!(required.len(), J2K_METAL_REQUIRED_IGNORED_TESTS.len());
     assert_eq!(optional.len(), METAL_OPTIONAL_IGNORED_TESTS.len());
     assert!(required.is_disjoint(&optional));

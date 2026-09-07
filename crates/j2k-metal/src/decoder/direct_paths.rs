@@ -241,6 +241,15 @@ impl J2kDecoder<'_> {
         &mut self,
         fmt: PixelFormat,
     ) -> Result<Surface, Error> {
+        let inputs = [self.bytes];
+        match crate::engine::decode_component_grid_color_batch(&inputs, fmt, None) {
+            Ok(mut surfaces) => return surfaces.pop().ok_or_else(adapter_missing_sampled_surface),
+            Err(Error::MetalDirectFallback {
+                reason: MetalDirectFallbackReason::UnsupportedPlan,
+                ..
+            }) => {}
+            Err(error) => return Err(error),
+        }
         self.ensure_native_image()?;
         let (Some(image), native_context) = (self.native_image.as_ref(), &mut self.native_context)
         else {
@@ -257,6 +266,15 @@ impl J2kDecoder<'_> {
         fmt: PixelFormat,
         device: &Device,
     ) -> Result<Surface, Error> {
+        let inputs = [self.bytes];
+        match crate::engine::decode_component_grid_color_batch(&inputs, fmt, None) {
+            Ok(mut surfaces) => return surfaces.pop().ok_or_else(adapter_missing_sampled_surface),
+            Err(Error::MetalDirectFallback {
+                reason: MetalDirectFallbackReason::UnsupportedPlan,
+                ..
+            }) => {}
+            Err(error) => return Err(error),
+        }
         self.ensure_native_image()?;
         let (Some(image), native_context) = (self.native_image.as_ref(), &mut self.native_context)
         else {
@@ -545,12 +563,7 @@ pub(crate) fn decode_full_color_batch_direct_to_device_routed(
             None => decoder.ensure_prepared_direct_color_plan()?,
         };
         let Some(plan) = plan else {
-            return Err(Error::MetalDirectFallback {
-                message: format!(
-                    "explicit J2K MetalDirect batch currently supports full RGB color only; fmt={fmt:?}"
-                ),
-                reason: MetalDirectFallbackReason::UnsupportedPlan,
-            });
+            return crate::engine::decode_component_grid_color_batch(inputs, fmt, session);
         };
         plans.push(plan);
     }
@@ -568,5 +581,13 @@ pub(crate) fn decode_full_color_batch_direct_to_device_routed(
             ),
         )),
         Err(error) => Err(error),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn adapter_missing_sampled_surface() -> Error {
+    Error::MetalStateInvariant {
+        state: "sampled full-image decode",
+        reason: "one input produced no surface",
     }
 }

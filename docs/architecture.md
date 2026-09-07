@@ -244,3 +244,38 @@ separate sources with one ABI owner; production classic encoding excludes the pr
 entrypoints and their token-planning implementation. Device tests exercise actual
 pipeline creation and resource queries, cached reuse, failure isolation, and decode/
 encode parity. This is an ownership/startup change; no throughput claim is made.
+
+## Metal sampled-component decode
+
+Full unsigned, origin-zero RGB codestreams without MCT can use native component
+grids when the existing full-resolution direct plan rejects subsampling. The
+additive `Image::build_component_grid_color_plan_with_context` entry point returns
+the image dimensions, compact component plans, and explicit sampling factors.
+It leaves the original direct-plan contract unchanged. Multi-tile, offset,
+signed, alpha, MCT, and reduced/region geometry retain their existing routes.
+
+The legacy Metal full-image and tile-batch APIs prepare these plans before
+submission. Matching component graphs are stacked across images, including
+classic entropy jobs, IDWT, and component stores. Geometry that cannot be stacked
+uses independent resident graphs in the same command buffer. A small GPU pass
+replicates samples onto the image grid, including incomplete blocks at odd image
+edges, before the existing RGB/RGBA packer. It performs no ICC or YCbCr transform;
+those remain the caller's responsibility as before. The owned dense batch API
+still rejects subsampling because its representability contract is unchanged.
+
+One command buffer retains all intermediate resources until completion. Existing
+checked allocation and status-retirement paths own scratch buffers and propagate
+errors. Stacking increases simultaneous device working memory compared with
+per-block readback, and expansion allocates full-sized float component planes.
+The CPU source decoder remains available. The focused sampled tests compare
+every output byte, exercise odd dimensions and several sampling factors, and
+require one submission for both distinct and repeated inputs.
+
+The opt-in `local_sampled_color_batch_characterization` test accepts eight
+extracted DICOM codestreams per level through `J2K_SAMPLED_CORPUS`. It compares
+every RGB byte to CPU output outside the timer and retains the existing two-code
+value limit for irreversible images. Initial measurements showed that batching
+removed the large synchronous fallback cost, while classic GPU entropy remained
+slower than CPU decoding on 256-pixel tiles. The general entropy kernel was
+slower than the existing plain kernel and was not selected. Detailed local
+commands and measurements belong in `.local-docs/`.

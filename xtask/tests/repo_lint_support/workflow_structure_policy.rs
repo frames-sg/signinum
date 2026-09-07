@@ -44,6 +44,30 @@ fn every_action_reference_is_pinned_to_a_forty_hex_sha() {
 }
 
 #[test]
+fn reusable_gpu_workflows_match_their_pinned_definitions() {
+    for dispatcher in ["gpu-validation.yml", "gpu-benchmarks.yml"] {
+        let caller = workflow(dispatcher);
+        let reference = caller.document["jobs"]["run"]["uses"]
+            .as_str()
+            .expect("immutable GPU workflow call");
+        let (path, revision) = reference
+            .strip_prefix("frames-sg/j2k/")
+            .and_then(|value| value.rsplit_once('@'))
+            .expect("same-repository pinned workflow");
+        let pinned = std::process::Command::new("git")
+            .args(["show", &format!("{revision}:{path}")])
+            .current_dir(repo_root())
+            .output()
+            .expect("read pinned workflow definition");
+        assert!(pinned.status.success(), "workflow pin must resolve locally");
+        let candidate =
+            std::fs::read(repo_root().join(path)).expect("candidate workflow definition");
+        assert_eq!(pinned.stdout, candidate,
+            "update the dispatcher pin and runner-group approval when changing trusted GPU instructions");
+    }
+}
+
+#[test]
 fn every_workflow_declares_default_permissions_including_contents_read() {
     let mut violations = Vec::new();
     for workflow in workflows() {

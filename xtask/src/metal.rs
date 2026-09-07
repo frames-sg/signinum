@@ -50,10 +50,13 @@ const J2K_METAL_REQUIRED_IGNORED_TESTS: &[&str] = &[
     "idwt::tests::metal_irreversible_idwt_perf_guard",
 ];
 
-// Capture requires an explicit output path and must never be folded into the
-// unattended release run. It remains inventoried so a new ignored test cannot
-// silently escape the fail-closed classification.
-const METAL_OPTIONAL_IGNORED_TESTS: &[&str] = &["idwt::tests::metal_irreversible_idwt_gpu_capture"];
+// Capture needs an explicit output path; startup timing is a manual benchmark.
+// Correctness and concurrent kernel reuse are covered by non-ignored tests.
+// Inventory both diagnostics so new ignored tests cannot silently escape review.
+const METAL_OPTIONAL_IGNORED_TESTS: &[&str] = &[
+    "idwt::tests::metal_irreversible_idwt_gpu_capture",
+    "engine::runtime::resource_profile_tests::benchmark_cold_and_repeated_session_kernel_initialization",
+];
 
 struct MetalTestSuite {
     label: &'static str,

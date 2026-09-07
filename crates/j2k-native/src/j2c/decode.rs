@@ -49,10 +49,10 @@ mod workspace;
 pub(crate) use self::allocation::DecodeAllocationBudget;
 use self::direct_plan::collect_classic_code_block_data;
 pub(crate) use self::direct_plan::{
-    build_direct_color_plan, build_direct_grayscale_plan, build_referenced_classic_color_plan,
-    build_referenced_classic_grayscale_plan, build_referenced_classic_rgba_plan,
-    build_referenced_htj2k_color_plan, build_referenced_htj2k_grayscale_plan,
-    build_referenced_htj2k_rgba_plan,
+    build_component_grid_color_plan, build_direct_color_plan, build_direct_grayscale_plan,
+    build_referenced_classic_color_plan, build_referenced_classic_grayscale_plan,
+    build_referenced_classic_rgba_plan, build_referenced_htj2k_color_plan,
+    build_referenced_htj2k_grayscale_plan, build_referenced_htj2k_rgba_plan,
 };
 use self::store::{apply_sign_shift_after_mct, component_unsigned_level_shift, store};
 use self::subband::{

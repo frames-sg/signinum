@@ -5,6 +5,7 @@ use j2k_metal_support::{checked_shared_buffer_with_slice, MetalPipelineLoader, M
 use j2k_native::{ht_uvlc_table0, ht_uvlc_table1, ht_vlc_table0, ht_vlc_table1};
 
 pub(in crate::engine) struct DecodeKernels {
+    pub(in crate::engine) expand_sampled_plane: ComputePipelineState,
     pub(in crate::engine) pack_gray8: ComputePipelineState,
     pub(in crate::engine) pack_rgb8: ComputePipelineState,
     pub(in crate::engine) pack_mct_rgb8: ComputePipelineState,
@@ -67,6 +68,7 @@ impl DecodeKernels {
         let source = super::super::shader_source::decode_shader_source();
         let loader = MetalPipelineLoader::new(device, &source)?;
         Ok(Self {
+            expand_sampled_plane: loader.pipeline("j2k_expand_sampled_plane")?,
             pack_gray8: loader.pipeline("j2k_pack_gray8")?,
             pack_rgb8: loader.pipeline("j2k_pack_rgb8")?,
             pack_mct_rgb8: loader.pipeline("j2k_pack_mct_rgb8")?,

@@ -3881,6 +3881,7 @@ pub j2k_native::DirectPlanUnsupportedReason::ColorRgbImageWithoutAlpha
 pub j2k_native::DirectPlanUnsupportedReason::ColorSingleTileCodestream
 pub j2k_native::DirectPlanUnsupportedReason::ColorThreeComponentRgbCodestream
 pub j2k_native::DirectPlanUnsupportedReason::ComponentDecompositionIndexOutOfRange
+pub j2k_native::DirectPlanUnsupportedReason::ComponentGridFullImage
 pub j2k_native::DirectPlanUnsupportedReason::ComponentIndexOutOfRange
 pub j2k_native::DirectPlanUnsupportedReason::ComponentUnitSampled
 pub j2k_native::DirectPlanUnsupportedReason::GrayscaleImageWithoutAlpha

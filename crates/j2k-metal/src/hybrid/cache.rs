@@ -3,7 +3,7 @@
 //! Prepared-plan cache lifecycle for region-scaled Metal color decode.
 
 #[cfg(test)]
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::cell::Cell;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::session::direct_plan_cache::{
@@ -22,14 +22,16 @@ static REGION_SCALED_COLOR_PLAN_CACHE: OnceLock<
 #[cfg(test)]
 macro_rules! test_atomic_counter {
     ($counter:ident, $reset:ident, $load:ident) => {
-        static $counter: AtomicUsize = AtomicUsize::new(0);
+        std::thread_local! {
+            static $counter: Cell<usize> = const { Cell::new(0) };
+        }
 
         pub(crate) fn $reset() {
-            $counter.store(0, Ordering::Relaxed);
+            $counter.with(|counter| counter.set(0));
         }
 
         pub(crate) fn $load() -> usize {
-            $counter.load(Ordering::Relaxed)
+            $counter.with(Cell::get)
         }
     };
 }
@@ -61,7 +63,7 @@ pub(crate) fn reset_region_scaled_color_plan_cache_for_test() {
 
 #[cfg(test)]
 pub(super) fn record_region_scaled_color_plan_build_for_test() {
-    REGION_SCALED_COLOR_PLAN_BUILDS.fetch_add(1, Ordering::Relaxed);
+    REGION_SCALED_COLOR_PLAN_BUILDS.with(|counter| counter.set(counter.get().saturating_add(1)));
 }
 
 #[derive(Clone, Copy)]
@@ -136,4 +138,20 @@ fn evict_one_region_scaled_color_plan_if_needed<T: crate::session::PreparedPlanC
             error,
         )
     })
+}
+
+#[cfg(test)]
+#[test]
+fn region_scaled_build_counts_exclude_other_test_threads() {
+    let _guard = region_scaled_color_plan_test_lock_for_test();
+    reset_region_scaled_color_plan_builds_for_test();
+    record_region_scaled_color_plan_build_for_test();
+    std::thread::spawn(record_region_scaled_color_plan_build_for_test)
+        .join()
+        .unwrap();
+    assert_eq!(
+        region_scaled_color_plan_builds_for_test(),
+        1,
+        "cache reuse assertions must count only their own synchronous plan builds"
+    );
 }

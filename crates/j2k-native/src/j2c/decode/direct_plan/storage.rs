@@ -31,8 +31,9 @@ pub(super) fn build_component_plan_from_storage(
     output_region: Option<super::super::OutputRegion>,
     ht_payloads: Option<&mut Vec<HtCodeBlockPayloadRanges>>,
     classic_payloads: Option<&mut ClassicPayloadCollector<'_>>,
+    component_grid: bool,
 ) -> Result<J2kDirectGrayscalePlan> {
-    let component_info = component_info(tile, component_idx)?;
+    let component_info = component_info(tile, component_idx, component_grid)?;
     let tile_decompositions = component_decompositions(storage, component_idx)?;
     let (step_capacity, active_decomposition_count) = component_step_capacity(
         component_info,
@@ -67,7 +68,7 @@ pub(super) fn build_component_plan_from_storage(
         &sub_band_ids,
         &mut steps,
     )?;
-    let store = component_store_step(
+    let mut store = component_store_step(
         tile,
         component_info,
         final_rect,
@@ -76,6 +77,18 @@ pub(super) fn build_component_plan_from_storage(
         output_region,
         store_addend,
     );
+    if component_grid {
+        // Eligibility guarantees an origin-zero, unreduced full image. Store
+        // the complete native component plane; expansion belongs to the caller.
+        store.source_x = 0;
+        store.source_y = 0;
+        store.copy_width = final_rect.width();
+        store.copy_height = final_rect.height();
+        store.output_width = final_rect.width();
+        store.output_height = final_rect.height();
+        store.output_x = 0;
+        store.output_y = 0;
+    }
     let dimensions = (store.output_width, store.output_height);
     steps.push(J2kDirectGrayscaleStep::Store(store));
 
@@ -90,15 +103,20 @@ pub(super) fn build_component_plan_from_storage(
     })
 }
 
-fn component_info<'a>(tile: &'a Tile<'_>, component_idx: usize) -> Result<&'a ComponentInfo> {
+fn component_info<'a>(
+    tile: &'a Tile<'_>,
+    component_idx: usize,
+    component_grid: bool,
+) -> Result<&'a ComponentInfo> {
     let component_info =
         tile.component_infos
             .get(component_idx)
             .ok_or(DecodingError::DirectPlanUnsupported(
                 DirectPlanUnsupportedReason::ComponentIndexOutOfRange,
             ))?;
-    if component_info.size_info.horizontal_resolution != 1
-        || component_info.size_info.vertical_resolution != 1
+    if !component_grid
+        && (component_info.size_info.horizontal_resolution != 1
+            || component_info.size_info.vertical_resolution != 1)
     {
         bail!(DecodingError::DirectPlanUnsupported(
             DirectPlanUnsupportedReason::ComponentUnitSampled

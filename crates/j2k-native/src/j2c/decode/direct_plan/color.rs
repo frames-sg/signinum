@@ -26,8 +26,35 @@ pub(crate) fn build_direct_color_plan<'a>(
         DirectPlanUnsupportedReason::ColorThreeComponentRgbCodestream,
         None,
         None,
+        false,
     )
     .map(DirectColorComponentPlans::into_rgb);
+    ctx.release_reusable_allocations();
+    result
+}
+
+pub(crate) fn build_component_grid_color_plan<'a>(
+    data: &'a [u8],
+    header: &Header<'a>,
+    retained_image_bytes: usize,
+    ctx: &mut DecoderContext<'a>,
+) -> Result<(J2kDirectColorPlan, [(u8, u8); 3])> {
+    ctx.release_reusable_allocations();
+    let result = build_direct_color_components_plan_inner::<3>(
+        data,
+        data,
+        header,
+        retained_image_bytes,
+        ctx,
+        DirectPlanUnsupportedReason::ColorThreeComponentRgbCodestream,
+        None,
+        None,
+        true,
+    )
+    .map(|plans| {
+        let sampling = plans.sampling;
+        (plans.into_rgb(), sampling)
+    });
     ctx.release_reusable_allocations();
     result
 }
@@ -37,6 +64,7 @@ pub(super) struct DirectColorComponentPlans<const COMPONENT_COUNT: usize> {
     bit_depths: [u8; COMPONENT_COUNT],
     mct: bool,
     transform: J2kWaveletTransform,
+    sampling: [(u8, u8); COMPONENT_COUNT],
     pub(super) component_plans: Vec<J2kDirectGrayscalePlan>,
 }
 
@@ -77,6 +105,7 @@ fn build_direct_color_components_plan_inner<'a, const COMPONENT_COUNT: usize>(
     component_count_error: DirectPlanUnsupportedReason,
     ht_payloads: Option<&mut Vec<HtCodeBlockPayloadRanges>>,
     classic_payloads: Option<&mut ClassicPayloadCollector<'_>>,
+    component_grid: bool,
 ) -> Result<DirectColorComponentPlans<COMPONENT_COUNT>> {
     let mut reader = BitReader::new(data);
     let tiles = tile::parse(&mut reader, header, retained_image_bytes)?;
@@ -102,6 +131,7 @@ fn build_direct_color_components_plan_inner<'a, const COMPONENT_COUNT: usize>(
         None,
         ht_payloads,
         classic_payloads,
+        component_grid,
     )
 }
 
@@ -122,9 +152,23 @@ pub(super) fn build_direct_color_tile_components_plan<'a, const COMPONENT_COUNT:
     store_region: Option<super::super::OutputRegion>,
     mut ht_payloads: Option<&mut Vec<HtCodeBlockPayloadRanges>>,
     mut classic_payloads: Option<&mut ClassicPayloadCollector<'_>>,
+    component_grid: bool,
 ) -> Result<DirectColorComponentPlans<COMPONENT_COUNT>> {
     if tile.component_infos.len() != COMPONENT_COUNT {
         bail!(DecodingError::DirectPlanUnsupported(component_count_error));
+    }
+    if component_grid
+        && (tile.mct
+            || tile.component_infos.iter().any(|c| c.size_info.signed)
+            || header.skipped_resolution_levels != 0
+            || header.size_data.image_area_x_offset != 0
+            || header.size_data.image_area_y_offset != 0
+            || decode_region.is_some()
+            || store_region.is_some())
+    {
+        bail!(DecodingError::DirectPlanUnsupported(
+            DirectPlanUnsupportedReason::ComponentGridFullImage
+        ));
     }
     let transform = tile.component_infos[0].wavelet_transform();
     if tile.mct
@@ -154,6 +198,7 @@ pub(super) fn build_direct_color_tile_components_plan<'a, const COMPONENT_COUNT:
     segment::parse(tile, progression_iterator(tile)?, header, &mut ctx.storage)?;
 
     let mut bit_depths = [0_u8; COMPONENT_COUNT];
+    let mut sampling = [(1, 1); COMPONENT_COUNT];
     let mut budget = DecodeAllocationBudget::for_storage(&ctx.storage)?;
     if let Some(collector) = classic_payloads.as_deref_mut() {
         collector.prepare(
@@ -167,6 +212,10 @@ pub(super) fn build_direct_color_tile_components_plan<'a, const COMPONENT_COUNT:
     for (component_idx, bit_depth) in bit_depths.iter_mut().enumerate() {
         let component_info = &tile.component_infos[component_idx];
         *bit_depth = component_info.size_info.precision;
+        sampling[component_idx] = (
+            component_info.size_info.horizontal_resolution,
+            component_info.size_info.vertical_resolution,
+        );
         let addend = if tile.mct && component_idx < 3 {
             0.0
         } else {
@@ -187,6 +236,7 @@ pub(super) fn build_direct_color_tile_components_plan<'a, const COMPONENT_COUNT:
             store_region,
             ht_payloads.as_deref_mut(),
             classic_payloads.as_deref_mut(),
+            component_grid,
         )?);
     }
 
@@ -202,6 +252,7 @@ pub(super) fn build_direct_color_tile_components_plan<'a, const COMPONENT_COUNT:
     Ok(DirectColorComponentPlans {
         dimensions,
         bit_depths,
+        sampling,
         mct: tile.mct,
         transform: J2kWaveletTransform::from(transform),
         component_plans,

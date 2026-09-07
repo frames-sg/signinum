@@ -47,11 +47,12 @@ pub(crate) use codestream::Header;
 #[cfg(test)]
 pub(crate) use decode::should_decode_classic_sub_band_in_parallel;
 pub(crate) use decode::{
-    build_direct_color_plan, build_direct_grayscale_plan, build_referenced_classic_color_plan,
-    build_referenced_classic_grayscale_plan, build_referenced_classic_rgba_plan,
-    build_referenced_htj2k_color_plan, build_referenced_htj2k_grayscale_plan,
-    build_referenced_htj2k_rgba_plan, decode_preparsed_with_capacity_retry as decode_preparsed,
-    decode_with_capacity_retry as decode, prepare_region_tiles,
+    build_component_grid_color_plan, build_direct_color_plan, build_direct_grayscale_plan,
+    build_referenced_classic_color_plan, build_referenced_classic_grayscale_plan,
+    build_referenced_classic_rgba_plan, build_referenced_htj2k_color_plan,
+    build_referenced_htj2k_grayscale_plan, build_referenced_htj2k_rgba_plan,
+    decode_preparsed_with_capacity_retry as decode_preparsed, decode_with_capacity_retry as decode,
+    prepare_region_tiles,
 };
 pub use decode::{CpuDecodeParallelism, DecoderContext, DecoderWorkspace, DecoderWorkspaceStats};
 pub use recode::Reversible53CoefficientImage;

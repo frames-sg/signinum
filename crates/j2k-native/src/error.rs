@@ -325,6 +325,8 @@ pub enum DirectPlanUnsupportedReason {
     ComponentIndexOutOfRange,
     /// Direct component plans require unit-sampled components.
     ComponentUnitSampled,
+    /// Component-grid plans require a full unsigned origin-zero image without MCT.
+    ComponentGridFullImage,
     /// A direct component decomposition index did not exist.
     ComponentDecompositionIndexOutOfRange,
     /// Direct device plans do not yet represent classic and HT code-blocks in one sub-band.
@@ -533,6 +535,9 @@ const fn direct_plan_unsupported_what(reason: DirectPlanUnsupportedReason) -> &'
         }
         DirectPlanUnsupportedReason::ComponentIndexOutOfRange => {
             "direct component plan index is out of range"
+        }
+        DirectPlanUnsupportedReason::ComponentGridFullImage => {
+            "component-grid plans require a full unsigned origin-zero image without MCT"
         }
         DirectPlanUnsupportedReason::ComponentUnitSampled => {
             "direct component plan only supports unit-sampled components"

@@ -112,6 +112,7 @@ fn build_referenced_htj2k_color_components_plan<'a, const COMPONENT_COUNT: usize
                 Some(output_region),
                 Some(&mut tile_payloads),
                 Some(&mut classic_collector),
+                false,
             )?;
             validate_and_strip_referenced_payload_owners(
                 &mut plans.component_plans,
@@ -253,6 +254,7 @@ fn build_referenced_classic_color_components_plan<'a, const COMPONENT_COUNT: usi
                 Some(output_region),
                 None,
                 Some(&mut collector),
+                false,
             )?;
             validate_and_strip_classic_payload_owners(
                 &mut plans.component_plans,

@@ -25,7 +25,7 @@ pub(super) use self::classic::{
     collect_classic_code_block_data, collect_referenced_classic_code_block_data,
 };
 mod color;
-pub(crate) use self::color::build_direct_color_plan;
+pub(crate) use self::color::{build_component_grid_color_plan, build_direct_color_plan};
 mod referenced_color;
 pub(crate) use self::referenced_color::{
     build_referenced_classic_color_plan, build_referenced_classic_rgba_plan,
@@ -198,6 +198,7 @@ fn build_direct_grayscale_tile_plan<'a>(
         store_region,
         ht_payloads,
         classic_payloads,
+        false,
     )
 }
 

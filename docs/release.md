@@ -1,8 +1,7 @@
 # Release Policy
 
-The `j2k` 0.10.0 public crate release is published and security-supported.
-The current workspace prepares 0.11.0; its publication requires the candidate
-and tag gates below. The published 0.10.0 line carries the release-scoped Part 1 and selected
+The `j2k` 0.11.0 public crate release is published and security-supported.
+The published 0.11.0 line carries the release-scoped Part 1 and selected
 Part 15 T.803 decoder evidence described in
 [`T.803 conformance`](t803-conformance.md).
 Runtime backend selection defaults to `Auto`; CPU remains the portable baseline
@@ -13,7 +12,7 @@ evidence.
 
 | Version | Distribution state | Security support |
 | --- | --- | --- |
-| `0.11.0` | Current release line. Distribution is recorded in the [GitHub release](https://github.com/frames-sg/j2k/releases/tag/v0.11.0) and [crate registry](https://crates.io/crates/j2k/0.11.0) after the required gates pass. | Security-supported. |
+| `0.11.0` | Published release line. Distribution is recorded in the [GitHub release](https://github.com/frames-sg/j2k/releases/tag/v0.11.0) and [crate registry](https://crates.io/crates/j2k/0.11.0) after the required gates passed. | Security-supported. |
 | `0.10.0` | Published on crates.io from annotated tag `v0.10.0`, with reviewed architecture-transition API evidence. | Supported. |
 | `0.9.0` | Published on crates.io from annotated tag `v0.9.0`, with reviewed `objc2-metal` API-break evidence. | Supported. |
 | `0.8.1` | Previous crates.io release from annotated tag `v0.8.1`. | Supported. |
@@ -110,8 +109,9 @@ and lossy HT quality-factor options. The experimental MPSGraph adapter removes
 four demonstration/reference helpers; applications construct their graphs with
 `MpsGraphProgram::new` and keep reference calculations in their own test code.
 The pre-1.0 minor-version increment reflects that source-compatibility change.
-Conformance wording for this version requires its own exact-candidate evidence;
-the published 0.10.0 reports are historical evidence, not a substitute.
+Its exact-candidate CPU, CUDA, and Metal gates passed. The five conformance
+reports attached to [release 0.11.0](https://github.com/frames-sg/j2k/releases/tag/v0.11.0)
+identify the tagged source; the older reports remain historical evidence.
 
 Version `0.7.3` retained the API contract introduced by `0.7.1`, which
 intentionally contracted parts of the published pre-1.0 `0.6.2` API. It does

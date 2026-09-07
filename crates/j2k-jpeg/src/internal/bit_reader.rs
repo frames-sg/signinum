@@ -14,6 +14,8 @@
 
 use crate::error::{HuffmanFailure, JpegError};
 
+#[cfg(test)]
+mod refill_tests;
 mod terminal;
 
 /// Maximum bits the accumulator can hold. Kept at 64 so a single `u64` is
@@ -248,6 +250,25 @@ impl<'a> BitReader<'a> {
     /// After consuming bits, top up the accumulator so the next Huffman peek
     /// can always examine 16 bits without further refill.
     fn refill_to_threshold(&mut self) {
+        // Below 32 buffered bits, reaching the 56-bit threshold requires at
+        // least four more bytes. Load them together only when none needs JPEG
+        // unstuffing. The strict bound preserves the scalar reader's exact
+        // cursor and reservoir size, including checkpoint snapshots.
+        if self.bits < 32 && self.marker.is_none() && self.synthetic_bits == 0 {
+            let chunk = self
+                .bytes
+                .get(self.pos..)
+                .and_then(|remaining| remaining.first_chunk::<4>())
+                .filter(|chunk| !chunk.contains(&0xff));
+            if let Some(chunk) = chunk {
+                let word = u64::from(u32::from_be_bytes(*chunk));
+                self.acc |= word << (ACC_BITS - 32 - self.bits);
+                self.bits += 32;
+                self.pos += 4;
+            }
+        }
+        // Keep short tails, stuffing, markers, and terminal padding on the
+        // existing byte-wise path. Do not bulk-prefetch in restart probes.
         while self.bits < REFILL_THRESHOLD && self.refill_one_byte() {}
     }
 

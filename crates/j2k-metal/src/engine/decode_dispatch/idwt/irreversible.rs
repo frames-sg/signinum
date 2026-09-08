@@ -204,10 +204,13 @@ pub(super) fn dispatch_irreversible97_stages(
     encoder.set_buffer(0, Some(decoded), decoded_offset as u64);
     encoder.set_bytes::<J2kIdwtSingleDecompositionParams>(1, &params);
     encoder.set_bytes::<f32>(2, &high_pass);
+    let horizontal_scale_grid = (params.width, params.height, batch_count);
+    #[cfg(test)]
+    crate::engine::test_counters::record_idwt97_logical_dispatch(horizontal_scale_grid);
     dispatch_3d_pipeline(
         encoder,
         &kernels.idwt_irreversible97_horizontal_scale,
-        (params.width, params.height, batch_count),
+        horizontal_scale_grid,
     );
     encoder.memory_barrier_with_resources(&[decoded]);
 
@@ -229,10 +232,13 @@ pub(super) fn dispatch_irreversible97_stages(
             _reserved1: 0,
         };
         encoder.set_bytes::<J2kIdwt97StepParams>(2, &step);
+        let horizontal_step_grid = (params.width, params.height, batch_count);
+        #[cfg(test)]
+        crate::engine::test_counters::record_idwt97_logical_dispatch(horizontal_step_grid);
         dispatch_3d_pipeline(
             encoder,
             &kernels.idwt_irreversible97_horizontal_step,
-            (params.width, params.height, batch_count),
+            horizontal_step_grid,
         );
         encoder.memory_barrier_with_resources(&[decoded]);
     }
@@ -240,10 +246,13 @@ pub(super) fn dispatch_irreversible97_stages(
     encoder.set_buffer(0, Some(decoded), decoded_offset as u64);
     encoder.set_bytes::<J2kIdwtSingleDecompositionParams>(1, &params);
     encoder.set_bytes::<f32>(2, &high_pass);
+    let vertical_scale_grid = (params.width, params.height, batch_count);
+    #[cfg(test)]
+    crate::engine::test_counters::record_idwt97_logical_dispatch(vertical_scale_grid);
     dispatch_3d_pipeline(
         encoder,
         &kernels.idwt_irreversible97_vertical_scale,
-        (params.width, params.height, batch_count),
+        vertical_scale_grid,
     );
     encoder.memory_barrier_with_resources(&[decoded]);
 
@@ -265,11 +274,19 @@ pub(super) fn dispatch_irreversible97_stages(
             _reserved1: 0,
         };
         encoder.set_bytes::<J2kIdwt97StepParams>(2, &step);
+        let vertical_step_grid = (params.width, params.height, batch_count);
+        #[cfg(test)]
+        crate::engine::test_counters::record_idwt97_logical_dispatch(vertical_step_grid);
         dispatch_3d_pipeline(
             encoder,
             &kernels.idwt_irreversible97_vertical_step,
-            (params.width, params.height, batch_count),
+            vertical_step_grid,
         );
         encoder.memory_barrier_with_resources(&[decoded]);
     }
 }
+
+#[cfg(test)]
+mod parity_tests;
+#[cfg(test)]
+mod performance;

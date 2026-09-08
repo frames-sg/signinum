@@ -274,6 +274,8 @@ pub(crate) fn record_ht_immutable_job_upload() {
 
 std::thread_local! {
     static IDWT97_STAGE_SEQUENCES: Cell<usize> = const { Cell::new(0) };
+    static IDWT97_LOGICAL_REQUESTED_POSITIONS: Cell<usize> = const { Cell::new(0) };
+    static IDWT97_STAGE_DISPATCHES: Cell<usize> = const { Cell::new(0) };
 }
 
 pub(crate) fn reset_idwt97_stage_sequences_for_test() {
@@ -286,4 +288,28 @@ pub(crate) fn idwt97_stage_sequences_for_test() -> usize {
 
 pub(crate) fn record_idwt97_stage_sequence() {
     IDWT97_STAGE_SEQUENCES.set(IDWT97_STAGE_SEQUENCES.get() + 1);
+}
+
+pub(crate) fn reset_idwt97_logical_dispatches_for_test() {
+    IDWT97_LOGICAL_REQUESTED_POSITIONS.set(0);
+    IDWT97_STAGE_DISPATCHES.set(0);
+}
+
+pub(crate) fn idwt97_logical_dispatches_for_test() -> (usize, usize) {
+    (
+        IDWT97_LOGICAL_REQUESTED_POSITIONS.get(),
+        IDWT97_STAGE_DISPATCHES.get(),
+    )
+}
+
+pub(crate) fn record_idwt97_logical_dispatch(grid: (u32, u32, u32)) {
+    let positions = (grid.0 as usize)
+        .saturating_mul(grid.1 as usize)
+        .saturating_mul(grid.2 as usize);
+    IDWT97_LOGICAL_REQUESTED_POSITIONS.set(
+        IDWT97_LOGICAL_REQUESTED_POSITIONS
+            .get()
+            .saturating_add(positions),
+    );
+    IDWT97_STAGE_DISPATCHES.set(IDWT97_STAGE_DISPATCHES.get().saturating_add(1));
 }

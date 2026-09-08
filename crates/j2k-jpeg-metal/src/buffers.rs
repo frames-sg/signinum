@@ -348,7 +348,7 @@ impl MetalBatchScratch {
         Ok(buffer)
     }
 
-    fn shared_buffer(
+    pub(crate) fn shared_buffer(
         &mut self,
         device: &DeviceRef,
         key: &'static str,
@@ -384,6 +384,17 @@ impl MetalBatchScratch {
             buffer
         };
 
+        Ok(buffer)
+    }
+
+    pub(crate) fn shared_zeroed_buffer(
+        &mut self,
+        device: &DeviceRef,
+        key: &'static str,
+        bytes: usize,
+    ) -> Result<Buffer, Error> {
+        let buffer = self.shared_buffer(device, key, bytes)?;
+        checked_fill_buffer_u8(&buffer, bytes, 0, "initialize shared scratch")?;
         Ok(buffer)
     }
 

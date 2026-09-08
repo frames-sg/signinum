@@ -2044,3 +2044,50 @@ impl EntropyBitWriter {
         self.bit_count = 0;
     }
 }
+
+#[test]
+fn single_scratch_recovers_after_gpu_entropy_failure() {
+    if !should_run_metal_runtime() {
+        return;
+    }
+    let runtime = MetalRuntime::new().expect("runtime");
+    let valid = j2k_jpeg::adapter::build_fast422_packet(BASELINE_422).expect("valid packet");
+    let mut invalid =
+        j2k_jpeg::adapter::build_fast422_packet(BASELINE_422).expect("packet to corrupt");
+    // All-one codes are invalid for these canonical tables. Reset the saved
+    // reader reservoir so the device reads the corrupt bytes from the start.
+    invalid.entropy_bytes.fill(0xff);
+    invalid.entropy_checkpoints.truncate(1);
+    invalid.entropy_checkpoints[0].mcu_index = 0;
+    invalid.entropy_checkpoints[0].entropy_pos = 0;
+    invalid.entropy_checkpoints[0].bit_acc = 0;
+    invalid.entropy_checkpoints[0].bit_count = 0;
+    let (expected, _) = CpuDecoder::new(BASELINE_422)
+        .unwrap()
+        .decode_request(DecodeRequest::full(PixelFormat::Rgb8))
+        .unwrap();
+    for _ in 0..2 {
+        let error = single_decode::try_decode_fast422_to_surface(
+            &runtime,
+            Some(&invalid),
+            PixelFormat::Rgb8,
+        )
+        .err()
+        .expect("GPU entropy failure");
+        assert!(
+            matches!(&error, Error::MetalKernel { message }
+            if message.starts_with("unexpected Metal fast422 failure at entropy byte ")),
+            "{error}"
+        );
+        assert!(
+            !runtime.batch_scratch_in_use_for_test(),
+            "failed call must release scratch after completion"
+        );
+        let surface =
+            single_decode::try_decode_fast422_to_surface(&runtime, Some(&valid), PixelFormat::Rgb8)
+                .expect("valid recovery")
+                .expect("supported packet");
+        assert_eq!(surface.as_bytes().unwrap().as_ref(), expected);
+        assert!(!runtime.batch_scratch_in_use_for_test());
+    }
+}

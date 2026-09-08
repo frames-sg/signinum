@@ -44,6 +44,43 @@ struct CachedDecodePlan {
     allocation_bytes: usize,
 }
 
+pub(crate) struct CachedDecodePlanLease<'a> {
+    // The vacant slot's plan lives in the temporary decoder and its key in this
+    // guard; both stay charged until restoration or abandoned-lease Drop.
+    slot: &'a mut Option<CachedDecodePlan>,
+    decode_plan_cache_bytes: &'a mut usize,
+    cache_evictions: &'a mut u64,
+    digest: u64,
+    header_prefix: Vec<u8>,
+    allocation_bytes: usize,
+    restored: bool,
+}
+
+impl CachedDecodePlanLease<'_> {
+    pub(crate) fn restore(mut self, plan: PreparedDecodePlan) {
+        let header_prefix = core::mem::take(&mut self.header_prefix);
+        *self.slot = Some(CachedDecodePlan {
+            digest: self.digest,
+            header_prefix,
+            plan,
+            allocation_bytes: self.allocation_bytes,
+        });
+        self.restored = true;
+    }
+}
+
+impl Drop for CachedDecodePlanLease<'_> {
+    fn drop(&mut self) {
+        if self.restored {
+            return;
+        }
+        *self.decode_plan_cache_bytes = self
+            .decode_plan_cache_bytes
+            .saturating_sub(self.allocation_bytes);
+        *self.cache_evictions = self.cache_evictions.saturating_add(1);
+    }
+}
+
 /// Shared decode context for WSI tile batches.
 ///
 /// Reuse one context across many related JPEG tiles to amortize Huffman-table
@@ -58,6 +95,8 @@ pub struct DecoderContext {
     cache_hits: u64,
     cache_misses: u64,
     cache_evictions: u64,
+    #[cfg(test)]
+    decode_plan_clones: u64,
 }
 
 impl DecoderContext {
@@ -72,12 +111,76 @@ impl DecoderContext {
             cache_hits: 0,
             cache_misses: 0,
             cache_evictions: 0,
+            #[cfg(test)]
+            decode_plan_clones: 0,
         }
     }
 
     pub(crate) fn resolve_quant_table(&mut self, table: [u16; 64]) -> [u16; 64] {
         let digest = digest_quant_table(&table);
         self.resolve_quant_table_with_digest(table, digest)
+    }
+
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the digest cast only selects a cache shard and intentionally uses the native word"
+    )]
+    pub(crate) fn cached_decode_plan(&self, header_prefix: &[u8]) -> Option<&PreparedDecodePlan> {
+        let digest = digest_bytes(header_prefix);
+        let start = (digest as usize) % self.decode_plans.len();
+        (0..self.decode_plans.len())
+            .map(|probe| (start + probe) % self.decode_plans.len())
+            .filter_map(|slot| self.decode_plans[slot].as_ref())
+            .find(|cached| {
+                cached.digest == digest && cached.header_prefix.as_slice() == header_prefix
+            })
+            .map(|cached| &cached.plan)
+    }
+
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the digest cast only selects a cache shard and intentionally uses the native word"
+    )]
+    pub(crate) fn lease_cached_decode_plan(
+        &mut self,
+        header_prefix: &[u8],
+    ) -> Result<Option<(CachedDecodePlanLease<'_>, PreparedDecodePlan)>, JpegError> {
+        let digest = digest_bytes(header_prefix);
+        let start = (digest as usize) % self.decode_plans.len();
+        let slot = (0..self.decode_plans.len())
+            .map(|probe| (start + probe) % self.decode_plans.len())
+            .find(|&slot| {
+                self.decode_plans[slot].as_ref().is_some_and(|cached| {
+                    cached.digest == digest && cached.header_prefix.as_slice() == header_prefix
+                })
+            });
+        let Some(slot) = slot else {
+            return Ok(None);
+        };
+        self.cache_hits = self.cache_hits.saturating_add(1);
+        let cached = self.decode_plans[slot]
+            .take()
+            .ok_or(JpegError::InternalInvariant {
+                reason: "matched cached decode plan disappeared before leasing",
+            })?;
+        let CachedDecodePlan {
+            digest,
+            header_prefix,
+            plan,
+            allocation_bytes,
+        } = cached;
+        Ok(Some((
+            CachedDecodePlanLease {
+                slot: &mut self.decode_plans[slot],
+                decode_plan_cache_bytes: &mut self.decode_plan_cache_bytes,
+                cache_evictions: &mut self.cache_evictions,
+                digest,
+                header_prefix,
+                allocation_bytes,
+                restored: false,
+            },
+            plan,
+        )))
     }
 
     #[expect(
@@ -201,6 +304,10 @@ impl DecoderContext {
         clippy::cast_possible_truncation,
         reason = "the digest cast only selects a cache shard and intentionally uses the native word"
     )]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "cache lookup, fallible admission, and exact retained-byte accounting form one transaction"
+    )]
     fn resolve_decode_plan_with_digest<F>(
         &mut self,
         header_prefix: &[u8],
@@ -224,16 +331,19 @@ impl DecoderContext {
                 {
                     self.cache_hits = self.cache_hits.saturating_add(1);
                     let mut live_bytes = initial_live_bytes;
-                    return try_clone_decode_plan(&cached.plan, &mut live_bytes, None)?.ok_or(
-                        JpegError::InternalInvariant {
+                    let cloned = try_clone_decode_plan(&cached.plan, &mut live_bytes, None)?
+                        .ok_or(JpegError::InternalInvariant {
                             reason: "cached decode plan unexpectedly bypassed cloning",
-                        },
-                    );
+                        })?;
+                    #[cfg(test)]
+                    {
+                        self.decode_plan_clones = self.decode_plan_clones.saturating_add(1);
+                    }
+                    return Ok(cloned);
                 }
                 Some(_) | None => {}
             }
         }
-
         let built = build(self)?;
         self.cache_misses = self.cache_misses.saturating_add(1);
         let predicted_bytes = decode_plan_entry_bytes(header_prefix.len(), &built)?;
@@ -243,7 +353,6 @@ impl DecoderContext {
             // retained.
             return Ok(built);
         }
-
         self.evict_decode_plans_until_fits(start, predicted_bytes);
         let slot = self.first_empty_decode_plan_slot(start).unwrap_or_else(|| {
             self.evict_decode_plan_slot(start);
@@ -267,6 +376,10 @@ impl DecoderContext {
         else {
             return Ok(built);
         };
+        #[cfg(test)]
+        {
+            self.decode_plan_clones = self.decode_plan_clones.saturating_add(1);
+        }
         let allocation_bytes = owned_prefix
             .capacity()
             .checked_add(cached_plan.retained_allocation_bytes()?)
@@ -348,6 +461,11 @@ impl DecoderContext {
             .capacity()
             .saturating_mul(size_of::<Option<CachedHuffmanTable>>());
         self.decode_plan_cache_bytes.saturating_add(huffman_bytes)
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn decode_plan_clone_count(&self) -> u64 {
+        self.decode_plan_clones
     }
 
     fn occupied_cache_slots(&self) -> u64 {
@@ -663,6 +781,56 @@ mod tests {
         assert_eq!(second.scan_offset, 2);
         assert_eq!(first_hit.scan_offset, 1);
         assert_eq!(ctx.cache_stats().hits, 1);
+    }
+
+    #[test]
+    fn prepared_plan_lease_compares_full_header_prefix_after_digest_collision() {
+        let requested = b"requested";
+        let digest = digest_bytes(requested);
+        let slot_count = u64::try_from(PLAN_CACHE_SLOTS).unwrap();
+        let start = usize::try_from(digest % slot_count).unwrap();
+        let wrong_slot = start;
+        let matching_slot = (start + 1) % PLAN_CACHE_SLOTS;
+        let wrong_prefix = b"collision".to_vec();
+        let matching_prefix = requested.to_vec();
+        let wrong_plan = empty_plan(11);
+        let matching_plan = empty_plan(29);
+        let wrong_bytes = decode_plan_entry_bytes(wrong_prefix.capacity(), &wrong_plan).unwrap();
+        let matching_bytes =
+            decode_plan_entry_bytes(matching_prefix.capacity(), &matching_plan).unwrap();
+        let mut ctx = DecoderContext::new();
+        ctx.decode_plans[wrong_slot] = Some(CachedDecodePlan {
+            digest,
+            header_prefix: wrong_prefix,
+            plan: wrong_plan,
+            allocation_bytes: wrong_bytes,
+        });
+        ctx.decode_plans[matching_slot] = Some(CachedDecodePlan {
+            digest,
+            header_prefix: matching_prefix,
+            plan: matching_plan,
+            allocation_bytes: matching_bytes,
+        });
+        ctx.decode_plan_cache_bytes = wrong_bytes + matching_bytes;
+        let retained = ctx.retained_allocation_bytes();
+        let occupied = ctx.cache_stats().occupied_slots;
+
+        assert!(ctx.lease_cached_decode_plan(b"absent").unwrap().is_none());
+        let (lease, plan) = ctx
+            .lease_cached_decode_plan(requested)
+            .unwrap()
+            .expect("matching full prefix must lease");
+        assert_eq!(plan.scan_offset, 29);
+        lease.restore(plan);
+
+        assert_eq!(
+            ctx.cached_decode_plan(requested)
+                .expect("leased plan restored under exact key")
+                .scan_offset,
+            29
+        );
+        assert_eq!(ctx.retained_allocation_bytes(), retained);
+        assert_eq!(ctx.cache_stats().occupied_slots, occupied);
     }
 
     #[test]

@@ -443,6 +443,60 @@ impl<'a> Decoder<'a> {
         })
     }
 
+    pub(crate) fn with_view_in_context<R>(
+        view: JpegView<'a>,
+        ctx: &mut DecoderContext,
+        operation: impl FnOnce(&Self) -> Result<R, JpegError>,
+    ) -> Result<R, JpegError> {
+        let cache_prefix = if view.options == DecodeOptions::default()
+            && matches!(
+                view.info.sof_kind,
+                SofKind::Baseline8 | SofKind::Extended8 | SofKind::Extended12
+            ) {
+            view.header
+                .sos_offset
+                .and_then(|offset| view.bytes.get(..offset))
+        } else {
+            None
+        };
+        let Some(cache_prefix) = cache_prefix else {
+            let decoder = Self::from_view_in_context(view, ctx)?;
+            return operation(&decoder);
+        };
+        let Some(cached_plan) = ctx.cached_decode_plan(cache_prefix) else {
+            let decoder = Self::from_view_in_context(view, ctx)?;
+            return operation(&decoder);
+        };
+        Self::validate_cached_plan_lease(&view.header, ctx, cached_plan, 0)?;
+        let Some((lease, plan)) = ctx.lease_cached_decode_plan(cache_prefix)? else {
+            return Err(JpegError::InternalInvariant {
+                reason: "validated cached decode plan disappeared before execution",
+            });
+        };
+        let JpegView {
+            bytes,
+            mut header,
+            info,
+            options: _,
+        } = view;
+        let warnings = core::mem::take(&mut header.warnings);
+        drop(header);
+        let decoder = Self {
+            bytes,
+            info,
+            warnings,
+            backend: Backend::detect(),
+            plan,
+            progressive_plan: None,
+            lossless_plan: None,
+            cpu_entropy_checkpoints: Mutex::new(CpuCheckpointCache::default()),
+        };
+        let result = operation(&decoder);
+        let Self { plan, .. } = decoder;
+        lease.restore(plan);
+        result
+    }
+
     /// The parsed header as a public [`Info`].
     pub fn info(&self) -> &Info {
         &self.info

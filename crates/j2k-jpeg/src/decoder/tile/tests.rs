@@ -7,13 +7,14 @@ use super::{
     decode_tile_region_scaled_into_in_context_with_options, decode_tile_scaled_into_in_context,
     decode_tile_scaled_into_in_context_with_options, planned_jpeg_tile_decode_live_bytes,
     planned_roi_checkpoint_bytes, DecodeOptions, Decoder, DecoderContext, Downscale, JpegError,
-    PixelFormat, PreparedJpegTileJob, Rect, ScratchPool, TileDecodeOutput,
+    JpegView, PixelFormat, PreparedJpegTileJob, Rect, ScratchPool, TileDecodeOutput,
 };
 use crate::{
     encode_jpeg_baseline, prepare_tiff_jpeg_tile, JpegBackend, JpegEncodeOptions, JpegSamples,
     JpegSubsampling, JpegTilePrepareOptions,
 };
 use alloc::vec::Vec;
+use j2k_core::CodecContext;
 use j2k_test_support::JPEG_BASELINE_420_16X16;
 
 const JPEG: &[u8] = JPEG_BASELINE_420_16X16;
@@ -76,6 +77,337 @@ fn wide_nonrestart_420_jpeg() -> Vec<u8> {
     )
     .expect("encode wide nonrestart fixture")
     .data
+}
+
+fn alternate_nonrestart_420_jpeg() -> Vec<u8> {
+    const WIDTH: u32 = 96;
+    const HEIGHT: u32 = 16;
+    let mut pixels = j2k_test_support::patterned_rgb8(WIDTH, HEIGHT);
+    for (index, value) in pixels.iter_mut().enumerate() {
+        let offset = u8::try_from(index % 251)
+            .expect("modulo bounds alternate fixture offset")
+            .wrapping_mul(29)
+            .wrapping_add(17);
+        *value = value.wrapping_add(offset);
+    }
+    encode_jpeg_baseline(
+        JpegSamples::Rgb8 {
+            data: &pixels,
+            width: WIDTH,
+            height: HEIGHT,
+        },
+        JpegEncodeOptions {
+            quality: 90,
+            subsampling: JpegSubsampling::Ybr420,
+            restart_interval: None,
+            backend: JpegBackend::Cpu,
+        },
+    )
+    .expect("encode alternate nonrestart fixture")
+    .data
+}
+
+#[test]
+fn warmed_context_decode_does_not_clone_the_cached_plan_arena() {
+    let first = wide_nonrestart_420_jpeg();
+    let second = alternate_nonrestart_420_jpeg();
+    assert_ne!(first, second);
+    let stride = 96 * PixelFormat::Rgb8.bytes_per_pixel();
+    let mut expected = vec![0u8; stride * 16];
+    Decoder::new(&second)
+        .expect("alternate fixture decoder")
+        .decode_into(&mut expected, stride, PixelFormat::Rgb8)
+        .expect("alternate fixture reference pixels");
+    let mut output = vec![0u8; stride * 16];
+    let mut context = DecoderContext::new();
+    let mut pool = ScratchPool::new();
+
+    decode_tile_into_in_context(
+        &first,
+        &mut context,
+        &mut pool,
+        &mut output,
+        stride,
+        PixelFormat::Rgb8,
+    )
+    .expect("warm context plan");
+    let clones_after_miss = context.decode_plan_clone_count();
+    let misses_after_miss = context.cache_stats().misses;
+    decode_tile_into_in_context(
+        &second,
+        &mut context,
+        &mut pool,
+        &mut output,
+        stride,
+        PixelFormat::Rgb8,
+    )
+    .expect("reuse context plan");
+
+    assert_eq!(context.decode_plan_clone_count(), clones_after_miss);
+    assert_eq!(context.cache_stats().misses, misses_after_miss);
+    assert_eq!(output, expected);
+}
+
+#[test]
+fn warmed_full_region_and_scaled_context_routes_reuse_the_cached_plan() {
+    let jpeg = wide_nonrestart_420_jpeg();
+    let decoder = Decoder::new(&jpeg).expect("fixture decoder");
+    let mut context = DecoderContext::new();
+    let mut pool = ScratchPool::new();
+    let full_stride = 96 * PixelFormat::Rgb8.bytes_per_pixel();
+    let mut full = vec![0u8; full_stride * 16];
+    decode_tile_into_in_context(
+        &jpeg,
+        &mut context,
+        &mut pool,
+        &mut full,
+        full_stride,
+        PixelFormat::Rgb8,
+    )
+    .expect("warm full decode");
+    let clones_after_miss = context.decode_plan_clone_count();
+
+    let roi = Rect {
+        x: 8,
+        y: 2,
+        w: 32,
+        h: 10,
+    };
+    let roi_stride = roi.w as usize * PixelFormat::Rgb8.bytes_per_pixel();
+    let mut expected_roi = vec![0u8; roi_stride * roi.h as usize];
+    decoder
+        .decode_region_into(&mut expected_roi, roi_stride, PixelFormat::Rgb8, roi)
+        .expect("reference region decode");
+    let mut region = vec![0u8; expected_roi.len()];
+    decode_tile_region_into_in_context(
+        &jpeg,
+        &mut context,
+        &mut pool,
+        TileDecodeOutput {
+            out: &mut region,
+            stride: roi_stride,
+            fmt: PixelFormat::Rgb8,
+        },
+        roi,
+    )
+    .expect("leased region decode");
+    assert_eq!(region, expected_roi);
+
+    let scale = Downscale::Half;
+    let scaled_width = 96u32.div_ceil(scale.denominator());
+    let scaled_height = 16u32.div_ceil(scale.denominator());
+    let scaled_stride = scaled_width as usize * PixelFormat::Rgb8.bytes_per_pixel();
+    let mut expected_scaled = vec![0u8; scaled_stride * scaled_height as usize];
+    decoder
+        .decode_scaled_into(
+            &mut expected_scaled,
+            scaled_stride,
+            PixelFormat::Rgb8,
+            scale,
+        )
+        .expect("reference scaled decode");
+    let mut scaled = vec![0u8; expected_scaled.len()];
+    decode_tile_scaled_into_in_context(
+        &jpeg,
+        &mut context,
+        &mut pool,
+        TileDecodeOutput {
+            out: &mut scaled,
+            stride: scaled_stride,
+            fmt: PixelFormat::Rgb8,
+        },
+        scale,
+    )
+    .expect("leased scaled decode");
+    assert_eq!(scaled, expected_scaled);
+
+    let output_roi = scaled_rect(roi, scale);
+    let region_scaled_stride = output_roi.w as usize * PixelFormat::Rgb8.bytes_per_pixel();
+    let mut expected_region_scaled = vec![0u8; region_scaled_stride * output_roi.h as usize];
+    decoder
+        .decode_region_scaled_into(
+            &mut expected_region_scaled,
+            region_scaled_stride,
+            PixelFormat::Rgb8,
+            roi,
+            scale,
+        )
+        .expect("reference region-scaled decode");
+    let mut region_scaled = vec![0u8; expected_region_scaled.len()];
+    decode_tile_region_scaled_into_in_context(
+        &jpeg,
+        &mut context,
+        &mut pool,
+        TileDecodeOutput {
+            out: &mut region_scaled,
+            stride: region_scaled_stride,
+            fmt: PixelFormat::Rgb8,
+        },
+        roi,
+        scale,
+    )
+    .expect("leased region-scaled decode");
+    assert_eq!(region_scaled, expected_region_scaled);
+    assert_eq!(context.decode_plan_clone_count(), clones_after_miss);
+}
+
+#[test]
+fn cached_plan_is_restored_after_context_decode_error() {
+    let jpeg = wide_nonrestart_420_jpeg();
+    let stride = 96 * PixelFormat::Rgb8.bytes_per_pixel();
+    let mut output = vec![0u8; stride * 16];
+    let mut context = DecoderContext::new();
+    let mut pool = ScratchPool::new();
+    decode_tile_into_in_context(
+        &jpeg,
+        &mut context,
+        &mut pool,
+        &mut output,
+        stride,
+        PixelFormat::Rgb8,
+    )
+    .expect("warm context plan");
+    let clones = context.decode_plan_clone_count();
+    let occupied = context.cache_stats().occupied_slots;
+    let retained = context.retained_allocation_bytes();
+
+    let error = decode_tile_into_in_context(
+        &jpeg,
+        &mut context,
+        &mut pool,
+        &mut [],
+        stride,
+        PixelFormat::Rgb8,
+    )
+    .expect_err("short output must fail");
+    assert!(matches!(error, JpegError::OutputBufferTooSmall { .. }));
+    assert_eq!(context.decode_plan_clone_count(), clones);
+    assert_eq!(context.cache_stats().occupied_slots, occupied);
+    assert_eq!(context.retained_allocation_bytes(), retained);
+
+    decode_tile_into_in_context(
+        &jpeg,
+        &mut context,
+        &mut pool,
+        &mut output,
+        stride,
+        PixelFormat::Rgb8,
+    )
+    .expect("restored cache plan remains reusable");
+    assert_eq!(context.decode_plan_clone_count(), clones);
+}
+
+#[test]
+fn warmed_batch_planning_reuses_the_cached_plan_without_cloning() {
+    let jpeg = wide_nonrestart_420_jpeg();
+    let mut context = DecoderContext::new();
+    let first = planned_jpeg_tile_decode_live_bytes(
+        &jpeg,
+        &mut context,
+        PixelFormat::Rgb8,
+        None,
+        Downscale::None,
+        DecodeOptions::default(),
+    )
+    .expect("first batch plan");
+    let clones = context.decode_plan_clone_count();
+    let misses = context.cache_stats().misses;
+    let second = planned_jpeg_tile_decode_live_bytes(
+        &jpeg,
+        &mut context,
+        PixelFormat::Rgb8,
+        None,
+        Downscale::None,
+        DecodeOptions::default(),
+    )
+    .expect("warmed batch plan");
+
+    assert_eq!(second, first);
+    assert_eq!(context.decode_plan_clone_count(), clones);
+    assert_eq!(context.cache_stats().misses, misses);
+}
+
+#[test]
+fn panicking_context_operation_safely_evicts_the_leased_plan() {
+    let jpeg = wide_nonrestart_420_jpeg();
+    let stride = 96 * PixelFormat::Rgb8.bytes_per_pixel();
+    let mut output = vec![0u8; stride * 16];
+    let mut context = DecoderContext::new();
+    let mut pool = ScratchPool::new();
+    decode_tile_into_in_context(
+        &jpeg,
+        &mut context,
+        &mut pool,
+        &mut output,
+        stride,
+        PixelFormat::Rgb8,
+    )
+    .expect("warm context plan");
+    let retained = context.retained_allocation_bytes();
+    let evictions = context.cache_stats().evictions;
+
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let view = JpegView::parse(&jpeg).expect("parse panic fixture");
+        let _: Result<(), JpegError> = Decoder::with_view_in_context(view, &mut context, |_| {
+            panic!("intentional leased operation panic")
+        });
+    }));
+    assert!(panic.is_err());
+    assert!(context.retained_allocation_bytes() < retained);
+    assert_eq!(context.cache_stats().evictions, evictions + 1);
+
+    decode_tile_into_in_context(
+        &jpeg,
+        &mut context,
+        &mut pool,
+        &mut output,
+        stride,
+        PixelFormat::Rgb8,
+    )
+    .expect("context remains valid after panic eviction");
+}
+
+#[test]
+fn cached_plan_lease_preflight_preserves_cache_at_live_budget_boundary() {
+    let jpeg = wide_nonrestart_420_jpeg();
+    let mut context = DecoderContext::new();
+    Decoder::from_view_in_context(
+        JpegView::parse(&jpeg).expect("parse cache warm fixture"),
+        &mut context,
+    )
+    .expect("warm cached plan");
+    let view = JpegView::parse(&jpeg).expect("parse preflight fixture");
+    let scan_offset = view.header.sos_offset.expect("baseline fixture SOS");
+    let prefix = &jpeg[..scan_offset];
+    let parsed_bytes = view
+        .header
+        .retained_allocation_bytes()
+        .expect("parsed header bytes");
+    let exact_external = j2k_core::DEFAULT_MAX_HOST_ALLOCATION_BYTES
+        .checked_sub(parsed_bytes)
+        .and_then(|remaining| remaining.checked_sub(context.retained_allocation_bytes()))
+        .expect("fixture leaves external live budget");
+    let retained = context.retained_allocation_bytes();
+    let occupied = context.cache_stats().occupied_slots;
+    let plan = context
+        .cached_decode_plan(prefix)
+        .expect("warmed exact-key plan");
+
+    Decoder::validate_cached_plan_lease(&view.header, &context, plan, exact_external)
+        .expect("exact parsed plus context live boundary");
+    assert!(matches!(
+        Decoder::validate_cached_plan_lease(&view.header, &context, plan, exact_external + 1),
+        Err(JpegError::MemoryCapExceeded { .. })
+    ));
+    assert_eq!(context.retained_allocation_bytes(), retained);
+    assert_eq!(context.cache_stats().occupied_slots, occupied);
+    assert_eq!(
+        context
+            .cached_decode_plan(prefix)
+            .expect("rejected preflight preserves cached plan")
+            .scan_offset,
+        plan.scan_offset
+    );
 }
 
 #[test]

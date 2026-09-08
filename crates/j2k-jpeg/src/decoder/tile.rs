@@ -85,8 +85,10 @@ pub fn decode_tile_into_in_context_with_options(
     fmt: PixelFormat,
     options: DecodeOptions,
 ) -> Result<DecodeOutcome, JpegError> {
-    let dec = Decoder::from_view_in_context(JpegView::parse_with_options(bytes, options)?, ctx)?;
-    dec.decode_into_with_scratch(pool, out, stride, fmt)
+    let view = JpegView::parse_with_options(bytes, options)?;
+    Decoder::with_view_in_context(view, ctx, |decoder| {
+        decoder.decode_into_with_scratch(pool, out, stride, fmt)
+    })
 }
 
 pub(crate) fn decode_prepared_jpeg_tile_rgb8_in_context(
@@ -99,12 +101,13 @@ pub(crate) fn decode_prepared_jpeg_tile_rgb8_in_context(
 ) -> Result<DecodedTile, JpegError> {
     let view = JpegView::parse_with_options(input.as_bytes(), options)?;
     let dimensions = view.info().dimensions;
-    let dec = Decoder::from_view_in_context(view, ctx)?;
-    let outcome = dec.decode_into_with_scratch(pool, out, stride, PixelFormat::Rgb8)?;
-    Ok(DecodedTile {
-        dimensions,
-        decoded: outcome.decoded,
-        warnings: outcome.warnings,
+    Decoder::with_view_in_context(view, ctx, |decoder| {
+        let outcome = decoder.decode_into_with_scratch(pool, out, stride, PixelFormat::Rgb8)?;
+        Ok(DecodedTile {
+            dimensions,
+            decoded: outcome.decoded,
+            warnings: outcome.warnings,
+        })
     })
 }
 
@@ -126,51 +129,52 @@ pub(crate) fn planned_jpeg_tile_decode_live_bytes(
     scale: Downscale,
     options: DecodeOptions,
 ) -> Result<PlannedJpegTileDecode, JpegError> {
-    let decoder =
-        Decoder::from_view_in_context(JpegView::parse_with_options(input, options)?, ctx)?;
-    let source_rect = roi.unwrap_or_else(|| Rect::full(decoder.info.dimensions));
-    if !source_rect.is_within(decoder.info.dimensions) {
-        return Err(JpegError::RectOutOfBounds {
-            rect: source_rect,
-            width: decoder.info.dimensions.0,
-            height: decoder.info.dimensions.1,
-        });
-    }
+    let view = JpegView::parse_with_options(input, options)?;
+    Decoder::with_view_in_context(view, ctx, |decoder| {
+        let source_rect = roi.unwrap_or_else(|| Rect::full(decoder.info.dimensions));
+        if !source_rect.is_within(decoder.info.dimensions) {
+            return Err(JpegError::RectOutOfBounds {
+                rect: source_rect,
+                width: decoder.info.dimensions.0,
+                height: decoder.info.dimensions.1,
+            });
+        }
 
-    let output_format = output_format_from_parts(decoder.info.sof_kind, fmt, scale)?;
-    let downscale = output_format.downscale();
-    let output_rect = if source_rect == Rect::full(decoder.info.dimensions) {
-        Rect::full(scaled_dimensions(decoder.info.dimensions, downscale))
-    } else {
-        scaled_rect_covering(source_rect, downscale)?
-    };
-    let additional_scratch = additional_decode_scratch_bytes(
-        decoder.info.sof_kind,
-        decoder.info.dimensions,
-        output_format,
-        source_rect,
-        output_rect,
-        downscale,
-    )?;
-    let workspace_cap = decoder.decode_workspace_cap()?;
-    let base_scratch = decoder.decode_scratch_bytes(workspace_cap)?;
-    let scratch = checked_add_allocation_bytes(base_scratch, additional_scratch)?;
-    let checkpoints = planned_roi_checkpoint_bytes(&decoder, source_rect)?;
-    let transient = checked_add_allocation_bytes(scratch, checkpoints)?;
-    let retained = DEFAULT_MAX_DECODE_BYTES.checked_sub(workspace_cap).ok_or(
-        JpegError::MemoryCapExceeded {
-            requested: usize::MAX,
-            cap: DEFAULT_MAX_DECODE_BYTES,
-        },
-    )?;
-    let worker_live_bytes = checked_add_allocation_bytes(retained, transient)?;
-    // The merged public result can retain all parsed warnings plus the bounded
-    // scan-warning tail after the decoder itself has been dropped. Batch
-    // planning counts that payload once per completed tile.
-    let retained_result_bytes = merged_warning_capacity_bytes(decoder.warnings.capacity())?;
-    Ok(PlannedJpegTileDecode {
-        worker_live_bytes,
-        retained_result_bytes,
+        let output_format = output_format_from_parts(decoder.info.sof_kind, fmt, scale)?;
+        let downscale = output_format.downscale();
+        let output_rect = if source_rect == Rect::full(decoder.info.dimensions) {
+            Rect::full(scaled_dimensions(decoder.info.dimensions, downscale))
+        } else {
+            scaled_rect_covering(source_rect, downscale)?
+        };
+        let additional_scratch = additional_decode_scratch_bytes(
+            decoder.info.sof_kind,
+            decoder.info.dimensions,
+            output_format,
+            source_rect,
+            output_rect,
+            downscale,
+        )?;
+        let workspace_cap = decoder.decode_workspace_cap()?;
+        let base_scratch = decoder.decode_scratch_bytes(workspace_cap)?;
+        let scratch = checked_add_allocation_bytes(base_scratch, additional_scratch)?;
+        let checkpoints = planned_roi_checkpoint_bytes(decoder, source_rect)?;
+        let transient = checked_add_allocation_bytes(scratch, checkpoints)?;
+        let retained = DEFAULT_MAX_DECODE_BYTES.checked_sub(workspace_cap).ok_or(
+            JpegError::MemoryCapExceeded {
+                requested: usize::MAX,
+                cap: DEFAULT_MAX_DECODE_BYTES,
+            },
+        )?;
+        let worker_live_bytes = checked_add_allocation_bytes(retained, transient)?;
+        // The merged public result can retain all parsed warnings plus the bounded
+        // scan-warning tail after the decoder itself has been dropped. Batch
+        // planning counts that payload once per completed tile.
+        let retained_result_bytes = merged_warning_capacity_bytes(decoder.warnings.capacity())?;
+        Ok(PlannedJpegTileDecode {
+            worker_live_bytes,
+            retained_result_bytes,
+        })
     })
 }
 
@@ -380,8 +384,10 @@ pub fn decode_tile_region_into_in_context_with_options(
     options: DecodeOptions,
 ) -> Result<DecodeOutcome, JpegError> {
     let TileDecodeOutput { out, stride, fmt } = output;
-    let dec = Decoder::from_view_in_context(JpegView::parse_with_options(bytes, options)?, ctx)?;
-    dec.decode_region_into_with_scratch(pool, out, stride, fmt, roi)
+    let view = JpegView::parse_with_options(bytes, options)?;
+    Decoder::with_view_in_context(view, ctx, |decoder| {
+        decoder.decode_region_into_with_scratch(pool, out, stride, fmt, roi)
+    })
 }
 
 /// One-shot parse-plus-scaled-decode of an independent JPEG tile into the
@@ -418,8 +424,10 @@ pub fn decode_tile_scaled_into_in_context_with_options(
     options: DecodeOptions,
 ) -> Result<DecodeOutcome, JpegError> {
     let TileDecodeOutput { out, stride, fmt } = output;
-    let dec = Decoder::from_view_in_context(JpegView::parse_with_options(bytes, options)?, ctx)?;
-    dec.decode_scaled_into_with_scratch(pool, out, stride, fmt, scale)
+    let view = JpegView::parse_with_options(bytes, options)?;
+    Decoder::with_view_in_context(view, ctx, |decoder| {
+        decoder.decode_scaled_into_with_scratch(pool, out, stride, fmt, scale)
+    })
 }
 
 /// One-shot parse-plus-region-scaled-decode of an independent JPEG tile into
@@ -459,8 +467,10 @@ pub fn decode_tile_region_scaled_into_in_context_with_options(
     options: DecodeOptions,
 ) -> Result<DecodeOutcome, JpegError> {
     let TileDecodeOutput { out, stride, fmt } = output;
-    let dec = Decoder::from_view_in_context(JpegView::parse_with_options(bytes, options)?, ctx)?;
-    dec.decode_region_scaled_into_with_scratch(pool, out, stride, fmt, roi, scale)
+    let view = JpegView::parse_with_options(bytes, options)?;
+    Decoder::with_view_in_context(view, ctx, |decoder| {
+        decoder.decode_region_scaled_into_with_scratch(pool, out, stride, fmt, roi, scale)
+    })
 }
 
 #[cfg(test)]

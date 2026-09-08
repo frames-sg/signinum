@@ -186,9 +186,12 @@ impl TileBatchDecode for JpegCodec {
         stride: usize,
         fmt: PixelFormat,
     ) -> Result<CoreDecodeOutcome<Self::Warning>, Self::Error> {
-        let dec = Decoder::from_view_in_context(JpegView::parse(input)?, ctx)?;
-        dec.decode_into_with_scratch(pool, out, stride, fmt)
-            .map(core_outcome)
+        let view = JpegView::parse(input)?;
+        Decoder::with_view_in_context(view, ctx, |decoder| {
+            decoder
+                .decode_into_with_scratch(pool, out, stride, fmt)
+                .map(core_outcome)
+        })
     }
 
     fn decode_tile_region(
@@ -200,9 +203,12 @@ impl TileBatchDecode for JpegCodec {
         fmt: PixelFormat,
         roi: j2k_core::Rect,
     ) -> Result<CoreDecodeOutcome<Self::Warning>, Self::Error> {
-        let dec = Decoder::from_view_in_context(JpegView::parse(input)?, ctx)?;
-        dec.decode_region_into_with_scratch(pool, out, stride, fmt, roi.into())
-            .map(core_outcome)
+        let view = JpegView::parse(input)?;
+        Decoder::with_view_in_context(view, ctx, |decoder| {
+            decoder
+                .decode_region_into_with_scratch(pool, out, stride, fmt, roi.into())
+                .map(core_outcome)
+        })
     }
 
     fn decode_tile_scaled(
@@ -214,9 +220,12 @@ impl TileBatchDecode for JpegCodec {
         fmt: PixelFormat,
         scale: Downscale,
     ) -> Result<CoreDecodeOutcome<Self::Warning>, Self::Error> {
-        let dec = Decoder::from_view_in_context(JpegView::parse(input)?, ctx)?;
-        dec.decode_scaled_into_with_scratch(pool, out, stride, fmt, scale)
-            .map(core_outcome)
+        let view = JpegView::parse(input)?;
+        Decoder::with_view_in_context(view, ctx, |decoder| {
+            decoder
+                .decode_scaled_into_with_scratch(pool, out, stride, fmt, scale)
+                .map(core_outcome)
+        })
     }
 
     fn decode_tile_region_scaled(
@@ -232,9 +241,12 @@ impl TileBatchDecode for JpegCodec {
             roi,
             scale,
         } = job;
-        let dec = Decoder::from_view_in_context(JpegView::parse(input)?, ctx)?;
-        dec.decode_region_scaled_into_with_scratch(pool, out, stride, fmt, roi.into(), scale)
-            .map(core_outcome)
+        let view = JpegView::parse(input)?;
+        Decoder::with_view_in_context(view, ctx, |decoder| {
+            decoder
+                .decode_region_scaled_into_with_scratch(pool, out, stride, fmt, roi.into(), scale)
+                .map(core_outcome)
+        })
     }
 }
 

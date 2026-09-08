@@ -9,7 +9,10 @@ use super::{
 use criterion::{Criterion, Throughput};
 use j2k_core::PixelFormat;
 use j2k_jpeg::DecodeRequest;
-use j2k_jpeg_metal::{Decoder, MetalBackendSession};
+use j2k_jpeg_metal::{
+    Codec, Decoder, MetalBackendSession, MetalBatchOutputBuffer, MetalBufferBatchTarget,
+    Rgb8MetalBatchOp, Rgb8MetalBatchRequest, Rgb8MetalBatchSource,
+};
 use jpeg_encoder::{ColorType, Encoder, SamplingFactor};
 use std::hint::black_box;
 
@@ -60,4 +63,44 @@ pub(super) fn bench(c: &mut Criterion) {
         }
     }
     group.finish();
+    bench_shared_plan_batch(c);
+}
+
+// A repeated-plan cache/control workload. Distinct-owner batches are separate:
+// 64 independently retained decoders exceed the existing owner budget.
+fn bench_shared_plan_batch(c: &mut Criterion) {
+    let bytes = include_bytes!("../../fixtures/jpeg/baseline_420_16x16.jpg");
+    let expected = native_request_pixels(bytes, DecodeRequest::full(PixelFormat::Rgb8));
+    let decoder = Decoder::new(bytes).expect("shared retained decoder");
+    let decoders = [&decoder; 64];
+    let session = MetalBackendSession::system_default().expect("shared-plan Metal session");
+    let output =
+        MetalBatchOutputBuffer::new_rgb8_tiles(&session, (16, 16), 64).expect("shared-plan output");
+    let decode = || {
+        Codec::decode_rgb8_batch_into_buffer_with_session(
+            Rgb8MetalBatchRequest {
+                source: Rgb8MetalBatchSource::Decoders(&decoders),
+                op: Rgb8MetalBatchOp::Full,
+            },
+            MetalBufferBatchTarget::Reusable(&output),
+            &session,
+        )
+        .expect("shared-plan batch decode")
+    };
+    let probe = decode();
+    assert_eq!(probe.len(), 64);
+    for surface in probe {
+        assert_metal_surface_pixels(&surface.expect("shared-plan item"), &expected);
+    }
+    c.bench_function(
+        "jpeg_metal_shared_plan_batch/repeated64/16x16/prepared/resident_rgb8",
+        |b| {
+            b.iter(|| {
+                let surfaces = decode();
+                for surface in surfaces {
+                    black_box(surface.expect("shared-plan timed item"));
+                }
+            });
+        },
+    );
 }

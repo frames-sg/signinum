@@ -105,6 +105,7 @@ fn j2k_metal_benches_directory_matches_the_audited_targets() {
             manifest_dir().join("benches/auto_routing/runner.rs"),
             manifest_dir().join("benches/auto_routing.rs"),
             manifest_dir().join("benches/decode_stages/geometry.rs"),
+            manifest_dir().join("benches/decode_stages/mixed_groups.rs"),
             manifest_dir().join("benches/decode_stages.rs"),
             manifest_dir().join("benches/htj2k_candidates/case.rs"),
             manifest_dir().join("benches/htj2k_candidates/runner.rs"),

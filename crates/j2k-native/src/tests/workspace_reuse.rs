@@ -301,7 +301,7 @@ fn ht_task_workspaces_match_serial_and_reuse_capacity() {
         if reversible {
             assert_eq!(expected.data, super::gradient_pixels(257, 263, 1));
         }
-        for threads in [1, 2, 4] {
+        for threads in [2, 4] {
             let pool = rayon::ThreadPoolBuilder::new()
                 .num_threads(threads)
                 .build()
@@ -581,4 +581,121 @@ fn scheduling_fixture_route_report() {
             });
         }
     }
+}
+
+#[cfg(feature = "parallel")]
+#[test]
+fn ht_auto_single_worker_matches_serial_without_parallel_staging() {
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .expect("single worker pool");
+    let parallel_pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(2)
+        .build()
+        .expect("parallel warmup pool");
+    for reversible in [false, true] {
+        let bytes = parallel_gray_fixture(257, 263, true, reversible);
+        let image = Image::new(&bytes, &DecodeSettings::default()).expect("HT image");
+        let mut serial = DecoderContext::default();
+        serial.set_cpu_decode_parallelism(crate::CpuDecodeParallelism::Serial);
+        let expected = image
+            .decode_with_context(&mut serial)
+            .expect("serial oracle");
+        let mut context = DecoderContext::default();
+        pool.install(|| {
+            for _ in 0..2 {
+                let actual = image
+                    .decode_with_context(&mut context)
+                    .expect("one-worker Auto decode");
+                assert_eq!(actual.data, expected.data);
+                assert_eq!((actual.width, actual.height), (257, 263));
+                assert_eq!(parallel_workspace_measurements(&context), (0, 0, 0, 0));
+                let counters = context.tile_decode_context.debug_counters;
+                assert!(counters.decoded_code_blocks > 0);
+                assert_eq!(counters.parallel_coefficients.allocations, 0);
+                assert_eq!(counters.parallel_coefficients.scatter_bytes, 0);
+            }
+        });
+        parallel_pool.install(|| {
+            image
+                .decode_with_context(&mut context)
+                .expect("populate parallel bank");
+        });
+        let retained = parallel_workspace_measurements(&context);
+        assert!(retained.0 > 0 && retained.2 > 0);
+        pool.install(|| {
+            let actual = image
+                .decode_with_context(&mut context)
+                .expect("one worker after parallel reuse");
+            assert_eq!(actual.data, expected.data);
+            let current = parallel_workspace_measurements(&context);
+            assert_eq!((current.0, current.1), (retained.0, retained.1));
+            assert_eq!((current.2, current.3), (0, 0));
+            let coefficients = context
+                .tile_decode_context
+                .debug_counters
+                .parallel_coefficients;
+            assert_eq!(
+                (coefficients.allocations, coefficients.scatter_bytes),
+                (0, 0)
+            );
+        });
+    }
+}
+
+#[cfg(feature = "parallel")]
+#[test]
+fn ht_single_worker_preserves_entropy_error_and_context_recovery() {
+    let valid_bytes = super::fixture_ht_multi_block();
+    let mut malformed_bytes = valid_bytes.clone();
+    assert!(malformed_bytes.ends_with(&[0xff, 0xd9]));
+    // This fixture has four cleanup-only blocks in one packet. Its last
+    // cleanup suffix precedes EOC; 0xff makes Scup exceed the maximum 4079.
+    let suffix = malformed_bytes.len() - 3;
+    malformed_bytes[suffix] = 0xff;
+    let malformed =
+        Image::new(&malformed_bytes, &DecodeSettings::default()).expect("header still parses");
+    let valid = Image::new(&valid_bytes, &DecodeSettings::default()).expect("valid image");
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .expect("single worker pool");
+    pool.install(|| {
+        for policy in [
+            crate::CpuDecodeParallelism::Auto,
+            crate::CpuDecodeParallelism::Serial,
+        ] {
+            let mut context = DecoderContext::default();
+            context.set_cpu_decode_parallelism(policy);
+            let error = malformed
+                .decode_with_context(&mut context)
+                .err()
+                .expect("malformed entropy must fail");
+            assert_eq!(
+                error,
+                crate::DecodeError::Decoding(crate::DecodingError::CodeBlockDecodeFailure)
+            );
+            assert!(
+                context
+                    .tile_decode_context
+                    .debug_counters
+                    .decoded_code_blocks
+                    > 0
+            );
+            assert_eq!(parallel_workspace_measurements(&context), (0, 0, 0, 0));
+            let coefficients = context
+                .tile_decode_context
+                .debug_counters
+                .parallel_coefficients;
+            assert_eq!(
+                (coefficients.allocations, coefficients.scatter_bytes),
+                (0, 0)
+            );
+            let recovered = valid
+                .decode_with_context(&mut context)
+                .expect("reuse after entropy error");
+            assert_eq!(recovered.data, (0u8..64).collect::<Vec<_>>());
+        }
+    });
 }

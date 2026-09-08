@@ -201,5 +201,16 @@ pub(crate) fn should_decode_ht_sub_band_in_parallel(
     parallelism: CpuDecodeParallelism,
     code_block_count: usize,
 ) -> bool {
-    cfg!(feature = "parallel") && parallelism == CpuDecodeParallelism::Auto && code_block_count >= 4
+    parallelism == CpuDecodeParallelism::Auto && code_block_count >= 4 && {
+        // One worker cannot overlap HT entropy jobs; keep its existing serial
+        // workspace instead of collecting and scattering parallel staging.
+        #[cfg(feature = "parallel")]
+        {
+            rayon::current_num_threads() > 1
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            false
+        }
+    }
 }

@@ -301,3 +301,58 @@ fn large_irreversible_groups_bound_the_working_set_without_changing_pixels() {
         );
     }
 }
+
+#[test]
+fn synchronous_distinct_groups_bound_pending_work_and_preserve_pixels() {
+    if !j2k_test_support::metal_runtime_gate(module_path!()) {
+        return;
+    }
+    let options = BatchDecodeOptions::default();
+    let inputs = [(48, 40), (32, 24), (56, 48), (40, 32)]
+        .into_iter()
+        .enumerate()
+        .map(|(index, dimensions)| {
+            EncodedImage::full(distinct_j2k(
+                FixtureRoute::Ht,
+                FixtureColor::Gray,
+                u8::try_from(index).expect("small distinct batch"),
+                dimensions,
+            ))
+        })
+        .collect::<Vec<_>>();
+    let mut cpu = CpuBatchDecoder::new(options);
+    let expected = cpu.decode(inputs.clone()).expect("CPU mixed group oracle");
+    assert!(expected.errors().is_empty());
+    let mut decoder = MetalBatchDecoder::system_default_with_options(options)
+        .expect("persistent mixed group decoder");
+    let prepared = decoder.prepare(inputs).expect("prepare mixed groups");
+    assert!(prepared.errors().is_empty());
+    assert_eq!(prepared.groups().len(), 4);
+    crate::engine::reset_pending_direct_destinations_for_test();
+    let actual = decoder
+        .decode_prepared(&prepared)
+        .expect("decode mixed groups");
+    assert!(actual.errors().is_empty());
+    assert!(actual.group_errors().is_empty());
+    assert_eq!(actual.groups().len(), expected.groups().len());
+    for (actual, expected) in actual.groups().iter().zip(expected.groups()) {
+        assert_eq!(actual.source_indices(), expected.source_indices());
+        let CpuBatchSamples::U8(expected) = expected.samples() else {
+            panic!("8-bit grayscale oracle must be U8")
+        };
+        assert_eq!(actual.surfaces().len(), 1);
+        assert_eq!(
+            actual.surfaces()[0]
+                .as_bytes()
+                .expect("completed pixels")
+                .as_ref(),
+            expected.as_slice()
+        );
+    }
+    let (pending, peak) = crate::engine::pending_direct_destinations_for_test();
+    assert_eq!(pending, 0, "completed decode must retire all pending work");
+    assert!(
+        peak <= 2,
+        "synchronous decode retained {peak} pending groups; expected at most two"
+    );
+}

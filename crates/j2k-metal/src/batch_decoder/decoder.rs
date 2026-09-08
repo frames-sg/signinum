@@ -145,13 +145,15 @@ impl MetalBatchDecoder {
     }
 
     /// Decode a reusable shared codec batch without consuming its inputs or plans.
+    /// On Metal, preparation of the next group overlaps the previous submission;
+    /// at most two committed groups retain scratch before completion is checked.
     pub fn decode_prepared(
         &mut self,
         prepared: &PreparedBatch,
     ) -> Result<MetalBatchDecodeResult, Error> {
         #[cfg(target_os = "macos")]
         {
-            self.submit_prepared(prepared)?.wait()
+            self.decode_prepared_bounded(prepared)
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -184,6 +186,72 @@ impl MetalBatchDecoder {
                 group_errors,
             })
         }
+    }
+
+    /// Complete a batch with at most two committed groups retaining scratch.
+    #[cfg(target_os = "macos")]
+    fn decode_prepared_bounded(
+        &mut self,
+        prepared: &PreparedBatch,
+    ) -> Result<MetalBatchDecodeResult, Error> {
+        let mut budget = crate::batch_allocation::BatchMetadataBudget::new(
+            "J2K synchronous prepared Metal batch",
+        );
+        let mut result = MetalBatchDecodeResult {
+            groups: budget.try_vec(
+                prepared.groups().len(),
+                "J2K synchronous prepared Metal output groups",
+            )?,
+            errors: budget.try_vec(
+                prepared.errors().len(),
+                "J2K synchronous prepared indexed errors",
+            )?,
+            group_errors: budget.try_vec(
+                prepared.groups().len(),
+                "J2K synchronous prepared group errors",
+            )?,
+        };
+        result.errors.extend_from_slice(prepared.errors());
+        let retire = |pending: super::SubmittedMetalResidentGroup,
+                      result: &mut MetalBatchDecodeResult| {
+            match pending.wait() {
+                Ok(group) => result.groups.push(group),
+                Err((_, source)) if source.session_is_unusable() => return Err(*source),
+                Err((source_indices, source)) => {
+                    result.group_errors.push(MetalBatchGroupError {
+                        source_indices,
+                        source,
+                    });
+                }
+            }
+            Ok(())
+        };
+        let mut pending = None;
+        let mut submission_errors = 0;
+        for group in prepared.groups() {
+            // Prepare and submit N+1 while N retains its command and scratch.
+            // Retiring N before the next iteration bounds live work at two.
+            let next = match self.submit_prepared_resident_group(group, prepared.options()) {
+                Ok(next) => next,
+                Err(source) if source.session_is_unusable() => return Err(source),
+                Err(source) => {
+                    // Match submit_prepared().wait(): submission failures precede
+                    // completion failures, with each category in group order.
+                    result
+                        .group_errors
+                        .insert(submission_errors, MetalBatchGroupError::new(group, source));
+                    submission_errors += 1;
+                    continue;
+                }
+            };
+            if let Some(previous) = pending.replace(next) {
+                retire(previous, &mut result)?;
+            }
+        }
+        if let Some(pending) = pending {
+            retire(pending, &mut result)?;
+        }
+        Ok(result)
     }
 
     /// Commit every representable shared prepared group to codec-owned Metal

@@ -292,3 +292,6 @@ fn compact_parity_axis_enumerates_original_active_coordinates() {
         assert_eq!(last, Some(expected_last));
     }
 }
+
+#[path = "interleave_tests.rs"]
+mod interleave_tests;

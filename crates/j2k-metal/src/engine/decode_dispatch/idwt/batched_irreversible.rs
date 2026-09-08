@@ -2,7 +2,9 @@
 
 use crate::metal_types::prelude::*;
 
-use super::irreversible::dispatch_irreversible97_stages;
+use super::irreversible::{
+    dispatch_irreversible97_horizontal_scale, dispatch_irreversible97_stages_after_horizontal_scale,
+};
 use super::{
     dispatch_3d_pipeline, label_compute_encoder, new_compute_command_encoder, CommandBufferRef,
     ComputeCommandEncoderRef, Error, J2kIdwtSingleDecompositionParams,
@@ -23,6 +25,24 @@ pub(in crate::engine) fn dispatch_irreversible97_repeated_buffers_in_command_buf
 pub(in crate::engine) fn dispatch_irreversible97_repeated_buffers_in_encoder_with_offsets(
     encoder: &ComputeCommandEncoderRef,
     dispatch: RepeatedIdwtDispatch<'_>,
+) {
+    let high_pass = j2k_codec_math::dwt::IDWT97_OPENJPEG_TWO_INV_KAPPA_F32 * 0.5;
+    dispatch_irreversible97_repeated_interleave_horizontal_scale(encoder, dispatch, high_pass);
+    dispatch_irreversible97_stages_after_horizontal_scale(
+        encoder,
+        dispatch.kernels,
+        dispatch.decoded,
+        0,
+        single_params(dispatch.params),
+        high_pass,
+        dispatch.params.batch_count,
+    );
+}
+
+pub(super) fn dispatch_irreversible97_repeated_interleave_horizontal_scale(
+    encoder: &ComputeCommandEncoderRef,
+    dispatch: RepeatedIdwtDispatch<'_>,
+    high_pass: f32,
 ) {
     let RepeatedIdwtDispatch {
         kernels,
@@ -46,17 +66,23 @@ pub(in crate::engine) fn dispatch_irreversible97_repeated_buffers_in_encoder_wit
         &kernels.idwt_interleave_batched,
         (params.width, params.height, params.batch_count),
     );
+    #[cfg(test)]
+    crate::engine::test_counters::record_idwt97_logical_dispatch((
+        params.width,
+        params.height,
+        params.batch_count,
+    ));
     encoder.memory_barrier_with_resources(&[decoded]);
 
     // The stacked-plan preflight guarantees identical geometry and origin
     // parity. Only the plane offset varies along the third grid dimension.
-    dispatch_irreversible97_stages(
+    dispatch_irreversible97_horizontal_scale(
         encoder,
         kernels,
         decoded,
         0,
         single_params(params),
-        j2k_codec_math::dwt::IDWT97_OPENJPEG_TWO_INV_KAPPA_F32 * 0.5,
+        high_pass,
         params.batch_count,
     );
 }

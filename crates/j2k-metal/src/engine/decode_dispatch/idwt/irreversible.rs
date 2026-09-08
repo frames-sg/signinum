@@ -150,6 +150,23 @@ fn dispatch_irreversible97_single_decomposition_buffers_in_encoder_with_high_pas
     dispatch: SingleIdwtDispatch<'_>,
     high_pass: f32,
 ) {
+    dispatch_irreversible97_interleave_horizontal_scale(encoder, dispatch, high_pass);
+    dispatch_irreversible97_stages_after_horizontal_scale(
+        encoder,
+        dispatch.kernels,
+        dispatch.decoded,
+        dispatch.decoded_offset,
+        dispatch.params,
+        high_pass,
+        1,
+    );
+}
+
+pub(super) fn dispatch_irreversible97_interleave_horizontal_scale(
+    encoder: &ComputeCommandEncoderRef,
+    dispatch: SingleIdwtDispatch<'_>,
+    high_pass: f32,
+) {
     let SingleIdwtDispatch {
         kernels,
         sub_bands,
@@ -179,9 +196,11 @@ fn dispatch_irreversible97_single_decomposition_buffers_in_encoder_with_high_pas
         &kernels.idwt_interleave,
         (params.width, params.height),
     );
+    #[cfg(test)]
+    crate::engine::test_counters::record_idwt97_logical_dispatch((params.width, params.height, 1));
     encoder.memory_barrier_with_resources(&[decoded]);
 
-    dispatch_irreversible97_stages(
+    dispatch_irreversible97_horizontal_scale(
         encoder,
         kernels,
         decoded,
@@ -192,6 +211,7 @@ fn dispatch_irreversible97_single_decomposition_buffers_in_encoder_with_high_pas
     );
 }
 
+#[cfg(test)]
 pub(super) fn dispatch_irreversible97_stages(
     encoder: &ComputeCommandEncoderRef,
     kernels: &crate::engine::runtime::DecodeKernels,
@@ -201,9 +221,35 @@ pub(super) fn dispatch_irreversible97_stages(
     high_pass: f32,
     batch_count: u32,
 ) {
-    #[cfg(test)]
-    crate::engine::test_counters::record_idwt97_stage_sequence();
+    dispatch_irreversible97_horizontal_scale(
+        encoder,
+        kernels,
+        decoded,
+        decoded_offset,
+        params,
+        high_pass,
+        batch_count,
+    );
+    dispatch_irreversible97_stages_after_horizontal_scale(
+        encoder,
+        kernels,
+        decoded,
+        decoded_offset,
+        params,
+        high_pass,
+        batch_count,
+    );
+}
 
+pub(super) fn dispatch_irreversible97_horizontal_scale(
+    encoder: &ComputeCommandEncoderRef,
+    kernels: &crate::engine::runtime::DecodeKernels,
+    decoded: &Buffer,
+    decoded_offset: usize,
+    params: J2kIdwtSingleDecompositionParams,
+    high_pass: f32,
+    batch_count: u32,
+) {
     encoder.setComputePipelineState(&kernels.idwt_irreversible97_horizontal_scale);
     encoder.set_buffer(0, Some(decoded), decoded_offset as u64);
     encoder.set_bytes::<J2kIdwtSingleDecompositionParams>(1, &params);
@@ -217,6 +263,19 @@ pub(super) fn dispatch_irreversible97_stages(
         horizontal_scale_grid,
     );
     encoder.memory_barrier_with_resources(&[decoded]);
+}
+
+pub(super) fn dispatch_irreversible97_stages_after_horizontal_scale(
+    encoder: &ComputeCommandEncoderRef,
+    kernels: &crate::engine::runtime::DecodeKernels,
+    decoded: &Buffer,
+    decoded_offset: usize,
+    params: J2kIdwtSingleDecompositionParams,
+    high_pass: f32,
+    batch_count: u32,
+) {
+    #[cfg(test)]
+    crate::engine::test_counters::record_idwt97_stage_sequence();
 
     let horizontal_even_is_odd = ((params.x0 + params.output_x) & 1) != 0;
     encoder.setComputePipelineState(&kernels.idwt_irreversible97_horizontal_step);

@@ -13,6 +13,10 @@ use super::super::{
 use super::{IdwtSubBandBuffers, SingleIdwtDispatch};
 use j2k_codec_math::dwt;
 
+const fn parity_axis_len(length: u32, odd: bool) -> u32 {
+    length / 2 + if odd { 0 } else { length % 2 }
+}
+
 pub(crate) fn decode_irreversible97_single_decomposition_idwt(
     job: J2kSingleDecompositionIdwtJob<'_>,
     output: &mut [f32],
@@ -214,32 +218,37 @@ pub(super) fn dispatch_irreversible97_stages(
     );
     encoder.memory_barrier_with_resources(&[decoded]);
 
-    let first_even_x = (params.x0 + params.output_x) & 1;
-    let first_odd_x = 1 - first_even_x;
+    let horizontal_even_is_odd = ((params.x0 + params.output_x) & 1) != 0;
     encoder.setComputePipelineState(&kernels.idwt_irreversible97_horizontal_step);
     encoder.set_buffer(0, Some(decoded), decoded_offset as u64);
     encoder.set_bytes::<J2kIdwtSingleDecompositionParams>(1, &params);
-    for (coefficient, parity) in [
-        (dwt::IDWT97_NEG_DELTA_F32, first_even_x),
-        (dwt::IDWT97_NEG_GAMMA_F32, first_odd_x),
-        (dwt::IDWT97_NEG_BETA_F32, first_even_x),
-        (dwt::IDWT97_NEG_ALPHA_F32, first_odd_x),
+    for (coefficient, odd) in [
+        (dwt::IDWT97_NEG_DELTA_F32, horizontal_even_is_odd),
+        (dwt::IDWT97_NEG_GAMMA_F32, !horizontal_even_is_odd),
+        (dwt::IDWT97_NEG_BETA_F32, horizontal_even_is_odd),
+        (dwt::IDWT97_NEG_ALPHA_F32, !horizontal_even_is_odd),
     ] {
         let step = J2kIdwt97StepParams {
             coefficient,
-            parity,
+            parity: u32::from(odd),
             _reserved0: 0,
             _reserved1: 0,
         };
         encoder.set_bytes::<J2kIdwt97StepParams>(2, &step);
-        let horizontal_step_grid = (params.width, params.height, batch_count);
-        #[cfg(test)]
-        crate::engine::test_counters::record_idwt97_logical_dispatch(horizontal_step_grid);
-        dispatch_3d_pipeline(
-            encoder,
-            &kernels.idwt_irreversible97_horizontal_step,
-            horizontal_step_grid,
+        let horizontal_step_grid = (
+            parity_axis_len(params.width, odd),
+            params.height,
+            batch_count,
         );
+        if horizontal_step_grid.0 != 0 {
+            #[cfg(test)]
+            crate::engine::test_counters::record_idwt97_logical_dispatch(horizontal_step_grid);
+            dispatch_3d_pipeline(
+                encoder,
+                &kernels.idwt_irreversible97_horizontal_step,
+                horizontal_step_grid,
+            );
+        }
         encoder.memory_barrier_with_resources(&[decoded]);
     }
     encoder.setComputePipelineState(&kernels.idwt_irreversible97_vertical_scale);
@@ -256,32 +265,37 @@ pub(super) fn dispatch_irreversible97_stages(
     );
     encoder.memory_barrier_with_resources(&[decoded]);
 
-    let first_even_y = (params.y0 + params.output_y) & 1;
-    let first_odd_y = 1 - first_even_y;
+    let vertical_even_is_odd = ((params.y0 + params.output_y) & 1) != 0;
     encoder.setComputePipelineState(&kernels.idwt_irreversible97_vertical_step);
     encoder.set_buffer(0, Some(decoded), decoded_offset as u64);
     encoder.set_bytes::<J2kIdwtSingleDecompositionParams>(1, &params);
-    for (coefficient, parity) in [
-        (dwt::IDWT97_NEG_DELTA_F32, first_even_y),
-        (dwt::IDWT97_NEG_GAMMA_F32, first_odd_y),
-        (dwt::IDWT97_NEG_BETA_F32, first_even_y),
-        (dwt::IDWT97_NEG_ALPHA_F32, first_odd_y),
+    for (coefficient, odd) in [
+        (dwt::IDWT97_NEG_DELTA_F32, vertical_even_is_odd),
+        (dwt::IDWT97_NEG_GAMMA_F32, !vertical_even_is_odd),
+        (dwt::IDWT97_NEG_BETA_F32, vertical_even_is_odd),
+        (dwt::IDWT97_NEG_ALPHA_F32, !vertical_even_is_odd),
     ] {
         let step = J2kIdwt97StepParams {
             coefficient,
-            parity,
+            parity: u32::from(odd),
             _reserved0: 0,
             _reserved1: 0,
         };
         encoder.set_bytes::<J2kIdwt97StepParams>(2, &step);
-        let vertical_step_grid = (params.width, params.height, batch_count);
-        #[cfg(test)]
-        crate::engine::test_counters::record_idwt97_logical_dispatch(vertical_step_grid);
-        dispatch_3d_pipeline(
-            encoder,
-            &kernels.idwt_irreversible97_vertical_step,
-            vertical_step_grid,
+        let vertical_step_grid = (
+            params.width,
+            parity_axis_len(params.height, odd),
+            batch_count,
         );
+        if vertical_step_grid.1 != 0 {
+            #[cfg(test)]
+            crate::engine::test_counters::record_idwt97_logical_dispatch(vertical_step_grid);
+            dispatch_3d_pipeline(
+                encoder,
+                &kernels.idwt_irreversible97_vertical_step,
+                vertical_step_grid,
+            );
+        }
         encoder.memory_barrier_with_resources(&[decoded]);
     }
 }

@@ -7,9 +7,14 @@ use j2k_native::{
     J2kDirectCpuScratch, J2kRect,
 };
 #[cfg(feature = "parallel")]
-use rayon::ThreadPoolBuilder;
+use rayon::{prelude::*, ThreadPool, ThreadPoolBuilder};
+
+#[path = "support/scheduling_fixtures.rs"]
+mod scheduling_fixtures;
 
 const TILE_SIDE: u32 = 512;
+#[cfg(feature = "parallel")]
+const SCHEDULING_SMALL_SIDE: u32 = 256;
 
 fn patterned_rgb8(width: u32, height: u32) -> Vec<u8> {
     let mut pixels = Vec::with_capacity(width as usize * height as usize * 3);
@@ -28,13 +33,7 @@ fn patterned_gray8(width: u32, height: u32) -> Vec<u8> {
 }
 
 fn patterned_gray8_with_seed(width: u32, height: u32, seed: u32) -> Vec<u8> {
-    let mut pixels = Vec::with_capacity(width as usize * height as usize);
-    for y in 0..height {
-        for x in 0..width {
-            pixels.push(((x * 17 + y * 31 + (x ^ y) * seed + seed * 13) & 0xff) as u8);
-        }
-    }
-    pixels
+    scheduling_fixtures::dense_gray8(width, height, seed)
 }
 
 #[cfg(feature = "parallel")]
@@ -57,6 +56,24 @@ fn gray53_codestream(
 }
 
 #[cfg(feature = "parallel")]
+fn gray53_codestream_from_pixels(
+    pixels: Vec<u8>,
+    width: u32,
+    height: u32,
+    use_ht_block_coding: bool,
+) -> (Vec<u8>, Vec<u8>) {
+    let options = EncodeOptions {
+        reversible: true,
+        num_decomposition_levels: 5,
+        use_ht_block_coding,
+        ..EncodeOptions::default()
+    };
+    let codestream =
+        encode(&pixels, width, height, 1, 8, false, &options).expect("encode scheduling fixture");
+    (codestream, pixels)
+}
+
+#[cfg(feature = "parallel")]
 fn validate_gray_decode(image: &Image<'_>, expected: &[u8], dimensions: (u32, u32)) {
     let decoded = image
         .decode_with_context(&mut DecoderContext::default())
@@ -71,6 +88,203 @@ fn warm_gray<'a>(image: &Image<'a>, expected: &[u8], context: &mut DecoderContex
         .decode_with_context(context)
         .expect("warm gray decode");
     assert_eq!(decoded.data, expected);
+}
+
+#[cfg(feature = "parallel")]
+fn configured_context<'a>(parallelism: CpuDecodeParallelism) -> DecoderContext<'a> {
+    let mut context = DecoderContext::default();
+    context.set_cpu_decode_parallelism(parallelism);
+    context
+}
+
+#[cfg(feature = "parallel")]
+fn benchmark_pool_threads() -> Vec<usize> {
+    let available = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+    let mut threads = vec![1, 2, 4, available];
+    threads.sort_unstable();
+    threads.dedup();
+    threads
+}
+
+#[cfg(feature = "parallel")]
+fn bench_standalone_gray(
+    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    id: String,
+    pool: &ThreadPool,
+    image: &Image<'_>,
+    expected: &[u8],
+    parallelism: CpuDecodeParallelism,
+) {
+    group.bench_function(id, |b| {
+        let mut context = configured_context(parallelism);
+        pool.install(|| warm_gray(image, expected, &mut context));
+        b.iter(|| {
+            pool.install(|| {
+                let decoded = image
+                    .decode_with_context(&mut context)
+                    .expect("decode standalone scheduling fixture");
+                std::hint::black_box(decoded.data);
+            });
+        });
+    });
+}
+
+#[cfg(feature = "parallel")]
+fn bench_scheduling_standalone_rows(
+    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    codec: &str,
+    use_ht_block_coding: bool,
+    pool_threads: &[usize],
+    primary_image: &Image<'_>,
+    primary_pixels: &[u8],
+) {
+    for &threads in pool_threads {
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .expect("build serial-policy benchmark Rayon pool");
+        bench_standalone_gray(
+            group,
+            format!("{codec}_sched_ld512_ser_p{threads}"),
+            &pool,
+            primary_image,
+            primary_pixels,
+            CpuDecodeParallelism::Serial,
+        );
+    }
+
+    let (dense_codestream, dense_pixels) = gray53_codestream_from_pixels(
+        scheduling_fixtures::dense_gray8(SCHEDULING_SMALL_SIDE, SCHEDULING_SMALL_SIDE, 3),
+        SCHEDULING_SMALL_SIDE,
+        SCHEDULING_SMALL_SIDE,
+        use_ht_block_coding,
+    );
+    let (sparse_codestream, sparse_pixels) = gray53_codestream_from_pixels(
+        scheduling_fixtures::sparse_gray8(SCHEDULING_SMALL_SIDE, SCHEDULING_SMALL_SIDE, 3),
+        SCHEDULING_SMALL_SIDE,
+        SCHEDULING_SMALL_SIDE,
+        use_ht_block_coding,
+    );
+    let dense_image = Image::new(&dense_codestream, &DecodeSettings::default())
+        .expect("prepare small dense scheduling image");
+    let sparse_image = Image::new(&sparse_codestream, &DecodeSettings::default())
+        .expect("prepare small sparse scheduling image");
+    validate_gray_decode(
+        &dense_image,
+        &dense_pixels,
+        (SCHEDULING_SMALL_SIDE, SCHEDULING_SMALL_SIDE),
+    );
+    validate_gray_decode(
+        &sparse_image,
+        &sparse_pixels,
+        (SCHEDULING_SMALL_SIDE, SCHEDULING_SMALL_SIDE),
+    );
+    let pool = ThreadPoolBuilder::new()
+        .num_threads(4)
+        .build()
+        .expect("build scheduling anchor pool");
+    for (mode, parallelism) in [
+        ("auto", CpuDecodeParallelism::Auto),
+        ("ser", CpuDecodeParallelism::Serial),
+    ] {
+        bench_standalone_gray(
+            group,
+            format!("{codec}_sched_sd256_{mode}_p4"),
+            &pool,
+            &dense_image,
+            &dense_pixels,
+            parallelism,
+        );
+        bench_standalone_gray(
+            group,
+            format!("{codec}_sched_ss256_{mode}_p4"),
+            &pool,
+            &sparse_image,
+            &sparse_pixels,
+            parallelism,
+        );
+    }
+}
+
+#[cfg(feature = "parallel")]
+fn bench_scheduling_outer_rows(
+    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    codec: &str,
+    use_ht_block_coding: bool,
+    pool_threads: &[usize],
+) {
+    let batch_count = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+    let fixtures = (0..batch_count)
+        .map(|index| {
+            gray53_codestream_from_pixels(
+                scheduling_fixtures::sparse_gray8(
+                    SCHEDULING_SMALL_SIDE,
+                    SCHEDULING_SMALL_SIDE,
+                    u32::try_from(index).expect("benchmark batch index fits u32") + 101,
+                ),
+                SCHEDULING_SMALL_SIDE,
+                SCHEDULING_SMALL_SIDE,
+                use_ht_block_coding,
+            )
+        })
+        .collect::<Vec<_>>();
+    for (index, fixture) in fixtures.iter().enumerate() {
+        assert!(fixtures[..index]
+            .iter()
+            .all(|previous| previous.0 != fixture.0 && previous.1 != fixture.1));
+    }
+    let images = fixtures
+        .iter()
+        .map(|(codestream, _)| {
+            Image::new(codestream, &DecodeSettings::default())
+                .expect("prepare distinct outer-batch image")
+        })
+        .collect::<Vec<_>>();
+
+    for (mode, parallelism) in [
+        ("auto", CpuDecodeParallelism::Auto),
+        ("ser", CpuDecodeParallelism::Serial),
+    ] {
+        for &threads in pool_threads {
+            let pool = ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .expect("build outer-batch benchmark Rayon pool");
+            group.bench_function(
+                format!("{codec}_sched_outer_ss256_b{batch_count}_{mode}_p{threads}"),
+                |b| {
+                    let mut contexts = (0..batch_count)
+                        .map(|_| configured_context(parallelism))
+                        .collect::<Vec<_>>();
+                    pool.install(|| {
+                        images
+                            .par_iter()
+                            .zip(fixtures.par_iter())
+                            .zip(contexts.par_iter_mut())
+                            .for_each(|((image, (_, expected)), context)| {
+                                warm_gray(image, expected, context);
+                            });
+                    });
+                    b.iter(|| {
+                        let decoded_bytes = pool.install(|| {
+                            images
+                                .par_iter()
+                                .zip(contexts.par_iter_mut())
+                                .map(|(image, context)| {
+                                    image
+                                        .decode_with_context(context)
+                                        .expect("decode distinct outer-batch image")
+                                        .data
+                                        .len()
+                                })
+                                .sum::<usize>()
+                        });
+                        std::hint::black_box(decoded_bytes);
+                    });
+                },
+            );
+        }
+    }
 }
 
 fn htj2k_gray_codestream(width: u32, height: u32, reversible: bool) -> Vec<u8> {
@@ -269,7 +483,8 @@ fn bench_generic_public_workspace(c: &mut Criterion) {
             },
         );
 
-        for threads in [1usize, 2, 4] {
+        let pool_threads = benchmark_pool_threads();
+        for &threads in &pool_threads {
             let pool = ThreadPoolBuilder::new()
                 .num_threads(threads)
                 .build()
@@ -290,6 +505,16 @@ fn bench_generic_public_workspace(c: &mut Criterion) {
                 },
             );
         }
+
+        bench_scheduling_standalone_rows(
+            &mut group,
+            codec,
+            use_ht_block_coding,
+            &pool_threads,
+            &primary_image,
+            &primary_pixels,
+        );
+        bench_scheduling_outer_rows(&mut group, codec, use_ht_block_coding, &pool_threads);
     }
     group.finish();
 }

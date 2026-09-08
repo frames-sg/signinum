@@ -142,14 +142,7 @@ fn host_slice_idwt_output_transfer_accounting() {
         assert!(decoder
             .decode_single_decomposition_idwt(fixture.job(transform), &mut output)
             .unwrap());
-        assert_eq!(
-            idwt_host_transfer_counters_for_test(),
-            (
-                output.len() * size_of::<f32>(),
-                1,
-                output.len() * size_of::<f32>()
-            )
-        );
+        assert_eq!(idwt_host_transfer_counters_for_test(), (0, 0, 0));
     }
 }
 

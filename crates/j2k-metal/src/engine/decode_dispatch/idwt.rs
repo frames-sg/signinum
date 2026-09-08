@@ -6,11 +6,35 @@ use crate::metal_types::prelude::*;
 use super::{
     checked_buffer_copy_into, commit_and_wait_metal, copied_slice_buffer, dispatch_2d_pipeline,
     dispatch_3d_pipeline, hybrid_stage_signpost, label_compute_encoder, new_command_buffer,
-    new_compute_command_encoder, with_runtime, Buffer, CommandBufferRef, ComputeCommandEncoderRef,
-    DirectIdwtCommandBuffers, Error, J2kIdwtSingleDecompositionParams,
+    new_compute_command_encoder, new_shared_buffer, with_runtime, Buffer, CommandBufferRef,
+    ComputeCommandEncoderRef, DirectIdwtCommandBuffers, Error, J2kIdwtSingleDecompositionParams,
     J2kRepeatedIdwtSingleDecompositionParams, J2kSingleDecompositionIdwtJob,
     SIGNPOST_DECODE_HYBRID_IDWT_COMMAND_ENCODE,
 };
+
+#[cfg(target_os = "macos")]
+fn checked_host_output_layout(
+    width: u32,
+    height: u32,
+    output_len: usize,
+) -> Result<(usize, usize), Error> {
+    let required_len = (width as usize)
+        .checked_mul(height as usize)
+        .ok_or_else(|| Error::MetalKernel {
+            message: "J2K Metal IDWT output length overflow".to_string(),
+        })?;
+    let required_bytes = required_len
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| Error::MetalKernel {
+            message: "J2K Metal IDWT output byte length overflow".to_string(),
+        })?;
+    if output_len < required_len {
+        return Err(Error::MetalKernel {
+            message: "J2K Metal IDWT output slice is too small".to_string(),
+        });
+    }
+    Ok((required_len, required_bytes))
+}
 #[cfg(target_os = "macos")]
 mod batched_irreversible;
 #[cfg(target_os = "macos")]
@@ -39,12 +63,8 @@ pub(crate) fn decode_reversible53_single_decomposition_idwt(
     output: &mut [f32],
 ) -> Result<(), Error> {
     with_runtime(|runtime| {
-        let required_len = job.rect.width() as usize * job.rect.height() as usize;
-        if output.len() < required_len {
-            return Err(Error::MetalKernel {
-                message: "J2K Metal IDWT output slice is too small".to_string(),
-            });
-        }
+        let (required_len, required_bytes) =
+            checked_host_output_layout(job.rect.width(), job.rect.height(), output.len())?;
 
         let params = J2kIdwtSingleDecompositionParams {
             x0: job.rect.x0,
@@ -71,15 +91,11 @@ pub(crate) fn decode_reversible53_single_decomposition_idwt(
             hh_height: job.hh.rect.height(),
         };
 
+        let decoded = new_shared_buffer(&runtime.device, required_bytes)?;
         let ll = copied_slice_buffer(&runtime.device, job.ll.coefficients)?;
         let hl = copied_slice_buffer(&runtime.device, job.hl.coefficients)?;
         let lh = copied_slice_buffer(&runtime.device, job.lh.coefficients)?;
         let hh = copied_slice_buffer(&runtime.device, job.hh.coefficients)?;
-        let decoded = copied_slice_buffer(&runtime.device, output)?;
-        #[cfg(test)]
-        crate::engine::test_counters::record_idwt_host_overwritten_output_upload(
-            std::mem::size_of_val(output),
-        );
 
         let command_buffer = new_command_buffer(&runtime.queue)?;
 
@@ -128,7 +144,7 @@ pub(crate) fn decode_reversible53_single_decomposition_idwt(
         );
         encoder.endEncoding();
         commit_and_wait_metal(&command_buffer)?;
-        checked_buffer_copy_into(&decoded, 0, output, "IDWT output")?;
+        checked_buffer_copy_into(&decoded, 0, &mut output[..required_len], "IDWT output")?;
         Ok(())
     })
 }

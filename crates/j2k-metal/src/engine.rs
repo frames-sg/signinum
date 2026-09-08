@@ -211,6 +211,11 @@ pub(crate) use self::test_counters::{
     stacked_component_batches_for_test, thread_hybrid_cpu_decode_inputs_for_test,
 };
 
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) use self::test_counters::{
+    pending_direct_destinations_for_test, reset_pending_direct_destinations_for_test,
+};
+
 #[cfg(target_os = "macos")]
 pub(crate) use crate::profile_env::metal_profile_stages_enabled;
 

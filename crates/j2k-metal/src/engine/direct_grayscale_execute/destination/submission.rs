@@ -38,6 +38,8 @@ pub(crate) struct SubmittedDirectDestination {
     known_consumer_event_ptr: Option<usize>,
     #[cfg(test)]
     known_consumer_value: Option<u64>,
+    #[cfg(test)]
+    pending_probe: Option<crate::engine::test_counters::PendingDirectDestinationForTest>,
 }
 
 impl SubmittedDirectDestination {
@@ -138,6 +140,8 @@ impl SubmittedDirectDestination {
                     reason: "completed submission lost its dispatch report",
                 });
         };
+        #[cfg(test)]
+        let _pending_probe = self.pending_probe.take();
         let completion = wait_for_completion_metal(&command_buffer);
         let metadata = self.metadata.take().ok_or(Error::MetalStateInvariant {
             state: "J2K Metal direct destination submission",
@@ -300,5 +304,9 @@ pub(in crate::engine::direct_grayscale_execute) fn commit_direct_destination(
         known_consumer_event_ptr,
         #[cfg(test)]
         known_consumer_value,
+        #[cfg(test)]
+        pending_probe: Some(
+            crate::engine::test_counters::record_pending_direct_destination_for_test(),
+        ),
     })
 }

@@ -343,3 +343,52 @@ pub(crate) fn record_idwt97_logical_dispatch(grid: (u32, u32, u32)) {
     );
     IDWT97_STAGE_DISPATCHES.set(IDWT97_STAGE_DISPATCHES.get().saturating_add(1));
 }
+
+// Each test thread owns its probe; a submission carries that owner so retiring
+// it on another thread still decrements the originating probe.
+#[cfg(target_os = "macos")]
+std::thread_local! {
+    static PENDING_DIRECT_DESTINATIONS: std::sync::Arc<(AtomicUsize, AtomicUsize)> =
+        std::sync::Arc::new((AtomicUsize::new(0), AtomicUsize::new(0)));
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) struct PendingDirectDestinationForTest(std::sync::Arc<(AtomicUsize, AtomicUsize)>);
+
+#[cfg(target_os = "macos")]
+pub(crate) fn record_pending_direct_destination_for_test() -> PendingDirectDestinationForTest {
+    PENDING_DIRECT_DESTINATIONS.with(|counts| {
+        let pending = counts.0.fetch_add(1, Ordering::Relaxed) + 1;
+        counts.1.fetch_max(pending, Ordering::Relaxed);
+        PendingDirectDestinationForTest(counts.clone())
+    })
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for PendingDirectDestinationForTest {
+    fn drop(&mut self) {
+        self.0 .0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn reset_pending_direct_destinations_for_test() {
+    PENDING_DIRECT_DESTINATIONS.with(|counts| {
+        assert_eq!(
+            counts.0.load(Ordering::Relaxed),
+            0,
+            "pending work must retire before resetting its probe"
+        );
+        counts.1.store(0, Ordering::Relaxed);
+    });
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn pending_direct_destinations_for_test() -> (usize, usize) {
+    PENDING_DIRECT_DESTINATIONS.with(|counts| {
+        (
+            counts.0.load(Ordering::Relaxed),
+            counts.1.load(Ordering::Relaxed),
+        )
+    })
+}

@@ -26,8 +26,12 @@ pub(in crate::engine) struct DecodeKernels {
     pub(in crate::engine) idwt_reversible53_horizontal: ComputePipelineState,
     pub(in crate::engine) idwt_reversible53_vertical: ComputePipelineState,
     pub(in crate::engine) idwt_interleave_batched: ComputePipelineState,
+    pub(in crate::engine) idwt_irreversible97_interleave_horizontal_scale: ComputePipelineState,
+    pub(in crate::engine) idwt_irreversible97_interleave_horizontal_scale_batched:
+        ComputePipelineState,
     pub(in crate::engine) idwt_reversible53_horizontal_batched: ComputePipelineState,
     pub(in crate::engine) idwt_reversible53_vertical_batched: ComputePipelineState,
+    #[cfg(test)]
     pub(in crate::engine) idwt_irreversible97_horizontal_scale: ComputePipelineState,
     pub(in crate::engine) idwt_irreversible97_vertical_scale: ComputePipelineState,
     pub(in crate::engine) idwt_irreversible97_horizontal_step: ComputePipelineState,
@@ -95,10 +99,15 @@ impl DecodeKernels {
                 .pipeline("j2k_idwt_reversible53_horizontal_pass")?,
             idwt_reversible53_vertical: loader.pipeline("j2k_idwt_reversible53_vertical_pass")?,
             idwt_interleave_batched: loader.pipeline("j2k_idwt_interleave_batched")?,
+            idwt_irreversible97_interleave_horizontal_scale: loader
+                .pipeline("j2k_idwt_irreversible97_interleave_horizontal_scale")?,
+            idwt_irreversible97_interleave_horizontal_scale_batched: loader
+                .pipeline("j2k_idwt_irreversible97_interleave_horizontal_scale_batched")?,
             idwt_reversible53_horizontal_batched: loader
                 .pipeline("j2k_idwt_reversible53_horizontal_pass_batched")?,
             idwt_reversible53_vertical_batched: loader
                 .pipeline("j2k_idwt_reversible53_vertical_pass_batched")?,
+            #[cfg(test)]
             idwt_irreversible97_horizontal_scale: loader
                 .pipeline("j2k_idwt_irreversible97_horizontal_scale")?,
             idwt_irreversible97_vertical_scale: loader

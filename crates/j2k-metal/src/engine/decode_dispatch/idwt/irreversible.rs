@@ -3,6 +3,8 @@
 #[cfg(target_os = "macos")]
 use crate::metal_types::prelude::*;
 
+#[cfg(test)]
+use super::super::checked_buffer_slice;
 use super::super::{
     checked_buffer_copy_into, commit_and_wait_metal, copied_slice_buffer, dispatch_2d_pipeline,
     dispatch_3d_pipeline, hybrid_stage_signpost, label_compute_encoder, new_command_buffer,
@@ -16,8 +18,6 @@ use j2k_codec_math::dwt;
 const fn parity_axis_len(length: u32, odd: bool) -> u32 {
     length / 2 + if odd { 0 } else { length % 2 }
 }
-#[cfg(test)]
-use super::super::checked_buffer_slice;
 
 pub(crate) fn decode_irreversible97_single_decomposition_idwt(
     job: J2kSingleDecompositionIdwtJob<'_>,

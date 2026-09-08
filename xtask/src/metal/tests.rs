@@ -180,7 +180,7 @@ fn ignored_inventory_is_unique_and_has_expected_size() {
         .copied()
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(required.len(), 21);
-    assert_eq!(optional.len(), 6);
+    assert_eq!(optional.len(), 7);
     assert!(optional.contains("idwt::tests::metal_host_slice_idwt_decode_perf"));
     assert!(optional
         .contains("engine::direct_buffers::performance::metal_checked_buffer_copy_into_perf"));

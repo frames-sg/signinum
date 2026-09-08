@@ -3,6 +3,65 @@
 //! Reusable decoder workspace ownership, policy, and diagnostics.
 
 use super::{DecompositionStorage, OutputRegion, TileDecodeContext};
+#[cfg(feature = "parallel")]
+use crate::{HtCodeBlockDecodeWorkspace, J2kCodeBlockDecodeWorkspace};
+#[cfg(feature = "parallel")]
+use alloc::vec::Vec;
+
+#[cfg(feature = "parallel")]
+pub(in crate::j2c::decode) struct ClassicTaskWorkspace {
+    pub(in crate::j2c::decode) workspace: J2kCodeBlockDecodeWorkspace,
+    // Componentwise maxima make orthogonal edge shapes reusable without growth.
+    pub(in crate::j2c::decode) prepared_width: u32,
+    pub(in crate::j2c::decode) prepared_height: u32,
+}
+
+#[cfg(feature = "parallel")]
+pub(in crate::j2c::decode) struct HtTaskWorkspace {
+    pub(in crate::j2c::decode) workspace: HtCodeBlockDecodeWorkspace,
+    // Componentwise maxima make orthogonal edge shapes reusable without growth.
+    pub(in crate::j2c::decode) prepared_width: u32,
+    pub(in crate::j2c::decode) prepared_height: u32,
+}
+
+#[cfg(feature = "parallel")]
+#[derive(Default)]
+pub(in crate::j2c::decode) struct ParallelTaskWorkspaces {
+    pub(in crate::j2c::decode) classic: Vec<ClassicTaskWorkspace>,
+    pub(in crate::j2c::decode) ht: Vec<HtTaskWorkspace>,
+}
+
+#[cfg(feature = "parallel")]
+pub(in crate::j2c::decode) fn classic_task_workspace_bytes(
+    slots: &Vec<ClassicTaskWorkspace>,
+) -> crate::Result<usize> {
+    let mut bytes = slots
+        .capacity()
+        .checked_mul(core::mem::size_of::<ClassicTaskWorkspace>())
+        .ok_or(crate::ValidationError::ImageTooLarge)?;
+    for slot in slots {
+        bytes = bytes
+            .checked_add(slot.workspace.allocated_bytes()?)
+            .ok_or(crate::ValidationError::ImageTooLarge)?;
+    }
+    Ok(bytes)
+}
+
+#[cfg(feature = "parallel")]
+pub(in crate::j2c::decode) fn ht_task_workspace_bytes(
+    slots: &Vec<HtTaskWorkspace>,
+) -> crate::Result<usize> {
+    let mut bytes = slots
+        .capacity()
+        .checked_mul(core::mem::size_of::<HtTaskWorkspace>())
+        .ok_or(crate::ValidationError::ImageTooLarge)?;
+    for slot in slots {
+        bytes = bytes
+            .checked_add(slot.workspace.allocated_bytes()?)
+            .ok_or(crate::ValidationError::ImageTooLarge)?;
+    }
+    Ok(bytes)
+}
 
 /// CPU parallelism policy for native JPEG 2000 decode.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

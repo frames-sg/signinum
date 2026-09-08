@@ -180,6 +180,12 @@ pub(super) fn decode_sub_band_classic_blocks(
                     dequantization_step,
                     irreversible_midpoint,
                 },
+                &mut tile_ctx.parallel_task_workspaces.classic,
+                &mut storage.structural_workspace_bytes,
+                #[cfg(test)]
+                &mut tile_ctx.debug_counters.classic_parallel_tasks,
+                #[cfg(test)]
+                &mut tile_ctx.debug_counters.classic_task_workspace_growths,
                 &mut budget,
             )?;
             tile_ctx.debug_counters.decoded_code_blocks += decoded_blocks.len();

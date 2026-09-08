@@ -342,6 +342,14 @@ pub(crate) struct DecodeDebugCounters {
     pub(crate) skipped_code_blocks: usize,
     pub(crate) idwt_output_samples: usize,
     pub(crate) ht_phase_stats: ht_block_decode::HtBlockDecodeStats,
+    #[cfg(all(test, feature = "parallel"))]
+    pub(crate) classic_parallel_tasks: usize,
+    #[cfg(all(test, feature = "parallel"))]
+    pub(crate) ht_parallel_tasks: usize,
+    #[cfg(all(test, feature = "parallel"))]
+    pub(crate) classic_task_workspace_growths: usize,
+    #[cfg(all(test, feature = "parallel"))]
+    pub(crate) ht_task_workspace_growths: usize,
 }
 
 #[expect(
@@ -728,6 +736,8 @@ pub(crate) struct TileDecodeContext {
     pub(crate) bit_plane_decode_buffers: BitPlaneDecodeBuffers,
     /// A reusable context for decoding HTJ2K code blocks.
     pub(crate) ht_block_decode_context: HtBlockDecodeContext,
+    #[cfg(feature = "parallel")]
+    pub(in crate::j2c::decode) parallel_task_workspaces: workspace::ParallelTaskWorkspaces,
     /// The raw, decoded samples for each channel.
     pub(crate) channel_data: Vec<ComponentData>,
     /// Optional output window for region-local decode storage.
@@ -756,9 +766,13 @@ impl TileDecodeContext {
         self.bit_plane_decode_context = BitPlaneDecodeContext::default();
         self.bit_plane_decode_buffers = BitPlaneDecodeBuffers::default();
         self.ht_block_decode_context = HtBlockDecodeContext::default();
+        #[cfg(feature = "parallel")]
+        {
+            self.parallel_task_workspaces = workspace::ParallelTaskWorkspaces::default();
+        }
     }
 
-    pub(crate) fn tier1_capacity_bytes(&self) -> Result<usize> {
+    pub(crate) fn serial_tier1_capacity_bytes(&self) -> Result<usize> {
         let classic_bytes = self.bit_plane_decode_context.allocated_bytes()?;
         let buffer_bytes = self.bit_plane_decode_buffers.allocated_bytes()?;
         let ht_bytes = self.ht_block_decode_context.allocated_bytes()?;
@@ -766,6 +780,49 @@ impl TileDecodeContext {
             .checked_add(buffer_bytes)
             .and_then(|bytes| bytes.checked_add(ht_bytes))
             .ok_or(ValidationError::ImageTooLarge.into())
+    }
+
+    pub(crate) fn tier1_capacity_bytes(&self) -> Result<usize> {
+        let serial_bytes = self.serial_tier1_capacity_bytes()?;
+        #[cfg(feature = "parallel")]
+        {
+            serial_bytes
+                .checked_add(self.parallel_task_workspace_bytes()?)
+                .ok_or(ValidationError::ImageTooLarge.into())
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            Ok(serial_bytes)
+        }
+    }
+
+    #[cfg(feature = "parallel")]
+    pub(in crate::j2c::decode) fn parallel_task_workspace_bytes(&self) -> Result<usize> {
+        workspace::classic_task_workspace_bytes(&self.parallel_task_workspaces.classic)?
+            .checked_add(workspace::ht_task_workspace_bytes(
+                &self.parallel_task_workspaces.ht,
+            )?)
+            .ok_or(ValidationError::ImageTooLarge.into())
+    }
+
+    #[cfg(all(test, feature = "parallel"))]
+    pub(crate) fn classic_parallel_workspace_count(&self) -> usize {
+        self.parallel_task_workspaces.classic.len()
+    }
+
+    #[cfg(all(test, feature = "parallel"))]
+    pub(crate) fn ht_parallel_workspace_count(&self) -> usize {
+        self.parallel_task_workspaces.ht.len()
+    }
+
+    #[cfg(all(test, feature = "parallel"))]
+    pub(crate) fn classic_parallel_workspace_bytes(&self) -> Result<usize> {
+        workspace::classic_task_workspace_bytes(&self.parallel_task_workspaces.classic)
+    }
+
+    #[cfg(all(test, feature = "parallel"))]
+    pub(crate) fn ht_parallel_workspace_bytes(&self) -> Result<usize> {
+        workspace::ht_task_workspace_bytes(&self.parallel_task_workspaces.ht)
     }
 
     pub(crate) fn idwt_capacity_bytes(&self) -> Result<usize> {

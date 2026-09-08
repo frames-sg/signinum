@@ -8,8 +8,11 @@ use crate::{try_reserve_decode_elements, try_resize_decode_elements, DEFAULT_MAX
 use alloc::vec::Vec;
 use core::mem::size_of;
 
+#[derive(Clone, Copy)]
 pub(crate) struct DecodeAllocationBudget {
     live_bytes: usize,
+    #[cfg(test)]
+    cap: usize,
 }
 
 impl DecodeAllocationBudget {
@@ -34,7 +37,24 @@ impl DecodeAllocationBudget {
         if live_bytes > DEFAULT_MAX_DECODE_BYTES {
             return Err(ValidationError::ImageTooLarge.into());
         }
-        Ok(Self { live_bytes })
+        Ok(Self {
+            live_bytes,
+            #[cfg(test)]
+            cap: DEFAULT_MAX_DECODE_BYTES,
+        })
+    }
+
+    #[cfg(all(test, feature = "parallel"))]
+    pub(crate) fn from_live_bytes_with_cap(live_bytes: usize, cap: usize) -> Result<Self> {
+        if live_bytes > cap {
+            return Err(ValidationError::ImageTooLarge.into());
+        }
+        Ok(Self { live_bytes, cap })
+    }
+
+    #[cfg(all(test, feature = "parallel"))]
+    pub(crate) const fn live_bytes(&self) -> usize {
+        self.live_bytes
     }
 
     pub(crate) fn include_elements<T>(&mut self, count: usize) -> Result<()> {
@@ -49,7 +69,11 @@ impl DecodeAllocationBudget {
             .live_bytes
             .checked_add(additional)
             .ok_or(ValidationError::ImageTooLarge)?;
-        if self.live_bytes > DEFAULT_MAX_DECODE_BYTES {
+        #[cfg(test)]
+        let cap = self.cap;
+        #[cfg(not(test))]
+        let cap = DEFAULT_MAX_DECODE_BYTES;
+        if self.live_bytes > cap {
             return Err(ValidationError::ImageTooLarge.into());
         }
         Ok(())
@@ -97,6 +121,15 @@ impl DecodeAllocationBudget {
         let released = count
             .checked_mul(size_of::<T>())
             .ok_or(ValidationError::ImageTooLarge)?;
+        self.live_bytes = self
+            .live_bytes
+            .checked_sub(released)
+            .ok_or(ValidationError::ImageTooLarge)?;
+        Ok(())
+    }
+
+    #[cfg(feature = "parallel")]
+    pub(crate) fn release_bytes(&mut self, released: usize) -> Result<()> {
         self.live_bytes = self
             .live_bytes
             .checked_sub(released)

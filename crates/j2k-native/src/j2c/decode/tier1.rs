@@ -124,7 +124,7 @@ pub(super) fn prepare_tier1_workspace(
 ) -> Result<Tier1WorkspaceAccounting> {
     let requirements = collect_requirements(tile, header, storage)?;
     let planned_bytes = requirements.logical_bytes()?;
-    let retained_bytes = tile_ctx.tier1_capacity_bytes()?;
+    let retained_bytes = tile_ctx.serial_tier1_capacity_bytes()?;
     let mut budget = DecodeAllocationBudget::for_storage(storage)?;
     budget.include_bytes(planned_bytes)?;
 
@@ -146,7 +146,7 @@ pub(super) fn prepare_tier1_workspace(
             )?;
         }
 
-        let actual_bytes = tile_ctx.tier1_capacity_bytes()?;
+        let actual_bytes = tile_ctx.serial_tier1_capacity_bytes()?;
         if actual_bytes > planned_bytes {
             budget.include_bytes(actual_bytes - planned_bytes)?;
         }
@@ -168,10 +168,9 @@ pub(super) fn release_tier1_workspace(
     storage: &mut DecompositionStorage<'_>,
     accounting: &Tier1WorkspaceAccounting,
 ) -> Result<()> {
-    // The active structural baseline already included the retained owner.
-    // Preparation temporarily charged the complete new owner so a Vec growth
-    // also accounts for the replacement peak. Keep the resulting owner live
-    // and remove only the now-duplicated retained capacity.
+    // The active structural baseline already included retained serial and
+    // parallel Tier-1 owners. Preparation charged only the complete new serial
+    // owner, so remove only its now-duplicated retained capacity.
     storage.structural_workspace_bytes = storage
         .structural_workspace_bytes
         .checked_sub(accounting.retained_bytes)

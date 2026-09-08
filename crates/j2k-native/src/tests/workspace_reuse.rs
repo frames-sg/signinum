@@ -529,3 +529,56 @@ fn parallel_coefficient_buffers_reuse_capacity_across_fitting_images() {
         }
     }
 }
+
+#[cfg(feature = "parallel")]
+#[path = "../../benches/support/scheduling_fixtures.rs"]
+mod scheduling_fixtures;
+
+#[cfg(feature = "parallel")]
+#[test]
+#[ignore = "scheduling fixture route report; run explicitly with --ignored --nocapture"]
+fn scheduling_fixture_route_report() {
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(4)
+        .build()
+        .expect("test pool");
+    for ht in [false, true] {
+        for (side, sparse) in [(512, false), (256, false), (256, true)] {
+            let pixels = if sparse {
+                scheduling_fixtures::sparse_gray8(side, side, 3)
+            } else {
+                scheduling_fixtures::dense_gray8(side, side, 3)
+            };
+            let bytes = encode(
+                &pixels,
+                side,
+                side,
+                1,
+                8,
+                false,
+                &EncodeOptions {
+                    reversible: true,
+                    num_decomposition_levels: 5,
+                    use_ht_block_coding: ht,
+                    ..EncodeOptions::default()
+                },
+            )
+            .expect("encode scheduling fixture");
+            let image = Image::new(&bytes, &DecodeSettings::default()).expect("image");
+            pool.install(|| {
+                let mut serial = DecoderContext::default();
+                serial.set_cpu_decode_parallelism(crate::CpuDecodeParallelism::Serial);
+                let expected = image.decode_with_context(&mut serial).expect("serial oracle");
+                assert_eq!(expected.data, pixels);
+                assert_eq!(serial.tile_decode_context.debug_counters.parallel_coefficients.scatter_bytes, 0);
+                let mut context = DecoderContext::default();
+                let actual = image.decode_with_context(&mut context).expect("Auto decode");
+                assert_eq!(actual.data, expected.data);
+                assert_eq!((actual.width, actual.height), (side, side));
+                let scatter = context.tile_decode_context.debug_counters.parallel_coefficients.scatter_bytes;
+                assert!(scatter > 0, "fixture must exercise parallel staging: ht={ht}, side={side}, sparse={sparse}");
+                println!("scheduling_fixture ht={ht} side={side} sparse={sparse} encoded_bytes={} parallel_scatter_bytes={scatter}", bytes.len());
+            });
+        }
+    }
+}

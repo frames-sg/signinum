@@ -20,7 +20,7 @@ use crate::idct::downscale::idct_islow_2x2_scalar;
 use crate::idct::{idct_islow, idct_islow_dc_only};
 use crate::internal::bit_reader::BitReader;
 use crate::internal::scratch::ScratchPool;
-use crate::parse::tables::{HuffmanValues, RawHuffmanTable};
+use crate::parse::tables::{HuffmanTableRole, HuffmanValues, RawHuffmanTable};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::Cell;
@@ -296,10 +296,13 @@ pub struct BenchHuffmanState {
 impl BenchHuffmanState {
     #[must_use]
     pub fn luma_dc_zeros(symbols: usize) -> Self {
-        let table = HuffmanTable::from_raw(&RawHuffmanTable {
-            bits: [0, 1, 5, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0],
-            values: HuffmanValues::from_slice(&[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]),
-        })
+        let table = HuffmanTable::from_raw(
+            &RawHuffmanTable {
+                bits: [0, 1, 5, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0],
+                values: HuffmanValues::from_slice(&[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]),
+            },
+            HuffmanTableRole::Dc,
+        )
         .expect("standard luma DC table must be valid");
         let bytes = vec![0u8; symbols.div_ceil(4) + 8];
         Self {

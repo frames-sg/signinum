@@ -9,12 +9,12 @@ use super::{
     decode_lossless_color_sample, decode_lossless_sampled_color_mcu, finish_scan,
     lossless_color_sampling, lossless_predictor_gray_rows, lossless_predictor_value,
     lossless_predictor_value_u16, lossless_sampled_plane_layout, merged_warnings,
-    scaled_rect_covering, validate_lossless_color_plan, write_lossless_color16_sampled_output,
-    write_lossless_color8_sampled_output, BitReader, ColorSpace, DecodeOutcome, Decoder,
-    DownscaleFactor, JpegError, LosslessColorIntoSample, LosslessColorPlanes,
-    LosslessColorRowSample, LosslessColorSampling, LosslessRestartTracker, LosslessSample,
-    LosslessSampledColorPlanesMut, LosslessSampledMcu, LosslessSampledPlaneLayout, Rect, RowSink,
-    Vec,
+    resolve_lossless_color_components, scaled_rect_covering, validate_lossless_color_plan,
+    write_lossless_color16_sampled_output, write_lossless_color8_sampled_output, BitReader,
+    ColorSpace, DecodeOutcome, Decoder, DownscaleFactor, JpegError, LosslessColorIntoSample,
+    LosslessColorPlanes, LosslessColorRowSample, LosslessColorSampling, LosslessRestartTracker,
+    LosslessSample, LosslessSampledColorPlanesMut, LosslessSampledMcu, LosslessSampledPlaneLayout,
+    Rect, RowSink, Vec,
 };
 use crate::allocation::{try_reserve_for_len_with_live_budget, try_resize_filled};
 
@@ -70,7 +70,7 @@ impl Decoder<'_> {
                 predictor: plan.predictor,
             });
         }
-        let dc_table = self.plan.huffman_table(Some(plan.dc_table))?;
+        let dc_table = self.plan.dc_table_by_id(plan.dc_table)?;
 
         let (width, height) = plan.dimensions;
         let scan_bytes = &self.bytes[plan.scan_offset..];
@@ -169,7 +169,7 @@ impl Decoder<'_> {
                 predictor: plan.predictor,
             });
         }
-        let dc_table = self.plan.huffman_table(Some(plan.dc_table))?;
+        let dc_table = self.plan.dc_table_by_id(plan.dc_table)?;
 
         let (width, height) = plan.dimensions;
         let width = width as usize;
@@ -284,6 +284,7 @@ impl Decoder<'_> {
                 sof: self.info.sof_kind,
             })?;
         validate_lossless_color_plan::<P>(plan, &self.plan, &self.info, color_space)?;
+        let components = resolve_lossless_color_components(&self.plan)?;
 
         let (width, height) = plan.dimensions;
         let scan_bytes = &self.bytes[plan.scan_offset..];
@@ -297,7 +298,7 @@ impl Decoder<'_> {
                 let restart_first_pixel = restart_tracker.begin_unit(&mut br, pixel_index)?;
                 decode_lossless_color_sample::<P, _>(
                     &mut br,
-                    &self.plan,
+                    &components,
                     plan.predictor,
                     restart_first_pixel,
                     &mut LosslessColorIntoSample {
@@ -366,6 +367,7 @@ impl Decoder<'_> {
             });
         }
         validate_lossless_color_plan::<P>(plan, &self.plan, &self.info, color_space)?;
+        let components = resolve_lossless_color_components(&self.plan)?;
 
         let (width, height) = plan.dimensions;
         let width = width as usize;
@@ -418,7 +420,7 @@ impl Decoder<'_> {
                 let restart_first_mcu = restart_tracker.begin_unit(&mut br, mcu_index)?;
                 decode_lossless_sampled_color_mcu::<P>(
                     &mut br,
-                    &self.plan,
+                    &components,
                     plan.predictor,
                     LosslessSampledMcu {
                         x: mcu_x,
@@ -493,6 +495,7 @@ impl Decoder<'_> {
                 sof: self.info.sof_kind,
             })?;
         validate_lossless_color_plan::<P>(plan, &self.plan, &self.info, color_space)?;
+        let components = resolve_lossless_color_components(&self.plan)?;
 
         let (width, height) = plan.dimensions;
         let width = width as usize;
@@ -512,7 +515,7 @@ impl Decoder<'_> {
                 let restart_first_pixel = restart_tracker.begin_unit(&mut br, pixel_index)?;
                 decode_lossless_color_sample::<P, _>(
                     &mut br,
-                    &self.plan,
+                    &components,
                     plan.predictor,
                     restart_first_pixel,
                     &mut LosslessColorRowSample {
@@ -697,7 +700,7 @@ impl Decoder<'_> {
                 predictor: plan.predictor,
             });
         }
-        let dc_table = self.plan.huffman_table(Some(plan.dc_table))?;
+        let dc_table = self.plan.dc_table_by_id(plan.dc_table)?;
 
         let (width, height) = plan.dimensions;
         let scan_bytes = &self.bytes[plan.scan_offset..];

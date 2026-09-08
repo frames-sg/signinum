@@ -688,8 +688,8 @@ fn compile_huffman_versions(
     construction: &mut PreparedConstructionBudget,
 ) -> Result<PreparedHuffmanTables, JpegError> {
     let mut prepared = construction.try_huffman_tables(header.huffman_tables.versions.len())?;
-    for raw in &header.huffman_tables.versions {
-        prepared.push(construction.resolve_huffman_table(ctx, raw)?)?;
+    for version in &header.huffman_tables.versions {
+        prepared.push(construction.resolve_huffman_table(ctx, &version.raw, version.role)?)?;
     }
     Ok(prepared)
 }

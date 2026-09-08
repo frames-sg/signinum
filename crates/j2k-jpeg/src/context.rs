@@ -6,7 +6,7 @@ use crate::allocation::{checked_add_allocation_bytes, try_reserve_for_len_with_l
 use crate::entropy::huffman::HuffmanTable;
 use crate::entropy::sequential::PreparedDecodePlan;
 use crate::error::JpegError;
-use crate::parse::tables::RawHuffmanTable;
+use crate::parse::tables::{HuffmanTableRole, RawHuffmanTable};
 use alloc::vec::Vec;
 use core::mem::size_of;
 use j2k_core::{CacheStats, CodecContext};
@@ -32,6 +32,7 @@ struct CachedQuantTable {
 #[derive(Debug)]
 struct CachedHuffmanTable {
     digest: u64,
+    role: HuffmanTableRole,
     raw: RawHuffmanTable,
     table: HuffmanTable,
 }
@@ -215,11 +216,12 @@ impl DecoderContext {
     pub(crate) fn resolve_huffman_table_with_live_budget(
         &mut self,
         raw: &RawHuffmanTable,
+        role: HuffmanTableRole,
         live_bytes: &mut usize,
         cap: usize,
     ) -> Result<HuffmanTable, JpegError> {
-        let digest = digest_huffman_table(raw);
-        self.resolve_huffman_table_with_digest_and_live_budget(raw, digest, live_bytes, cap)
+        let digest = digest_huffman_table(raw, role);
+        self.resolve_huffman_table_with_digest_and_live_budget(raw, role, digest, live_bytes, cap)
     }
 
     #[expect(
@@ -229,6 +231,7 @@ impl DecoderContext {
     fn resolve_huffman_table_with_digest_and_live_budget(
         &mut self,
         raw: &RawHuffmanTable,
+        role: HuffmanTableRole,
         digest: u64,
         live_bytes: &mut usize,
         cap: usize,
@@ -238,14 +241,17 @@ impl DecoderContext {
         for probe in 0..self.huffman_tables.len() {
             let slot = (start + probe) % self.huffman_tables.len();
             match &self.huffman_tables[slot] {
-                Some(cached) if cached.digest == digest && &cached.raw == raw => {
+                Some(cached)
+                    if cached.digest == digest && cached.role == role && &cached.raw == raw =>
+                {
                     self.cache_hits = self.cache_hits.saturating_add(1);
                     return Ok(cached.table.clone());
                 }
                 None => {
-                    let table = HuffmanTable::from_raw(raw)?;
+                    let table = HuffmanTable::from_raw(raw, role)?;
                     self.huffman_tables[slot] = Some(CachedHuffmanTable {
                         digest,
+                        role,
                         raw: raw.clone(),
                         table: table.clone(),
                     });
@@ -257,9 +263,10 @@ impl DecoderContext {
         }
 
         let slot = start;
-        let table = HuffmanTable::from_raw(raw)?;
+        let table = HuffmanTable::from_raw(raw, role)?;
         self.huffman_tables[slot] = Some(CachedHuffmanTable {
             digest,
+            role,
             raw: raw.clone(),
             table: table.clone(),
         });
@@ -518,11 +525,18 @@ fn digest_quant_table(table: &[u16; 64]) -> u64 {
     hash
 }
 
-fn digest_huffman_table(raw: &RawHuffmanTable) -> u64 {
+fn digest_huffman_table(raw: &RawHuffmanTable, role: HuffmanTableRole) -> u64 {
     let mut hash = digest_bytes(&raw.bits);
     for &byte in raw.values.as_slice() {
         j2k_core::__j2k_fnv1a64_update!(hash, byte);
     }
+    j2k_core::__j2k_fnv1a64_update!(
+        hash,
+        match role {
+            HuffmanTableRole::Dc => 0u8,
+            HuffmanTableRole::Ac => 1u8,
+        }
+    );
     hash
 }
 
@@ -609,6 +623,7 @@ mod tests {
         let mut live_bytes = ctx.retained_allocation_bytes();
         ctx.resolve_huffman_table_with_live_budget(
             raw,
+            HuffmanTableRole::Dc,
             &mut live_bytes,
             MAX_DECODER_CONTEXT_ALLOCATION_BYTES,
         )
@@ -622,6 +637,7 @@ mod tests {
         let mut live_bytes = ctx.retained_allocation_bytes();
         ctx.resolve_huffman_table_with_digest_and_live_budget(
             raw,
+            HuffmanTableRole::Dc,
             digest,
             &mut live_bytes,
             MAX_DECODER_CONTEXT_ALLOCATION_BYTES,
@@ -719,7 +735,7 @@ mod tests {
             crate::entropy::huffman::PreparedHuffmanTables::try_with_capacity(1)
                 .expect("bounded arena");
         let table = huffman_tables
-            .push(HuffmanTable::from_raw(&raw).expect("empty table"))
+            .push(HuffmanTable::from_raw(&raw, HuffmanTableRole::Dc).expect("empty table"))
             .expect("reserved arena");
         let mut plan = empty_plan(7);
         plan.huffman_tables = huffman_tables;
@@ -881,7 +897,7 @@ mod tests {
             crate::entropy::huffman::PreparedHuffmanTables::try_with_capacity(1)
                 .expect("bounded arena");
         let table = huffman_tables
-            .push(HuffmanTable::from_raw(&raw).expect("empty table"))
+            .push(HuffmanTable::from_raw(&raw, HuffmanTableRole::Dc).expect("empty table"))
             .expect("reserved arena");
         let mut plan = empty_plan(0);
         plan.huffman_tables = huffman_tables;
@@ -926,6 +942,86 @@ mod tests {
         assert_eq!(builds, 2, "oversized keys must bypass the cache");
         assert_eq!(ctx.decode_plan_cache_bytes, 0);
         assert!(ctx.decode_plans.iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn identical_raw_huffman_tables_keep_roles_distinct_even_on_digest_collision() {
+        let raw = RawHuffmanTable {
+            bits: [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            values: crate::parse::tables::HuffmanValues::from_slice(&[0]),
+        };
+        for force_collision in [false, true] {
+            let mut ctx = DecoderContext::new();
+            for role in [
+                HuffmanTableRole::Dc,
+                HuffmanTableRole::Ac,
+                HuffmanTableRole::Dc,
+                HuffmanTableRole::Ac,
+            ] {
+                let mut live_bytes = ctx.retained_allocation_bytes();
+                let digest = if force_collision {
+                    0
+                } else {
+                    digest_huffman_table(&raw, role)
+                };
+                let table = ctx
+                    .resolve_huffman_table_with_digest_and_live_budget(
+                        &raw,
+                        role,
+                        digest,
+                        &mut live_bytes,
+                        MAX_DECODER_CONTEXT_ALLOCATION_BYTES,
+                    )
+                    .expect("role-specific cached table");
+                assert_eq!(table.dc().is_ok(), role == HuffmanTableRole::Dc);
+                assert_eq!(table.ac().is_ok(), role == HuffmanTableRole::Ac);
+                assert_eq!(live_bytes, ctx.retained_allocation_bytes());
+            }
+            let stats = ctx.cache_stats();
+            assert_eq!(stats.misses, 2);
+            assert_eq!(stats.hits, 2);
+            assert_eq!(stats.occupied_slots, 2);
+        }
+    }
+
+    #[test]
+    fn role_specific_cache_slots_obey_exact_live_byte_boundary() {
+        let raw = RawHuffmanTable {
+            bits: [0; 16],
+            values: crate::parse::tables::HuffmanValues::default(),
+        };
+        let external_bytes = 7;
+        let cache_bytes = HUFFMAN_CACHE_SLOTS * size_of::<Option<CachedHuffmanTable>>();
+        let exact_cap = external_bytes + cache_bytes;
+        let mut ctx = DecoderContext::new();
+        let mut live_bytes = external_bytes;
+        let error = ctx
+            .resolve_huffman_table_with_live_budget(
+                &raw,
+                HuffmanTableRole::Dc,
+                &mut live_bytes,
+                exact_cap - 1,
+            )
+            .expect_err("one byte below the slot allocation");
+        assert!(
+            matches!(error, JpegError::MemoryCapExceeded { requested, cap }
+            if requested == exact_cap && cap == exact_cap - 1)
+        );
+        assert_eq!(ctx.retained_allocation_bytes(), 0);
+        assert_eq!(live_bytes, external_bytes);
+        assert_eq!(ctx.cache_stats().occupied_slots, 0);
+
+        for role in [HuffmanTableRole::Dc, HuffmanTableRole::Ac] {
+            ctx.resolve_huffman_table_with_live_budget(&raw, role, &mut live_bytes, exact_cap)
+                .expect("both roles fit in the already charged slots");
+            assert_eq!(live_bytes, exact_cap);
+            assert_eq!(ctx.retained_allocation_bytes(), cache_bytes);
+            assert_eq!(
+                ctx.retained_allocation_bytes(),
+                ctx.huffman_tables.capacity() * size_of::<Option<CachedHuffmanTable>>()
+            );
+        }
+        assert_eq!(ctx.cache_stats().occupied_slots, 2);
     }
 
     #[test]

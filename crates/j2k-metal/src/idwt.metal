@@ -484,15 +484,15 @@ kernel void j2k_idwt_irreversible97_horizontal_step(
     constant J2kIdwt97StepParams &step [[buffer(2)]],
     uint3 gid [[thread_position_in_grid]]
 ) {
-    if (gid.x >= params.width || gid.y >= params.height || params.width <= 1u
-        || (gid.x & 1u) != step.parity) {
+    const uint x = 2u * gid.x + step.parity;
+    if (x >= params.width || gid.y >= params.height || params.width <= 1u) {
         return;
     }
 
     out += ulong(gid.z) * params.width * params.height;
-    const uint left = periodic_symmetric_extension_left_u32(gid.x, 1u);
-    const uint right = periodic_symmetric_extension_right_u32(gid.x, 1u, params.width);
-    const uint idx = gid.y * params.width + gid.x;
+    const uint left = periodic_symmetric_extension_left_u32(x, 1u);
+    const uint right = periodic_symmetric_extension_right_u32(x, 1u, params.width);
+    const uint idx = gid.y * params.width + x;
     out[idx] = fma(out[gid.y * params.width + left] + out[gid.y * params.width + right],
                    step.coefficient,
                    out[idx]);
@@ -504,15 +504,15 @@ kernel void j2k_idwt_irreversible97_vertical_step(
     constant J2kIdwt97StepParams &step [[buffer(2)]],
     uint3 gid [[thread_position_in_grid]]
 ) {
-    if (gid.x >= params.width || gid.y >= params.height || params.height <= 1u
-        || (gid.y & 1u) != step.parity) {
+    const uint y = 2u * gid.y + step.parity;
+    if (gid.x >= params.width || y >= params.height || params.height <= 1u) {
         return;
     }
 
     out += ulong(gid.z) * params.width * params.height;
-    const uint above = periodic_symmetric_extension_left_u32(gid.y, 1u);
-    const uint below = periodic_symmetric_extension_right_u32(gid.y, 1u, params.height);
-    const uint idx = gid.y * params.width + gid.x;
+    const uint above = periodic_symmetric_extension_left_u32(y, 1u);
+    const uint below = periodic_symmetric_extension_right_u32(y, 1u, params.height);
+    const uint idx = y * params.width + gid.x;
     out[idx] = fma(out[above * params.width + gid.x] + out[below * params.width + gid.x],
                    step.coefficient,
                    out[idx]);

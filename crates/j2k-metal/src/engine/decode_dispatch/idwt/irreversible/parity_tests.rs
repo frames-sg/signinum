@@ -90,15 +90,9 @@ fn compare_stage(
     }
 }
 
-fn compare_geometry(
-    runtime: &MetalRuntime,
-    references: &[ComputePipelineState; 2],
-    geometry: (u32, u32, u32, u32, u32, u32),
-    batch: u32,
-    high_pass: f32,
-) {
+fn geometry_params(geometry: (u32, u32, u32, u32, u32, u32)) -> J2kIdwtSingleDecompositionParams {
     let (width, height, x0, y0, output_x, output_y) = geometry;
-    let params = J2kIdwtSingleDecompositionParams {
+    J2kIdwtSingleDecompositionParams {
         x0,
         y0,
         output_x,
@@ -121,7 +115,18 @@ fn compare_geometry(
         hh_y: 0,
         hh_width: 0,
         hh_height: 0,
-    };
+    }
+}
+
+fn compare_geometry(
+    runtime: &MetalRuntime,
+    references: &[ComputePipelineState; 2],
+    geometry: (u32, u32, u32, u32, u32, u32),
+    batch: u32,
+    high_pass: f32,
+) {
+    let (width, height, x0, y0, output_x, output_y) = geometry;
+    let params = geometry_params(geometry);
     let count = width as usize * height as usize * batch as usize;
     let mut seed = vec![7.0; count + 8];
     for (index, value) in seed[4..count + 4].iter_mut().enumerate() {
@@ -220,4 +225,70 @@ fn irreversible97_lifting_intermediates_match_full_grid_reference_bits() {
         Ok(())
     })
     .expect("intermediate bitwise comparison");
+}
+
+#[test]
+fn irreversible97_stage_grids_remove_inactive_parity_positions() {
+    if !j2k_test_support::metal_runtime_gate(module_path!()) {
+        return;
+    }
+    with_runtime(|runtime| {
+        for (width, height, batch) in [(5, 7, 3), (1, 1, 1), (1, 7, 3), (9, 1, 16), (128, 64, 16)] {
+            let params = geometry_params((width, height, 1, 0, 2, 3));
+            let samples = vec![0.25_f32; width as usize * height as usize * batch as usize];
+            let buffer = copied_slice_buffer(&runtime.device, &samples).unwrap();
+            let command = new_command_buffer(&runtime.queue).unwrap();
+            let encoder = new_compute_command_encoder(&command).unwrap();
+            crate::engine::test_counters::reset_idwt97_logical_dispatches_for_test();
+            dispatch_irreversible97_stages(
+                &encoder,
+                runtime.decode().unwrap(),
+                &buffer,
+                0,
+                params,
+                dwt::DWT97_INV_KAPPA_F32,
+                batch,
+            );
+            encoder.endEncoding();
+            commit_and_wait_metal(&command)?;
+            let (positions, dispatches) =
+                crate::engine::test_counters::idwt97_logical_dispatches_for_test();
+            assert_eq!(
+                positions,
+                6 * samples.len(),
+                "two scales plus eight half-parity lifts"
+            );
+            assert_eq!(
+                dispatches,
+                2 + if width == 1 { 2 } else { 4 } + if height == 1 { 2 } else { 4 },
+                "zero-count parity dispatches must be skipped"
+            );
+        }
+        Ok(())
+    })
+    .expect("production parity grids");
+}
+
+#[test]
+fn compact_parity_axis_enumerates_original_active_coordinates() {
+    for length in 0..=257 {
+        for odd in [false, true] {
+            let parity = u32::from(odd);
+            let original = (0..length)
+                .filter(|index| index & 1 == parity)
+                .collect::<Vec<_>>();
+            let compact = (0..parity_axis_len(length, odd))
+                .map(|index| index * 2 + parity)
+                .collect::<Vec<_>>();
+            assert_eq!(compact, original, "length={length}, odd={odd}");
+        }
+    }
+    assert_eq!(parity_axis_len(u32::MAX, false), 1_u32 << 31);
+    assert_eq!(parity_axis_len(u32::MAX, true), (1_u32 << 31) - 1);
+    for (odd, expected_last) in [(false, u32::MAX - 1), (true, u32::MAX - 2)] {
+        let last = (parity_axis_len(u32::MAX, odd) - 1)
+            .checked_mul(2)
+            .and_then(|index| index.checked_add(u32::from(odd)));
+        assert_eq!(last, Some(expected_last));
+    }
 }

@@ -25,10 +25,19 @@ fn bench_micro(c: &mut Criterion) {
     });
 
     let huffman = BenchHuffmanState::luma_dc_zeros(2048);
+    assert_eq!(huffman.decode_all().expect("validate zero stream"), 0);
     c.bench_function("micro/huffman_luma_dc_zero_stream", |b| {
         b.iter(|| {
             let sum = huffman.decode_all().expect("huffman decode");
             std::hint::black_box(sum);
+        });
+    });
+
+    // Includes standard DC table compilation and the constructor's fixed
+    // eight-byte padded stream allocation, with no entropy symbols to generate.
+    c.bench_function("micro/huffman_luma_dc_state_build", |b| {
+        b.iter(|| {
+            std::hint::black_box(BenchHuffmanState::luma_dc_zeros(std::hint::black_box(0)));
         });
     });
 

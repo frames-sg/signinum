@@ -30,6 +30,9 @@ mod bench_inputs;
 #[cfg(target_os = "macos")]
 #[path = "support/distinct_batch.rs"]
 mod distinct_batch;
+#[cfg(target_os = "macos")]
+#[path = "support/representative_matrix.rs"]
+mod representative_matrix;
 use bench_inputs::{BenchInput, CorpusInputClass, DecodeMode};
 
 #[cfg(target_os = "macos")]
@@ -1631,6 +1634,7 @@ fn bench_compare(c: &mut Criterion) {
     #[cfg(target_os = "macos")]
     if has_metal {
         distinct_batch::bench(c);
+        representative_matrix::bench(c);
     }
     bench_resident_texture_batches(c, &inputs, has_metal);
     bench_resident_viewport_outputs(c, &inputs, has_metal);

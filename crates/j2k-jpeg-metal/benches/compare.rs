@@ -27,6 +27,9 @@ use std::collections::HashSet;
 
 #[path = "support/bench_inputs.rs"]
 mod bench_inputs;
+#[cfg(target_os = "macos")]
+#[path = "support/distinct_batch.rs"]
+mod distinct_batch;
 use bench_inputs::{BenchInput, CorpusInputClass, DecodeMode};
 
 #[cfg(target_os = "macos")]
@@ -1625,6 +1628,10 @@ fn bench_compare(c: &mut Criterion) {
     bench_fast_packet_planning(c, &inputs);
     bench_full_and_tile_decode_groups(c, &inputs, has_metal);
     bench_retained_single_decode(c, has_metal);
+    #[cfg(target_os = "macos")]
+    if has_metal {
+        distinct_batch::bench(c);
+    }
     bench_resident_texture_batches(c, &inputs, has_metal);
     bench_resident_viewport_outputs(c, &inputs, has_metal);
     bench_region_and_scaled_decode_groups(c, &inputs, has_metal);

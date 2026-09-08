@@ -99,3 +99,22 @@ impl Drop for BatchScratchLease<'_> {
         self.pool.released.notify_all();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scratch_slots_fail_closed_after_panicking_owner() {
+        let pool = BatchScratchPool::default();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _lease = pool.acquire().expect("scratch lease");
+            panic!("abandon scratch during an owner panic");
+        }));
+        assert!(result.is_err());
+        assert!(matches!(
+            pool.acquire(),
+            Err(Error::MetalStatePoisoned { .. })
+        ));
+    }
+}

@@ -2,6 +2,9 @@
 
 use crate::metal_types::prelude::*;
 
+use super::scratch::{
+    packet_buffers as scratch_packet_buffers, status_buffer as scratch_status_buffer,
+};
 use crate::buffers::new_shared_buffer;
 
 use super::super::{
@@ -36,7 +39,14 @@ pub(in crate::compute) fn decode_fast422_to_rgb_buffer(
     fmt: PixelFormat,
     output_storage: MTLResourceOptions,
 ) -> Result<Option<FastRgbDecodeBuffer>, Error> {
-    decode_fast_subsampled_to_rgb_buffer(runtime, packet, fmt, output_storage, fast422_status_error)
+    decode_fast_subsampled_to_rgb_buffer(
+        runtime,
+        packet,
+        fmt,
+        output_storage,
+        fast422_status_error,
+        false,
+    )
 }
 
 #[cfg(target_os = "macos")]
@@ -52,6 +62,7 @@ fn try_decode_fast_subsampled_to_surface<P: FastSubsampledMetal>(
         fmt,
         MTLResourceOptions::StorageModeShared,
         map_status,
+        true,
     )?
     else {
         return Ok(None);
@@ -74,6 +85,7 @@ fn decode_fast_subsampled_to_rgb_buffer<P: FastSubsampledMetal>(
     fmt: PixelFormat,
     output_storage: MTLResourceOptions,
     map_status: impl Fn(JpegDecodeStatus) -> Error,
+    reuse_temporaries: bool,
 ) -> Result<Option<FastRgbDecodeBuffer>, Error> {
     let Some(packet) = packet else {
         return Ok(None);
@@ -85,19 +97,54 @@ fn decode_fast_subsampled_to_rgb_buffer<P: FastSubsampledMetal>(
     let params = fast_subsampled_params(packet, fmt)?;
     let y_len = params.width as usize * params.height as usize;
     let chroma_len = params.chroma_width as usize * params.chroma_height as usize;
-    let y_plane = new_decode_plane_buffer(&runtime.device, y_len, fmt == PixelFormat::Gray8)?;
-    let cb_plane = new_private_buffer(&runtime.device, chroma_len)?;
-    let cr_plane = new_private_buffer(&runtime.device, chroma_len)?;
+    let mut scratch = reuse_temporaries
+        .then(|| runtime.batch_scratch())
+        .transpose()?;
+    let y_plane = if fmt == PixelFormat::Gray8 {
+        new_decode_plane_buffer(&runtime.device, y_len, true)?
+    } else if let Some(scratch) = scratch.as_deref_mut() {
+        scratch.private_buffer(&runtime.device, "single_decode_y", y_len)?
+    } else {
+        new_private_buffer(&runtime.device, y_len)?
+    };
+    let cb_plane = if let Some(scratch) = scratch.as_deref_mut() {
+        scratch.private_buffer(&runtime.device, "single_decode_cb", chroma_len)?
+    } else {
+        new_private_buffer(&runtime.device, chroma_len)?
+    };
+    let cr_plane = if let Some(scratch) = scratch.as_deref_mut() {
+        scratch.private_buffer(&runtime.device, "single_decode_cr", chroma_len)?
+    } else {
+        new_private_buffer(&runtime.device, chroma_len)?
+    };
     let decode_threads = entropy_decode_thread_count(
         packet.restart_interval_mcus(),
         packet.restart_offsets().len(),
         packet.entropy_checkpoints().len(),
     );
-    let status_buffer = decode_status_buffer(&runtime.device, decode_threads)?;
-    let entropy_buffer = new_shared_buffer_with_data(&runtime.device, packet.entropy_bytes())?;
-    let restart_offsets_buffer = restart_offsets_buffer(&runtime.device, packet.restart_offsets())?;
-    let entropy_checkpoints_buffer =
-        entropy_checkpoints_buffer(&runtime.device, packet.entropy_checkpoints())?;
+    let (status_buffer, entropy_buffer, restart_offsets_buffer, entropy_checkpoints_buffer) =
+        if let Some(scratch) = scratch.as_deref_mut() {
+            let packet_buffers = scratch_packet_buffers(
+                scratch,
+                &runtime.device,
+                packet.entropy_bytes(),
+                packet.restart_offsets(),
+                packet.entropy_checkpoints(),
+            )?;
+            (
+                scratch_status_buffer(scratch, &runtime.device, decode_threads)?,
+                packet_buffers.entropy,
+                packet_buffers.restart_offsets,
+                packet_buffers.checkpoints,
+            )
+        } else {
+            (
+                decode_status_buffer(&runtime.device, decode_threads)?,
+                new_shared_buffer_with_data(&runtime.device, packet.entropy_bytes())?,
+                restart_offsets_buffer(&runtime.device, packet.restart_offsets())?,
+                entropy_checkpoints_buffer(&runtime.device, packet.entropy_checkpoints())?,
+            )
+        };
 
     let (dc_tables, ac_tables) = fast_packet_huffman_tables(packet);
 
@@ -185,6 +232,7 @@ fn try_decode_fast_subsampled_region_to_surface<P: FastSubsampledMetal>(
     };
 
     let command_buffer = new_command_buffer(&runtime.queue)?;
+    let mut scratch = runtime.batch_scratch()?;
     let item = encode_fast_subsampled_region_batch_item(
         runtime,
         &command_buffer,
@@ -196,6 +244,7 @@ fn try_decode_fast_subsampled_region_to_surface<P: FastSubsampledMetal>(
             w: roi.w,
             h: roi.h,
         },
+        Some(&mut scratch),
     )?;
     commit_and_wait_jpeg(&command_buffer)?;
 
@@ -225,8 +274,15 @@ fn try_decode_fast_subsampled_scaled_to_surface<P: FastSubsampledMetal>(
     }
 
     let command_buffer = new_command_buffer(&runtime.queue)?;
-    let item =
-        encode_fast_subsampled_scaled_batch_item(runtime, &command_buffer, packet, fmt, scale)?;
+    let mut scratch = runtime.batch_scratch()?;
+    let item = encode_fast_subsampled_scaled_batch_item(
+        runtime,
+        &command_buffer,
+        packet,
+        fmt,
+        scale,
+        Some(&mut scratch),
+    )?;
     commit_and_wait_jpeg(&command_buffer)?;
 
     if let Some(status) = first_decode_error_status(&item.status_buffer, item.decode_threads)? {
@@ -347,19 +403,26 @@ fn try_decode_fast_subsampled_scaled_region_to_surface<P: FastSubsampledMetal>(
     let y_len = source_window.w as usize * source_window.h as usize;
     let chroma_len =
         source_window.w.div_ceil(2) as usize * P::chroma_height(source_window.h) as usize;
-    let y_plane = new_decode_plane_buffer(&runtime.device, y_len, false)?;
-    let cb_plane = new_private_buffer(&runtime.device, chroma_len)?;
-    let cr_plane = new_private_buffer(&runtime.device, chroma_len)?;
+    let mut scratch = runtime.batch_scratch()?;
+    let y_plane = scratch.private_buffer(&runtime.device, "single_decode_y", y_len)?;
+    let cb_plane = scratch.private_buffer(&runtime.device, "single_decode_cb", chroma_len)?;
+    let cr_plane = scratch.private_buffer(&runtime.device, "single_decode_cr", chroma_len)?;
     let decode_threads = entropy_decode_thread_count(
         packet.restart_interval_mcus(),
         restart_offsets.len(),
         packet.entropy_checkpoints().len(),
     );
-    let status_buffer = decode_status_buffer(&runtime.device, decode_threads)?;
-    let entropy_buffer = new_shared_buffer_with_data(&runtime.device, packet.entropy_bytes())?;
-    let restart_offsets_buffer = restart_offsets_buffer(&runtime.device, restart_offsets)?;
-    let entropy_checkpoints_buffer =
-        entropy_checkpoints_buffer(&runtime.device, packet.entropy_checkpoints())?;
+    let packet_buffers = scratch_packet_buffers(
+        &mut scratch,
+        &runtime.device,
+        packet.entropy_bytes(),
+        restart_offsets,
+        packet.entropy_checkpoints(),
+    )?;
+    let status_buffer = scratch_status_buffer(&mut scratch, &runtime.device, decode_threads)?;
+    let entropy_buffer = packet_buffers.entropy;
+    let restart_offsets_buffer = packet_buffers.restart_offsets;
+    let entropy_checkpoints_buffer = packet_buffers.checkpoints;
 
     let (dc_tables, ac_tables) = fast_packet_huffman_tables(packet);
 
@@ -440,6 +503,7 @@ pub(in crate::compute) fn decode_fast420_to_rgb_buffer(
         fmt,
         output_storage,
         fast_decode_status_error,
+        false,
     )
 }
 

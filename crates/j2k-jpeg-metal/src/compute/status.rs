@@ -98,7 +98,7 @@ mod tests {
     }
 
     #[test]
-    fn batch_status_read_retains_scratch_ownership() {
+    fn batch_and_single_status_reads_retain_scratch_ownership() {
         if !j2k_test_support::metal_runtime_gate(module_path!()) {
             return;
         }
@@ -117,7 +117,7 @@ mod tests {
                 observed_reads.set(observed_reads.get() + 1);
             }));
         });
-        let decoder =
+        let mut decoder =
             crate::Decoder::new(include_bytes!("../../fixtures/jpeg/baseline_420_16x16.jpg"))
                 .expect("decoder");
         let requests = [decoder.rgb8_metal_request(crate::batch::BatchOp::Full)];
@@ -131,6 +131,19 @@ mod tests {
         super::super::batch_entry::decode_full_batch_to_surfaces_with_session(&requests, &session)
             .expect("RGB batch")
             .expect("supported batch");
-        assert_eq!(reads.get(), 2, "both completion paths must inspect status");
+        for fmt in [
+            crate::PixelFormat::Gray8,
+            crate::PixelFormat::Rgb8,
+            crate::PixelFormat::Rgba8,
+        ] {
+            decoder
+                .decode_to_device_with_session(fmt, &session)
+                .expect("single surface");
+        }
+        assert_eq!(
+            reads.get(),
+            5,
+            "batch and single completion paths must inspect status"
+        );
     }
 }

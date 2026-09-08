@@ -17,7 +17,7 @@ use j2k_jpeg_metal::{
     Rgb8MetalBatchOp, Rgb8MetalBatchRequest, Rgb8MetalBatchSource,
 };
 use jpeg_encoder::SamplingFactor;
-use std::hint::black_box;
+use std::{hint::black_box, sync::Barrier, time::Instant};
 
 const BATCH_SIZE: usize = 4;
 
@@ -59,6 +59,7 @@ pub(super) fn bench(c: &mut Criterion) {
         let decoder_refs = decoders.iter().collect::<Vec<_>>();
         let reversed_bytes = bytes.iter().copied().rev().collect::<Vec<_>>();
         let reversed_decoders = decoder_refs.iter().copied().rev().collect::<Vec<_>>();
+        bench_two_streams(&mut group, side, &decoder_refs, &expected);
         group.throughput(Throughput::Elements(BATCH_SIZE as u64));
         for prepared in [false, true] {
             for host_copy in [false, true] {
@@ -133,4 +134,96 @@ pub(super) fn bench(c: &mut Criterion) {
         }
     }
     group.finish();
+}
+
+// Each sample measures two streams of completed resident batches. Worker creation
+// is excluded; concurrent timing includes the start barrier and worker joins.
+// This measures throughput, not individual batch latency or proof of GPU overlap.
+fn bench_two_streams(
+    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    side: u16,
+    decoders: &[&Decoder<'_>],
+    expected: &[Vec<u8>],
+) {
+    group.throughput(Throughput::Elements((2 * BATCH_SIZE) as u64));
+    for concurrent in [false, true] {
+        let session = MetalBackendSession::system_default().expect("two-stream Metal session");
+        let outputs = std::array::from_fn::<_, 2, _>(|_| {
+            MetalBatchOutputBuffer::new_rgb8_tiles(
+                &session,
+                (u32::from(side), u32::from(side)),
+                BATCH_SIZE,
+            )
+            .expect("independent stream output")
+        });
+        let decode = |output: &MetalBatchOutputBuffer, verify: bool| {
+            let surfaces = Codec::decode_rgb8_batch_into_buffer_with_session(
+                Rgb8MetalBatchRequest {
+                    source: Rgb8MetalBatchSource::Decoders(decoders),
+                    op: Rgb8MetalBatchOp::Full,
+                },
+                MetalBufferBatchTarget::Reusable(output),
+                &session,
+            )
+            .expect("two-stream resident decode");
+            assert_eq!(surfaces.len(), BATCH_SIZE);
+            for (surface, expected) in surfaces.into_iter().zip(expected) {
+                let surface = surface.expect("two-stream item");
+                if verify {
+                    assert_metal_surface_pixels(&surface, expected);
+                }
+                black_box(surface);
+            }
+        };
+        // Exercise both destination owners concurrently before measuring, too.
+        std::thread::scope(|scope| {
+            let first = scope.spawn(|| decode(&outputs[0], true));
+            let second = scope.spawn(|| decode(&outputs[1], true));
+            first.join().expect("first probe worker");
+            second.join().expect("second probe worker");
+        });
+        let execution = if concurrent {
+            "concurrent_two"
+        } else {
+            "sequential_two"
+        };
+        group.bench_function(
+            format!("420_r2/{side}x{side}/distinct4/warm_session_reused_output/prepared/resident/batch4/{execution}"),
+            |b| b.iter_custom(|iters| {
+                if concurrent {
+                    let ready = Barrier::new(3);
+                    let start = Barrier::new(3);
+                    std::thread::scope(|scope| {
+                        let workers = outputs.each_ref().map(|output| {
+                            let ready = &ready;
+                            let start = &start;
+                            let decode = &decode;
+                            scope.spawn(move || {
+                                ready.wait();
+                                start.wait();
+                                for _ in 0..iters {
+                                    decode(output, false);
+                                }
+                            })
+                        });
+                        ready.wait();
+                        let began = Instant::now();
+                        start.wait();
+                        for worker in workers {
+                            worker.join().expect("resident decode worker");
+                        }
+                        began.elapsed()
+                    })
+                } else {
+                    let began = Instant::now();
+                    for _ in 0..iters {
+                        for output in &outputs {
+                            decode(output, false);
+                        }
+                    }
+                    began.elapsed()
+                }
+            }),
+        );
+    }
 }

@@ -7,6 +7,7 @@ use j2k_metal_support::{
     checked_buffer_read_vec, checked_buffer_write, checked_private_buffer, checked_shared_buffer,
     checked_shared_buffer_with_bytes, checked_shared_buffer_with_slice, MetalSupportError,
 };
+use objc2_metal::MTLBuffer;
 #[cfg(test)]
 use std::cell::Cell;
 
@@ -15,7 +16,13 @@ use crate::{error::metal_kernel_support_error, Error};
 #[cfg(test)]
 std::thread_local! {
     static JPEG_PRIVATE_BUFFER_ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
+    static JPEG_SCRATCH_UPLOAD_BYTES: Cell<usize> = const { Cell::new(0) };
     static JPEG_SHARED_BUFFER_ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_jpeg_scratch_upload_bytes_for_test() -> usize {
+    JPEG_SCRATCH_UPLOAD_BYTES.with(|count| count.replace(0))
 }
 
 #[cfg(test)]
@@ -197,6 +204,76 @@ mod tests {
     }
 
     #[test]
+    fn shared_scratch_repeated_entropy_avoids_uploads() {
+        if !j2k_test_support::metal_runtime_gate(module_path!()) {
+            return;
+        }
+        let device = system_default_device().expect("Metal device");
+        let mut scratch = MetalBatchScratch::default();
+        for (index, expected) in [b"abcde", b"abcde", b"edcba"].into_iter().enumerate() {
+            super::JPEG_SCRATCH_UPLOAD_BYTES.with(|count| count.set(0));
+            let buffer = scratch
+                .shared_immutable_buffer_with_byte_slices(
+                    &device,
+                    "immutable entropy",
+                    5,
+                    [expected[..2].as_ref(), expected[2..].as_ref()],
+                )
+                .expect("stage entropy");
+            assert_eq!(
+                checked_buffer_slice::<u8>(&buffer, 5, "entropy").unwrap(),
+                expected
+            );
+            let written = super::JPEG_SCRATCH_UPLOAD_BYTES.with(std::cell::Cell::get);
+            if index == 1 {
+                assert_eq!(written, 0, "identical entropy must not be uploaded again");
+            } else {
+                assert_eq!(written, 5);
+            }
+        }
+    }
+
+    #[test]
+    fn immutable_scratch_validates_extent_and_invalidates_mutable_access() {
+        if !j2k_test_support::metal_runtime_gate(module_path!()) {
+            return;
+        }
+        let device = system_default_device().expect("Metal device");
+        let mut scratch = MetalBatchScratch::default();
+        let key = "immutable extent";
+        for bytes in [b"ab".as_slice(), b"abcdef", b"a", b""] {
+            let buffer = scratch
+                .shared_immutable_buffer_with_byte_slices(&device, key, bytes.len(), [bytes])
+                .unwrap();
+            assert_eq!(
+                checked_buffer_slice::<u8>(&buffer, bytes.len(), key).unwrap(),
+                bytes
+            );
+            for wrong_len in [bytes.len() + 1, usize::MAX] {
+                assert!(scratch
+                    .shared_immutable_buffer_with_byte_slices(&device, key, wrong_len, [bytes],)
+                    .is_err());
+            }
+        }
+        scratch
+            .shared_immutable_buffer_with_byte_slices(&device, key, 2, [b"ab".as_slice()])
+            .unwrap();
+        // A generic upload can partially write before rejecting its length.
+        assert!(scratch
+            .shared_buffer_with_byte_slices(&device, key, 2, [b"z".as_slice()])
+            .is_err());
+        super::JPEG_SCRATCH_UPLOAD_BYTES.with(|count| count.set(0));
+        let buffer = scratch
+            .shared_immutable_buffer_with_byte_slices(&device, key, 2, [b"ab".as_slice()])
+            .unwrap();
+        assert_eq!(checked_buffer_slice::<u8>(&buffer, 2, key).unwrap(), b"ab");
+        assert_eq!(
+            super::JPEG_SCRATCH_UPLOAD_BYTES.with(std::cell::Cell::get),
+            2
+        );
+    }
+
+    #[test]
     fn shared_scratch_stages_slices_directly_and_reuses_capacity() {
         if !j2k_test_support::metal_runtime_gate(module_path!()) {
             return;
@@ -275,7 +352,7 @@ mod tests {
                 &device,
                 "direct entropy staging limit test",
                 requested,
-                std::iter::empty(),
+                std::iter::empty::<&[u8]>(),
             )
             .expect_err("oversized staging must fail");
 
@@ -299,6 +376,7 @@ struct ReusablePrivateBuffer {
 }
 
 struct ReusableSharedBuffer {
+    immutable_len: Option<usize>,
     key: &'static str,
     capacity: usize,
     buffer: Buffer,
@@ -357,9 +435,10 @@ impl MetalBatchScratch {
         let capacity = bytes.max(1);
         let buffer = if let Some(entry) = self
             .shared_buffers
-            .iter()
+            .iter_mut()
             .find(|entry| entry.key == key && entry.capacity >= capacity)
         {
+            entry.immutable_len = None;
             entry.buffer.clone()
         } else {
             let buffer = new_shared_buffer(device, capacity)?;
@@ -368,6 +447,7 @@ impl MetalBatchScratch {
                 .iter_mut()
                 .find(|entry| entry.key == key)
             {
+                entry.immutable_len = None;
                 entry.capacity = capacity;
                 entry.buffer = buffer.clone();
             } else {
@@ -376,6 +456,7 @@ impl MetalBatchScratch {
                     "JPEG Metal shared scratch metadata",
                 )?;
                 self.shared_buffers.push(ReusableSharedBuffer {
+                    immutable_len: None,
                     key,
                     capacity,
                     buffer: buffer.clone(),
@@ -412,19 +493,26 @@ impl MetalBatchScratch {
             unsafe { checked_buffer_write::<u8>(&buffer, 0, bytes) }
                 .map_err(|error| buffer_access_error("shared scratch upload", error))?;
         }
+        #[cfg(test)]
+        JPEG_SCRATCH_UPLOAD_BYTES.with(|count| count.set(count.get() + bytes.len()));
         Ok(buffer)
     }
 
-    pub(crate) fn shared_buffer_with_byte_slices<'a>(
+    pub(crate) fn shared_buffer_with_byte_slices<I>(
         &mut self,
         device: &DeviceRef,
         key: &'static str,
         total_bytes: usize,
-        slices: impl IntoIterator<Item = &'a [u8]>,
-    ) -> Result<Buffer, Error> {
+        slices: I,
+    ) -> Result<Buffer, Error>
+    where
+        I: IntoIterator,
+        I::Item: AsRef<[u8]>,
+    {
         let buffer = self.shared_buffer(device, key, total_bytes)?;
         let mut offset = 0_usize;
-        for bytes in slices {
+        for chunk in slices {
+            let bytes = chunk.as_ref();
             let end = offset
                 .checked_add(bytes.len())
                 .ok_or_else(|| Error::MetalKernel {
@@ -442,6 +530,8 @@ impl MetalBatchScratch {
                 unsafe { checked_buffer_write::<u8>(&buffer, offset, bytes) }
                     .map_err(|error| buffer_access_error("shared scratch upload", error))?;
             }
+            #[cfg(test)]
+            JPEG_SCRATCH_UPLOAD_BYTES.with(|count| count.set(count.get() + bytes.len()));
             offset = end;
         }
         if offset != total_bytes {
@@ -450,6 +540,89 @@ impl MetalBatchScratch {
             });
         }
         Ok(buffer)
+    }
+
+    /// Retain CPU-initialized, GPU-read-only bytes for this exclusive scratch lease.
+    /// Callers must not write through returned buffers or bind them as GPU outputs.
+    pub(crate) fn shared_immutable_buffer_with_byte_slices<I>(
+        &mut self,
+        device: &DeviceRef,
+        key: &'static str,
+        total_bytes: usize,
+        slices: I,
+    ) -> Result<Buffer, Error>
+    where
+        I: IntoIterator,
+        I::Item: AsRef<[u8]>,
+        I::IntoIter: Clone,
+    {
+        let slices = slices.into_iter();
+        let actual = slices.clone().try_fold(0_usize, |len, chunk| {
+            len.checked_add(chunk.as_ref().len())
+                .ok_or_else(|| Error::MetalKernel {
+                    message: "JPEG Metal shared scratch staging length overflowed".to_string(),
+                })
+        })?;
+        if actual != total_bytes {
+            return Err(Error::MetalKernel {
+                message: "JPEG Metal shared scratch staging length mismatch".to_string(),
+            });
+        }
+        if let Some(entry) = self
+            .shared_buffers
+            .iter()
+            .find(|entry| entry.key == key && entry.immutable_len == Some(total_bytes))
+        {
+            let matches = if total_bytes == 0 {
+                true
+            } else {
+                // SAFETY: immutable_len is published only after a complete CPU
+                // upload. The scratch lease excludes other users and these
+                // buffers are read-only on the GPU. The checked read validates
+                // CPU visibility; the full extent is bounded by capacity.
+                unsafe { support_checked_buffer_read::<u8>(&entry.buffer, 0) }
+                    .map_err(|error| buffer_access_error("retained scratch", error))?;
+                debug_assert!(total_bytes <= entry.capacity);
+                // SAFETY: the entire initialized range is within this buffer;
+                // no CPU or GPU writer may overlap this scratch lease.
+                let retained = unsafe {
+                    std::slice::from_raw_parts(
+                        entry.buffer.contents().as_ptr().cast::<u8>(),
+                        total_bytes,
+                    )
+                };
+                let mut offset = 0;
+                slices.clone().all(|chunk| {
+                    let bytes = chunk.as_ref();
+                    let end = offset + bytes.len();
+                    let equal = retained[offset..end] == *bytes;
+                    offset = end;
+                    equal
+                })
+            };
+            if matches {
+                return Ok(entry.buffer.clone());
+            }
+        }
+        let buffer = self.shared_buffer_with_byte_slices(device, key, total_bytes, slices)?;
+        if let Some(entry) = self
+            .shared_buffers
+            .iter_mut()
+            .find(|entry| entry.key == key)
+        {
+            entry.immutable_len = Some(total_bytes);
+        }
+        Ok(buffer)
+    }
+
+    pub(crate) fn shared_immutable_buffer_with_slice<T: GpuAbi>(
+        &mut self,
+        device: &DeviceRef,
+        key: &'static str,
+        values: &[T],
+    ) -> Result<Buffer, Error> {
+        let bytes = T::slice_as_bytes(values);
+        self.shared_immutable_buffer_with_byte_slices(device, key, bytes.len(), [bytes])
     }
 
     pub(crate) fn shared_buffer_with_slice<T: GpuAbi>(

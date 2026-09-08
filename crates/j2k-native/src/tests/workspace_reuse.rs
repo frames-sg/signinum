@@ -472,7 +472,7 @@ fn ht_task_workspaces_remain_reusable_across_classic_decode() {
 #[ignore = "coefficient allocation measurement; run explicitly with --ignored --nocapture"]
 fn parallel_coefficient_allocation_report() {
     let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(2)
+        .num_threads(1)
         .build()
         .expect("test pool");
     for ht in [false, true] {
@@ -488,10 +488,17 @@ fn parallel_coefficient_allocation_report() {
                 let warm_stats = context.tile_decode_context.debug_counters.parallel_coefficients;
                 let warm_retained = context.tile_decode_context.tier1_capacity_bytes().expect("retained bytes");
                 assert_eq!(warm.data, cold.data);
-                assert!(cold_stats.allocations > 0);
-                assert!(cold_stats.scatter_bytes > 0);
+                if ht {
+                    assert!(cold_stats.direct_bytes > 0);
+                    assert_eq!(cold_stats.allocations, 0);
+                    assert_eq!(cold_stats.scatter_bytes, 0);
+                } else {
+                    assert!(cold_stats.allocations > 0);
+                    assert!(cold_stats.scatter_bytes > 0);
+                }
+                assert_eq!(warm_stats.direct_bytes, cold_stats.direct_bytes);
                 assert_eq!(warm_stats.scatter_bytes, cold_stats.scatter_bytes);
-                println!("parallel_coefficients ht={ht} reversible={reversible} width=257 height=263 pool=2 cold={cold_stats:?} warm={warm_stats:?} cold_retained_tier1_bytes={cold_retained} warm_retained_tier1_bytes={warm_retained}");
+                println!("parallel_coefficients ht={ht} reversible={reversible} width=257 height=263 pool=1 cold={cold_stats:?} warm={warm_stats:?} cold_retained_tier1_bytes={cold_retained} warm_retained_tier1_bytes={warm_retained}");
             });
         }
     }
@@ -514,7 +521,10 @@ fn parallel_coefficient_buffers_reuse_capacity_across_fitting_images() {
             pool.install(|| {
                 let mut context = DecoderContext::default();
                 first.decode_with_context(&mut context).expect("reserve coefficient buffers");
-                assert!(context.tile_decode_context.debug_counters.parallel_coefficients.allocations > 0);
+                let first_stats = context.tile_decode_context.debug_counters.parallel_coefficients;
+                assert!(first_stats.allocations > 0);
+                assert!(first_stats.scatter_bytes > 0);
+                assert_eq!(first_stats.direct_bytes, 0, "multiworker decode must retain block scheduling");
                 for image in [&first, &second, &first] {
                     let mut serial = DecoderContext::default();
                     serial.set_cpu_decode_parallelism(crate::CpuDecodeParallelism::Serial);
@@ -522,8 +532,55 @@ fn parallel_coefficient_buffers_reuse_capacity_across_fitting_images() {
                     let actual = image.decode_with_context(&mut context).expect("reused decode");
                     assert_eq!(actual.data, expected.data, "ht={ht}, reversible={reversible}");
                     assert_eq!((actual.width, actual.height), (expected.width, expected.height));
+                    assert_eq!(context.tile_decode_context.debug_counters.parallel_coefficients.direct_bytes, 0,
+                        "multiworker reused decode must retain block scheduling");
                     assert_eq!(context.tile_decode_context.debug_counters.parallel_coefficients.allocations, 0,
                         "fitting coefficient buffers must not allocate again: ht={ht}, reversible={reversible}");
+                }
+            });
+        }
+    }
+}
+
+#[cfg(feature = "parallel")]
+#[test]
+fn parallel_ht_complete_stripes_write_destination_without_scatter() {
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    for (width, height) in [(257, 263), (512, 512)] {
+        for reversible in [false, true] {
+            let bytes = parallel_gray_fixture(width, height, true, reversible);
+            let image = Image::new(&bytes, &DecodeSettings::default()).unwrap();
+            pool.install(|| {
+                let mut serial = DecoderContext::default();
+                serial.set_cpu_decode_parallelism(crate::CpuDecodeParallelism::Serial);
+                let expected = image.decode_with_context(&mut serial).unwrap();
+                let mut parallel = DecoderContext::default();
+                for _ in 0..2 {
+                    let actual = image.decode_with_context(&mut parallel).unwrap();
+                    assert_eq!(actual.data, expected.data);
+                    assert_eq!(
+                        (actual.width, actual.height),
+                        (expected.width, expected.height)
+                    );
+                    let stats = parallel
+                        .tile_decode_context
+                        .debug_counters
+                        .parallel_coefficients;
+                    assert!(
+                        stats.direct_bytes > 0,
+                        "complete HT stripes must reach direct destination writes: {stats:?}"
+                    );
+                    assert_eq!(
+                        stats.scatter_bytes, 0,
+                        "eligible complete HT bands must not scatter"
+                    );
+                    assert_eq!(
+                        stats.allocations, 0,
+                        "direct HT bands must not allocate a coefficient slab"
+                    );
                 }
             });
         }

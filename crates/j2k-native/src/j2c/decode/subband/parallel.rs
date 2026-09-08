@@ -20,6 +20,9 @@ use crate::{
 use alloc::vec::Vec;
 use rayon::prelude::*;
 
+mod stripes;
+pub(super) use stripes::try_decode_ht_stripes;
+
 const PARALLEL_TASKS_PER_WORKER: usize = 2;
 
 #[derive(Clone, Copy)]
@@ -31,7 +34,7 @@ struct PreparedTaskPlan {
 }
 
 impl PreparedTaskPlan {
-    fn chunks<'a, T>(&self, values: &'a [T]) -> impl Iterator<Item = &'a [T]> {
+    fn chunks<'a, T>(&self, values: &'a [T]) -> impl Iterator<Item = &'a [T]> + Clone {
         let (large, small) = values.split_at(self.large_jobs);
         large
             .chunks(self.large_chunk_size)
@@ -563,10 +566,6 @@ fn updated_structural_bytes(
         .ok_or(ValidationError::ImageTooLarge.into())
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "the staged replacement transaction keeps allocation, rollback, and ledger reconciliation together"
-)]
 fn try_prepare_ht_task_workspaces(
     pending_blocks: &[PendingHtBlock],
     plan: PreparedTaskPlan,
@@ -574,12 +573,32 @@ fn try_prepare_ht_task_workspaces(
     structural_workspace_bytes: &mut usize,
     budget: &mut DecodeAllocationBudget,
 ) -> Result<usize> {
+    try_prepare_ht_workspace_chunks(
+        plan.chunks(pending_blocks),
+        plan.active_workspaces,
+        workspaces,
+        structural_workspace_bytes,
+        budget,
+    )
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "the staged replacement transaction keeps allocation, rollback, and ledger reconciliation together"
+)]
+fn try_prepare_ht_workspace_chunks<'a>(
+    chunks: impl Iterator<Item = &'a [PendingHtBlock]> + Clone,
+    active_workspaces: usize,
+    workspaces: &mut Vec<HtTaskWorkspace>,
+    structural_workspace_bytes: &mut usize,
+    budget: &mut DecodeAllocationBudget,
+) -> Result<usize> {
     let old_bank_bytes = ht_task_workspace_bytes(workspaces)?;
     let mut trial = *budget;
-    if workspaces.capacity() < plan.active_workspaces {
+    if workspaces.capacity() < active_workspaces {
         let mut replacement = Vec::new();
-        trial.reserve_new(&mut replacement, plan.active_workspaces)?;
-        for (index, chunk) in plan.chunks(pending_blocks).enumerate() {
+        trial.reserve_new(&mut replacement, active_workspaces)?;
+        for (index, chunk) in chunks.enumerate() {
             let (required_width, required_height) = ht_chunk_dimensions(chunk);
             let (width, height) =
                 workspaces
@@ -629,8 +648,8 @@ fn try_prepare_ht_task_workspaces(
         return Ok(growths);
     }
 
-    let replacement_count = plan
-        .chunks(pending_blocks)
+    let replacement_count = chunks
+        .clone()
         .enumerate()
         .filter(|&(index, chunk)| {
             let (width, height) = ht_chunk_dimensions(chunk);
@@ -652,7 +671,7 @@ fn try_prepare_ht_task_workspaces(
     let mut replaced_workspace_bytes = 0usize;
     #[cfg(test)]
     let mut growths = 0usize;
-    for (index, chunk) in plan.chunks(pending_blocks).enumerate() {
+    for (index, chunk) in chunks.enumerate() {
         let (required_width, required_height) = ht_chunk_dimensions(chunk);
         if workspaces.get(index).is_some_and(|slot| {
             required_width <= slot.prepared_width && required_height <= slot.prepared_height

@@ -14,7 +14,7 @@ use crate::j2c::build::CodeBlockCoding;
 #[cfg(feature = "parallel")]
 use super::{
     copy_decoded_ht_blocks_to_sub_band, decode_ht_sub_band_blocks_parallel,
-    release_coefficient_slab, HtParallelParameters,
+    release_coefficient_slab, try_decode_ht_stripes, HtParallelParameters,
 };
 
 #[expect(
@@ -250,17 +250,40 @@ pub(super) fn decode_sub_band_ht_blocks(
                 }
                 Err(error) => return Err(error),
             };
+            let parameters = HtParallelParameters {
+                strict: header.strict,
+                num_bitplanes,
+                roi_shift: component_info.roi_shift,
+                stripe_causal,
+                dequantization_step,
+                irreversible_midpoint,
+            };
+            // Whole-row ownership removes the coefficient slab, but limits
+            // available tasks. Keep multiworker decoding on the block scheduler.
+            if rayon::current_num_threads() == 1
+                && !component_info
+                    .coding_style
+                    .parameters
+                    .code_block_style
+                    .allows_mixed_block_coding()
+                && tile_ctx.output_region.is_none()
+                && !storage.exact_integer_decode
+                && try_decode_ht_stripes(
+                    &pending_blocks,
+                    sub_band,
+                    parameters,
+                    tile_ctx,
+                    storage,
+                    &mut budget,
+                )?
+            {
+                tile_ctx.debug_counters.decoded_code_blocks += pending_blocks.len();
+                return Ok(());
+            }
             let decoded_blocks = decode_ht_sub_band_blocks_parallel(
                 &pending_blocks,
                 sub_band,
-                HtParallelParameters {
-                    strict: header.strict,
-                    num_bitplanes,
-                    roi_shift: component_info.roi_shift,
-                    stripe_causal,
-                    dequantization_step,
-                    irreversible_midpoint,
-                },
+                parameters,
                 &mut tile_ctx.ht_task_workspaces,
                 &mut tile_ctx.parallel_coefficients,
                 &mut storage.structural_workspace_bytes,

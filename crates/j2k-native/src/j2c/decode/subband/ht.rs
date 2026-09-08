@@ -258,11 +258,14 @@ pub(super) fn decode_sub_band_ht_blocks(
                 dequantization_step,
                 irreversible_midpoint,
             };
-            if !component_info
-                .coding_style
-                .parameters
-                .code_block_style
-                .allows_mixed_block_coding()
+            // Whole-row ownership removes the coefficient slab, but limits
+            // available tasks. Keep multiworker decoding on the block scheduler.
+            if rayon::current_num_threads() == 1
+                && !component_info
+                    .coding_style
+                    .parameters
+                    .code_block_style
+                    .allows_mixed_block_coding()
                 && tile_ctx.output_region.is_none()
                 && !storage.exact_integer_decode
                 && try_decode_ht_stripes(

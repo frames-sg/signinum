@@ -180,10 +180,18 @@ pub(super) fn decode_sub_band_classic_blocks(
                     dequantization_step,
                     irreversible_midpoint,
                 },
+                #[cfg(test)]
+                &mut tile_ctx.debug_counters.parallel_coefficients,
                 &mut budget,
             )?;
             tile_ctx.debug_counters.decoded_code_blocks += decoded_blocks.len();
-            copy_decoded_classic_blocks_to_sub_band(&decoded_blocks, sub_band, storage)?;
+            copy_decoded_classic_blocks_to_sub_band(
+                &decoded_blocks,
+                sub_band,
+                storage,
+                #[cfg(test)]
+                &mut tile_ctx.debug_counters.parallel_coefficients,
+            )?;
             return Ok(());
         }
     }

@@ -466,3 +466,33 @@ fn ht_task_workspaces_remain_reusable_across_classic_decode() {
         });
     }
 }
+
+#[cfg(feature = "parallel")]
+#[test]
+#[ignore = "coefficient allocation measurement; run explicitly with --ignored --nocapture"]
+fn parallel_coefficient_allocation_report() {
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(2)
+        .build()
+        .expect("test pool");
+    for ht in [false, true] {
+        for reversible in [false, true] {
+            let bytes = parallel_gray_fixture(257, 263, ht, reversible);
+            let image = Image::new(&bytes, &DecodeSettings::default()).expect("image");
+            pool.install(|| {
+                let mut context = DecoderContext::default();
+                let cold = image.decode_with_context(&mut context).expect("cold decode");
+                let cold_stats = context.tile_decode_context.debug_counters.parallel_coefficients;
+                let cold_retained = context.tile_decode_context.tier1_capacity_bytes().expect("retained bytes");
+                let warm = image.decode_with_context(&mut context).expect("warm decode");
+                let warm_stats = context.tile_decode_context.debug_counters.parallel_coefficients;
+                let warm_retained = context.tile_decode_context.tier1_capacity_bytes().expect("retained bytes");
+                assert_eq!(warm.data, cold.data);
+                assert!(cold_stats.allocations > 0);
+                assert!(cold_stats.scatter_bytes > 0);
+                assert_eq!(warm_stats.scatter_bytes, cold_stats.scatter_bytes);
+                println!("parallel_coefficients ht={ht} reversible={reversible} width=257 height=263 pool=2 cold={cold_stats:?} warm={warm_stats:?} cold_retained_tier1_bytes={cold_retained} warm_retained_tier1_bytes={warm_retained}");
+            });
+        }
+    }
+}

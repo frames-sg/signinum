@@ -233,10 +233,18 @@ pub(super) fn decode_sub_band_ht_blocks(
                 &mut tile_ctx.debug_counters.ht_parallel_tasks,
                 #[cfg(test)]
                 &mut tile_ctx.debug_counters.ht_task_workspace_growths,
+                #[cfg(test)]
+                &mut tile_ctx.debug_counters.parallel_coefficients,
                 &mut budget,
             )?;
             tile_ctx.debug_counters.decoded_code_blocks += decoded_blocks.len();
-            copy_decoded_ht_blocks_to_sub_band(&decoded_blocks, sub_band, storage)?;
+            copy_decoded_ht_blocks_to_sub_band(
+                &decoded_blocks,
+                sub_band,
+                storage,
+                #[cfg(test)]
+                &mut tile_ctx.debug_counters.parallel_coefficients,
+            )?;
             return Ok(());
         }
     }

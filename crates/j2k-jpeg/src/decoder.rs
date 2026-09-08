@@ -71,10 +71,10 @@ pub(crate) use self::lossless_helpers::restart_index_allocation_bytes;
 use self::lossless_helpers::{
     decode_lossless_color_sample, decode_lossless_sampled_color_mcu, emit_decode_scan_profile,
     lossless_predictor_gray_rows, lossless_predictor_value, lossless_predictor_value_u16,
-    restart_index_for_stream, validate_lossless_color_plan, write_lossless_color16_sampled_output,
-    write_lossless_color8_sampled_output, LosslessColorIntoSample, LosslessColorPlanes,
-    LosslessColorRowSample, LosslessRestartTracker, LosslessSampledColorPlanesMut,
-    LosslessSampledMcu,
+    resolve_lossless_color_components, restart_index_for_stream, validate_lossless_color_plan,
+    write_lossless_color16_sampled_output, write_lossless_color8_sampled_output,
+    LosslessColorIntoSample, LosslessColorPlanes, LosslessColorRowSample, LosslessRestartTracker,
+    LosslessSampledColorPlanesMut, LosslessSampledMcu,
 };
 mod color_convert;
 use self::color_convert::{

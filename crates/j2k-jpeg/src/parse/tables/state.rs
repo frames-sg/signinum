@@ -9,7 +9,7 @@ use crate::allocation::checked_allocation_bytes;
 use crate::error::JpegError;
 use crate::parse::allocation::ParsedMetadataBudget;
 
-use super::RawHuffmanTable;
+use super::{HuffmanTableRole, RawHuffmanTable};
 
 const TABLE_SLOTS: usize = 4;
 
@@ -97,7 +97,13 @@ pub(crate) struct HuffmanTables {
     pub(crate) ac: [Option<RawHuffmanTable>; TABLE_SLOTS],
     active_dc: [Option<RawHuffmanTableId>; TABLE_SLOTS],
     active_ac: [Option<RawHuffmanTableId>; TABLE_SLOTS],
-    pub(crate) versions: Vec<RawHuffmanTable>,
+    pub(crate) versions: Vec<RawHuffmanVersion>,
+}
+
+#[derive(Debug)]
+pub(crate) struct RawHuffmanVersion {
+    pub(crate) role: HuffmanTableRole,
+    pub(crate) raw: RawHuffmanTable,
 }
 
 impl HuffmanTables {
@@ -119,7 +125,18 @@ impl HuffmanTables {
             });
         }
         let id = RawHuffmanTableId::for_next_index(self.versions.len())?;
-        budget.try_push(&mut self.versions, table.clone())?;
+        let role = if class == 0 {
+            HuffmanTableRole::Dc
+        } else {
+            HuffmanTableRole::Ac
+        };
+        budget.try_push(
+            &mut self.versions,
+            RawHuffmanVersion {
+                role,
+                raw: table.clone(),
+            },
+        )?;
         if class == 0 {
             self.dc[slot] = Some(table);
             self.active_dc[slot] = Some(id);
@@ -139,6 +156,15 @@ impl HuffmanTables {
         resolve_huffman(&self.versions, &state.dc, slot)
     }
 
+    #[cfg(test)]
+    pub(crate) fn resolve_ac(
+        &self,
+        state: &ProgressiveTableState,
+        slot: u8,
+    ) -> Option<&RawHuffmanTable> {
+        resolve_huffman(&self.versions, &state.ac, slot)
+    }
+
     pub(crate) fn active_dc_version_index(&self, slot: u8) -> Option<usize> {
         self.active_dc
             .get(usize::from(slot))
@@ -156,7 +182,7 @@ impl HuffmanTables {
     }
 
     pub(crate) fn retained_allocation_bytes(&self) -> Result<usize, JpegError> {
-        checked_allocation_bytes::<RawHuffmanTable>(self.versions.capacity())
+        checked_allocation_bytes::<RawHuffmanVersion>(self.versions.capacity())
     }
 }
 
@@ -188,7 +214,7 @@ impl ProgressiveTableState {
 
 #[cfg(test)]
 fn resolve_huffman<'a>(
-    versions: &'a [RawHuffmanTable],
+    versions: &'a [RawHuffmanVersion],
     slots: &[Option<RawHuffmanTableId>; TABLE_SLOTS],
     slot: u8,
 ) -> Option<&'a RawHuffmanTable> {
@@ -198,6 +224,7 @@ fn resolve_huffman<'a>(
         .flatten()
         .and_then(RawHuffmanTableId::index)
         .and_then(|index| versions.get(index))
+        .map(|version| &version.raw)
 }
 
 fn nonzero_id(index: usize) -> Result<NonZeroU32, JpegError> {

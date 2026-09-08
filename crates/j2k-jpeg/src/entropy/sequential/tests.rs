@@ -4,7 +4,7 @@ use super::*;
 use crate::entropy::huffman::{HuffmanTable, PreparedHuffmanTables};
 use crate::info::{ColorSpace, SamplingFactors};
 use crate::output::Rgb8Writer;
-use crate::parse::tables::{HuffmanValues, RawHuffmanTable};
+use crate::parse::tables::{HuffmanTableRole, HuffmanValues, RawHuffmanTable};
 use crate::Decoder;
 use alloc::vec;
 use j2k_test_support::JPEG_BASELINE_420_16X16;
@@ -512,17 +512,23 @@ fn emit_stripe_rgb_444_matches_direct_ycbcr_conversion_with_trailing_row() {
 }
 
 fn trivial_dc_table() -> HuffmanTable {
-    HuffmanTable::from_raw(&RawHuffmanTable {
-        bits: [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-        values: HuffmanValues::from_slice(&[0]),
-    })
+    HuffmanTable::from_raw(
+        &RawHuffmanTable {
+            bits: [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            values: HuffmanValues::from_slice(&[0]),
+        },
+        HuffmanTableRole::Dc,
+    )
     .expect("trivial DC table must be valid")
 }
 
 fn eob_ac_table() -> HuffmanTable {
-    HuffmanTable::from_raw(&RawHuffmanTable {
-        bits: [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-        values: HuffmanValues::from_slice(&[0x00]),
-    })
+    HuffmanTable::from_raw(
+        &RawHuffmanTable {
+            bits: [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            values: HuffmanValues::from_slice(&[0x00]),
+        },
+        HuffmanTableRole::Ac,
+    )
     .expect("trivial AC table must be valid")
 }

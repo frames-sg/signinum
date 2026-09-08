@@ -13,7 +13,7 @@
 
 use crate::error::{HuffmanFailure, JpegError};
 use crate::internal::bit_reader::BitReader;
-use crate::parse::tables::{HuffmanValues, RawHuffmanTable};
+use crate::parse::tables::{HuffmanTableRole, HuffmanValues, RawHuffmanTable};
 use alloc::vec::Vec;
 use core::num::NonZeroU32;
 
@@ -48,9 +48,15 @@ pub(crate) struct HuffmanTable {
     max_code: [i32; 17],
     val_offset: [i32; 17],
     values: HuffmanValues,
-    fast_dc: [u32; FAST_ENTRIES],
-    fast_ac: [u32; FAST_ENTRIES],
+    role: HuffmanTableRole,
+    packed: [u32; FAST_ENTRIES],
 }
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DcHuffmanTable<'a>(&'a HuffmanTable);
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct AcHuffmanTable<'a>(&'a HuffmanTable);
 
 /// Checked handle into the one compiled-table arena retained by a decoder.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -89,11 +95,13 @@ impl HuffmanTable {
         clippy::cast_possible_truncation,
         reason = "canonical JPEG Huffman code lengths and symbol positions are bounded to 16 bits and 256 entries"
     )]
-    pub(crate) fn from_raw(raw: &RawHuffmanTable) -> Result<Self, JpegError> {
+    pub(crate) fn from_raw(
+        raw: &RawHuffmanTable,
+        role: HuffmanTableRole,
+    ) -> Result<Self, JpegError> {
         let canonical = derive_canonical_huffman(raw)?;
         let mut fast = [(0u8, 0u8); FAST_ENTRIES];
-        let mut fast_dc = [0u32; FAST_ENTRIES];
-        let mut fast_ac = [0u32; FAST_ENTRIES];
+        let mut packed = [0u32; FAST_ENTRIES];
 
         let mut k = 0;
         for len_minus_1 in 0..FAST_BITS as usize {
@@ -114,7 +122,7 @@ impl HuffmanTable {
             if len == 0 {
                 continue;
             }
-            if sym <= 15 {
+            if role == HuffmanTableRole::Dc && sym <= 15 {
                 let total_len = len + sym;
                 if total_len <= FAST_BITS {
                     let diff = if sym == 0 {
@@ -126,15 +134,19 @@ impl HuffmanTable {
                         huff_extend(i32::from(mag_bits), sym)
                     };
                     if (i32::from(i16::MIN)..=i32::from(i16::MAX)).contains(&diff) {
-                        fast_dc[idx] = pack_dc_value(total_len, diff as i16);
+                        packed[idx] = pack_dc_value(total_len, diff as i16);
                     }
                 }
+                continue;
             }
 
+            if role != HuffmanTableRole::Ac {
+                continue;
+            }
             let run = usize::from((sym >> 4) & 0x0F);
             let ssss = sym & 0x0F;
             if ssss == 0 {
-                fast_ac[idx] = match run {
+                packed[idx] = match run {
                     0 => pack_ac_eob(len),
                     15 => pack_ac_zrl(len),
                     _ => 0,
@@ -153,7 +165,7 @@ impl HuffmanTable {
             if !(i32::from(i16::MIN)..=i32::from(i16::MAX)).contains(&value) {
                 continue;
             }
-            fast_ac[idx] = pack_ac_value(total_len, run as u8, value as i16);
+            packed[idx] = pack_ac_value(total_len, run as u8, value as i16);
         }
 
         Ok(Self {
@@ -162,9 +174,27 @@ impl HuffmanTable {
             max_code: canonical.max_code,
             val_offset: canonical.val_offset,
             values: raw.values.clone(),
-            fast_dc,
-            fast_ac,
+            role,
+            packed,
         })
+    }
+
+    pub(crate) fn dc(&self) -> Result<DcHuffmanTable<'_>, JpegError> {
+        if self.role != HuffmanTableRole::Dc {
+            return Err(JpegError::InternalInvariant {
+                reason: "prepared AC Huffman table was resolved for a DC decode",
+            });
+        }
+        Ok(DcHuffmanTable(self))
+    }
+
+    pub(crate) fn ac(&self) -> Result<AcHuffmanTable<'_>, JpegError> {
+        if self.role != HuffmanTableRole::Ac {
+            return Err(JpegError::InternalInvariant {
+                reason: "prepared DC Huffman table was resolved for an AC decode",
+            });
+        }
+        Ok(AcHuffmanTable(self))
     }
 
     /// Decode one symbol from the bit reader. Common case (code ≤ 12 bits) is
@@ -222,10 +252,10 @@ impl HuffmanTable {
         clippy::cast_possible_wrap,
         reason = "packed DC values intentionally reinterpret a validated 16-bit two's-complement field"
     )]
-    pub(crate) fn decode_fast_dc(&self, br: &mut BitReader<'_>) -> Result<i32, JpegError> {
+    fn decode_fast_dc(&self, br: &mut BitReader<'_>) -> Result<i32, JpegError> {
         br.ensure_bits_padded(FAST_BITS)?;
         let peek = br.peek_bits(FAST_BITS) as usize;
-        let packed = self.fast_dc[peek];
+        let packed = self.packed[peek];
         if packed != 0 {
             br.consume_bits((packed & DC_FAST_LEN_MASK) as u8);
             return Ok(i32::from(
@@ -252,10 +282,10 @@ impl HuffmanTable {
         clippy::cast_possible_truncation,
         reason = "JPEG receive-extend values are bounded to the signed 16-bit packed AC field"
     )]
-    pub(crate) fn decode_fast_ac(&self, br: &mut BitReader<'_>) -> Result<u32, JpegError> {
+    fn decode_fast_ac(&self, br: &mut BitReader<'_>) -> Result<u32, JpegError> {
         br.ensure_bits_padded(FAST_BITS)?;
         let peek = br.peek_bits(FAST_BITS) as usize;
-        let packed = self.fast_ac[peek];
+        let packed = self.packed[peek];
         if packed != 0 {
             br.consume_bits((packed & AC_FAST_LEN_MASK) as u8);
             return Ok(packed);
@@ -288,10 +318,10 @@ impl HuffmanTable {
         reason = "measured Huffman lookup hot path requires cross-helper inlining"
     )]
     #[inline(always)]
-    pub(crate) fn skip_fast_ac(&self, br: &mut BitReader<'_>) -> Result<u32, JpegError> {
+    fn skip_fast_ac(&self, br: &mut BitReader<'_>) -> Result<u32, JpegError> {
         br.ensure_bits_padded(FAST_BITS)?;
         let peek = br.peek_bits(FAST_BITS) as usize;
-        let packed = self.fast_ac[peek];
+        let packed = self.packed[peek];
         if packed != 0 {
             br.consume_bits((packed & AC_FAST_LEN_MASK) as u8);
             return Ok(packed);
@@ -318,6 +348,45 @@ impl HuffmanTable {
         br.ensure_bits(ssss)?;
         br.consume_bits(ssss);
         Ok(pack_ac_value(0, run, 0))
+    }
+}
+
+impl DcHuffmanTable<'_> {
+    #[expect(
+        clippy::inline_always,
+        reason = "measured Huffman lookup hot path requires cross-helper inlining"
+    )]
+    #[inline(always)]
+    pub(crate) fn decode_fast_dc(self, br: &mut BitReader<'_>) -> Result<i32, JpegError> {
+        self.0.decode_fast_dc(br)
+    }
+
+    pub(crate) fn decode(self, br: &mut BitReader<'_>) -> Result<u8, JpegError> {
+        self.0.decode(br)
+    }
+}
+
+impl AcHuffmanTable<'_> {
+    #[expect(
+        clippy::inline_always,
+        reason = "measured Huffman lookup hot path requires cross-helper inlining"
+    )]
+    #[inline(always)]
+    pub(crate) fn decode_fast_ac(self, br: &mut BitReader<'_>) -> Result<u32, JpegError> {
+        self.0.decode_fast_ac(br)
+    }
+
+    #[expect(
+        clippy::inline_always,
+        reason = "measured Huffman lookup hot path requires cross-helper inlining"
+    )]
+    #[inline(always)]
+    pub(crate) fn skip_fast_ac(self, br: &mut BitReader<'_>) -> Result<u32, JpegError> {
+        self.0.skip_fast_ac(br)
+    }
+
+    pub(crate) fn decode(self, br: &mut BitReader<'_>) -> Result<u8, JpegError> {
+        self.0.decode(br)
     }
 }
 
@@ -383,6 +452,28 @@ impl PreparedHuffmanTables {
 
     pub(crate) fn get(&self, id: PreparedHuffmanTableId) -> Option<&HuffmanTable> {
         id.index().and_then(|index| self.entries.get(index))
+    }
+
+    pub(crate) fn get_dc(
+        &self,
+        id: PreparedHuffmanTableId,
+    ) -> Result<DcHuffmanTable<'_>, JpegError> {
+        self.get(id)
+            .ok_or(JpegError::InternalInvariant {
+                reason: "prepared component references a missing Huffman table",
+            })?
+            .dc()
+    }
+
+    pub(crate) fn get_ac(
+        &self,
+        id: PreparedHuffmanTableId,
+    ) -> Result<AcHuffmanTable<'_>, JpegError> {
+        self.get(id)
+            .ok_or(JpegError::InternalInvariant {
+                reason: "prepared component references a missing Huffman table",
+            })?
+            .ac()
     }
 
     pub(crate) fn id_at(&self, index: usize) -> Option<PreparedHuffmanTableId> {
@@ -487,6 +578,184 @@ fn huff_extend(v: i32, ssss: u8) -> i32 {
 mod tests {
     use super::*;
 
+    struct LegacyLookups {
+        fast: [(u8, u8); FAST_ENTRIES],
+        min_code: [i32; 17],
+        max_code: [i32; 17],
+        val_offset: [i32; 17],
+        fast_dc: [u32; FAST_ENTRIES],
+        fast_ac: [u32; FAST_ENTRIES],
+    }
+
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the legacy oracle reproduces conversions bounded by the 12-bit lookup and JPEG symbol fields"
+    )]
+    fn legacy_lookups(raw: &RawHuffmanTable) -> Result<LegacyLookups, JpegError> {
+        let canonical = derive_canonical_huffman(raw)?;
+        let mut fast = [(0u8, 0u8); FAST_ENTRIES];
+        let mut fast_dc = [0u32; FAST_ENTRIES];
+        let mut fast_ac = [0u32; FAST_ENTRIES];
+        let mut k = 0;
+        for len_minus_1 in 0..FAST_BITS as usize {
+            let len = (len_minus_1 + 1) as u8;
+            for _ in 0..raw.bits[len_minus_1] {
+                let code = canonical.huffcode[k];
+                let base = usize::from(code) << (FAST_BITS - len);
+                let count = 1 << (FAST_BITS - len);
+                fast[base..base + count].fill((raw.values.as_slice()[k], len));
+                k += 1;
+            }
+        }
+        for (idx, &(sym, len)) in fast.iter().enumerate() {
+            if len == 0 {
+                continue;
+            }
+            if sym <= 15 {
+                let total_len = len + sym;
+                if total_len <= FAST_BITS {
+                    let diff = if sym == 0 {
+                        0
+                    } else {
+                        let mag_shift = FAST_BITS - total_len;
+                        let mag_mask = (1u16 << sym) - 1;
+                        let mag_bits = ((idx as u16) >> mag_shift) & mag_mask;
+                        huff_extend(i32::from(mag_bits), sym)
+                    };
+                    if (i32::from(i16::MIN)..=i32::from(i16::MAX)).contains(&diff) {
+                        fast_dc[idx] = pack_dc_value(total_len, diff as i16);
+                    }
+                }
+            }
+            let run = usize::from((sym >> 4) & 0x0F);
+            let ssss = sym & 0x0F;
+            if ssss == 0 {
+                fast_ac[idx] = match run {
+                    0 => pack_ac_eob(len),
+                    15 => pack_ac_zrl(len),
+                    _ => 0,
+                };
+                continue;
+            }
+            let total_len = len + ssss;
+            if total_len > FAST_BITS {
+                continue;
+            }
+            let mag_shift = FAST_BITS - total_len;
+            let mag_mask = (1u16 << ssss) - 1;
+            let mag_bits = ((idx as u16) >> mag_shift) & mag_mask;
+            let value = huff_extend(i32::from(mag_bits), ssss);
+            if (i32::from(i16::MIN)..=i32::from(i16::MAX)).contains(&value) {
+                fast_ac[idx] = pack_ac_value(total_len, run as u8, value as i16);
+            }
+        }
+        Ok(LegacyLookups {
+            fast,
+            min_code: canonical.min_code,
+            max_code: canonical.max_code,
+            val_offset: canonical.val_offset,
+            fast_dc,
+            fast_ac,
+        })
+    }
+
+    #[test]
+    fn compiled_table_retains_only_one_packed_specialization() {
+        assert!(core::mem::size_of::<HuffmanTable>() < 32 * 1024);
+    }
+
+    #[test]
+    fn role_specializations_match_legacy_tables_for_all_fast_indices_and_code_lengths() {
+        let standard_dc = luma_dc_raw();
+        // Annex K luminance AC symbol order.
+        let standard_ac_values = [
+            0x01, 0x02, 0x03, 0x00, 0x04, 0x11, 0x05, 0x12, 0x21, 0x31, 0x41, 0x06, 0x13, 0x51,
+            0x61, 0x07, 0x22, 0x71, 0x14, 0x32, 0x81, 0x91, 0xA1, 0x08, 0x23, 0x42, 0xB1, 0xC1,
+            0x15, 0x52, 0xD1, 0xF0, 0x24, 0x33, 0x62, 0x72, 0x82, 0x09, 0x0A, 0x16, 0x17, 0x18,
+            0x19, 0x1A, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2A, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39,
+            0x3A, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4A, 0x53, 0x54, 0x55, 0x56, 0x57,
+            0x58, 0x59, 0x5A, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6A, 0x73, 0x74, 0x75,
+            0x76, 0x77, 0x78, 0x79, 0x7A, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8A, 0x92,
+            0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9A, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7,
+            0xA8, 0xA9, 0xAA, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7, 0xB8, 0xB9, 0xBA, 0xC2, 0xC3,
+            0xC4, 0xC5, 0xC6, 0xC7, 0xC8, 0xC9, 0xCA, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7, 0xD8,
+            0xD9, 0xDA, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7, 0xE8, 0xE9, 0xEA, 0xF1, 0xF2,
+            0xF3, 0xF4, 0xF5, 0xF6, 0xF7, 0xF8, 0xF9, 0xFA,
+        ];
+        let standard_ac = RawHuffmanTable {
+            bits: [0, 2, 1, 3, 3, 2, 4, 3, 5, 5, 4, 4, 0, 0, 1, 0x7D],
+            values: HuffmanValues::from_slice(&standard_ac_values),
+        };
+        let length_values: Vec<u8> = (0..16).collect();
+        let length_coverage = RawHuffmanTable {
+            bits: [1; 16],
+            values: HuffmanValues::from_slice(&length_values),
+        };
+        let empty = RawHuffmanTable {
+            bits: [0; 16],
+            values: HuffmanValues::default(),
+        };
+        let complete = RawHuffmanTable {
+            bits: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            values: HuffmanValues::from_slice(&[0, 0xF0]),
+        };
+
+        for raw in [
+            &standard_dc,
+            &standard_ac,
+            &length_coverage,
+            &empty,
+            &complete,
+        ] {
+            assert_matches_legacy(raw);
+        }
+
+        // Short codes exercise packed magnitudes and every run/EOB/ZRL symbol;
+        // longer codes also verify that both specializations keep the slow path.
+        for code_length in 1..=16 {
+            for symbol in 0..=u8::MAX {
+                let mut bits = [0; 16];
+                bits[code_length - 1] = 1;
+                assert_matches_legacy(&RawHuffmanTable {
+                    bits,
+                    values: HuffmanValues::from_slice(&[symbol]),
+                });
+            }
+        }
+
+        let oversubscribed = RawHuffmanTable {
+            bits: [1, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            values: HuffmanValues::from_slice(&[0, 1, 2, 3, 4]),
+        };
+        let Err(legacy_error) = legacy_lookups(&oversubscribed) else {
+            panic!("legacy builder must reject an oversubscribed tree");
+        };
+        for role in [HuffmanTableRole::Dc, HuffmanTableRole::Ac] {
+            assert_eq!(
+                HuffmanTable::from_raw(&oversubscribed, role).unwrap_err(),
+                legacy_error
+            );
+        }
+    }
+
+    fn assert_matches_legacy(raw: &RawHuffmanTable) {
+        let legacy = legacy_lookups(raw).unwrap();
+        for role in [HuffmanTableRole::Dc, HuffmanTableRole::Ac] {
+            let table = HuffmanTable::from_raw(raw, role).unwrap();
+            assert_eq!(table.fast, legacy.fast);
+            assert_eq!(table.min_code, legacy.min_code);
+            assert_eq!(table.max_code, legacy.max_code);
+            assert_eq!(table.val_offset, legacy.val_offset);
+            assert_eq!(
+                table.packed,
+                match role {
+                    HuffmanTableRole::Dc => legacy.fast_dc,
+                    HuffmanTableRole::Ac => legacy.fast_ac,
+                }
+            );
+        }
+    }
+
     /// Standard JPEG luminance DC table from Annex K.3 — well-known fixture.
     /// `bits[0..16]` counts per length; `values` lists the symbols in order.
     fn luma_dc_raw() -> RawHuffmanTable {
@@ -498,7 +767,7 @@ mod tests {
 
     #[test]
     fn builds_fast_table_from_standard_luma_dc() {
-        let table = HuffmanTable::from_raw(&luma_dc_raw()).unwrap();
+        let table = HuffmanTable::from_raw(&luma_dc_raw(), HuffmanTableRole::Dc).unwrap();
         let (sym, len) = table.fast[0b0000_0000_0000];
         assert_eq!((sym, len), (0, 2));
         let (sym, len) = table.fast[0b0011_1111_1111];
@@ -509,7 +778,7 @@ mod tests {
 
     #[test]
     fn widened_fast_table_covers_9_bit_luma_dc_code() {
-        let table = HuffmanTable::from_raw(&luma_dc_raw()).unwrap();
+        let table = HuffmanTable::from_raw(&luma_dc_raw(), HuffmanTableRole::Dc).unwrap();
         let idx = 0b1_1111_1110usize << usize::from(FAST_BITS - 9);
         let (sym, len) = table.fast.get(idx).copied().unwrap_or((0, 0));
         assert_eq!((sym, len), (11, 9));
@@ -517,7 +786,8 @@ mod tests {
 
     #[test]
     fn prepared_arena_ids_are_checked_and_capacity_bounded() {
-        let table = HuffmanTable::from_raw(&luma_dc_raw()).expect("valid fixture");
+        let table =
+            HuffmanTable::from_raw(&luma_dc_raw(), HuffmanTableRole::Dc).expect("valid fixture");
         let mut arena = PreparedHuffmanTables::try_with_capacity(1).expect("bounded arena");
         let id = arena.push(table.clone()).expect("reserved slot");
 
@@ -531,12 +801,33 @@ mod tests {
     }
 
     #[test]
+    fn prepared_arena_validates_roles_and_accounts_actual_capacity() {
+        let raw = luma_dc_raw();
+        let mut arena = PreparedHuffmanTables::try_with_capacity(2).expect("bounded arena");
+        let dc = arena
+            .push(HuffmanTable::from_raw(&raw, HuffmanTableRole::Dc).unwrap())
+            .unwrap();
+        let ac = arena
+            .push(HuffmanTable::from_raw(&raw, HuffmanTableRole::Ac).unwrap())
+            .unwrap();
+
+        assert!(arena.get_dc(dc).is_ok());
+        assert!(arena.get_ac(dc).is_err());
+        assert!(arena.get_ac(ac).is_ok());
+        assert!(arena.get_dc(ac).is_err());
+        assert_eq!(
+            arena.retained_allocation_bytes().unwrap(),
+            arena.capacity() * core::mem::size_of::<HuffmanTable>()
+        );
+    }
+
+    #[test]
     fn rejects_oversubscribed_code_table() {
         let raw = RawHuffmanTable {
             bits: [1, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             values: HuffmanValues::from_slice(&[0, 1, 2, 3, 4]),
         };
-        let err = HuffmanTable::from_raw(&raw).unwrap_err();
+        let err = HuffmanTable::from_raw(&raw, HuffmanTableRole::Dc).unwrap_err();
         assert!(matches!(
             err,
             JpegError::HuffmanDecode {
@@ -552,7 +843,8 @@ mod tests {
             bits: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             values: HuffmanValues::from_slice(&[0, 1]),
         };
-        HuffmanTable::from_raw(&raw).expect("CPU decoder accepts a complete prefix table");
+        HuffmanTable::from_raw(&raw, HuffmanTableRole::Dc)
+            .expect("CPU decoder accepts a complete prefix table");
     }
 
     #[test]
@@ -561,7 +853,7 @@ mod tests {
             bits: [0; 16],
             values: HuffmanValues::default(),
         };
-        let table = HuffmanTable::from_raw(&raw).unwrap();
+        let table = HuffmanTable::from_raw(&raw, HuffmanTableRole::Dc).unwrap();
         assert!(table.fast.iter().all(|&(_, len)| len == 0));
     }
 
@@ -585,7 +877,7 @@ mod tests {
 
     #[test]
     fn decodes_all_standard_luma_dc_codes() {
-        let table = HuffmanTable::from_raw(&luma_dc_raw()).unwrap();
+        let table = HuffmanTable::from_raw(&luma_dc_raw(), HuffmanTableRole::Dc).unwrap();
         for &(code, len, expected) in luma_dc_code_cases() {
             let shift = 32 - len;
             let aligned = code << shift;
@@ -598,13 +890,13 @@ mod tests {
 
     #[test]
     fn fast_dc_decodes_symbol_and_magnitude_in_one_lookup() {
-        let table = HuffmanTable::from_raw(&luma_dc_raw()).unwrap();
+        let table = HuffmanTable::from_raw(&luma_dc_raw(), HuffmanTableRole::Dc).unwrap();
         // Standard luma DC code `011` => category 2, followed by magnitude
         // bits `10` => diff +2. The fast DC path should consume all 5 bits.
         let bytes = [0b0111_0000u8, 0, 0, 0, 0, 0, 0, 0];
         let mut br = BitReader::new(&bytes);
 
-        let diff = table.decode_fast_dc(&mut br).unwrap();
+        let diff = table.dc().unwrap().decode_fast_dc(&mut br).unwrap();
 
         assert_eq!(diff, 2);
         assert_eq!(br.snapshot().bits, 51);
@@ -617,7 +909,7 @@ mod tests {
             bits: [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             values: HuffmanValues::from_slice(&[0]),
         };
-        let table = HuffmanTable::from_raw(&raw).unwrap();
+        let table = HuffmanTable::from_raw(&raw, HuffmanTableRole::Dc).unwrap();
         let mut br = BitReader::new(&[0x7f, 0xff, 0xc4]);
 
         let symbol = table.decode(&mut br).unwrap();
@@ -627,7 +919,7 @@ mod tests {
 
     #[test]
     fn decodes_9_plus_bit_codes_via_slow_path() {
-        let table = HuffmanTable::from_raw(&luma_dc_raw()).unwrap();
+        let table = HuffmanTable::from_raw(&luma_dc_raw(), HuffmanTableRole::Dc).unwrap();
         // Code `111111110` (9 bits) → symbol 11. A literal 0xFF in a JPEG
         // entropy stream must be byte-stuffed as `FF 00` (T.81 §F.1.2.3) so
         // the BitReader does not mistake it for a marker prefix.
@@ -639,7 +931,7 @@ mod tests {
 
     #[test]
     fn reports_huffman_failure_on_truncated_bit_stream() {
-        let table = HuffmanTable::from_raw(&luma_dc_raw()).unwrap();
+        let table = HuffmanTable::from_raw(&luma_dc_raw(), HuffmanTableRole::Dc).unwrap();
         let bytes = [];
         let mut br = BitReader::new(&bytes);
         let err = table.decode(&mut br).unwrap_err();

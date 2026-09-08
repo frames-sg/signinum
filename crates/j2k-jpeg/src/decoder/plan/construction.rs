@@ -12,7 +12,7 @@ use crate::allocation::try_reserve_for_len_with_live_budget;
 use crate::context::DecoderContext;
 use crate::entropy::huffman::{HuffmanTable, PreparedHuffmanTables};
 use crate::error::JpegError;
-use crate::parse::tables::RawHuffmanTable;
+use crate::parse::tables::{HuffmanTableRole, RawHuffmanTable};
 
 /// One live-byte ledger for the entire parsed-to-prepared handoff.
 ///
@@ -85,6 +85,7 @@ impl PreparedConstructionBudget {
         &mut self,
         ctx: &mut DecoderContext,
         raw: &RawHuffmanTable,
+        role: HuffmanTableRole,
     ) -> Result<HuffmanTable, JpegError> {
         let non_context_bytes = self.live_bytes.checked_sub(self.context_bytes).ok_or(
             JpegError::InternalInvariant {
@@ -92,7 +93,7 @@ impl PreparedConstructionBudget {
             },
         )?;
         let table =
-            ctx.resolve_huffman_table_with_live_budget(raw, &mut self.live_bytes, self.cap)?;
+            ctx.resolve_huffman_table_with_live_budget(raw, role, &mut self.live_bytes, self.cap)?;
         let context_bytes = ctx.retained_allocation_bytes();
         let expected = checked_add_under_cap(non_context_bytes, context_bytes, self.cap)?;
         if self.live_bytes != expected {

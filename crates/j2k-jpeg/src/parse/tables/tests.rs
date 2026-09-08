@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use super::{
-    parse_dht, parse_dqt, HuffmanTables, HuffmanValues, ProgressiveTableState, QuantTables,
-    RawHuffmanTable,
+    parse_dht, parse_dqt, HuffmanTableRole, HuffmanTables, HuffmanValues, ProgressiveTableState,
+    QuantTables, RawHuffmanTable,
 };
 use crate::error::JpegError;
 use crate::parse::allocation::ParsedMetadataBudget;
@@ -50,17 +50,48 @@ fn parses_single_dc_huffman_table() {
 }
 
 #[test]
-fn dht_redefinition_creates_one_version_and_snapshot_tracks_it() {
+fn dht_versions_preserve_redefinitions_and_identical_cross_role_tables() {
     let mut tables = HuffmanTables::default();
     let mut budget = ParsedMetadataBudget::new();
-    for symbol in [0xaau8, 0xbb] {
-        let payload = [0u8, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, symbol];
-        parse_dht(&payload, 0, &mut tables, &mut budget).unwrap();
-    }
-    let state = ProgressiveTableState::capture(&tables, &QuantTables::default());
-    assert_eq!(tables.versions.len(), 2);
+    let first_dc = [0u8, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xaa];
+    parse_dht(&first_dc, 0, &mut tables, &mut budget).unwrap();
+    let first_state = ProgressiveTableState::capture(&tables, &QuantTables::default());
+    let second_dc = [0u8, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xbb];
+    parse_dht(&second_dc, 0, &mut tables, &mut budget).unwrap();
+    let identical_ac = [0x10u8, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xbb];
+    parse_dht(&identical_ac, 0, &mut tables, &mut budget).unwrap();
+    let active_state = ProgressiveTableState::capture(&tables, &QuantTables::default());
+
+    assert_eq!(tables.versions.len(), 3);
+    assert_eq!(tables.versions[0].role, HuffmanTableRole::Dc);
+    assert_eq!(tables.versions[1].role, HuffmanTableRole::Dc);
+    assert_eq!(tables.versions[2].role, HuffmanTableRole::Ac);
     assert_eq!(
-        tables.resolve_dc(&state, 0).unwrap().values.as_slice(),
+        tables.retained_allocation_bytes().unwrap(),
+        tables.versions.capacity() * core::mem::size_of_val(&tables.versions[0])
+    );
+    assert_eq!(
+        tables
+            .resolve_dc(&first_state, 0)
+            .unwrap()
+            .values
+            .as_slice(),
+        &[0xaa]
+    );
+    assert_eq!(
+        tables
+            .resolve_dc(&active_state, 0)
+            .unwrap()
+            .values
+            .as_slice(),
+        &[0xbb]
+    );
+    assert_eq!(
+        tables
+            .resolve_ac(&active_state, 0)
+            .unwrap()
+            .values
+            .as_slice(),
         &[0xbb]
     );
 }

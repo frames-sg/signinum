@@ -248,7 +248,7 @@ fn decode_progressive_block_first(
     eob_run: &mut u32,
 ) -> Result<(), JpegError> {
     if scan.ss == 0 {
-        let dc_table = plan.huffman_table(scan_component.dc_table)?;
+        let dc_table = plan.dc_table(scan_component.dc_table)?;
         let ssss = dc_table.decode(br)?;
         if ssss > 15 {
             return Err(invalid_symbol());
@@ -259,7 +259,7 @@ fn decode_progressive_block_first(
         return Ok(());
     }
 
-    let ac_table = plan.huffman_table(scan_component.ac_table)?;
+    let ac_table = plan.ac_table(scan_component.ac_table)?;
     if *eob_run > 0 {
         *eob_run -= 1;
         return Ok(());
@@ -323,7 +323,7 @@ fn decode_progressive_block_refine(
         return Ok(());
     }
 
-    let ac_table = plan.huffman_table(scan_component.ac_table)?;
+    let ac_table = plan.ac_table(scan_component.ac_table)?;
     if *eob_run > 0 {
         *eob_run -= 1;
         refine_non_zeroes(br, block, scan.ss, scan.se, 64, bit)?;

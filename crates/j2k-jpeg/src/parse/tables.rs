@@ -10,7 +10,7 @@ mod types;
 pub(crate) use dht::parse_dht;
 pub(crate) use dqt::parse_dqt;
 pub(crate) use state::{HuffmanTables, ProgressiveTableState, QuantTables};
-pub(crate) use types::{HuffmanValues, RawHuffmanTable};
+pub(crate) use types::{HuffmanTableRole, HuffmanValues, RawHuffmanTable};
 
 #[cfg(test)]
 mod tests;

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use super::*;
+use jpeg_encoder::SamplingFactor::{F_1_1, F_2_1, F_2_2};
 
 #[test]
 #[ignore = "allocation diagnostic; run explicitly with --ignored --nocapture"]
@@ -93,7 +94,6 @@ fn single_surfaces_survive_distinct_size_and_sampling_reuse() {
     if !should_run_metal_runtime() {
         return;
     }
-    use jpeg_encoder::SamplingFactor::{F_1_1, F_2_1, F_2_2};
     let session = MetalBackendSession::system_default().unwrap();
     let mut retained = Vec::new();
     for (side, variant, sampling) in [

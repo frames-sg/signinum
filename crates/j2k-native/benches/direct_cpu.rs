@@ -65,6 +65,14 @@ fn validate_gray_decode(image: &Image<'_>, expected: &[u8], dimensions: (u32, u3
     assert_eq!(decoded.data, expected);
 }
 
+#[cfg(feature = "parallel")]
+fn warm_gray<'a>(image: &Image<'a>, expected: &[u8], context: &mut DecoderContext<'a>) {
+    let decoded = image
+        .decode_with_context(context)
+        .expect("warm gray decode");
+    assert_eq!(decoded.data, expected);
+}
+
 fn htj2k_gray_codestream(width: u32, height: u32, reversible: bool) -> Vec<u8> {
     let pixels = patterned_gray8(width, height);
     let options = EncodeOptions {
@@ -232,11 +240,7 @@ fn bench_generic_public_workspace(c: &mut Criterion) {
             format!("{codec}_gray8_512x512_reuse_context_default_pool"),
             |b| {
                 let mut context = DecoderContext::default();
-                let warmed = primary_image
-                    .decode_with_context(&mut context)
-                    .expect("warm reusable context");
-                assert_eq!(warmed.data, primary_pixels);
-                drop(warmed);
+                warm_gray(&primary_image, &primary_pixels, &mut context);
                 b.iter(|| {
                     let decoded = primary_image
                         .decode_with_context(&mut context)
@@ -249,16 +253,8 @@ fn bench_generic_public_workspace(c: &mut Criterion) {
             format!("{codec}_gray8_two_input_512x512_509x383_reuse_context_default_pool"),
             |b| {
                 let mut context = DecoderContext::default();
-                let first = primary_image
-                    .decode_with_context(&mut context)
-                    .expect("warm primary image");
-                assert_eq!(first.data, primary_pixels);
-                drop(first);
-                let second = secondary_image
-                    .decode_with_context(&mut context)
-                    .expect("warm secondary image");
-                assert_eq!(second.data, secondary_pixels);
-                drop(second);
+                warm_gray(&primary_image, &primary_pixels, &mut context);
+                warm_gray(&secondary_image, &secondary_pixels, &mut context);
                 let mut use_secondary = false;
                 b.iter(|| {
                     use_secondary = !use_secondary;
@@ -282,11 +278,7 @@ fn bench_generic_public_workspace(c: &mut Criterion) {
                 format!("{codec}_gray8_512x512_reuse_context_pool_threads_{threads}"),
                 |b| {
                     let mut context = DecoderContext::default();
-                    let warmed = pool
-                        .install(|| primary_image.decode_with_context(&mut context))
-                        .expect("warm context in benchmark Rayon pool");
-                    assert_eq!(warmed.data, primary_pixels);
-                    drop(warmed);
+                    pool.install(|| warm_gray(&primary_image, &primary_pixels, &mut context));
                     b.iter(|| {
                         pool.install(|| {
                             let decoded = primary_image

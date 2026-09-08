@@ -285,10 +285,10 @@ fn irreversible97_production_decomposition_dispatch_count() {
             encoder.endEncoding();
             commit_and_wait_metal(&command).unwrap();
             let (positions, dispatches) = idwt97_logical_dispatches_for_test();
-            assert_eq!(dispatches, 11, "actual production launches, batch {batch}");
+            assert_eq!(dispatches, 10, "actual production launches, batch {batch}");
             assert_eq!(
                 positions,
-                7 * count,
+                6 * count,
                 "actual requested production positions"
             );
         }

@@ -184,31 +184,22 @@ pub(super) fn dispatch_irreversible97_interleave_horizontal_scale(
         hh,
         hh_offset,
     } = sub_bands;
-    encoder.setComputePipelineState(&kernels.idwt_interleave);
+    encoder.setComputePipelineState(&kernels.idwt_irreversible97_interleave_horizontal_scale);
     encoder.set_buffer(0, Some(ll), ll_offset as u64);
     encoder.set_buffer(1, Some(hl), hl_offset as u64);
     encoder.set_buffer(2, Some(lh), lh_offset as u64);
     encoder.set_buffer(3, Some(hh), hh_offset as u64);
     encoder.set_buffer(4, Some(decoded), decoded_offset as u64);
     encoder.set_bytes::<J2kIdwtSingleDecompositionParams>(5, &params);
+    encoder.set_bytes::<f32>(6, &high_pass);
     dispatch_2d_pipeline(
         encoder,
-        &kernels.idwt_interleave,
+        &kernels.idwt_irreversible97_interleave_horizontal_scale,
         (params.width, params.height),
     );
     #[cfg(test)]
     crate::engine::test_counters::record_idwt97_logical_dispatch((params.width, params.height, 1));
     encoder.memory_barrier_with_resources(&[decoded]);
-
-    dispatch_irreversible97_horizontal_scale(
-        encoder,
-        kernels,
-        decoded,
-        decoded_offset,
-        params,
-        high_pass,
-        1,
-    );
 }
 
 #[cfg(test)]
@@ -241,6 +232,7 @@ pub(super) fn dispatch_irreversible97_stages(
     );
 }
 
+#[cfg(test)]
 pub(super) fn dispatch_irreversible97_horizontal_scale(
     encoder: &ComputeCommandEncoderRef,
     kernels: &crate::engine::runtime::DecodeKernels,

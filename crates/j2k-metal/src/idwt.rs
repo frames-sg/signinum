@@ -657,6 +657,91 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "host-slice IDWT performance harness; run explicitly with --ignored --nocapture"]
+    fn metal_host_slice_idwt_decode_perf() {
+        use std::time::{Duration, Instant};
+
+        if !should_run_metal_runtime() {
+            return;
+        }
+        for reversible in [true, false] {
+            for (width, height) in [(512, 512), (509, 383)] {
+                let pixels = j2k_test_support::patterned_gray8(width, height);
+                let bytes = encode(
+                    &pixels,
+                    width,
+                    height,
+                    1,
+                    8,
+                    false,
+                    &EncodeOptions {
+                        reversible,
+                        num_decomposition_levels: 3,
+                        ..EncodeOptions::default()
+                    },
+                )
+                .expect("host-slice IDWT fixture");
+                let image = Image::new(&bytes, &DecodeSettings::default()).expect("image");
+                let mut reference_context = DecoderContext::default();
+                let expected = image
+                    .decode_components_with_context(&mut reference_context)
+                    .expect("native component oracle");
+                let mut context = DecoderContext::default();
+                let mut decoder = MetalIdwtDecoder::default();
+                let actual = image
+                    .decode_components_with_ht_decoder(&mut context, &mut decoder)
+                    .expect("host-slice IDWT probe");
+                assert_eq!(actual.dimensions(), expected.dimensions());
+                assert_eq!(actual.planes().len(), 1);
+                assert_eq!(
+                    actual.planes()[0].samples().len(),
+                    expected.planes()[0].samples().len()
+                );
+                for (actual, expected) in actual.planes()[0]
+                    .samples()
+                    .iter()
+                    .zip(expected.planes()[0].samples())
+                {
+                    assert!((actual - expected).abs() <= 1.0e-3);
+                }
+                assert!(decoder.kernel_dispatches() >= 3);
+                drop(actual);
+
+                // The prepared image and CPU workspace are retained. Each
+                // iteration still executes the actual synchronous host-slice
+                // callbacks, including their Metal transfers and completion.
+                let mut decode = || {
+                    let output = image
+                        .decode_components_with_ht_decoder(&mut context, &mut decoder)
+                        .expect("measured host-slice IDWT decode");
+                    std::hint::black_box(output.planes()[0].samples());
+                };
+                let warm_started = Instant::now();
+                let mut warm_iterations = 0_u64;
+                while warm_started.elapsed() < Duration::from_secs(3) {
+                    decode();
+                    warm_iterations += 1;
+                }
+                // Fifty samples of roughly 200 ms, based on the three-second
+                // warmup. Raw batch durations permit external CI analysis.
+                let iterations = (warm_iterations / 15).max(1);
+                for sample in 0..50 {
+                    let started = Instant::now();
+                    for _ in 0..iterations {
+                        decode();
+                    }
+                    let elapsed = started.elapsed();
+                    println!(
+                        "metal_host_slice_idwt_decode reversible={reversible} width={width} height={height} sample={sample} iterations={iterations} elapsed_ns={}",
+                        elapsed.as_nanos()
+                    );
+                }
+            }
+        }
+    }
+
     struct CpuOnlyCodeBlockDecoder;
 
     impl HtCodeBlockDecoder for CpuOnlyCodeBlockDecoder {}

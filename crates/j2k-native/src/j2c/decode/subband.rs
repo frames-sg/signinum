@@ -28,7 +28,8 @@ pub(super) use self::parallel::{
 #[cfg(feature = "parallel")]
 use self::parallel::{
     decode_classic_sub_band_blocks_parallel, decode_ht_sub_band_blocks_parallel,
-    release_coefficient_slab, ClassicParallelParameters, HtParallelParameters,
+    release_coefficient_slab, try_decode_ht_stripes, ClassicParallelParameters,
+    HtParallelParameters,
 };
 use self::pending::{collect_pending_classic_blocks, collect_pending_ht_blocks};
 pub(in crate::j2c::decode) use self::pending::{count_classic_code_blocks, count_ht_code_blocks};

@@ -356,6 +356,7 @@ pub(crate) struct ParallelCoefficientStats {
     pub(crate) allocated_bytes: usize,
     pub(crate) peak_live_bytes: usize,
     pub(crate) scatter_bytes: usize,
+    pub(crate) direct_bytes: usize,
 }
 
 #[cfg(all(test, feature = "parallel"))]

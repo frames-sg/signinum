@@ -79,6 +79,10 @@ fn try_decode_fast_subsampled_to_surface<P: FastSubsampledMetal>(
     clippy::similar_names,
     reason = "Cb and Cr are normative JPEG component names"
 )]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the full decode keeps scratch acquisition, ordered command encoding, completion, and status publication together"
+)]
 fn decode_fast_subsampled_to_rgb_buffer<P: FastSubsampledMetal>(
     runtime: &MetalRuntime,
     packet: Option<&P>,

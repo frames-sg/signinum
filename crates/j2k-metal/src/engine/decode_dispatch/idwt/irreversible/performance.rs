@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+#![cfg(test)]
+
 use super::{dispatch_irreversible97_interleave_horizontal_scale, dispatch_irreversible97_stages};
 use crate::engine::decode_dispatch::idwt::batched_irreversible::dispatch_irreversible97_repeated_interleave_horizontal_scale;
 use crate::engine::decode_dispatch::idwt::{

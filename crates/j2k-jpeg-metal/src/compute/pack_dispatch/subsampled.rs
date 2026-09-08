@@ -3,6 +3,10 @@
 use crate::metal_types::prelude::*;
 
 use crate::buffers::new_shared_buffer;
+use crate::buffers::MetalBatchScratch;
+use crate::compute::single_decode::scratch::{
+    packet_buffers as scratch_packet_buffers, status_buffer as scratch_status_buffer,
+};
 
 use super::super::{
     batch, bind_fast_decode_entropy_inputs, bind_three_plane_pack, checked_entropy_segment_count,
@@ -37,6 +41,7 @@ pub(in crate::compute) fn encode_fast_subsampled_region_batch_item<P: FastSubsam
     packet: &P,
     fmt: PixelFormat,
     roi: Rect,
+    mut scratch: Option<&mut MetalBatchScratch>,
 ) -> Result<BatchedDecodeItem, Error> {
     let roi = core_rect_to_jpeg(roi);
     let source_window = fast_subsampled_full_mcu_window::<P>(packet.dimensions(), roi);
@@ -77,19 +82,49 @@ pub(in crate::compute) fn encode_fast_subsampled_region_batch_item<P: FastSubsam
     let y_len = source_window.w as usize * source_window.h as usize;
     let chroma_len =
         source_window.w.div_ceil(2) as usize * P::chroma_height(source_window.h) as usize;
-    let y_plane = new_decode_plane_buffer(&runtime.device, y_len, false)?;
-    let cb_plane = new_private_buffer(&runtime.device, chroma_len)?;
-    let cr_plane = new_private_buffer(&runtime.device, chroma_len)?;
+    let y_plane = if let Some(scratch) = scratch.as_deref_mut() {
+        scratch.private_buffer(&runtime.device, "single_decode_y", y_len)?
+    } else {
+        new_decode_plane_buffer(&runtime.device, y_len, false)?
+    };
+    let cb_plane = if let Some(scratch) = scratch.as_deref_mut() {
+        scratch.private_buffer(&runtime.device, "single_decode_cb", chroma_len)?
+    } else {
+        new_private_buffer(&runtime.device, chroma_len)?
+    };
+    let cr_plane = if let Some(scratch) = scratch.as_deref_mut() {
+        scratch.private_buffer(&runtime.device, "single_decode_cr", chroma_len)?
+    } else {
+        new_private_buffer(&runtime.device, chroma_len)?
+    };
     let decode_threads = entropy_decode_thread_count(
         packet.restart_interval_mcus(),
         restart_offsets.len(),
         packet.entropy_checkpoints().len(),
     );
-    let status_buffer = decode_status_buffer(&runtime.device, decode_threads)?;
-    let entropy_buffer = new_shared_buffer_with_data(&runtime.device, packet.entropy_bytes())?;
-    let restart_offsets_buffer = restart_offsets_buffer(&runtime.device, restart_offsets)?;
-    let entropy_checkpoints_buffer =
-        entropy_checkpoints_buffer(&runtime.device, packet.entropy_checkpoints())?;
+    let (status_buffer, entropy_buffer, restart_offsets_buffer, entropy_checkpoints_buffer) =
+        if let Some(scratch) = scratch {
+            let packet_buffers = scratch_packet_buffers(
+                scratch,
+                &runtime.device,
+                packet.entropy_bytes(),
+                restart_offsets,
+                packet.entropy_checkpoints(),
+            )?;
+            (
+                scratch_status_buffer(scratch, &runtime.device, decode_threads)?,
+                packet_buffers.entropy,
+                packet_buffers.restart_offsets,
+                packet_buffers.checkpoints,
+            )
+        } else {
+            (
+                decode_status_buffer(&runtime.device, decode_threads)?,
+                new_shared_buffer_with_data(&runtime.device, packet.entropy_bytes())?,
+                restart_offsets_buffer(&runtime.device, restart_offsets)?,
+                entropy_checkpoints_buffer(&runtime.device, packet.entropy_checkpoints())?,
+            )
+        };
 
     let (dc_tables, ac_tables) = fast_packet_huffman_tables(packet);
 
@@ -161,6 +196,7 @@ pub(in crate::compute) fn encode_fast_subsampled_scaled_batch_item<P: FastSubsam
     packet: &P,
     fmt: PixelFormat,
     scale: j2k_core::Downscale,
+    mut scratch: Option<&mut MetalBatchScratch>,
 ) -> Result<BatchedDecodeItem, Error> {
     let Some(params) = fast_subsampled_scaled_params(packet, scale) else {
         return Err(Error::MetalKernel {
@@ -170,19 +206,51 @@ pub(in crate::compute) fn encode_fast_subsampled_scaled_batch_item<P: FastSubsam
 
     let y_len = params.scaled_width as usize * params.scaled_height as usize;
     let chroma_len = params.chroma_width as usize * params.chroma_height as usize;
-    let y_plane = new_decode_plane_buffer(&runtime.device, y_len, fmt == PixelFormat::Gray8)?;
-    let cb_plane = new_private_buffer(&runtime.device, chroma_len)?;
-    let cr_plane = new_private_buffer(&runtime.device, chroma_len)?;
+    let y_plane = if fmt == PixelFormat::Gray8 {
+        new_decode_plane_buffer(&runtime.device, y_len, true)?
+    } else if let Some(scratch) = scratch.as_deref_mut() {
+        scratch.private_buffer(&runtime.device, "single_decode_y", y_len)?
+    } else {
+        new_private_buffer(&runtime.device, y_len)?
+    };
+    let cb_plane = if let Some(scratch) = scratch.as_deref_mut() {
+        scratch.private_buffer(&runtime.device, "single_decode_cb", chroma_len)?
+    } else {
+        new_private_buffer(&runtime.device, chroma_len)?
+    };
+    let cr_plane = if let Some(scratch) = scratch.as_deref_mut() {
+        scratch.private_buffer(&runtime.device, "single_decode_cr", chroma_len)?
+    } else {
+        new_private_buffer(&runtime.device, chroma_len)?
+    };
     let decode_threads = entropy_decode_thread_count(
         packet.restart_interval_mcus(),
         packet.restart_offsets().len(),
         packet.entropy_checkpoints().len(),
     );
-    let status_buffer = decode_status_buffer(&runtime.device, decode_threads)?;
-    let entropy_buffer = new_shared_buffer_with_data(&runtime.device, packet.entropy_bytes())?;
-    let restart_offsets_buffer = restart_offsets_buffer(&runtime.device, packet.restart_offsets())?;
-    let entropy_checkpoints_buffer =
-        entropy_checkpoints_buffer(&runtime.device, packet.entropy_checkpoints())?;
+    let (status_buffer, entropy_buffer, restart_offsets_buffer, entropy_checkpoints_buffer) =
+        if let Some(scratch) = scratch {
+            let packet_buffers = scratch_packet_buffers(
+                scratch,
+                &runtime.device,
+                packet.entropy_bytes(),
+                packet.restart_offsets(),
+                packet.entropy_checkpoints(),
+            )?;
+            (
+                scratch_status_buffer(scratch, &runtime.device, decode_threads)?,
+                packet_buffers.entropy,
+                packet_buffers.restart_offsets,
+                packet_buffers.checkpoints,
+            )
+        } else {
+            (
+                decode_status_buffer(&runtime.device, decode_threads)?,
+                new_shared_buffer_with_data(&runtime.device, packet.entropy_bytes())?,
+                restart_offsets_buffer(&runtime.device, packet.restart_offsets())?,
+                entropy_checkpoints_buffer(&runtime.device, packet.entropy_checkpoints())?,
+            )
+        };
 
     let (dc_tables, ac_tables) = fast_packet_huffman_tables(packet);
 
@@ -567,12 +635,22 @@ pub(in crate::compute) fn encode_fast_subsampled_op_batch_item<P: FastSubsampled
         batch::BatchOp::Full => {
             encode_fast_subsampled_batch_item(runtime, command_buffer, packet, fmt)
         }
-        batch::BatchOp::Region(roi) => {
-            encode_fast_subsampled_region_batch_item(runtime, command_buffer, packet, fmt, roi)
-        }
-        batch::BatchOp::Scaled(scale) => {
-            encode_fast_subsampled_scaled_batch_item(runtime, command_buffer, packet, fmt, scale)
-        }
+        batch::BatchOp::Region(roi) => encode_fast_subsampled_region_batch_item(
+            runtime,
+            command_buffer,
+            packet,
+            fmt,
+            roi,
+            None,
+        ),
+        batch::BatchOp::Scaled(scale) => encode_fast_subsampled_scaled_batch_item(
+            runtime,
+            command_buffer,
+            packet,
+            fmt,
+            scale,
+            None,
+        ),
         batch::BatchOp::RegionScaled { roi, scale } => {
             encode_fast_subsampled_scaled_region_batch_item(
                 FastSubsampledScaledRegionBatchItemRequest {

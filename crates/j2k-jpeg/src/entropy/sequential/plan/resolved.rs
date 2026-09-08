@@ -3,7 +3,7 @@
 //! Checked prepared-table resolution outside entropy hot loops.
 
 use super::{PreparedComponentPlan, PreparedDecodePlan};
-use crate::entropy::huffman::{HuffmanTable, PreparedHuffmanTableId};
+use crate::entropy::huffman::{AcHuffmanTable, DcHuffmanTable, PreparedHuffmanTableId};
 use crate::error::JpegError;
 
 /// Borrowed component metadata with table IDs resolved once before entering an
@@ -11,33 +11,36 @@ use crate::error::JpegError;
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ResolvedPreparedComponentPlan<'a> {
     pub(crate) quant: &'a [u16; 64],
-    pub(crate) dc_table: &'a HuffmanTable,
-    pub(crate) ac_table: &'a HuffmanTable,
+    pub(crate) dc_table: DcHuffmanTable<'a>,
+    pub(crate) ac_table: AcHuffmanTable<'a>,
 }
 
 impl PreparedDecodePlan {
-    pub(crate) fn huffman_table(
-        &self,
-        id: Option<PreparedHuffmanTableId>,
-    ) -> Result<&HuffmanTable, JpegError> {
-        id.and_then(|id| self.huffman_tables.get(id))
-            .ok_or(JpegError::InternalInvariant {
-                reason: "prepared component references a missing Huffman table",
-            })
-    }
-
     pub(crate) fn dc_table(
         &self,
         component: &PreparedComponentPlan,
-    ) -> Result<&HuffmanTable, JpegError> {
-        self.huffman_table(component.dc_table)
+    ) -> Result<DcHuffmanTable<'_>, JpegError> {
+        self.huffman_tables
+            .get_dc(component.dc_table.ok_or(JpegError::InternalInvariant {
+                reason: "prepared component references a missing Huffman table",
+            })?)
+    }
+
+    pub(crate) fn dc_table_by_id(
+        &self,
+        id: PreparedHuffmanTableId,
+    ) -> Result<DcHuffmanTable<'_>, JpegError> {
+        self.huffman_tables.get_dc(id)
     }
 
     pub(crate) fn ac_table(
         &self,
         component: &PreparedComponentPlan,
-    ) -> Result<&HuffmanTable, JpegError> {
-        self.huffman_table(component.ac_table)
+    ) -> Result<AcHuffmanTable<'_>, JpegError> {
+        self.huffman_tables
+            .get_ac(component.ac_table.ok_or(JpegError::InternalInvariant {
+                reason: "prepared component references a missing Huffman table",
+            })?)
     }
 
     pub(crate) fn resolve_component<'a>(

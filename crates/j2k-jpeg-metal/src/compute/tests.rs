@@ -40,6 +40,120 @@ fn restart_work_for_mcu_range_slices_to_overlapping_restart_segments() {
 }
 
 #[test]
+fn restart_roi_gpu_does_not_validate_an_unselected_empty_entropy_segment() {
+    if !should_run_metal_runtime() {
+        return;
+    }
+
+    let dimensions = (128, 128);
+    let rgb = j2k_test_support::patterned_rgb8(dimensions.0, dimensions.1);
+    let encoded = j2k_jpeg::encode_jpeg_baseline(
+        j2k_jpeg::JpegSamples::Rgb8 {
+            data: &rgb,
+            width: dimensions.0,
+            height: dimensions.1,
+        },
+        j2k_jpeg::JpegEncodeOptions {
+            quality: 90,
+            subsampling: j2k_jpeg::JpegSubsampling::Ybr420,
+            restart_interval: Some(4),
+            backend: j2k_jpeg::JpegBackend::Cpu,
+        },
+    )
+    .expect("encode restart JPEG");
+
+    let decoder = CpuDecoder::new(&encoded.data).expect("valid CPU decoder");
+    let mut structural_packet =
+        j2k_jpeg::adapter::build_fast420_packet(&encoded.data).expect("valid packet");
+    assert!(structural_packet.restart_offsets.len() > 2);
+    let roi = j2k_jpeg::Rect {
+        x: 112,
+        y: 112,
+        w: 16,
+        h: 16,
+    };
+    let full = j2k_jpeg::Rect {
+        x: 0,
+        y: 0,
+        w: dimensions.0,
+        h: dimensions.1,
+    };
+    let decode = |packet: &j2k_jpeg::adapter::JpegFast420PacketV1, rect| {
+        with_runtime(|runtime| {
+            try_decode_fast420_region_to_surface(
+                runtime,
+                &decoder,
+                Some(packet),
+                PixelFormat::Rgb8,
+                rect,
+            )?
+            .ok_or_else(|| Error::MetalKernel {
+                message: "expected fast420 surface".to_string(),
+            })
+        })
+        .expect("GPU status accepts the restart segments")
+        .as_bytes()
+        .expect("completed surface bytes")
+        .to_vec()
+    };
+    let valid_full = decode(&structural_packet, full);
+    let valid_roi = decode(&structural_packet, roi);
+
+    // Remove the complete first entropy interval while retaining RST0. Header
+    // parsing and marker structure remain valid, but the existing checkpoint
+    // builder must entropy-decode the now-empty first interval.
+    let sos = encoded
+        .data
+        .windows(2)
+        .position(|bytes| bytes == [0xff, 0xda])
+        .expect("SOS marker");
+    let sos_len = usize::from(u16::from_be_bytes([
+        encoded.data[sos + 2],
+        encoded.data[sos + 3],
+    ]));
+    let entropy_start = sos + 2 + sos_len;
+    let first_rst = encoded.data[entropy_start..]
+        .windows(2)
+        .position(|bytes| bytes[0] == 0xff && (0xd0..=0xd7).contains(&bytes[1]))
+        .map(|offset| entropy_start + offset)
+        .expect("first restart marker");
+    let mut malformed = encoded.data.clone();
+    malformed.drain(entropy_start..first_rst);
+    let old_error = j2k_jpeg::adapter::build_fast420_packet(&malformed)
+        .expect_err("full checkpoint preparation must reject the empty first interval");
+    assert!(matches!(
+        old_error,
+        j2k_jpeg::adapter::FastPacketError::Decode(j2k_jpeg::JpegError::HuffmanDecode { .. })
+    ));
+
+    // Model a marker-only structural plan derived from that malformed stream:
+    // the first interval is empty and every later restart segment is unchanged.
+    let removed = usize::try_from(structural_packet.restart_offsets[1])
+        .expect("first entropy interval length");
+    structural_packet.entropy_bytes.drain(..removed);
+    let removed_u32 = u32::try_from(removed).expect("first entropy interval fits in u32");
+    for offset in &mut structural_packet.restart_offsets[1..] {
+        *offset = offset
+            .checked_sub(removed_u32)
+            .expect("later restart offset follows first interval");
+    }
+
+    // Full-image dispatch currently gives every restart thread the global
+    // entropy length rather than its segment end. Segment zero therefore starts
+    // at the same offset as segment one, decodes valid bytes belonging to that
+    // next segment, and reports success despite producing the wrong first MCUs.
+    assert_ne!(
+        decode(&structural_packet, full),
+        valid_full,
+        "successful GPU status must not be mistaken for valid full-image pixels"
+    );
+
+    // The ROI lies wholly in the final MCU, so its selected restart segment
+    // does not include malformed segment zero.
+    assert_eq!(decode(&structural_packet, roi), valid_roi);
+}
+
+#[test]
 fn runtime_initialization_error_classifies_device_unavailable() {
     assert!(matches!(
         runtime_initialization_error(&MetalSupportError::MetalUnavailable),
@@ -1928,5 +2042,52 @@ impl EntropyBitWriter {
         }
         self.current = 0;
         self.bit_count = 0;
+    }
+}
+
+#[test]
+fn single_scratch_recovers_after_gpu_entropy_failure() {
+    if !should_run_metal_runtime() {
+        return;
+    }
+    let runtime = MetalRuntime::new().expect("runtime");
+    let valid = j2k_jpeg::adapter::build_fast422_packet(BASELINE_422).expect("valid packet");
+    let mut invalid =
+        j2k_jpeg::adapter::build_fast422_packet(BASELINE_422).expect("packet to corrupt");
+    // All-one codes are invalid for these canonical tables. Reset the saved
+    // reader reservoir so the device reads the corrupt bytes from the start.
+    invalid.entropy_bytes.fill(0xff);
+    invalid.entropy_checkpoints.truncate(1);
+    invalid.entropy_checkpoints[0].mcu_index = 0;
+    invalid.entropy_checkpoints[0].entropy_pos = 0;
+    invalid.entropy_checkpoints[0].bit_acc = 0;
+    invalid.entropy_checkpoints[0].bit_count = 0;
+    let (expected, _) = CpuDecoder::new(BASELINE_422)
+        .unwrap()
+        .decode_request(DecodeRequest::full(PixelFormat::Rgb8))
+        .unwrap();
+    for _ in 0..2 {
+        let error = single_decode::try_decode_fast422_to_surface(
+            &runtime,
+            Some(&invalid),
+            PixelFormat::Rgb8,
+        )
+        .err()
+        .expect("GPU entropy failure");
+        assert!(
+            matches!(&error, Error::MetalKernel { message }
+            if message.starts_with("unexpected Metal fast422 failure at entropy byte ")),
+            "{error}"
+        );
+        assert!(
+            !runtime.batch_scratch_in_use_for_test(),
+            "failed call must release scratch after completion"
+        );
+        let surface =
+            single_decode::try_decode_fast422_to_surface(&runtime, Some(&valid), PixelFormat::Rgb8)
+                .expect("valid recovery")
+                .expect("supported packet");
+        assert_eq!(surface.as_bytes().unwrap().as_ref(), expected);
+        assert!(!runtime.batch_scratch_in_use_for_test());
     }
 }

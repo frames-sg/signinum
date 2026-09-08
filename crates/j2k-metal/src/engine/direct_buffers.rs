@@ -73,8 +73,76 @@ pub(crate) fn checked_buffer_slice_at<T: GpuAbi>(
 ) -> Result<Vec<T>, Error> {
     // SAFETY: J2K readback helpers are called only for CPU-initialized buffers
     // or after the producing Metal command buffer has completed.
-    unsafe { checked_buffer_read_vec::<T>(buffer, byte_offset, len) }
-        .map_err(|error| buffer_access_error(context, error))
+    let result = unsafe { checked_buffer_read_vec::<T>(buffer, byte_offset, len) }
+        .map_err(|error| buffer_access_error(context, error));
+    #[cfg(test)]
+    if let Ok(values) = &result {
+        if !values.is_empty() {
+            crate::engine::test_counters::record_idwt_host_temporary_readback_vec(size_of_val(
+                values.as_slice(),
+            ));
+        }
+    }
+    result
+}
+
+pub(crate) fn checked_buffer_copy_into<T: GpuAbi>(
+    buffer: &Buffer,
+    byte_offset: usize,
+    output: &mut [T],
+    context: &str,
+) -> Result<(), Error> {
+    let result = (|| {
+        let buffer_len = buffer.length();
+        let element_size = size_of::<T>();
+        if element_size == 0 {
+            return Err(MetalSupportError::BufferZeroSizedType { abi_name: T::NAME });
+        }
+        let byte_len =
+            output
+                .len()
+                .checked_mul(element_size)
+                .ok_or(MetalSupportError::BufferBounds {
+                    offset_bytes: byte_offset,
+                    byte_len: usize::MAX,
+                    buffer_len,
+                })?;
+        let end = byte_offset
+            .checked_add(byte_len)
+            .ok_or(MetalSupportError::BufferBounds {
+                offset_bytes: byte_offset,
+                byte_len,
+                buffer_len,
+            })?;
+        if end > buffer_len {
+            return Err(MetalSupportError::BufferBounds {
+                offset_bytes: byte_offset,
+                byte_len,
+                buffer_len,
+            });
+        }
+        let align = core::mem::align_of::<T>();
+        if !byte_offset.is_multiple_of(align) {
+            return Err(MetalSupportError::BufferAlignment {
+                offset_bytes: byte_offset,
+                align,
+            });
+        }
+        if output.is_empty() {
+            return Ok(());
+        }
+        // SAFETY: These private readback callers use completed/synchronized,
+        // immutable Metal storage and a separate, exclusively borrowed host
+        // destination. Reuse the audited support read for storage and actual
+        // pointer alignment, then the existing checked byte-borrow boundary.
+        let bytes = unsafe {
+            support_checked_buffer_read::<T>(buffer, byte_offset)?;
+            completed_metal_buffer_bytes(buffer, byte_offset, byte_len)?
+        };
+        T::slice_as_bytes_mut(output).copy_from_slice(bytes);
+        Ok(())
+    })();
+    result.map_err(|error| buffer_access_error(context, error))
 }
 
 #[cfg(target_os = "macos")]
@@ -205,10 +273,17 @@ pub(super) fn take_classic_states_scratch_buffer(
 }
 
 #[cfg(test)]
+#[path = "direct_buffers/performance.rs"]
+mod performance;
+
+#[cfg(test)]
 mod tests {
     use j2k_metal_support::MetalSupportError;
 
-    use super::buffer_access_error;
+    use super::{
+        buffer_access_error, checked_buffer_copy_into, new_private_buffer,
+        new_shared_buffer_with_slice,
+    };
     use crate::Error;
 
     #[test]
@@ -226,5 +301,124 @@ mod tests {
                 if message.contains("J2K Metal status readback")
                     && message.contains("not aligned")
         ));
+    }
+
+    #[test]
+    fn checked_buffer_copy_into_preserves_destination_outside_the_selected_slice() {
+        if !j2k_test_support::metal_runtime_gate(module_path!()) {
+            return;
+        }
+        crate::engine::with_runtime(|runtime| {
+            let source = [7.0_f32, -1.25, 2.5, -3.75, 7.0];
+            let buffer = new_shared_buffer_with_slice(&runtime.device, &source)?;
+            let mut output = [11.0_f32; 5];
+            checked_buffer_copy_into(
+                &buffer,
+                core::mem::size_of::<f32>(),
+                &mut output[1..4],
+                "selected copy",
+            )?;
+            assert_eq!(output[0].to_bits(), 11.0_f32.to_bits());
+            assert_eq!(output[4].to_bits(), 11.0_f32.to_bits());
+            for (actual, expected) in output[1..4].iter().zip(&source[1..4]) {
+                assert_eq!(actual.to_bits(), expected.to_bits());
+            }
+            Ok(())
+        })
+        .expect("copy selected shared Metal buffer range");
+    }
+
+    #[test]
+    fn checked_buffer_copy_into_rejects_invalid_ranges_without_changing_output() {
+        if !j2k_test_support::metal_runtime_gate(module_path!()) {
+            return;
+        }
+        crate::engine::with_runtime(|runtime| {
+            let buffer = new_shared_buffer_with_slice(&runtime.device, &[1.0_f32, 2.0])?;
+            let mut output = [13.0_f32; 2];
+            let alignment = checked_buffer_copy_into(&buffer, 1, &mut output[..1], "alignment")
+                .expect_err("misaligned typed copy must fail");
+            assert!(matches!(
+                alignment,
+                Error::MetalSupport {
+                    source: MetalSupportError::BufferAlignment { .. },
+                    ..
+                }
+            ));
+            assert!(output
+                .iter()
+                .all(|value| value.to_bits() == 13.0_f32.to_bits()));
+
+            let bounds = checked_buffer_copy_into(
+                &buffer,
+                core::mem::size_of::<f32>(),
+                &mut output,
+                "bounds",
+            )
+            .expect_err("out-of-bounds typed copy must fail");
+            assert!(matches!(
+                bounds,
+                Error::MetalSupport {
+                    source: MetalSupportError::BufferBounds { .. },
+                    ..
+                }
+            ));
+            assert!(output
+                .iter()
+                .all(|value| value.to_bits() == 13.0_f32.to_bits()));
+
+            checked_buffer_copy_into::<f32>(
+                &buffer,
+                2 * core::mem::size_of::<f32>(),
+                &mut [],
+                "empty end",
+            )?;
+            let empty_unaligned =
+                checked_buffer_copy_into::<f32>(&buffer, 1, &mut [], "empty unaligned")
+                    .expect_err("empty typed copy still validates alignment");
+            assert!(matches!(
+                empty_unaligned,
+                Error::MetalSupport {
+                    source: MetalSupportError::BufferAlignment { .. },
+                    ..
+                }
+            ));
+            let past_end = checked_buffer_copy_into::<f32>(
+                &buffer,
+                3 * core::mem::size_of::<f32>(),
+                &mut [],
+                "empty past end",
+            )
+            .expect_err("empty copy past the buffer must fail");
+            assert!(matches!(
+                past_end,
+                Error::MetalSupport {
+                    source: MetalSupportError::BufferBounds { .. },
+                    ..
+                }
+            ));
+
+            let mut zero_sized_output = [[0_u8; 0]; 1];
+            let zero_sized =
+                checked_buffer_copy_into(&buffer, 0, &mut zero_sized_output, "zero-sized ABI")
+                    .expect_err("zero-sized GPU ABI element must fail");
+            assert!(matches!(
+                zero_sized,
+                Error::MetalSupport {
+                    source: MetalSupportError::BufferZeroSizedType { .. },
+                    ..
+                }
+            ));
+
+            let private = new_private_buffer(&runtime.device, core::mem::size_of::<f32>())?;
+            let private_error = checked_buffer_copy_into(&private, 0, &mut output[..1], "private")
+                .expect_err("private Metal storage must not be copied on the CPU");
+            assert!(matches!(private_error, Error::MetalSupport { .. }));
+            assert!(output
+                .iter()
+                .all(|value| value.to_bits() == 13.0_f32.to_bits()));
+            Ok(())
+        })
+        .expect("validate checked Metal buffer copy failures");
     }
 }

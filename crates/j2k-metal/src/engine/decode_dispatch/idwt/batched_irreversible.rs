@@ -2,7 +2,7 @@
 
 use crate::metal_types::prelude::*;
 
-use super::irreversible::dispatch_irreversible97_stages;
+use super::irreversible::dispatch_irreversible97_stages_after_horizontal_scale;
 use super::{
     dispatch_3d_pipeline, label_compute_encoder, new_compute_command_encoder, CommandBufferRef,
     ComputeCommandEncoderRef, Error, J2kIdwtSingleDecompositionParams,
@@ -24,13 +24,32 @@ pub(in crate::engine) fn dispatch_irreversible97_repeated_buffers_in_encoder_wit
     encoder: &ComputeCommandEncoderRef,
     dispatch: RepeatedIdwtDispatch<'_>,
 ) {
+    let high_pass = j2k_codec_math::dwt::IDWT97_OPENJPEG_TWO_INV_KAPPA_F32 * 0.5;
+    dispatch_irreversible97_repeated_interleave_horizontal_scale(encoder, dispatch, high_pass);
+    dispatch_irreversible97_stages_after_horizontal_scale(
+        encoder,
+        dispatch.kernels,
+        dispatch.decoded,
+        0,
+        single_params(dispatch.params),
+        high_pass,
+        dispatch.params.batch_count,
+    );
+}
+
+pub(super) fn dispatch_irreversible97_repeated_interleave_horizontal_scale(
+    encoder: &ComputeCommandEncoderRef,
+    dispatch: RepeatedIdwtDispatch<'_>,
+    high_pass: f32,
+) {
     let RepeatedIdwtDispatch {
         kernels,
         sub_bands,
         params,
         decoded,
     } = dispatch;
-    encoder.setComputePipelineState(&kernels.idwt_interleave_batched);
+    encoder
+        .setComputePipelineState(&kernels.idwt_irreversible97_interleave_horizontal_scale_batched);
     for (index, buffer, offset) in [
         (0, sub_bands.ll, sub_bands.ll_offset),
         (1, sub_bands.hl, sub_bands.hl_offset),
@@ -41,24 +60,19 @@ pub(in crate::engine) fn dispatch_irreversible97_repeated_buffers_in_encoder_wit
     }
     encoder.set_buffer(4, Some(decoded), 0);
     encoder.set_bytes::<J2kRepeatedIdwtSingleDecompositionParams>(5, &params);
+    encoder.set_bytes::<f32>(6, &high_pass);
     dispatch_3d_pipeline(
         encoder,
-        &kernels.idwt_interleave_batched,
+        &kernels.idwt_irreversible97_interleave_horizontal_scale_batched,
         (params.width, params.height, params.batch_count),
     );
-    encoder.memory_barrier_with_resources(&[decoded]);
-
-    // The stacked-plan preflight guarantees identical geometry and origin
-    // parity. Only the plane offset varies along the third grid dimension.
-    dispatch_irreversible97_stages(
-        encoder,
-        kernels,
-        decoded,
-        0,
-        single_params(params),
-        j2k_codec_math::dwt::IDWT97_OPENJPEG_TWO_INV_KAPPA_F32 * 0.5,
+    #[cfg(test)]
+    crate::engine::test_counters::record_idwt97_logical_dispatch((
+        params.width,
+        params.height,
         params.batch_count,
-    );
+    ));
+    encoder.memory_barrier_with_resources(&[decoded]);
 }
 
 fn single_params(

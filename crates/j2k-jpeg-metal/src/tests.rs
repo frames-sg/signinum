@@ -2155,3 +2155,6 @@ fn warm_session_reuses_shared_upload_buffers_for_reusable_output_batches() {
         "warm session batch should reuse shared upload/status buffers"
     );
 }
+
+#[cfg(target_os = "macos")]
+mod single_scratch;

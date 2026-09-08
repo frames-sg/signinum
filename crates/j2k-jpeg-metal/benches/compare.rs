@@ -18,12 +18,21 @@ use j2k_jpeg_metal::{
     MetalSession, ScratchPool, ViewportTile, ViewportWorkload,
 };
 #[cfg(target_os = "macos")]
-use j2k_jpeg_metal::{MetalBackendSession, MetalBatchTextureOutput};
+use j2k_jpeg_metal::{
+    MetalBackendSession, MetalBatchOutputBuffer, MetalBatchTextureOutput, MetalBufferBatchTarget,
+    Rgb8MetalBatchOp, Rgb8MetalBatchRequest, Rgb8MetalBatchSource, SurfaceResidency,
+};
 use jpeg_encoder::{ColorType, Encoder, SamplingFactor};
 use std::collections::HashSet;
 
 #[path = "support/bench_inputs.rs"]
 mod bench_inputs;
+#[cfg(target_os = "macos")]
+#[path = "support/distinct_batch.rs"]
+mod distinct_batch;
+#[cfg(target_os = "macos")]
+#[path = "support/representative_matrix.rs"]
+mod representative_matrix;
 use bench_inputs::{BenchInput, CorpusInputClass, DecodeMode};
 
 #[cfg(target_os = "macos")]
@@ -126,7 +135,23 @@ fn generated_rgb_jpeg(
     sampling: SamplingFactor,
     restart_interval: Option<u16>,
 ) -> Vec<u8> {
-    let rgb = j2k_test_support::gpu_bench_rgb8(u32::from(width), u32::from(height));
+    generated_rgb_jpeg_variant(width, height, sampling, restart_interval, 0)
+}
+
+fn generated_rgb_jpeg_variant(
+    width: u16,
+    height: u16,
+    sampling: SamplingFactor,
+    restart_interval: Option<u16>,
+    variant: u8,
+) -> Vec<u8> {
+    let mut rgb = j2k_test_support::gpu_bench_rgb8(u32::from(width), u32::from(height));
+    if variant != 0 {
+        for (index, sample) in rgb.iter_mut().enumerate() {
+            let position = u8::try_from(index % 251).expect("generated JPEG position fits u8");
+            *sample = sample.wrapping_add(position.wrapping_mul(variant));
+        }
+    }
 
     let mut jpeg = Vec::new();
     let mut encoder = Encoder::new(&mut jpeg, 90);
@@ -868,6 +893,237 @@ fn bench_full_and_tile_decode_groups(c: &mut Criterion, inputs: &[BenchInput], h
     wsi_tile_batch_rgb.finish();
 }
 
+#[cfg(target_os = "macos")]
+fn pixel_format_label(fmt: PixelFormat) -> &'static str {
+    match fmt {
+        PixelFormat::Gray8 => "gray8",
+        PixelFormat::Rgb8 => "rgb8",
+        PixelFormat::Rgba8 => "rgba8",
+        _ => "other",
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn native_request_pixels(bytes: &[u8], request: DecodeRequest) -> Vec<u8> {
+    CpuDecoder::new(bytes)
+        .expect("native retained-session benchmark decoder")
+        .decode_request(request)
+        .expect("native retained-session benchmark decode")
+        .0
+}
+
+#[cfg(target_os = "macos")]
+fn assert_metal_surface_pixels(surface: &j2k_jpeg_metal::Surface, expected: &[u8]) {
+    assert_eq!(surface.residency(), SurfaceResidency::MetalResidentDecode);
+    let actual = surface.as_bytes().expect("Metal benchmark surface bytes");
+    let actual = actual.as_ref();
+    if actual != expected {
+        let first_mismatch = actual
+            .iter()
+            .zip(expected)
+            .position(|(actual, expected)| actual != expected);
+        let mismatch_count = actual
+            .iter()
+            .zip(expected)
+            .filter(|(actual, expected)| actual != expected)
+            .count()
+            + actual.len().abs_diff(expected.len());
+        let max_delta = actual
+            .iter()
+            .zip(expected)
+            .map(|(actual, expected)| actual.abs_diff(*expected))
+            .max()
+            .unwrap_or(0);
+        panic!(
+            "Metal benchmark pixels differ: actual_len={} expected_len={} first_mismatch={first_mismatch:?} mismatch_count={mismatch_count} max_delta={max_delta}",
+            actual.len(),
+            expected.len(),
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn bench_retained_full_rows(c: &mut Criterion) {
+    let fixtures = [
+        (
+            "420_nr",
+            generated_rgb_jpeg(256, 256, SamplingFactor::F_2_2, None),
+            "fast420",
+        ),
+        (
+            "420_r2",
+            generated_rgb_jpeg(256, 256, SamplingFactor::F_2_2, Some(2)),
+            "fast420",
+        ),
+        (
+            "422_nr",
+            generated_rgb_jpeg(256, 256, SamplingFactor::F_2_1, None),
+            "fast422",
+        ),
+        (
+            "444_nr",
+            generated_rgb_jpeg(256, 256, SamplingFactor::F_1_1, None),
+            "fast444",
+        ),
+    ];
+    let mut group = c.benchmark_group("jpeg_metal_single_retained");
+    for (fixture_name, bytes, expected_family) in &fixtures {
+        let packet = fast_packet_plan(bytes).expect("retained-session fast packet");
+        assert_eq!(fast_packet_family_label(packet), *expected_family);
+        for fmt in [PixelFormat::Gray8, PixelFormat::Rgb8, PixelFormat::Rgba8] {
+            let expected = native_request_pixels(bytes, DecodeRequest::full(fmt));
+            let session = MetalBackendSession::system_default().expect("Metal backend session");
+            let mut decoder = Decoder::new(bytes).expect("retained Metal decoder");
+            let probe = decoder
+                .decode_to_device_with_session(fmt, &session)
+                .expect("retained-session Metal probe");
+            assert_metal_surface_pixels(&probe, &expected);
+            drop(probe);
+
+            group.bench_function(
+                format!("{fixture_name}/full/{}", pixel_format_label(fmt)),
+                |b| {
+                    b.iter(|| {
+                        let surface = decoder
+                            .decode_to_device_with_session(fmt, &session)
+                            .expect("retained-session Metal decode");
+                        std::hint::black_box(surface);
+                    });
+                },
+            );
+        }
+    }
+    group.finish();
+}
+
+#[cfg(target_os = "macos")]
+fn bench_single_request_controls(c: &mut Criterion) {
+    let scaled_bytes = generated_rgb_jpeg(256, 256, SamplingFactor::F_2_2, Some(2));
+    let region_bytes = generated_rgb_jpeg(256, 256, SamplingFactor::F_1_1, None);
+    let controls = [
+        (
+            "420_r2",
+            "scaled_q4",
+            scaled_bytes.as_slice(),
+            MetalDecodeRequest::scaled(
+                PixelFormat::Rgb8,
+                Downscale::Quarter,
+                BackendRequest::Metal,
+            ),
+            DecodeRequest::scaled(PixelFormat::Rgb8, Downscale::Quarter),
+        ),
+        (
+            "444_nr",
+            "region192_q4",
+            region_bytes.as_slice(),
+            MetalDecodeRequest::region_scaled(
+                PixelFormat::Rgb8,
+                centered_roi((256, 256), 192),
+                Downscale::Quarter,
+                BackendRequest::Metal,
+            ),
+            DecodeRequest::region_scaled(
+                PixelFormat::Rgb8,
+                to_jpeg_rect(centered_roi((256, 256), 192)),
+                Downscale::Quarter,
+            ),
+        ),
+    ];
+    let mut group = c.benchmark_group("jpeg_metal_single_request_controls");
+    for (fixture_name, name, bytes, metal_request, native_request) in controls {
+        let expected = native_request_pixels(bytes, native_request);
+        let mut decoder = Decoder::new(bytes).expect("retained request-control decoder");
+        let probe = decoder
+            .decode_request_to_device(metal_request)
+            .expect("global-runtime request control probe");
+        assert_metal_surface_pixels(&probe, &expected);
+        drop(probe);
+        group.bench_function(
+            format!("{fixture_name}/global_runtime_control/{name}"),
+            |b| {
+                b.iter(|| {
+                    let surface = decoder
+                        .decode_request_to_device(metal_request)
+                        .expect("global-runtime request control");
+                    std::hint::black_box(surface);
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
+#[cfg(target_os = "macos")]
+fn bench_retained_distinct_batch(c: &mut Criterion) {
+    let distinct_bytes = (1..=4)
+        .map(|variant| {
+            generated_rgb_jpeg_variant(256, 256, SamplingFactor::F_2_2, Some(2), variant)
+        })
+        .collect::<Vec<_>>();
+    for bytes in &distinct_bytes {
+        let packet = fast_packet_plan(bytes).expect("distinct batch fast packet");
+        assert_eq!(fast_packet_family_label(packet), "fast420");
+    }
+    let expected = distinct_bytes
+        .iter()
+        .map(|bytes| native_request_pixels(bytes, DecodeRequest::full(PixelFormat::Rgb8)))
+        .collect::<Vec<_>>();
+    for first in 0..distinct_bytes.len() {
+        for second in first + 1..distinct_bytes.len() {
+            assert_ne!(
+                distinct_bytes[first], distinct_bytes[second],
+                "distinct batch JPEG inputs {first} and {second}"
+            );
+            assert_ne!(
+                expected[first], expected[second],
+                "distinct batch pixels {first} and {second}"
+            );
+        }
+    }
+    let decoders = distinct_bytes
+        .iter()
+        .map(|bytes| Decoder::new(bytes).expect("distinct retained Metal decoder"))
+        .collect::<Vec<_>>();
+    let decoder_refs = decoders.iter().collect::<Vec<_>>();
+    let session = MetalBackendSession::system_default().expect("distinct batch Metal session");
+    let output = MetalBatchOutputBuffer::new_rgb8_tiles(&session, (256, 256), decoder_refs.len())
+        .expect("distinct batch output");
+    let decode_batch = || {
+        Codec::decode_rgb8_batch_into_buffer_with_session(
+            Rgb8MetalBatchRequest {
+                source: Rgb8MetalBatchSource::Decoders(&decoder_refs),
+                op: Rgb8MetalBatchOp::Full,
+            },
+            MetalBufferBatchTarget::Reusable(&output),
+            &session,
+        )
+        .expect("distinct retained-session batch")
+    };
+    let probe = decode_batch();
+    assert_eq!(probe.len(), expected.len());
+    for (surface, expected) in probe.into_iter().zip(&expected) {
+        assert_metal_surface_pixels(&surface.expect("distinct batch surface"), expected);
+    }
+    let mut batch_group = c.benchmark_group("jpeg_metal_single_retained_batch_control");
+    batch_group.bench_function("420_r2/distinct4/rgb8", |b| {
+        b.iter(|| std::hint::black_box(decode_batch()));
+    });
+    batch_group.finish();
+}
+
+#[cfg(target_os = "macos")]
+fn bench_retained_single_decode(c: &mut Criterion, has_metal: bool) {
+    if !has_metal {
+        return;
+    }
+    bench_retained_full_rows(c);
+    bench_single_request_controls(c);
+    bench_retained_distinct_batch(c);
+}
+
+#[cfg(not(target_os = "macos"))]
+fn bench_retained_single_decode(_c: &mut Criterion, _has_metal: bool) {}
+
 fn bench_region_and_scaled_decode_groups(
     c: &mut Criterion,
     inputs: &[BenchInput],
@@ -1374,6 +1630,12 @@ fn bench_compare(c: &mut Criterion) {
 
     bench_fast_packet_planning(c, &inputs);
     bench_full_and_tile_decode_groups(c, &inputs, has_metal);
+    bench_retained_single_decode(c, has_metal);
+    #[cfg(target_os = "macos")]
+    if has_metal {
+        distinct_batch::bench(c);
+        representative_matrix::bench(c);
+    }
     bench_resident_texture_batches(c, &inputs, has_metal);
     bench_resident_viewport_outputs(c, &inputs, has_metal);
     bench_region_and_scaled_decode_groups(c, &inputs, has_metal);

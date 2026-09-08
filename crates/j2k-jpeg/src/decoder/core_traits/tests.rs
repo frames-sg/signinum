@@ -429,3 +429,35 @@ fn cropped_interleaved_writer_failed_row_reservation_is_transactional() {
     assert!(writer.bottom_row.is_empty());
     assert!(writer.inner.interleaved.is_empty());
 }
+
+#[test]
+fn core_tile_context_route_reuses_cached_plan_without_cloning() {
+    let (expected, _) = decode_direct(None, Downscale::None);
+    let stride = 16 * PixelFormat::Rgb8.bytes_per_pixel();
+    let mut output = vec![0u8; expected.len()];
+    let mut context = DecoderContext::new();
+    let mut pool = ScratchPool::new();
+
+    <JpegCodec as TileBatchDecode>::decode_tile(
+        &mut context,
+        &mut pool,
+        JPEG,
+        &mut output,
+        stride,
+        PixelFormat::Rgb8,
+    )
+    .expect("warm core tile context");
+    let clones = context.decode_plan_clone_count();
+    <JpegCodec as TileBatchDecode>::decode_tile(
+        &mut context,
+        &mut pool,
+        JPEG,
+        &mut output,
+        stride,
+        PixelFormat::Rgb8,
+    )
+    .expect("reuse core tile context");
+
+    assert_eq!(output, expected);
+    assert_eq!(context.decode_plan_clone_count(), clones);
+}

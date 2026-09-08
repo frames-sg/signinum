@@ -61,8 +61,7 @@ use self::subband::{
 };
 #[cfg(all(test, feature = "parallel"))]
 use self::subband::{
-    copy_decoded_classic_blocks_to_sub_band, copy_decoded_ht_blocks_to_sub_band,
-    DecodedClassicBlock, DecodedHtBlock,
+    copy_decoded_classic_blocks_to_sub_band, copy_decoded_ht_blocks_to_sub_band, DecodedBlock,
 };
 #[cfg(test)]
 pub(crate) use self::subband::{
@@ -342,6 +341,41 @@ pub(crate) struct DecodeDebugCounters {
     pub(crate) skipped_code_blocks: usize,
     pub(crate) idwt_output_samples: usize,
     pub(crate) ht_phase_stats: ht_block_decode::HtBlockDecodeStats,
+    #[cfg(all(test, feature = "parallel"))]
+    pub(crate) ht_parallel_tasks: usize,
+    #[cfg(all(test, feature = "parallel"))]
+    pub(crate) ht_task_workspace_growths: usize,
+    #[cfg(all(test, feature = "parallel"))]
+    pub(crate) parallel_coefficients: ParallelCoefficientStats,
+}
+
+#[cfg(all(test, feature = "parallel"))]
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ParallelCoefficientStats {
+    pub(crate) allocations: usize,
+    pub(crate) allocated_bytes: usize,
+    pub(crate) peak_live_bytes: usize,
+    pub(crate) scatter_bytes: usize,
+}
+
+#[cfg(all(test, feature = "parallel"))]
+impl ParallelCoefficientStats {
+    fn record_allocation(&mut self, bytes: usize, peak_live_bytes: usize) {
+        if bytes == 0 {
+            return;
+        }
+        self.allocations = self.allocations.saturating_add(1);
+        self.allocated_bytes = self.allocated_bytes.saturating_add(bytes);
+        self.peak_live_bytes = self.peak_live_bytes.max(peak_live_bytes);
+    }
+
+    fn record_retained(&mut self, bytes: usize) {
+        self.peak_live_bytes = self.peak_live_bytes.max(bytes);
+    }
+
+    fn record_scatter(&mut self, bytes: usize) {
+        self.scatter_bytes = self.scatter_bytes.saturating_add(bytes);
+    }
 }
 
 #[expect(
@@ -728,6 +762,10 @@ pub(crate) struct TileDecodeContext {
     pub(crate) bit_plane_decode_buffers: BitPlaneDecodeBuffers,
     /// A reusable context for decoding HTJ2K code blocks.
     pub(crate) ht_block_decode_context: HtBlockDecodeContext,
+    #[cfg(feature = "parallel")]
+    pub(in crate::j2c::decode) ht_task_workspaces: Vec<workspace::HtTaskWorkspace>,
+    #[cfg(feature = "parallel")]
+    pub(in crate::j2c::decode) parallel_coefficients: Vec<f32>,
     /// The raw, decoded samples for each channel.
     pub(crate) channel_data: Vec<ComponentData>,
     /// Optional output window for region-local decode storage.
@@ -756,9 +794,14 @@ impl TileDecodeContext {
         self.bit_plane_decode_context = BitPlaneDecodeContext::default();
         self.bit_plane_decode_buffers = BitPlaneDecodeBuffers::default();
         self.ht_block_decode_context = HtBlockDecodeContext::default();
+        #[cfg(feature = "parallel")]
+        {
+            self.ht_task_workspaces = Vec::new();
+            self.parallel_coefficients = Vec::new();
+        }
     }
 
-    pub(crate) fn tier1_capacity_bytes(&self) -> Result<usize> {
+    pub(crate) fn serial_tier1_capacity_bytes(&self) -> Result<usize> {
         let classic_bytes = self.bit_plane_decode_context.allocated_bytes()?;
         let buffer_bytes = self.bit_plane_decode_buffers.allocated_bytes()?;
         let ht_bytes = self.ht_block_decode_context.allocated_bytes()?;
@@ -766,6 +809,38 @@ impl TileDecodeContext {
             .checked_add(buffer_bytes)
             .and_then(|bytes| bytes.checked_add(ht_bytes))
             .ok_or(ValidationError::ImageTooLarge.into())
+    }
+
+    pub(crate) fn tier1_capacity_bytes(&self) -> Result<usize> {
+        let serial_bytes = self.serial_tier1_capacity_bytes()?;
+        #[cfg(feature = "parallel")]
+        {
+            serial_bytes
+                .checked_add(workspace::ht_task_workspace_bytes(
+                    &self.ht_task_workspaces,
+                )?)
+                .and_then(|bytes| {
+                    self.parallel_coefficients
+                        .capacity()
+                        .checked_mul(size_of::<f32>())
+                        .and_then(|coefficient_bytes| bytes.checked_add(coefficient_bytes))
+                })
+                .ok_or(ValidationError::ImageTooLarge.into())
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            Ok(serial_bytes)
+        }
+    }
+
+    #[cfg(all(test, feature = "parallel"))]
+    pub(crate) fn ht_parallel_workspace_count(&self) -> usize {
+        self.ht_task_workspaces.len()
+    }
+
+    #[cfg(all(test, feature = "parallel"))]
+    pub(crate) fn ht_parallel_workspace_bytes(&self) -> Result<usize> {
+        workspace::ht_task_workspace_bytes(&self.ht_task_workspaces)
     }
 
     pub(crate) fn idwt_capacity_bytes(&self) -> Result<usize> {
@@ -971,18 +1046,25 @@ mod tests {
     #[test]
     fn decoded_classic_block_copyback_covers_full_block() {
         let (sub_band, mut storage) = copyback_test_sub_band(4, 3);
-        let block = super::DecodedClassicBlock {
+        let mut coefficient_stats = super::ParallelCoefficientStats::default();
+        let mut coefficients = (0..12)
+            .map(|value| f32::from(u8::try_from(value).expect("test value fits u8")))
+            .collect::<Vec<_>>();
+        let block = super::DecodedBlock {
             output_x: 0,
             output_y: 0,
             width: 4,
             height: 3,
-            coefficients: (0..12)
-                .map(|value| f32::from(u8::try_from(value).expect("test value fits u8")))
-                .collect(),
+            coefficients: &mut coefficients,
         };
 
-        super::copy_decoded_classic_blocks_to_sub_band(&[block], &sub_band, &mut storage)
-            .expect("full classic block copyback");
+        super::copy_decoded_classic_blocks_to_sub_band(
+            &[block],
+            &sub_band,
+            &mut storage,
+            &mut coefficient_stats,
+        )
+        .expect("full classic block copyback");
 
         assert_eq!(
             storage.coefficients,
@@ -990,22 +1072,30 @@ mod tests {
                 .map(|value| f32::from(u8::try_from(value).expect("test value fits u8")))
                 .collect::<Vec<_>>()
         );
+        assert_eq!(coefficient_stats.scatter_bytes, 12 * size_of::<f32>());
     }
 
     #[cfg(feature = "parallel")]
     #[test]
     fn decoded_ht_block_copyback_covers_partial_edge_block() {
         let (sub_band, mut storage) = copyback_test_sub_band(5, 3);
-        let block = super::DecodedHtBlock {
+        let mut coefficient_stats = super::ParallelCoefficientStats::default();
+        let mut coefficients = vec![1.0, 2.0, 3.0, 4.0];
+        let block = super::DecodedBlock {
             output_x: 3,
             output_y: 1,
             width: 2,
             height: 2,
-            coefficients: vec![1.0, 2.0, 3.0, 4.0],
+            coefficients: &mut coefficients,
         };
 
-        super::copy_decoded_ht_blocks_to_sub_band(&[block], &sub_band, &mut storage)
-            .expect("partial HT block copyback");
+        super::copy_decoded_ht_blocks_to_sub_band(
+            &[block],
+            &sub_band,
+            &mut storage,
+            &mut coefficient_stats,
+        )
+        .expect("partial HT block copyback");
 
         assert_eq!(
             storage.coefficients,
@@ -1014,34 +1104,55 @@ mod tests {
                 4.0,
             ]
         );
+        assert_eq!(coefficient_stats.scatter_bytes, 4 * size_of::<f32>());
     }
 
     #[cfg(feature = "parallel")]
     #[test]
     fn decoded_block_copyback_rejects_out_of_bounds_blocks() {
         let (sub_band, mut storage) = copyback_test_sub_band(5, 3);
-        let block = super::DecodedClassicBlock {
+        let mut coefficient_stats = super::ParallelCoefficientStats::default();
+        let mut coefficients = vec![1.0, 2.0];
+        let block = super::DecodedBlock {
             output_x: 4,
             output_y: 1,
             width: 2,
             height: 1,
-            coefficients: vec![1.0, 2.0],
+            coefficients: &mut coefficients,
         };
 
-        let error =
-            super::copy_decoded_classic_blocks_to_sub_band(&[block], &sub_band, &mut storage)
-                .expect_err("out-of-bounds block must fail");
+        let error = super::copy_decoded_classic_blocks_to_sub_band(
+            &[block],
+            &sub_band,
+            &mut storage,
+            &mut coefficient_stats,
+        )
+        .expect_err("out-of-bounds block must fail");
 
         assert_eq!(error, DecodingError::CodeBlockDecodeFailure.into());
+        assert_eq!(coefficient_stats.scatter_bytes, 0);
     }
 
     #[cfg(feature = "parallel")]
     #[test]
     fn auto_cpu_parallelism_enables_ht_sub_band_parallel_branch() {
-        assert!(super::should_decode_ht_sub_band_in_parallel(
-            super::CpuDecodeParallelism::Auto,
-            16
-        ));
+        for threads in [1, 2] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            pool.install(|| {
+                for blocks in [0, 3, 4, 16, usize::MAX] {
+                    assert_eq!(
+                        super::should_decode_ht_sub_band_in_parallel(
+                            super::CpuDecodeParallelism::Auto,
+                            blocks
+                        ),
+                        threads > 1 && blocks >= 4
+                    );
+                }
+            });
+        }
     }
 
     #[test]

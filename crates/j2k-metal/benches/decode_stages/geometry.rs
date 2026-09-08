@@ -3,8 +3,51 @@
 use super::{
     combined_dispatch_report, encode_htj2k, readback_bytes, readback_hash, require_success,
     resident_bytes, Arc, BatchDecodeOptions, BatchLayout, Criterion, EncodeOptions, EncodedImage,
-    MetalBatchDecoder, Throughput,
+    MetalBatchDecodeResult, MetalBatchDecoder, Throughput,
 };
+
+fn cold_input_decode(
+    backend: &j2k_metal::MetalBackendSession,
+    sources: &[Arc<[u8]>],
+) -> MetalBatchDecodeResult {
+    // Retain the initialized Metal device, queue, pipelines, and session caches.
+    // A fresh decoder starts with empty prepared-image plan caches, so this row
+    // measures input parsing/grouping and decoder preparation, not Metal startup.
+    let mut decoder = MetalBatchDecoder::with_backend_session_and_options(
+        backend.clone(),
+        BatchDecodeOptions {
+            layout: BatchLayout::Nhwc,
+            ..BatchDecodeOptions::default()
+        },
+    );
+    let inputs = sources
+        .iter()
+        .map(|bytes| EncodedImage::full(Arc::clone(bytes)))
+        .collect();
+    let prepared = decoder
+        .prepare(inputs)
+        .expect("cold-input geometry benchmark prepared batch");
+    decoder
+        .decode_prepared(&prepared)
+        .expect("cold-input geometry benchmark decode")
+}
+
+fn validate_geometry_decode(result: &MetalBatchDecodeResult, expected: &[Vec<u8>]) {
+    require_success(result);
+    assert_eq!(combined_dispatch_report(result).ht_tier1, 3);
+    let surfaces = result
+        .groups()
+        .iter()
+        .flat_map(j2k_metal::MetalBatchGroup::surfaces)
+        .collect::<Vec<_>>();
+    assert_eq!(surfaces.len(), expected.len());
+    for (surface, expected) in surfaces.iter().zip(expected) {
+        assert_eq!(
+            surface.as_bytes().expect("geometry probe readback"),
+            *expected
+        );
+    }
+}
 
 pub(super) fn bench(criterion: &mut Criterion) {
     for (width, height, count) in [
@@ -25,6 +68,7 @@ pub(super) fn bench(criterion: &mut Criterion) {
             ..EncodeOptions::default()
         };
         let mut inputs = Vec::new();
+        let mut sources = Vec::new();
         let mut expected = Vec::new();
         let mut input_bytes = Vec::new();
         let mut input_hashes = std::collections::BTreeSet::new();
@@ -48,7 +92,8 @@ pub(super) fn bench(criterion: &mut Criterion) {
             );
             input_bytes.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
             input_bytes.extend_from_slice(&bytes);
-            inputs.push(EncodedImage::full(bytes));
+            inputs.push(EncodedImage::full(Arc::clone(&bytes)));
+            sources.push(bytes);
         }
         let prepared = decoder
             .prepare(inputs)
@@ -56,20 +101,7 @@ pub(super) fn bench(criterion: &mut Criterion) {
         let probe = decoder
             .decode_prepared(&prepared)
             .expect("geometry benchmark probe");
-        require_success(&probe);
-        assert_eq!(combined_dispatch_report(&probe).ht_tier1, 3);
-        let surfaces = probe
-            .groups()
-            .iter()
-            .flat_map(j2k_metal::MetalBatchGroup::surfaces)
-            .collect::<Vec<_>>();
-        assert_eq!(surfaces.len(), expected.len());
-        for (surface, expected) in surfaces.iter().zip(&expected) {
-            assert_eq!(
-                surface.as_bytes().expect("geometry probe readback"),
-                *expected
-            );
-        }
+        validate_geometry_decode(&probe, &expected);
         let id = format!("metal_idwt97_geometry_distinct/{width}x{height}/batch-{count}");
         eprintln!(
             "{id} input_sha256={} output_sha256={}",
@@ -92,6 +124,16 @@ pub(super) fn bench(criterion: &mut Criterion) {
                 let result = decoder
                     .decode_prepared(std::hint::black_box(&prepared))
                     .expect("readback geometry decode");
+                require_success(&result);
+                std::hint::black_box(readback_bytes(&result));
+            });
+        });
+        let backend = decoder.backend_session().clone();
+        let cold_probe = cold_input_decode(&backend, &sources);
+        validate_geometry_decode(&cold_probe, &expected);
+        group.bench_function("cold_input_prepare_readback_warm_session", |bencher| {
+            bencher.iter(|| {
+                let result = cold_input_decode(&backend, &sources);
                 require_success(&result);
                 std::hint::black_box(readback_bytes(&result));
             });

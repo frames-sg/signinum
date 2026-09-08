@@ -17,7 +17,7 @@ use crate::j2c::build::CodeBlockCoding;
 #[cfg(feature = "parallel")]
 use super::{
     copy_decoded_classic_blocks_to_sub_band, decode_classic_sub_band_blocks_parallel,
-    ClassicParallelParameters,
+    release_coefficient_slab, ClassicParallelParameters,
 };
 
 #[expect(
@@ -162,15 +162,46 @@ pub(super) fn decode_sub_band_classic_blocks(
         #[cfg(feature = "parallel")]
         {
             let mut budget = DecodeAllocationBudget::for_storage(storage)?;
-            let pending_blocks = collect_pending_classic_blocks(
+            let mut collection_budget = budget;
+            let pending_result = collect_pending_classic_blocks(
                 sub_band_idx,
                 sub_band,
                 component_info,
                 storage,
-                &mut budget,
-            )?;
+                &mut collection_budget,
+            );
+            let pending_blocks = match pending_result {
+                Ok(pending_blocks) => {
+                    budget = collection_budget;
+                    pending_blocks
+                }
+                Err(error)
+                    if tile_ctx.parallel_coefficients.capacity() != 0
+                        && super::super::reuse::is_capacity_error(&error) =>
+                {
+                    release_coefficient_slab(
+                        &mut tile_ctx.parallel_coefficients,
+                        &mut storage.structural_workspace_bytes,
+                        #[cfg(test)]
+                        &mut tile_ctx.debug_counters.parallel_coefficients,
+                        &mut budget,
+                    )?;
+                    let mut retry_budget = budget;
+                    let pending_blocks = collect_pending_classic_blocks(
+                        sub_band_idx,
+                        sub_band,
+                        component_info,
+                        storage,
+                        &mut retry_budget,
+                    )?;
+                    budget = retry_budget;
+                    pending_blocks
+                }
+                Err(error) => return Err(error),
+            };
             let decoded_blocks = decode_classic_sub_band_blocks_parallel(
                 &pending_blocks,
+                sub_band,
                 ClassicParallelParameters {
                     sub_band_type: job_sub_band_type,
                     style: job_style,
@@ -180,10 +211,20 @@ pub(super) fn decode_sub_band_classic_blocks(
                     dequantization_step,
                     irreversible_midpoint,
                 },
+                &mut tile_ctx.parallel_coefficients,
+                &mut storage.structural_workspace_bytes,
+                #[cfg(test)]
+                &mut tile_ctx.debug_counters.parallel_coefficients,
                 &mut budget,
             )?;
             tile_ctx.debug_counters.decoded_code_blocks += decoded_blocks.len();
-            copy_decoded_classic_blocks_to_sub_band(&decoded_blocks, sub_band, storage)?;
+            copy_decoded_classic_blocks_to_sub_band(
+                &decoded_blocks,
+                sub_band,
+                storage,
+                #[cfg(test)]
+                &mut tile_ctx.debug_counters.parallel_coefficients,
+            )?;
             return Ok(());
         }
     }

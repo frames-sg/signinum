@@ -64,9 +64,10 @@ pub(crate) use self::direct_buffers::{
 };
 #[cfg(target_os = "macos")]
 use self::direct_buffers::{
-    copied_recyclable_shared_slice_buffer, copied_slice_buffer, new_private_buffer,
-    new_shared_buffer, new_shared_buffer_with_slice, take_classic_coefficients_scratch_buffer,
-    take_classic_states_scratch_buffer, zeroed_recyclable_shared_buffer, zeroed_shared_buffer,
+    checked_buffer_copy_into, copied_recyclable_shared_slice_buffer, copied_slice_buffer,
+    new_private_buffer, new_shared_buffer, new_shared_buffer_with_slice,
+    take_classic_coefficients_scratch_buffer, take_classic_states_scratch_buffer,
+    zeroed_recyclable_shared_buffer, zeroed_shared_buffer,
 };
 #[cfg(target_os = "macos")]
 mod direct_commands;
@@ -190,8 +191,9 @@ pub(crate) use self::test_counters::{
     ht_batch_coefficient_copy_blits_for_test, hybrid_cpu_decode_inputs_for_test,
     hybrid_cpu_decode_worker_inits_for_test, hybrid_repeated_output_blits_for_test,
     hybrid_stacked_component_batches_for_test, idwt97_stage_sequences_for_test,
-    lossless_deinterleave_rct_fused_dispatches_for_test, metal_command_buffers_for_test,
-    metal_compute_encoders_for_test, reset_classic_gpu_token_pack_dispatches_for_test,
+    idwt_host_transfer_counters_for_test, lossless_deinterleave_rct_fused_dispatches_for_test,
+    metal_command_buffers_for_test, metal_compute_encoders_for_test,
+    reset_classic_gpu_token_pack_dispatches_for_test,
     reset_classic_split_mq_byte_gpu_token_pack_dispatches_for_test,
     reset_direct_destination_event_bridge_for_test,
     reset_direct_tier1_input_buffer_prepares_for_test,
@@ -199,6 +201,7 @@ pub(crate) use self::test_counters::{
     reset_ht_batch_coefficient_copy_blits_for_test, reset_hybrid_cpu_decode_inputs_for_test,
     reset_hybrid_cpu_decode_worker_inits_for_test, reset_hybrid_repeated_output_blits_for_test,
     reset_hybrid_stacked_component_batches_for_test, reset_idwt97_stage_sequences_for_test,
+    reset_idwt_host_transfer_counters_for_test,
     reset_lossless_deinterleave_rct_fused_dispatches_for_test,
     reset_metal_command_buffers_for_test, reset_metal_compute_encoders_for_test,
     reset_resident_codestream_command_buffer_waits_for_test,

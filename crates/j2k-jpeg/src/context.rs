@@ -6,7 +6,7 @@ use crate::allocation::{checked_add_allocation_bytes, try_reserve_for_len_with_l
 use crate::entropy::huffman::HuffmanTable;
 use crate::entropy::sequential::PreparedDecodePlan;
 use crate::error::JpegError;
-use crate::parse::tables::RawHuffmanTable;
+use crate::parse::tables::{HuffmanTableRole, RawHuffmanTable};
 use alloc::vec::Vec;
 use core::mem::size_of;
 use j2k_core::{CacheStats, CodecContext};
@@ -32,6 +32,7 @@ struct CachedQuantTable {
 #[derive(Debug)]
 struct CachedHuffmanTable {
     digest: u64,
+    role: HuffmanTableRole,
     raw: RawHuffmanTable,
     table: HuffmanTable,
 }
@@ -42,6 +43,43 @@ struct CachedDecodePlan {
     header_prefix: Vec<u8>,
     plan: PreparedDecodePlan,
     allocation_bytes: usize,
+}
+
+pub(crate) struct CachedDecodePlanLease<'a> {
+    // The vacant slot's plan lives in the temporary decoder and its key in this
+    // guard; both stay charged until restoration or abandoned-lease Drop.
+    slot: &'a mut Option<CachedDecodePlan>,
+    decode_plan_cache_bytes: &'a mut usize,
+    cache_evictions: &'a mut u64,
+    digest: u64,
+    header_prefix: Vec<u8>,
+    allocation_bytes: usize,
+    restored: bool,
+}
+
+impl CachedDecodePlanLease<'_> {
+    pub(crate) fn restore(mut self, plan: PreparedDecodePlan) {
+        let header_prefix = core::mem::take(&mut self.header_prefix);
+        *self.slot = Some(CachedDecodePlan {
+            digest: self.digest,
+            header_prefix,
+            plan,
+            allocation_bytes: self.allocation_bytes,
+        });
+        self.restored = true;
+    }
+}
+
+impl Drop for CachedDecodePlanLease<'_> {
+    fn drop(&mut self) {
+        if self.restored {
+            return;
+        }
+        *self.decode_plan_cache_bytes = self
+            .decode_plan_cache_bytes
+            .saturating_sub(self.allocation_bytes);
+        *self.cache_evictions = self.cache_evictions.saturating_add(1);
+    }
 }
 
 /// Shared decode context for WSI tile batches.
@@ -58,6 +96,8 @@ pub struct DecoderContext {
     cache_hits: u64,
     cache_misses: u64,
     cache_evictions: u64,
+    #[cfg(test)]
+    decode_plan_clones: u64,
 }
 
 impl DecoderContext {
@@ -72,12 +112,76 @@ impl DecoderContext {
             cache_hits: 0,
             cache_misses: 0,
             cache_evictions: 0,
+            #[cfg(test)]
+            decode_plan_clones: 0,
         }
     }
 
     pub(crate) fn resolve_quant_table(&mut self, table: [u16; 64]) -> [u16; 64] {
         let digest = digest_quant_table(&table);
         self.resolve_quant_table_with_digest(table, digest)
+    }
+
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the digest cast only selects a cache shard and intentionally uses the native word"
+    )]
+    pub(crate) fn cached_decode_plan(&self, header_prefix: &[u8]) -> Option<&PreparedDecodePlan> {
+        let digest = digest_bytes(header_prefix);
+        let start = (digest as usize) % self.decode_plans.len();
+        (0..self.decode_plans.len())
+            .map(|probe| (start + probe) % self.decode_plans.len())
+            .filter_map(|slot| self.decode_plans[slot].as_ref())
+            .find(|cached| {
+                cached.digest == digest && cached.header_prefix.as_slice() == header_prefix
+            })
+            .map(|cached| &cached.plan)
+    }
+
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the digest cast only selects a cache shard and intentionally uses the native word"
+    )]
+    pub(crate) fn lease_cached_decode_plan(
+        &mut self,
+        header_prefix: &[u8],
+    ) -> Result<Option<(CachedDecodePlanLease<'_>, PreparedDecodePlan)>, JpegError> {
+        let digest = digest_bytes(header_prefix);
+        let start = (digest as usize) % self.decode_plans.len();
+        let slot = (0..self.decode_plans.len())
+            .map(|probe| (start + probe) % self.decode_plans.len())
+            .find(|&slot| {
+                self.decode_plans[slot].as_ref().is_some_and(|cached| {
+                    cached.digest == digest && cached.header_prefix.as_slice() == header_prefix
+                })
+            });
+        let Some(slot) = slot else {
+            return Ok(None);
+        };
+        self.cache_hits = self.cache_hits.saturating_add(1);
+        let cached = self.decode_plans[slot]
+            .take()
+            .ok_or(JpegError::InternalInvariant {
+                reason: "matched cached decode plan disappeared before leasing",
+            })?;
+        let CachedDecodePlan {
+            digest,
+            header_prefix,
+            plan,
+            allocation_bytes,
+        } = cached;
+        Ok(Some((
+            CachedDecodePlanLease {
+                slot: &mut self.decode_plans[slot],
+                decode_plan_cache_bytes: &mut self.decode_plan_cache_bytes,
+                cache_evictions: &mut self.cache_evictions,
+                digest,
+                header_prefix,
+                allocation_bytes,
+                restored: false,
+            },
+            plan,
+        )))
     }
 
     #[expect(
@@ -112,11 +216,12 @@ impl DecoderContext {
     pub(crate) fn resolve_huffman_table_with_live_budget(
         &mut self,
         raw: &RawHuffmanTable,
+        role: HuffmanTableRole,
         live_bytes: &mut usize,
         cap: usize,
     ) -> Result<HuffmanTable, JpegError> {
-        let digest = digest_huffman_table(raw);
-        self.resolve_huffman_table_with_digest_and_live_budget(raw, digest, live_bytes, cap)
+        let digest = digest_huffman_table(raw, role);
+        self.resolve_huffman_table_with_digest_and_live_budget(raw, role, digest, live_bytes, cap)
     }
 
     #[expect(
@@ -126,6 +231,7 @@ impl DecoderContext {
     fn resolve_huffman_table_with_digest_and_live_budget(
         &mut self,
         raw: &RawHuffmanTable,
+        role: HuffmanTableRole,
         digest: u64,
         live_bytes: &mut usize,
         cap: usize,
@@ -135,14 +241,17 @@ impl DecoderContext {
         for probe in 0..self.huffman_tables.len() {
             let slot = (start + probe) % self.huffman_tables.len();
             match &self.huffman_tables[slot] {
-                Some(cached) if cached.digest == digest && &cached.raw == raw => {
+                Some(cached)
+                    if cached.digest == digest && cached.role == role && &cached.raw == raw =>
+                {
                     self.cache_hits = self.cache_hits.saturating_add(1);
                     return Ok(cached.table.clone());
                 }
                 None => {
-                    let table = HuffmanTable::from_raw(raw)?;
+                    let table = HuffmanTable::from_raw(raw, role)?;
                     self.huffman_tables[slot] = Some(CachedHuffmanTable {
                         digest,
+                        role,
                         raw: raw.clone(),
                         table: table.clone(),
                     });
@@ -154,9 +263,10 @@ impl DecoderContext {
         }
 
         let slot = start;
-        let table = HuffmanTable::from_raw(raw)?;
+        let table = HuffmanTable::from_raw(raw, role)?;
         self.huffman_tables[slot] = Some(CachedHuffmanTable {
             digest,
+            role,
             raw: raw.clone(),
             table: table.clone(),
         });
@@ -201,6 +311,10 @@ impl DecoderContext {
         clippy::cast_possible_truncation,
         reason = "the digest cast only selects a cache shard and intentionally uses the native word"
     )]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "cache lookup, fallible admission, and exact retained-byte accounting form one transaction"
+    )]
     fn resolve_decode_plan_with_digest<F>(
         &mut self,
         header_prefix: &[u8],
@@ -224,16 +338,19 @@ impl DecoderContext {
                 {
                     self.cache_hits = self.cache_hits.saturating_add(1);
                     let mut live_bytes = initial_live_bytes;
-                    return try_clone_decode_plan(&cached.plan, &mut live_bytes, None)?.ok_or(
-                        JpegError::InternalInvariant {
+                    let cloned = try_clone_decode_plan(&cached.plan, &mut live_bytes, None)?
+                        .ok_or(JpegError::InternalInvariant {
                             reason: "cached decode plan unexpectedly bypassed cloning",
-                        },
-                    );
+                        })?;
+                    #[cfg(test)]
+                    {
+                        self.decode_plan_clones = self.decode_plan_clones.saturating_add(1);
+                    }
+                    return Ok(cloned);
                 }
                 Some(_) | None => {}
             }
         }
-
         let built = build(self)?;
         self.cache_misses = self.cache_misses.saturating_add(1);
         let predicted_bytes = decode_plan_entry_bytes(header_prefix.len(), &built)?;
@@ -243,7 +360,6 @@ impl DecoderContext {
             // retained.
             return Ok(built);
         }
-
         self.evict_decode_plans_until_fits(start, predicted_bytes);
         let slot = self.first_empty_decode_plan_slot(start).unwrap_or_else(|| {
             self.evict_decode_plan_slot(start);
@@ -267,6 +383,10 @@ impl DecoderContext {
         else {
             return Ok(built);
         };
+        #[cfg(test)]
+        {
+            self.decode_plan_clones = self.decode_plan_clones.saturating_add(1);
+        }
         let allocation_bytes = owned_prefix
             .capacity()
             .checked_add(cached_plan.retained_allocation_bytes()?)
@@ -350,6 +470,11 @@ impl DecoderContext {
         self.decode_plan_cache_bytes.saturating_add(huffman_bytes)
     }
 
+    #[cfg(test)]
+    pub(crate) const fn decode_plan_clone_count(&self) -> u64 {
+        self.decode_plan_clones
+    }
+
     fn occupied_cache_slots(&self) -> u64 {
         let occupied = self
             .quant_tables
@@ -400,11 +525,18 @@ fn digest_quant_table(table: &[u16; 64]) -> u64 {
     hash
 }
 
-fn digest_huffman_table(raw: &RawHuffmanTable) -> u64 {
+fn digest_huffman_table(raw: &RawHuffmanTable, role: HuffmanTableRole) -> u64 {
     let mut hash = digest_bytes(&raw.bits);
     for &byte in raw.values.as_slice() {
         j2k_core::__j2k_fnv1a64_update!(hash, byte);
     }
+    j2k_core::__j2k_fnv1a64_update!(
+        hash,
+        match role {
+            HuffmanTableRole::Dc => 0u8,
+            HuffmanTableRole::Ac => 1u8,
+        }
+    );
     hash
 }
 
@@ -491,6 +623,7 @@ mod tests {
         let mut live_bytes = ctx.retained_allocation_bytes();
         ctx.resolve_huffman_table_with_live_budget(
             raw,
+            HuffmanTableRole::Dc,
             &mut live_bytes,
             MAX_DECODER_CONTEXT_ALLOCATION_BYTES,
         )
@@ -504,6 +637,7 @@ mod tests {
         let mut live_bytes = ctx.retained_allocation_bytes();
         ctx.resolve_huffman_table_with_digest_and_live_budget(
             raw,
+            HuffmanTableRole::Dc,
             digest,
             &mut live_bytes,
             MAX_DECODER_CONTEXT_ALLOCATION_BYTES,
@@ -601,7 +735,7 @@ mod tests {
             crate::entropy::huffman::PreparedHuffmanTables::try_with_capacity(1)
                 .expect("bounded arena");
         let table = huffman_tables
-            .push(HuffmanTable::from_raw(&raw).expect("empty table"))
+            .push(HuffmanTable::from_raw(&raw, HuffmanTableRole::Dc).expect("empty table"))
             .expect("reserved arena");
         let mut plan = empty_plan(7);
         plan.huffman_tables = huffman_tables;
@@ -666,6 +800,56 @@ mod tests {
     }
 
     #[test]
+    fn prepared_plan_lease_compares_full_header_prefix_after_digest_collision() {
+        let requested = b"requested";
+        let digest = digest_bytes(requested);
+        let slot_count = u64::try_from(PLAN_CACHE_SLOTS).unwrap();
+        let start = usize::try_from(digest % slot_count).unwrap();
+        let wrong_slot = start;
+        let matching_slot = (start + 1) % PLAN_CACHE_SLOTS;
+        let wrong_prefix = b"collision".to_vec();
+        let matching_prefix = requested.to_vec();
+        let wrong_plan = empty_plan(11);
+        let matching_plan = empty_plan(29);
+        let wrong_bytes = decode_plan_entry_bytes(wrong_prefix.capacity(), &wrong_plan).unwrap();
+        let matching_bytes =
+            decode_plan_entry_bytes(matching_prefix.capacity(), &matching_plan).unwrap();
+        let mut ctx = DecoderContext::new();
+        ctx.decode_plans[wrong_slot] = Some(CachedDecodePlan {
+            digest,
+            header_prefix: wrong_prefix,
+            plan: wrong_plan,
+            allocation_bytes: wrong_bytes,
+        });
+        ctx.decode_plans[matching_slot] = Some(CachedDecodePlan {
+            digest,
+            header_prefix: matching_prefix,
+            plan: matching_plan,
+            allocation_bytes: matching_bytes,
+        });
+        ctx.decode_plan_cache_bytes = wrong_bytes + matching_bytes;
+        let retained = ctx.retained_allocation_bytes();
+        let occupied = ctx.cache_stats().occupied_slots;
+
+        assert!(ctx.lease_cached_decode_plan(b"absent").unwrap().is_none());
+        let (lease, plan) = ctx
+            .lease_cached_decode_plan(requested)
+            .unwrap()
+            .expect("matching full prefix must lease");
+        assert_eq!(plan.scan_offset, 29);
+        lease.restore(plan);
+
+        assert_eq!(
+            ctx.cached_decode_plan(requested)
+                .expect("leased plan restored under exact key")
+                .scan_offset,
+            29
+        );
+        assert_eq!(ctx.retained_allocation_bytes(), retained);
+        assert_eq!(ctx.cache_stats().occupied_slots, occupied);
+    }
+
+    #[test]
     fn prepared_plan_cache_full_eviction_is_deterministic() {
         let mut ctx = DecoderContext::new();
         let cache_slots = u8::try_from(PLAN_CACHE_SLOTS).expect("plan cache slot count fits u8");
@@ -713,7 +897,7 @@ mod tests {
             crate::entropy::huffman::PreparedHuffmanTables::try_with_capacity(1)
                 .expect("bounded arena");
         let table = huffman_tables
-            .push(HuffmanTable::from_raw(&raw).expect("empty table"))
+            .push(HuffmanTable::from_raw(&raw, HuffmanTableRole::Dc).expect("empty table"))
             .expect("reserved arena");
         let mut plan = empty_plan(0);
         plan.huffman_tables = huffman_tables;
@@ -758,6 +942,86 @@ mod tests {
         assert_eq!(builds, 2, "oversized keys must bypass the cache");
         assert_eq!(ctx.decode_plan_cache_bytes, 0);
         assert!(ctx.decode_plans.iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn identical_raw_huffman_tables_keep_roles_distinct_even_on_digest_collision() {
+        let raw = RawHuffmanTable {
+            bits: [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            values: crate::parse::tables::HuffmanValues::from_slice(&[0]),
+        };
+        for force_collision in [false, true] {
+            let mut ctx = DecoderContext::new();
+            for role in [
+                HuffmanTableRole::Dc,
+                HuffmanTableRole::Ac,
+                HuffmanTableRole::Dc,
+                HuffmanTableRole::Ac,
+            ] {
+                let mut live_bytes = ctx.retained_allocation_bytes();
+                let digest = if force_collision {
+                    0
+                } else {
+                    digest_huffman_table(&raw, role)
+                };
+                let table = ctx
+                    .resolve_huffman_table_with_digest_and_live_budget(
+                        &raw,
+                        role,
+                        digest,
+                        &mut live_bytes,
+                        MAX_DECODER_CONTEXT_ALLOCATION_BYTES,
+                    )
+                    .expect("role-specific cached table");
+                assert_eq!(table.dc().is_ok(), role == HuffmanTableRole::Dc);
+                assert_eq!(table.ac().is_ok(), role == HuffmanTableRole::Ac);
+                assert_eq!(live_bytes, ctx.retained_allocation_bytes());
+            }
+            let stats = ctx.cache_stats();
+            assert_eq!(stats.misses, 2);
+            assert_eq!(stats.hits, 2);
+            assert_eq!(stats.occupied_slots, 2);
+        }
+    }
+
+    #[test]
+    fn role_specific_cache_slots_obey_exact_live_byte_boundary() {
+        let raw = RawHuffmanTable {
+            bits: [0; 16],
+            values: crate::parse::tables::HuffmanValues::default(),
+        };
+        let external_bytes = 7;
+        let cache_bytes = HUFFMAN_CACHE_SLOTS * size_of::<Option<CachedHuffmanTable>>();
+        let exact_cap = external_bytes + cache_bytes;
+        let mut ctx = DecoderContext::new();
+        let mut live_bytes = external_bytes;
+        let error = ctx
+            .resolve_huffman_table_with_live_budget(
+                &raw,
+                HuffmanTableRole::Dc,
+                &mut live_bytes,
+                exact_cap - 1,
+            )
+            .expect_err("one byte below the slot allocation");
+        assert!(
+            matches!(error, JpegError::MemoryCapExceeded { requested, cap }
+            if requested == exact_cap && cap == exact_cap - 1)
+        );
+        assert_eq!(ctx.retained_allocation_bytes(), 0);
+        assert_eq!(live_bytes, external_bytes);
+        assert_eq!(ctx.cache_stats().occupied_slots, 0);
+
+        for role in [HuffmanTableRole::Dc, HuffmanTableRole::Ac] {
+            ctx.resolve_huffman_table_with_live_budget(&raw, role, &mut live_bytes, exact_cap)
+                .expect("both roles fit in the already charged slots");
+            assert_eq!(live_bytes, exact_cap);
+            assert_eq!(ctx.retained_allocation_bytes(), cache_bytes);
+            assert_eq!(
+                ctx.retained_allocation_bytes(),
+                ctx.huffman_tables.capacity() * size_of::<Option<CachedHuffmanTable>>()
+            );
+        }
+        assert_eq!(ctx.cache_stats().occupied_slots, 2);
     }
 
     #[test]

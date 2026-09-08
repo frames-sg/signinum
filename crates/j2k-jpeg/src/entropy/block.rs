@@ -15,9 +15,11 @@
 //! Produces a 64-entry array in row-major (natural) order, suitable for
 //! direct consumption by the IDCT.
 
+#[cfg(test)]
+use crate::entropy::huffman::HuffmanTable;
 use crate::entropy::huffman::{
-    ac_decoded_run, ac_decoded_value, HuffmanTable, AC_FAST_EOB, AC_FAST_KIND_MASK, AC_FAST_VALUE,
-    AC_FAST_ZRL,
+    ac_decoded_run, ac_decoded_value, AcHuffmanTable, DcHuffmanTable, AC_FAST_EOB,
+    AC_FAST_KIND_MASK, AC_FAST_VALUE, AC_FAST_ZRL,
 };
 use crate::entropy::ZIGZAG;
 use crate::error::{HuffmanFailure, JpegError};
@@ -165,8 +167,8 @@ fn extend_activity(activity: BlockActivity, natural_idx: usize) -> BlockActivity
 #[cfg(test)]
 pub(crate) fn decode_block(
     br: &mut BitReader<'_>,
-    dc_table: &HuffmanTable,
-    ac_table: &HuffmanTable,
+    dc_table: DcHuffmanTable<'_>,
+    ac_table: AcHuffmanTable<'_>,
     prev_dc: &mut i32,
     quant: &[u16; 64],
     block: &mut CoefficientBlock,
@@ -181,8 +183,8 @@ pub(crate) fn decode_block(
 #[inline(always)]
 pub(crate) fn decode_block_with_activity(
     br: &mut BitReader<'_>,
-    dc_table: &HuffmanTable,
-    ac_table: &HuffmanTable,
+    dc_table: DcHuffmanTable<'_>,
+    ac_table: AcHuffmanTable<'_>,
     prev_dc: &mut i32,
     quant: &[u16; 64],
     block: &mut CoefficientBlock,
@@ -221,8 +223,8 @@ pub(crate) fn decode_block_with_activity(
 #[inline(always)]
 pub(crate) fn decode_block_dequantized_into(
     br: &mut BitReader<'_>,
-    dc_table: &HuffmanTable,
-    ac_table: &HuffmanTable,
+    dc_table: DcHuffmanTable<'_>,
+    ac_table: AcHuffmanTable<'_>,
     prev_dc: &mut i32,
     quant: &[u16; 64],
     out: &mut [i16; 64],
@@ -250,8 +252,8 @@ pub(crate) fn decode_block_dequantized_into(
 #[inline(always)]
 pub(crate) fn decode_block_quantized_and_dequantized_with_activity(
     br: &mut BitReader<'_>,
-    dc_table: &HuffmanTable,
-    ac_table: &HuffmanTable,
+    dc_table: DcHuffmanTable<'_>,
+    ac_table: AcHuffmanTable<'_>,
     prev_dc: &mut i32,
     quant: &[u16; 64],
     quantized_block: &mut CoefficientBlock,
@@ -288,8 +290,8 @@ pub(crate) fn decode_block_quantized_and_dequantized_with_activity(
 #[cfg(test)]
 pub(crate) fn decode_block_with_dc_status(
     br: &mut BitReader<'_>,
-    dc_table: &HuffmanTable,
-    ac_table: &HuffmanTable,
+    dc_table: DcHuffmanTable<'_>,
+    ac_table: AcHuffmanTable<'_>,
     prev_dc: &mut i32,
     quant: &[u16; 64],
     block: &mut CoefficientBlock,
@@ -320,8 +322,8 @@ pub(crate) fn decode_block_with_dc_status(
 #[inline(always)]
 pub(crate) fn decode_block_for_reduced_idct(
     br: &mut BitReader<'_>,
-    dc_table: &HuffmanTable,
-    ac_table: &HuffmanTable,
+    dc_table: DcHuffmanTable<'_>,
+    ac_table: AcHuffmanTable<'_>,
     prev_dc: &mut i32,
     quant: &[u16; 64],
     block: &mut CoefficientBlock,
@@ -355,8 +357,8 @@ pub(crate) fn decode_block_for_reduced_idct(
 #[inline(always)]
 pub(crate) fn decode_block_for_1x1_idct(
     br: &mut BitReader<'_>,
-    dc_table: &HuffmanTable,
-    ac_table: &HuffmanTable,
+    dc_table: DcHuffmanTable<'_>,
+    ac_table: AcHuffmanTable<'_>,
     prev_dc: &mut i32,
     quant: &[u16; 64],
     block: &mut CoefficientBlock,
@@ -379,8 +381,8 @@ pub(crate) fn decode_block_for_1x1_idct(
 #[inline(always)]
 pub(crate) fn skip_block(
     br: &mut BitReader<'_>,
-    dc_table: &HuffmanTable,
-    ac_table: &HuffmanTable,
+    dc_table: DcHuffmanTable<'_>,
+    ac_table: AcHuffmanTable<'_>,
     prev_dc: &mut i32,
 ) -> Result<(), JpegError> {
     let diff = dc_table.decode_fast_dc(br)?;
@@ -397,7 +399,7 @@ pub(crate) fn skip_block(
 #[inline(always)]
 fn drive_ac_fast<const SKIP_VALUES: bool, F>(
     br: &mut BitReader<'_>,
-    ac_table: &HuffmanTable,
+    ac_table: AcHuffmanTable<'_>,
     mut on_value: F,
 ) -> Result<(), JpegError>
 where
@@ -456,7 +458,7 @@ pub(crate) fn clamp_i16(v: i32) -> i16 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parse::tables::{HuffmanValues, RawHuffmanTable};
+    use crate::parse::tables::{HuffmanTableRole, HuffmanValues, RawHuffmanTable};
 
     /// DC table that decodes bit `0` → symbol `0` (DC category 0 = no diff).
     /// Single code of length 1 → symbol 0.
@@ -465,7 +467,7 @@ mod tests {
             bits: [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             values: HuffmanValues::from_slice(&[0]),
         };
-        HuffmanTable::from_raw(&raw).unwrap()
+        HuffmanTable::from_raw(&raw, HuffmanTableRole::Dc).unwrap()
     }
 
     /// AC table that decodes bit `0` → symbol `0x00` (EOB).
@@ -474,7 +476,7 @@ mod tests {
             bits: [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             values: HuffmanValues::from_slice(&[0x00]),
         };
-        HuffmanTable::from_raw(&raw).unwrap()
+        HuffmanTable::from_raw(&raw, HuffmanTableRole::Ac).unwrap()
     }
 
     #[test]
@@ -488,8 +490,15 @@ mod tests {
         let quant = [1u16; 64];
         let mut prev_dc = 0i32;
         let mut out = CoefficientBlock::default();
-        let activity =
-            decode_block_with_activity(&mut br, &dc, &ac, &mut prev_dc, &quant, &mut out).unwrap();
+        let activity = decode_block_with_activity(
+            &mut br,
+            dc.dc().unwrap(),
+            ac.ac().unwrap(),
+            &mut prev_dc,
+            &quant,
+            &mut out,
+        )
+        .unwrap();
         assert_eq!(prev_dc, 0);
         assert_eq!(activity, BlockActivity::DcOnly);
         assert!(out.coefficients().iter().all(|&c| c == 0));
@@ -501,7 +510,7 @@ mod tests {
             bits: [0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             values: HuffmanValues::from_slice(&[2]),
         };
-        let dc = HuffmanTable::from_raw(&raw).unwrap();
+        let dc = HuffmanTable::from_raw(&raw, HuffmanTableRole::Dc).unwrap();
         let ac = eob_ac_table();
         // Bits: 00 (DC code → ssss=2) 11 (extend → diff=3) 0 (EOB).
         // Trailing zero bytes satisfy the decoder's 8-bit peek requirement.
@@ -510,8 +519,15 @@ mod tests {
         let quant = [7u16; 64];
         let mut prev_dc = 0i32;
         let mut out = CoefficientBlock::default();
-        let activity =
-            decode_block_with_activity(&mut br, &dc, &ac, &mut prev_dc, &quant, &mut out).unwrap();
+        let activity = decode_block_with_activity(
+            &mut br,
+            dc.dc().unwrap(),
+            ac.ac().unwrap(),
+            &mut prev_dc,
+            &quant,
+            &mut out,
+        )
+        .unwrap();
         assert_eq!(prev_dc, 3);
         assert_eq!(activity, BlockActivity::DcOnly);
         assert_eq!(out.coefficients()[0], 21, "DC = 3 * quant 7 = 21");
@@ -524,7 +540,7 @@ mod tests {
             bits: [0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             values: HuffmanValues::from_slice(&[2]),
         };
-        let dc = HuffmanTable::from_raw(&raw).unwrap();
+        let dc = HuffmanTable::from_raw(&raw, HuffmanTableRole::Dc).unwrap();
         let ac = eob_ac_table();
         // Block 1: 00 11 0 (diff=+3). Block 2: 00 11 0 (diff=+3). Pad for peek.
         let bytes = [0b0011_0001u8, 0b1000_0000u8, 0, 0];
@@ -532,9 +548,25 @@ mod tests {
         let quant = [1u16; 64];
         let mut prev_dc = 10i32;
         let mut out = CoefficientBlock::default();
-        decode_block(&mut br, &dc, &ac, &mut prev_dc, &quant, &mut out).unwrap();
+        decode_block(
+            &mut br,
+            dc.dc().unwrap(),
+            ac.ac().unwrap(),
+            &mut prev_dc,
+            &quant,
+            &mut out,
+        )
+        .unwrap();
         assert_eq!(prev_dc, 13);
-        decode_block(&mut br, &dc, &ac, &mut prev_dc, &quant, &mut out).unwrap();
+        decode_block(
+            &mut br,
+            dc.dc().unwrap(),
+            ac.ac().unwrap(),
+            &mut prev_dc,
+            &quant,
+            &mut out,
+        )
+        .unwrap();
         assert_eq!(prev_dc, 16);
     }
 
@@ -545,7 +577,7 @@ mod tests {
             bits: [0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             values: HuffmanValues::from_slice(&[0x01, 0x00]),
         };
-        let ac = HuffmanTable::from_raw(&raw).unwrap();
+        let ac = HuffmanTable::from_raw(&raw, HuffmanTableRole::Ac).unwrap();
         // AC symbols: `00` => 0x01 (run 0, size 1), then `010` => EOB.
         // Payload bit `1` gives AC value +1 at zigzag slot 1.
         let bytes = [0b0001_0100u8, 0, 0, 0];
@@ -553,8 +585,15 @@ mod tests {
         let quant = [1u16; 64];
         let mut prev_dc = 0i32;
         let mut out = CoefficientBlock::default();
-        let activity =
-            decode_block_with_activity(&mut br, &dc, &ac, &mut prev_dc, &quant, &mut out).unwrap();
+        let activity = decode_block_with_activity(
+            &mut br,
+            dc.dc().unwrap(),
+            ac.ac().unwrap(),
+            &mut prev_dc,
+            &quant,
+            &mut out,
+        )
+        .unwrap();
         assert_eq!(activity, BlockActivity::BottomHalfZero);
         assert_eq!(out.coefficients()[crate::entropy::ZIGZAG[1] as usize], 1);
     }
@@ -566,7 +605,7 @@ mod tests {
             bits: [0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             values: HuffmanValues::from_slice(&[0x01, 0x00]),
         };
-        let ac = HuffmanTable::from_raw(&raw).unwrap();
+        let ac = HuffmanTable::from_raw(&raw, HuffmanTableRole::Ac).unwrap();
         let bytes = [0b0001_0100u8, 0, 0, 0];
         let quant = [1u16; 64];
         let mut activity_reader = BitReader::new(&bytes);
@@ -578,8 +617,8 @@ mod tests {
 
         let activity = decode_block_with_activity(
             &mut activity_reader,
-            &dc,
-            &ac,
+            dc.dc().unwrap(),
+            ac.ac().unwrap(),
             &mut activity_prev_dc,
             &quant,
             &mut activity_block,
@@ -587,8 +626,8 @@ mod tests {
         .unwrap();
         let dc_only = decode_block_with_dc_status(
             &mut dc_status_reader,
-            &dc,
-            &ac,
+            dc.dc().unwrap(),
+            ac.ac().unwrap(),
             &mut dc_status_prev_dc,
             &quant,
             &mut dc_status_block,
@@ -612,7 +651,7 @@ mod tests {
             bits: [0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             values: HuffmanValues::from_slice(&[0x41, 0x00]),
         };
-        let ac = HuffmanTable::from_raw(&raw).unwrap();
+        let ac = HuffmanTable::from_raw(&raw, HuffmanTableRole::Ac).unwrap();
         let bytes = [0b0001_0100u8, 0, 0, 0];
         let quant = [1u16; 64];
         let ignored_by_quarter = ZIGZAG[5] as usize;
@@ -630,8 +669,8 @@ mod tests {
 
         decode_block_with_activity(
             &mut full_reader,
-            &dc,
-            &ac,
+            dc.dc().unwrap(),
+            ac.ac().unwrap(),
             &mut full_prev_dc,
             &quant,
             &mut full_block,
@@ -639,8 +678,8 @@ mod tests {
         .unwrap();
         let quarter_dc_only = decode_block_for_reduced_idct(
             &mut quarter_reader,
-            &dc,
-            &ac,
+            dc.dc().unwrap(),
+            ac.ac().unwrap(),
             &mut quarter_prev_dc,
             &quant,
             &mut quarter_block,
@@ -649,8 +688,8 @@ mod tests {
         .unwrap();
         let half_dc_only = decode_block_for_reduced_idct(
             &mut half_reader,
-            &dc,
-            &ac,
+            dc.dc().unwrap(),
+            ac.ac().unwrap(),
             &mut half_prev_dc,
             &quant,
             &mut half_block,
@@ -676,7 +715,7 @@ mod tests {
             bits: [0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             values: HuffmanValues::from_slice(&[0x01, 0x00]),
         };
-        let ac = HuffmanTable::from_raw(&raw).unwrap();
+        let ac = HuffmanTable::from_raw(&raw, HuffmanTableRole::Ac).unwrap();
         let bytes = [0b0001_0100u8, 0, 0, 0];
         let quant = [1u16; 64];
         let mut full_reader = BitReader::new(&bytes);
@@ -688,8 +727,8 @@ mod tests {
 
         decode_block_with_activity(
             &mut full_reader,
-            &dc,
-            &ac,
+            dc.dc().unwrap(),
+            ac.ac().unwrap(),
             &mut full_prev_dc,
             &quant,
             &mut full_block,
@@ -697,8 +736,8 @@ mod tests {
         .unwrap();
         decode_block_for_1x1_idct(
             &mut one_by_one_reader,
-            &dc,
-            &ac,
+            dc.dc().unwrap(),
+            ac.ac().unwrap(),
             &mut one_by_one_prev_dc,
             &quant,
             &mut one_by_one_block,
@@ -717,12 +756,12 @@ mod tests {
             bits: [0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             values: HuffmanValues::from_slice(&[2]),
         };
-        let dc = HuffmanTable::from_raw(&dc_raw).unwrap();
+        let dc = HuffmanTable::from_raw(&dc_raw, HuffmanTableRole::Dc).unwrap();
         let ac_raw = RawHuffmanTable {
             bits: [0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             values: HuffmanValues::from_slice(&[0x01, 0x00]),
         };
-        let ac = HuffmanTable::from_raw(&ac_raw).unwrap();
+        let ac = HuffmanTable::from_raw(&ac_raw, HuffmanTableRole::Ac).unwrap();
         let bytes = [0b0011_0010u8, 0b1000_0000, 0, 0];
         let quant = [1u16; 64];
 
@@ -734,14 +773,20 @@ mod tests {
 
         decode_block_with_activity(
             &mut decoded_reader,
-            &dc,
-            &ac,
+            dc.dc().unwrap(),
+            ac.ac().unwrap(),
             &mut decoded_prev_dc,
             &quant,
             &mut out,
         )
         .unwrap();
-        skip_block(&mut skipped_reader, &dc, &ac, &mut skipped_prev_dc).unwrap();
+        skip_block(
+            &mut skipped_reader,
+            dc.dc().unwrap(),
+            ac.ac().unwrap(),
+            &mut skipped_prev_dc,
+        )
+        .unwrap();
 
         assert_eq!(skipped_prev_dc, decoded_prev_dc);
         assert_eq!(skipped_reader.snapshot(), decoded_reader.snapshot());

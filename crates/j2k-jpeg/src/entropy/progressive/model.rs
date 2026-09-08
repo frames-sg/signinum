@@ -5,7 +5,9 @@
 use alloc::vec::Vec;
 
 use crate::allocation::{checked_add_allocation_bytes, checked_allocation_bytes};
-use crate::entropy::huffman::{HuffmanTable, PreparedHuffmanTableId, PreparedHuffmanTables};
+use crate::entropy::huffman::{
+    AcHuffmanTable, DcHuffmanTable, PreparedHuffmanTableId, PreparedHuffmanTables,
+};
 use crate::error::JpegError;
 use crate::info::{ColorSpace, SamplingFactors};
 
@@ -88,14 +90,24 @@ impl PreparedProgressivePlan {
             })
     }
 
-    pub(super) fn huffman_table(
+    pub(super) fn dc_table(
         &self,
         id: Option<PreparedHuffmanTableId>,
-    ) -> Result<&HuffmanTable, JpegError> {
-        id.and_then(|id| self.huffman_tables.get(id))
-            .ok_or(JpegError::InternalInvariant {
+    ) -> Result<DcHuffmanTable<'_>, JpegError> {
+        self.huffman_tables
+            .get_dc(id.ok_or(JpegError::InternalInvariant {
                 reason: "progressive scan references a missing prepared Huffman table",
-            })
+            })?)
+    }
+
+    pub(super) fn ac_table(
+        &self,
+        id: Option<PreparedHuffmanTableId>,
+    ) -> Result<AcHuffmanTable<'_>, JpegError> {
+        self.huffman_tables
+            .get_ac(id.ok_or(JpegError::InternalInvariant {
+                reason: "progressive scan references a missing prepared Huffman table",
+            })?)
     }
 }
 

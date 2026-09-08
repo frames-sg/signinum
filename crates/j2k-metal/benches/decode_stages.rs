@@ -20,6 +20,9 @@ const DIMENSION: u32 = 512;
 #[path = "decode_stages/geometry.rs"]
 mod geometry;
 #[cfg(target_os = "macos")]
+#[path = "decode_stages/mixed_groups.rs"]
+mod mixed_groups;
+#[cfg(target_os = "macos")]
 const BATCH_SIZE: usize = 16;
 #[cfg(target_os = "macos")]
 const STAGE_MARKERS: &[&str] = &[
@@ -316,7 +319,7 @@ fn bench_decode_stages_classic(criterion: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = bench_decode_stages, bench_decode_stages_idwt97, bench_decode_stages_classic, geometry::bench
+    targets = bench_decode_stages, bench_decode_stages_idwt97, bench_decode_stages_classic, geometry::bench, mixed_groups::bench
 }
 #[cfg(target_os = "macos")]
 criterion_main!(benches);

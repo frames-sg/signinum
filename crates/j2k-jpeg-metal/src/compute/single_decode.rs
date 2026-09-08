@@ -2,6 +2,7 @@
 
 mod fast444;
 mod routing;
+pub(in crate::compute) mod scratch;
 mod subsampled;
 
 pub(super) use fast444::try_decode_fast444_scaled_region_to_surface_with_mode_and_status;

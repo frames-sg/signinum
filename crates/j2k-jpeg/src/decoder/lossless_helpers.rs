@@ -2,11 +2,12 @@
 
 use super::{
     downscale_profile_name, emit_jpeg_profile_fields, lossless_predict, upsample_h2v1_sample_at,
-    upsample_h2v2_rows_at, BitReader, ColorSpace, DownscaleFactor, Duration, HuffmanTable, Info,
-    JpegError, LosslessColorSampling, LosslessSample, MarkerKind, PreparedLosslessPlan,
-    ProfileField, Rect, RestartIndex, RestartSegment, SofKind,
+    upsample_h2v2_rows_at, BitReader, ColorSpace, DownscaleFactor, Duration, Info, JpegError,
+    LosslessColorSampling, LosslessSample, MarkerKind, PreparedLosslessPlan, ProfileField, Rect,
+    RestartIndex, RestartSegment, SofKind,
 };
 use crate::allocation::{checked_allocation_bytes, try_vec_with_capacity};
+use crate::entropy::huffman::DcHuffmanTable;
 use crate::entropy::sequential::PreparedDecodePlan;
 
 pub(crate) fn restart_index_allocation_bytes(
@@ -372,9 +373,42 @@ impl<P: LosslessSample> LosslessColorSampleTarget<P> for LosslessColorRowSample<
     clippy::cast_possible_truncation,
     reason = "component indices are validated against the JPEG maximum component count"
 )]
+pub(super) fn resolve_lossless_color_components(
+    decode_plan: &PreparedDecodePlan,
+) -> Result<[ResolvedLosslessColorComponent<'_>; 3], JpegError> {
+    if decode_plan.components.len() != 3 {
+        return Err(JpegError::UnsupportedComponentCount {
+            count: decode_plan.components.len() as u8,
+        });
+    }
+    let resolve = |index: usize| {
+        let component = &decode_plan.components[index];
+        if component.output_index >= 3 {
+            return Err(JpegError::UnsupportedComponentCount {
+                count: decode_plan.components.len() as u8,
+            });
+        }
+        Ok(ResolvedLosslessColorComponent {
+            h: usize::from(component.h),
+            v: usize::from(component.v),
+            output_index: component.output_index,
+            dc_table: decode_plan.dc_table(component)?,
+        })
+    };
+    Ok([resolve(0)?, resolve(1)?, resolve(2)?])
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct ResolvedLosslessColorComponent<'a> {
+    h: usize,
+    v: usize,
+    output_index: usize,
+    dc_table: DcHuffmanTable<'a>,
+}
+
 pub(super) fn decode_lossless_color_sample<P, T>(
     br: &mut BitReader<'_>,
-    decode_plan: &PreparedDecodePlan,
+    components: &[ResolvedLosslessColorComponent<'_>; 3],
     predictor: u8,
     restart_first_sample: bool,
     target: &mut T,
@@ -383,18 +417,13 @@ where
     P: LosslessSample,
     T: LosslessColorSampleTarget<P>,
 {
-    for component in &decode_plan.components {
-        if component.output_index >= 3 {
-            return Err(JpegError::UnsupportedComponentCount {
-                count: decode_plan.components.len() as u8,
-            });
-        }
+    for component in components {
         let predicted = if restart_first_sample {
             P::RESTART_PREDICTOR
         } else {
             target.predict(predictor, component.output_index)
         };
-        let diff = decode_plan.dc_table(component)?.decode_fast_dc(br)?;
+        let diff = component.dc_table.decode_fast_dc(br)?;
         let sample = P::from_i32(predicted + diff)?;
         target.write(component.output_index, sample);
     }
@@ -441,7 +470,7 @@ pub(super) struct LosslessPlaneSample {
 
 pub(super) fn decode_lossless_plane_sample<P: LosslessSample>(
     br: &mut BitReader<'_>,
-    table: &HuffmanTable,
+    table: DcHuffmanTable<'_>,
     predictor: u8,
     plane: &mut [P],
     width: usize,
@@ -497,7 +526,7 @@ pub(super) struct LosslessSampledMcu {
 )]
 pub(super) fn decode_lossless_sampled_color_mcu<P>(
     br: &mut BitReader<'_>,
-    decode_plan: &PreparedDecodePlan,
+    components: &[ResolvedLosslessColorComponent<'_>; 3],
     predictor: u8,
     mcu: LosslessSampledMcu,
     planes: &mut LosslessSampledColorPlanesMut<'_, P>,
@@ -505,24 +534,24 @@ pub(super) fn decode_lossless_sampled_color_mcu<P>(
 where
     P: LosslessSample,
 {
-    for component in &decode_plan.components {
+    for component in components {
         let Some((plane, plane_width, plane_height)) =
             planes.component_plane(component.output_index)
         else {
             return Err(JpegError::UnsupportedComponentCount {
-                count: decode_plan.components.len() as u8,
+                count: components.len() as u8,
             });
         };
-        for local_y in 0..component.v as usize {
-            for local_x in 0..component.h as usize {
-                let x = mcu.x * component.h as usize + local_x;
-                let y = mcu.y * component.v as usize + local_y;
+        for local_y in 0..component.v {
+            for local_x in 0..component.h {
+                let x = mcu.x * component.h + local_x;
+                let y = mcu.y * component.v + local_y;
                 if x >= plane_width || y >= plane_height {
                     continue;
                 }
                 decode_lossless_plane_sample(
                     br,
-                    decode_plan.dc_table(component)?,
+                    component.dc_table,
                     predictor,
                     plane,
                     plane_width,

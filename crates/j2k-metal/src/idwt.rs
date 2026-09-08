@@ -728,14 +728,17 @@ mod tests {
                 // warmup. Raw batch durations permit external CI analysis.
                 let iterations = (warm_iterations / 15).max(1);
                 for sample in 0..50 {
+                    crate::engine::reset_idwt_host_transfer_counters_for_test();
                     let started = Instant::now();
                     for _ in 0..iterations {
                         decode();
                     }
                     let elapsed = started.elapsed();
+                    let (upload_bytes, readback_allocations, readback_bytes) =
+                        crate::engine::idwt_host_transfer_counters_for_test();
                     println!(
-                        "metal_host_slice_idwt_decode reversible={reversible} width={width} height={height} sample={sample} iterations={iterations} elapsed_ns={}",
-                        elapsed.as_nanos()
+                        "metal_host_slice_idwt_decode reversible={reversible} width={width} height={height} sample={sample} iterations={iterations} elapsed_ns={} overwritten_output_upload_bytes={upload_bytes} temporary_readback_vec_allocations={readback_allocations} temporary_readback_vec_bytes={readback_bytes}",
+                        elapsed.as_nanos(),
                     );
                 }
             }
@@ -758,3 +761,7 @@ mod tests {
         assert_eq!(image_components.dimensions(), (4, 4));
     }
 }
+
+#[cfg(all(test, target_os = "macos"))]
+#[path = "idwt_host_slice_tests.rs"]
+mod host_slice_tests;

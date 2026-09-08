@@ -60,6 +60,7 @@ const METAL_OPTIONAL_IGNORED_TESTS: &[&str] = &[
     "engine::runtime::resource_profile_tests::benchmark_cold_and_repeated_session_kernel_initialization",
     "idwt::tests::metal_host_slice_idwt_decode_perf",
     "engine::decode_dispatch::idwt::irreversible::performance::metal_irreversible97_interleave_horizontal_scale_gpu_timing",
+    "engine::direct_buffers::performance::metal_checked_buffer_copy_into_perf",
     "engine::decode_dispatch::idwt::irreversible::performance::metal_irreversible97_stage_gpu_timing",
 ];
 

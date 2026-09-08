@@ -103,7 +103,7 @@ pub(in crate::compute) fn encode_fast_subsampled_region_batch_item<P: FastSubsam
         packet.entropy_checkpoints().len(),
     );
     let (status_buffer, entropy_buffer, restart_offsets_buffer, entropy_checkpoints_buffer) =
-        if let Some(scratch) = scratch.as_deref_mut() {
+        if let Some(scratch) = scratch {
             let packet_buffers = scratch_packet_buffers(
                 scratch,
                 &runtime.device,
@@ -229,7 +229,7 @@ pub(in crate::compute) fn encode_fast_subsampled_scaled_batch_item<P: FastSubsam
         packet.entropy_checkpoints().len(),
     );
     let (status_buffer, entropy_buffer, restart_offsets_buffer, entropy_checkpoints_buffer) =
-        if let Some(scratch) = scratch.as_deref_mut() {
+        if let Some(scratch) = scratch {
             let packet_buffers = scratch_packet_buffers(
                 scratch,
                 &runtime.device,

@@ -9,11 +9,10 @@ use super::super::{
     entropy_decode_thread_count, fast444_params, fast444_region_params, fast444_scaled_params,
     fast444_scaled_region_params, fast_decode_status_error, fast_packet_huffman_tables,
     first_decode_error_status, mcu_range_for_rect, new_command_buffer, new_compute_command_encoder,
-    new_decode_plane_buffer, new_private_buffer, new_shared_buffer_with_data,
-    pixel_format_to_out_format, restart_offsets_buffer, restart_work_for_mcu_range, CpuDecoder,
-    Error, FastDecodeEntropyInputs, JpegColorSpace, JpegDecodeStatus, JpegFast444PacketV1,
-    JpegFast444Params, JpegFast444ScaledParams, MetalRuntime, PixelFormat, PlaneMode, PlaneStage,
-    Surface,
+    new_private_buffer, new_shared_buffer_with_data, pixel_format_to_out_format,
+    restart_offsets_buffer, restart_work_for_mcu_range, CpuDecoder, Error, FastDecodeEntropyInputs,
+    JpegColorSpace, JpegDecodeStatus, JpegFast444PacketV1, JpegFast444Params,
+    JpegFast444ScaledParams, MetalRuntime, PixelFormat, PlaneMode, PlaneStage, Surface,
 };
 
 #[cfg(target_os = "macos")]

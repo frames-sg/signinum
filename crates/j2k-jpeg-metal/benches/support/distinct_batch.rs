@@ -24,33 +24,7 @@ const BATCH_SIZE: usize = 4;
 pub(super) fn bench(c: &mut Criterion) {
     let mut group = c.benchmark_group("jpeg_metal_distinct_batch");
     for side in [128_u16, 512] {
-        let inputs = (0..BATCH_SIZE)
-            .map(|variant| {
-                generated_rgb_jpeg_variant(
-                    side,
-                    side,
-                    SamplingFactor::F_2_2,
-                    Some(2),
-                    u8::try_from(variant).expect("small batch variant"),
-                )
-            })
-            .collect::<Vec<_>>();
-        let expected = inputs
-            .iter()
-            .map(|bytes| {
-                assert_eq!(
-                    fast_packet_family_label(fast_packet_plan(bytes).expect("fast packet")),
-                    "fast420"
-                );
-                native_request_pixels(bytes, DecodeRequest::full(PixelFormat::Rgb8))
-            })
-            .collect::<Vec<_>>();
-        for first in 0..BATCH_SIZE {
-            for second in first + 1..BATCH_SIZE {
-                assert_ne!(inputs[first], inputs[second]);
-                assert_ne!(expected[first], expected[second]);
-            }
-        }
+        let (inputs, expected) = distinct_inputs(side);
         let bytes = inputs.iter().map(Vec::as_slice).collect::<Vec<_>>();
         let decoders = inputs
             .iter()
@@ -134,6 +108,37 @@ pub(super) fn bench(c: &mut Criterion) {
         }
     }
     group.finish();
+}
+
+fn distinct_inputs(side: u16) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
+    let inputs = (0..BATCH_SIZE)
+        .map(|variant| {
+            generated_rgb_jpeg_variant(
+                side,
+                side,
+                SamplingFactor::F_2_2,
+                Some(2),
+                u8::try_from(variant).expect("small batch variant"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let expected = inputs
+        .iter()
+        .map(|bytes| {
+            assert_eq!(
+                fast_packet_family_label(fast_packet_plan(bytes).expect("fast packet")),
+                "fast420"
+            );
+            native_request_pixels(bytes, DecodeRequest::full(PixelFormat::Rgb8))
+        })
+        .collect::<Vec<_>>();
+    for first in 0..BATCH_SIZE {
+        for second in first + 1..BATCH_SIZE {
+            assert_ne!(inputs[first], inputs[second]);
+            assert_ne!(expected[first], expected[second]);
+        }
+    }
+    (inputs, expected)
 }
 
 // Each sample measures two streams of completed resident batches. Worker creation

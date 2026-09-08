@@ -98,6 +98,7 @@ pub(super) fn decode_classic_sub_band_blocks_parallel<'a>(
     install_decoded_blocks(
         &mut decoded_blocks,
         coefficient_slab,
+        total_coefficients,
         pending_blocks.iter().map(|pending| {
             (
                 pending.output_x,
@@ -112,6 +113,7 @@ pub(super) fn decode_classic_sub_band_blocks_parallel<'a>(
         .zip(pending_blocks.par_iter())
         .zip(workspaces.par_iter_mut())
         .try_for_each(|((decoded, pending), workspace)| -> Result<()> {
+            decoded.coefficients.fill(0.0);
             let decode = if parameters.irreversible_midpoint {
                 decode_j2k_code_block_scalar_with_workspace_midpoint
             } else {
@@ -292,6 +294,7 @@ pub(super) fn decode_ht_sub_band_blocks_parallel<'a>(
     install_decoded_blocks(
         &mut decoded_blocks,
         coefficient_slab,
+        total_coefficients,
         pending_blocks.iter().map(|pending| {
             (
                 pending.output_x,
@@ -321,6 +324,7 @@ pub(super) fn decode_ht_sub_band_blocks_parallel<'a>(
         .zip(workspaces[..plan.active_workspaces].par_iter_mut())
         .try_for_each(|((decoded_chunk, pending_chunk), slot)| -> Result<()> {
             for (decoded, pending) in decoded_chunk.iter_mut().zip(pending_chunk) {
+                decoded.coefficients.fill(0.0);
                 let decode = if parameters.irreversible_midpoint {
                     decode_ht_code_block_scalar_with_workspace_midpoint
                 } else {
@@ -752,10 +756,13 @@ fn validate_pending_blocks(
 
 fn install_decoded_blocks<'a>(
     decoded_blocks: &mut Vec<DecodedBlock<'a>>,
-    coefficient_slab: &'a mut Vec<f32>,
+    coefficient_slab: &'a mut [f32],
+    total_coefficients: usize,
     blocks: impl Iterator<Item = (u32, u32, u32, u32)>,
 ) -> Result<()> {
-    let mut remaining = coefficient_slab.as_mut_slice();
+    let mut remaining = coefficient_slab
+        .get_mut(..total_coefficients)
+        .ok_or(DecodingError::CodeBlockDecodeFailure)?;
     for (output_x, output_y, width, height) in blocks {
         let coefficient_count = block_coefficient_count(width, height)?;
         let (coefficients, tail) = remaining.split_at_mut(coefficient_count);
@@ -783,8 +790,11 @@ fn prepare_coefficient_slab(
     if coefficients.capacity() >= len {
         #[cfg(test)]
         coefficient_stats.record_retained(old_bytes);
-        coefficients.resize(len, 0.0);
-        coefficients.fill(0.0);
+        // Keep every initialized element available for later sub-bands; each
+        // owning worker clears only its active borrowed slice before entropy.
+        if coefficients.len() < len {
+            coefficients.resize(len, 0.0);
+        }
         return Ok(());
     }
 
@@ -1304,12 +1314,13 @@ mod tests {
             let retained = super::ht_task_workspace_bytes(&workspaces).unwrap();
             let retained_coefficients = coefficient_slab.capacity() * size_of::<f32>();
             assert_eq!(retained + retained_coefficients, structural);
+            let retained_initialized_coefficients = coefficient_slab.len();
             coefficient_slab.fill(7.0);
 
             let mut valid_budget = DecodeAllocationBudget::from_live_bytes(structural).unwrap();
             workspace_growths = 0;
             let decoded = decode_ht_sub_band_blocks_parallel(
-                &ht_pending(&[(16, 16); 4]),
+                &ht_pending(&[(8, 8); 4]),
                 &sub_band,
                 parameters,
                 &mut workspaces,
@@ -1330,6 +1341,11 @@ mod tests {
             assert!(decoded
                 .iter()
                 .all(|block| block.coefficients.iter().all(|&value| value == 0.0)));
+            drop(decoded);
+            assert_eq!(coefficient_slab.len(), retained_initialized_coefficients);
+            assert!(coefficient_slab[4 * 8 * 8..]
+                .iter()
+                .all(|&value| value.to_bits() == 7.0_f32.to_bits()));
         });
     }
 
@@ -1421,6 +1437,7 @@ mod tests {
         install_decoded_blocks(
             &mut decoded,
             &mut coefficients,
+            pending.len(),
             pending.iter().map(|pending| {
                 (
                     pending.output_x,

@@ -59,6 +59,7 @@ const METAL_OPTIONAL_IGNORED_TESTS: &[&str] = &[
     "idwt::tests::metal_irreversible_idwt_gpu_capture",
     "engine::runtime::resource_profile_tests::benchmark_cold_and_repeated_session_kernel_initialization",
     "idwt::tests::metal_host_slice_idwt_decode_perf",
+    "engine::direct_buffers::performance::metal_checked_buffer_copy_into_perf",
     "engine::decode_dispatch::idwt::irreversible::performance::metal_irreversible97_stage_gpu_timing",
 ];
 

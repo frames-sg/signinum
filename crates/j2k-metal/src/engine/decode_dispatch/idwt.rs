@@ -4,7 +4,7 @@
 use crate::metal_types::prelude::*;
 
 use super::{
-    checked_buffer_slice, commit_and_wait_metal, copied_slice_buffer, dispatch_2d_pipeline,
+    checked_buffer_copy_into, commit_and_wait_metal, copied_slice_buffer, dispatch_2d_pipeline,
     dispatch_3d_pipeline, hybrid_stage_signpost, label_compute_encoder, new_command_buffer,
     new_compute_command_encoder, with_runtime, Buffer, CommandBufferRef, ComputeCommandEncoderRef,
     DirectIdwtCommandBuffers, Error, J2kIdwtSingleDecompositionParams,
@@ -76,6 +76,10 @@ pub(crate) fn decode_reversible53_single_decomposition_idwt(
         let lh = copied_slice_buffer(&runtime.device, job.lh.coefficients)?;
         let hh = copied_slice_buffer(&runtime.device, job.hh.coefficients)?;
         let decoded = copied_slice_buffer(&runtime.device, output)?;
+        #[cfg(test)]
+        crate::engine::test_counters::record_idwt_host_overwritten_output_upload(
+            std::mem::size_of_val(output),
+        );
 
         let command_buffer = new_command_buffer(&runtime.queue)?;
 
@@ -124,8 +128,7 @@ pub(crate) fn decode_reversible53_single_decomposition_idwt(
         );
         encoder.endEncoding();
         commit_and_wait_metal(&command_buffer)?;
-        let decoded_host = checked_buffer_slice::<f32>(&decoded, output.len(), "IDWT output")?;
-        output.copy_from_slice(&decoded_host);
+        checked_buffer_copy_into(&decoded, 0, output, "IDWT output")?;
         Ok(())
     })
 }

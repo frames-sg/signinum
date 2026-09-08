@@ -276,6 +276,44 @@ std::thread_local! {
     static IDWT97_STAGE_SEQUENCES: Cell<usize> = const { Cell::new(0) };
     static IDWT97_LOGICAL_REQUESTED_POSITIONS: Cell<usize> = const { Cell::new(0) };
     static IDWT97_STAGE_DISPATCHES: Cell<usize> = const { Cell::new(0) };
+    static IDWT_HOST_OVERWRITTEN_OUTPUT_UPLOAD_BYTES: Cell<usize> = const { Cell::new(0) };
+    static IDWT_HOST_TEMPORARY_READBACK_VEC_ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
+    static IDWT_HOST_TEMPORARY_READBACK_VEC_BYTES: Cell<usize> = const { Cell::new(0) };
+}
+
+pub(crate) fn reset_idwt_host_transfer_counters_for_test() {
+    IDWT_HOST_OVERWRITTEN_OUTPUT_UPLOAD_BYTES.set(0);
+    IDWT_HOST_TEMPORARY_READBACK_VEC_ALLOCATIONS.set(0);
+    IDWT_HOST_TEMPORARY_READBACK_VEC_BYTES.set(0);
+}
+
+pub(crate) fn idwt_host_transfer_counters_for_test() -> (usize, usize, usize) {
+    (
+        IDWT_HOST_OVERWRITTEN_OUTPUT_UPLOAD_BYTES.get(),
+        IDWT_HOST_TEMPORARY_READBACK_VEC_ALLOCATIONS.get(),
+        IDWT_HOST_TEMPORARY_READBACK_VEC_BYTES.get(),
+    )
+}
+
+pub(crate) fn record_idwt_host_overwritten_output_upload(bytes: usize) {
+    IDWT_HOST_OVERWRITTEN_OUTPUT_UPLOAD_BYTES.set(
+        IDWT_HOST_OVERWRITTEN_OUTPUT_UPLOAD_BYTES
+            .get()
+            .saturating_add(bytes),
+    );
+}
+
+pub(crate) fn record_idwt_host_temporary_readback_vec(bytes: usize) {
+    IDWT_HOST_TEMPORARY_READBACK_VEC_ALLOCATIONS.set(
+        IDWT_HOST_TEMPORARY_READBACK_VEC_ALLOCATIONS
+            .get()
+            .saturating_add(1),
+    );
+    IDWT_HOST_TEMPORARY_READBACK_VEC_BYTES.set(
+        IDWT_HOST_TEMPORARY_READBACK_VEC_BYTES
+            .get()
+            .saturating_add(bytes),
+    );
 }
 
 pub(crate) fn reset_idwt97_stage_sequences_for_test() {

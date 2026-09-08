@@ -17,14 +17,15 @@ use super::abi::{
     J2kStoreParams, J2K_CLASSIC_MAX_HEIGHT, J2K_CLASSIC_MAX_WIDTH, J2K_CLASSIC_STATUS_OK,
 };
 use super::{
-    checked_buffer_slice, commit_and_wait_metal, copied_slice_buffer, decode_classic_status_error,
-    j2k_u32_param, new_command_buffer, new_compute_command_encoder, new_shared_buffer,
-    take_classic_coefficients_scratch_buffer, take_classic_states_scratch_buffer, with_runtime,
-    zeroed_shared_buffer, Buffer, CommandBufferRef, ComputeCommandEncoderRef,
-    DirectIdwtCommandBuffers, DirectScratchBuffer, DirectStatusCheck, Error, HtCodeBlockDecodeJob,
-    J2kInverseMctJob, J2kSingleDecompositionIdwtJob, J2kStoreComponentJob, J2kWaveletTransform,
-    MetalRuntime, PixelFormat, PreparedClassicSubBand, PreparedClassicSubBandGroup,
-    PreparedHtSubBand, PreparedHtSubBandGroup, Surface,
+    checked_buffer_copy_into, checked_buffer_slice, commit_and_wait_metal, copied_slice_buffer,
+    decode_classic_status_error, j2k_u32_param, new_command_buffer, new_compute_command_encoder,
+    new_shared_buffer, take_classic_coefficients_scratch_buffer,
+    take_classic_states_scratch_buffer, with_runtime, zeroed_shared_buffer, Buffer,
+    CommandBufferRef, ComputeCommandEncoderRef, DirectIdwtCommandBuffers, DirectScratchBuffer,
+    DirectStatusCheck, Error, HtCodeBlockDecodeJob, J2kInverseMctJob,
+    J2kSingleDecompositionIdwtJob, J2kStoreComponentJob, J2kWaveletTransform, MetalRuntime,
+    PixelFormat, PreparedClassicSubBand, PreparedClassicSubBandGroup, PreparedHtSubBand,
+    PreparedHtSubBandGroup, Surface,
 };
 
 mod classic_cleanup;

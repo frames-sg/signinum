@@ -180,7 +180,9 @@ fn ignored_inventory_is_unique_and_has_expected_size() {
         .copied()
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(required.len(), 21);
-    assert_eq!(optional.len(), 3);
+    assert_eq!(optional.len(), 5);
+    assert!(optional.contains("idwt::tests::metal_host_slice_idwt_decode_perf"));
+    assert!(optional.contains("engine::decode_dispatch::idwt::irreversible::performance::metal_irreversible97_stage_gpu_timing"));
     assert!(
         optional.contains("decoder::tests::sampled::local_sampled_color_batch_characterization")
     );

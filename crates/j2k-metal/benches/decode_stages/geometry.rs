@@ -32,6 +32,23 @@ fn cold_input_decode(
         .expect("cold-input geometry benchmark decode")
 }
 
+fn validate_geometry_decode(result: &MetalBatchDecodeResult, expected: &[Vec<u8>]) {
+    require_success(result);
+    assert_eq!(combined_dispatch_report(result).ht_tier1, 3);
+    let surfaces = result
+        .groups()
+        .iter()
+        .flat_map(j2k_metal::MetalBatchGroup::surfaces)
+        .collect::<Vec<_>>();
+    assert_eq!(surfaces.len(), expected.len());
+    for (surface, expected) in surfaces.iter().zip(expected) {
+        assert_eq!(
+            surface.as_bytes().expect("geometry probe readback"),
+            *expected
+        );
+    }
+}
+
 pub(super) fn bench(criterion: &mut Criterion) {
     for (width, height, count) in [
         (128, 128, 16),
@@ -84,20 +101,7 @@ pub(super) fn bench(criterion: &mut Criterion) {
         let probe = decoder
             .decode_prepared(&prepared)
             .expect("geometry benchmark probe");
-        require_success(&probe);
-        assert_eq!(combined_dispatch_report(&probe).ht_tier1, 3);
-        let surfaces = probe
-            .groups()
-            .iter()
-            .flat_map(j2k_metal::MetalBatchGroup::surfaces)
-            .collect::<Vec<_>>();
-        assert_eq!(surfaces.len(), expected.len());
-        for (surface, expected) in surfaces.iter().zip(&expected) {
-            assert_eq!(
-                surface.as_bytes().expect("geometry probe readback"),
-                *expected
-            );
-        }
+        validate_geometry_decode(&probe, &expected);
         let id = format!("metal_idwt97_geometry_distinct/{width}x{height}/batch-{count}");
         eprintln!(
             "{id} input_sha256={} output_sha256={}",
@@ -126,20 +130,7 @@ pub(super) fn bench(criterion: &mut Criterion) {
         });
         let backend = decoder.backend_session().clone();
         let cold_probe = cold_input_decode(&backend, &sources);
-        require_success(&cold_probe);
-        assert_eq!(combined_dispatch_report(&cold_probe).ht_tier1, 3);
-        let cold_surfaces = cold_probe
-            .groups()
-            .iter()
-            .flat_map(j2k_metal::MetalBatchGroup::surfaces)
-            .collect::<Vec<_>>();
-        assert_eq!(cold_surfaces.len(), expected.len());
-        for (surface, expected) in cold_surfaces.iter().zip(&expected) {
-            assert_eq!(
-                surface.as_bytes().expect("cold-input probe readback"),
-                *expected
-            );
-        }
+        validate_geometry_decode(&cold_probe, &expected);
         group.bench_function("cold_input_prepare_readback_warm_session", |bencher| {
             bencher.iter(|| {
                 let result = cold_input_decode(&backend, &sources);

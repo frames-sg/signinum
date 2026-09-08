@@ -341,23 +341,27 @@ pub(super) fn batch_entropy_buffers_from_metadata<'a>(
     runtime: &MetalRuntime,
     scratch: &mut MetalBatchScratch,
     keys: BatchEntropyBufferKeys,
-    entropy_bytes_iter: impl Iterator<Item = &'a [u8]>,
+    entropy_bytes_iter: impl Iterator<Item = &'a [u8]> + Clone,
     metadata: &BatchEntropyMetadata,
 ) -> Result<BatchEntropyBuffers, Error> {
     Ok(BatchEntropyBuffers {
-        payload: scratch.shared_buffer_with_byte_slices(
+        payload: scratch.shared_immutable_buffer_with_byte_slices(
             &runtime.device,
             keys.payload,
             metadata.payload_len,
             entropy_bytes_iter,
         )?,
-        offsets: scratch.shared_buffer_with_slice(
+        offsets: scratch.shared_immutable_buffer_with_slice(
             &runtime.device,
             keys.offsets,
             &metadata.offsets,
         )?,
-        lens: scratch.shared_buffer_with_slice(&runtime.device, keys.lens, &metadata.lens)?,
-        checkpoints: scratch.shared_buffer_with_slice(
+        lens: scratch.shared_immutable_buffer_with_slice(
+            &runtime.device,
+            keys.lens,
+            &metadata.lens,
+        )?,
+        checkpoints: scratch.shared_immutable_buffer_with_slice(
             &runtime.device,
             keys.checkpoints,
             &metadata.checkpoints,

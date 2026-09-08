@@ -92,9 +92,57 @@ pub(crate) fn checked_buffer_copy_into<T: GpuAbi>(
     output: &mut [T],
     context: &str,
 ) -> Result<(), Error> {
-    let values = checked_buffer_slice_at(buffer, byte_offset, output.len(), context)?;
-    output.copy_from_slice(&values);
-    Ok(())
+    let result = (|| {
+        let buffer_len = buffer.length();
+        let element_size = size_of::<T>();
+        if element_size == 0 {
+            return Err(MetalSupportError::BufferZeroSizedType { abi_name: T::NAME });
+        }
+        let byte_len =
+            output
+                .len()
+                .checked_mul(element_size)
+                .ok_or(MetalSupportError::BufferBounds {
+                    offset_bytes: byte_offset,
+                    byte_len: usize::MAX,
+                    buffer_len,
+                })?;
+        let end = byte_offset
+            .checked_add(byte_len)
+            .ok_or(MetalSupportError::BufferBounds {
+                offset_bytes: byte_offset,
+                byte_len,
+                buffer_len,
+            })?;
+        if end > buffer_len {
+            return Err(MetalSupportError::BufferBounds {
+                offset_bytes: byte_offset,
+                byte_len,
+                buffer_len,
+            });
+        }
+        let align = core::mem::align_of::<T>();
+        if !byte_offset.is_multiple_of(align) {
+            return Err(MetalSupportError::BufferAlignment {
+                offset_bytes: byte_offset,
+                align,
+            });
+        }
+        if output.is_empty() {
+            return Ok(());
+        }
+        // SAFETY: These private readback callers use completed/synchronized,
+        // immutable Metal storage and a separate, exclusively borrowed host
+        // destination. Reuse the audited support read for storage and actual
+        // pointer alignment, then the existing checked byte-borrow boundary.
+        let bytes = unsafe {
+            support_checked_buffer_read::<T>(buffer, byte_offset)?;
+            completed_metal_buffer_bytes(buffer, byte_offset, byte_len)?
+        };
+        T::slice_as_bytes_mut(output).copy_from_slice(bytes);
+        Ok(())
+    })();
+    result.map_err(|error| buffer_access_error(context, error))
 }
 
 #[cfg(target_os = "macos")]

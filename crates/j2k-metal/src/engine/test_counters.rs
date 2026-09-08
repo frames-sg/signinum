@@ -295,14 +295,6 @@ pub(crate) fn idwt_host_transfer_counters_for_test() -> (usize, usize, usize) {
     )
 }
 
-pub(crate) fn record_idwt_host_overwritten_output_upload(bytes: usize) {
-    IDWT_HOST_OVERWRITTEN_OUTPUT_UPLOAD_BYTES.set(
-        IDWT_HOST_OVERWRITTEN_OUTPUT_UPLOAD_BYTES
-            .get()
-            .saturating_add(bytes),
-    );
-}
-
 pub(crate) fn record_idwt_host_temporary_readback_vec(bytes: usize) {
     IDWT_HOST_TEMPORARY_READBACK_VEC_ALLOCATIONS.set(
         IDWT_HOST_TEMPORARY_READBACK_VEC_ALLOCATIONS

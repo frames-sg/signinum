@@ -6,11 +6,11 @@ use crate::metal_types::prelude::*;
 use super::super::{
     checked_buffer_copy_into, commit_and_wait_metal, copied_slice_buffer, dispatch_2d_pipeline,
     dispatch_3d_pipeline, hybrid_stage_signpost, label_compute_encoder, new_command_buffer,
-    new_compute_command_encoder, with_runtime, Buffer, CommandBufferRef, ComputeCommandEncoderRef,
-    Error, J2kIdwt97StepParams, J2kIdwtSingleDecompositionParams, J2kSingleDecompositionIdwtJob,
-    SIGNPOST_DECODE_HYBRID_IDWT_COMMAND_ENCODE,
+    new_compute_command_encoder, new_shared_buffer, with_runtime, Buffer, CommandBufferRef,
+    ComputeCommandEncoderRef, Error, J2kIdwt97StepParams, J2kIdwtSingleDecompositionParams,
+    J2kSingleDecompositionIdwtJob, SIGNPOST_DECODE_HYBRID_IDWT_COMMAND_ENCODE,
 };
-use super::{IdwtSubBandBuffers, SingleIdwtDispatch};
+use super::{checked_host_output_layout, IdwtSubBandBuffers, SingleIdwtDispatch};
 use j2k_codec_math::dwt;
 
 const fn parity_axis_len(length: u32, odd: bool) -> u32 {
@@ -54,12 +54,8 @@ fn decode_irreversible97_staged_single_decomposition_idwt_with_high_pass(
     high_pass: f32,
 ) -> Result<(), Error> {
     with_runtime(|runtime| {
-        let required_len = job.rect.width() as usize * job.rect.height() as usize;
-        if output.len() < required_len {
-            return Err(Error::MetalKernel {
-                message: "J2K Metal IDWT output slice is too small".to_string(),
-            });
-        }
+        let (required_len, required_bytes) =
+            checked_host_output_layout(job.rect.width(), job.rect.height(), output.len())?;
 
         let params = J2kIdwtSingleDecompositionParams {
             x0: job.rect.x0,
@@ -86,15 +82,11 @@ fn decode_irreversible97_staged_single_decomposition_idwt_with_high_pass(
             hh_height: job.hh.rect.height(),
         };
 
+        let decoded = new_shared_buffer(&runtime.device, required_bytes)?;
         let ll = copied_slice_buffer(&runtime.device, job.ll.coefficients)?;
         let hl = copied_slice_buffer(&runtime.device, job.hl.coefficients)?;
         let lh = copied_slice_buffer(&runtime.device, job.lh.coefficients)?;
         let hh = copied_slice_buffer(&runtime.device, job.hh.coefficients)?;
-        let decoded = copied_slice_buffer(&runtime.device, output)?;
-        #[cfg(test)]
-        crate::engine::test_counters::record_idwt_host_overwritten_output_upload(
-            std::mem::size_of_val(output),
-        );
         let command_buffer = new_command_buffer(&runtime.queue)?;
         let encoder = new_compute_command_encoder(&command_buffer)?;
         dispatch_irreversible97_single_decomposition_buffers_in_encoder_with_high_pass(
@@ -120,7 +112,7 @@ fn decode_irreversible97_staged_single_decomposition_idwt_with_high_pass(
         encoder.endEncoding();
         commit_and_wait_metal(&command_buffer)?;
 
-        checked_buffer_copy_into(&decoded, 0, output, "IDWT output")?;
+        checked_buffer_copy_into(&decoded, 0, &mut output[..required_len], "IDWT output")?;
         Ok(())
     })
 }

@@ -132,9 +132,15 @@ impl DecodedSubBandBlock for DecodedHtBlock {
 pub(super) fn decode_classic_sub_band_blocks_parallel(
     pending_blocks: &[PendingClassicBlock],
     parameters: ClassicParallelParameters,
+    #[cfg(test)] coefficient_stats: &mut super::super::ParallelCoefficientStats,
     budget: &mut DecodeAllocationBudget,
 ) -> Result<Vec<DecodedClassicBlock>> {
-    let mut decoded_blocks = preallocate_classic_outputs(pending_blocks, budget)?;
+    let mut decoded_blocks = preallocate_classic_outputs(
+        pending_blocks,
+        #[cfg(test)]
+        coefficient_stats,
+        budget,
+    )?;
     let mut workspaces = preallocate_classic_workspaces(pending_blocks, budget)?;
     decoded_blocks
         .par_iter_mut()
@@ -171,6 +177,7 @@ pub(super) fn decode_classic_sub_band_blocks_parallel(
 
 fn preallocate_classic_outputs(
     pending_blocks: &[PendingClassicBlock],
+    #[cfg(test)] coefficient_stats: &mut super::super::ParallelCoefficientStats,
     budget: &mut DecodeAllocationBudget,
 ) -> Result<Vec<DecodedClassicBlock>> {
     let total_coefficients = pending_coefficient_count(
@@ -182,11 +189,15 @@ fn preallocate_classic_outputs(
 
     let mut decoded_blocks = Vec::new();
     budget.reserve_new(&mut decoded_blocks, pending_blocks.len())?;
+    #[cfg(test)]
+    let mut live_coefficient_bytes = 0usize;
     for pending in pending_blocks {
         let coefficient_count = block_coefficient_count(pending.width, pending.height)?;
         let mut coefficients = Vec::new();
         try_resize_decode_elements(&mut coefficients, coefficient_count, 0.0)?;
         budget.include_capacity_overage::<f32>(coefficient_count, coefficients.capacity())?;
+        #[cfg(test)]
+        coefficient_stats.record_allocation(coefficients.capacity(), &mut live_coefficient_bytes);
         decoded_blocks.push(DecodedClassicBlock {
             output_x: pending.output_x,
             output_y: pending.output_y,
@@ -236,9 +247,15 @@ pub(super) fn decode_ht_sub_band_blocks_parallel(
     structural_workspace_bytes: &mut usize,
     #[cfg(test)] maximum_tasks: &mut usize,
     #[cfg(test)] workspace_growths: &mut usize,
+    #[cfg(test)] coefficient_stats: &mut super::super::ParallelCoefficientStats,
     budget: &mut DecodeAllocationBudget,
 ) -> Result<Vec<DecodedHtBlock>> {
-    let mut decoded_blocks = preallocate_ht_outputs(pending_blocks, budget)?;
+    let mut decoded_blocks = preallocate_ht_outputs(
+        pending_blocks,
+        #[cfg(test)]
+        coefficient_stats,
+        budget,
+    )?;
     let (plan, growths) = prepare_ht_task_workspaces(
         pending_blocks,
         workspaces,
@@ -301,6 +318,7 @@ pub(super) fn decode_ht_sub_band_blocks_parallel(
 
 fn preallocate_ht_outputs(
     pending_blocks: &[PendingHtBlock],
+    #[cfg(test)] coefficient_stats: &mut super::super::ParallelCoefficientStats,
     budget: &mut DecodeAllocationBudget,
 ) -> Result<Vec<DecodedHtBlock>> {
     let total_coefficients = pending_coefficient_count(
@@ -312,11 +330,15 @@ fn preallocate_ht_outputs(
 
     let mut decoded_blocks = Vec::new();
     budget.reserve_new(&mut decoded_blocks, pending_blocks.len())?;
+    #[cfg(test)]
+    let mut live_coefficient_bytes = 0usize;
     for pending in pending_blocks {
         let coefficient_count = block_coefficient_count(pending.width, pending.height)?;
         let mut coefficients = Vec::new();
         try_reserve_decode_elements(&mut coefficients, coefficient_count)?;
         budget.include_capacity_overage::<f32>(coefficient_count, coefficients.capacity())?;
+        #[cfg(test)]
+        coefficient_stats.record_allocation(coefficients.capacity(), &mut live_coefficient_bytes);
         decoded_blocks.push(DecodedHtBlock {
             output_x: pending.output_x,
             output_y: pending.output_y,
@@ -648,25 +670,42 @@ pub(crate) fn copy_decoded_classic_blocks_to_sub_band(
     decoded_blocks: &[DecodedClassicBlock],
     sub_band: &SubBand,
     storage: &mut DecompositionStorage<'_>,
+    #[cfg(test)] coefficient_stats: &mut super::super::ParallelCoefficientStats,
 ) -> Result<()> {
-    copy_decoded_blocks_to_sub_band(decoded_blocks, sub_band, storage)
+    copy_decoded_blocks_to_sub_band(
+        decoded_blocks,
+        sub_band,
+        storage,
+        #[cfg(test)]
+        coefficient_stats,
+    )
 }
 
 pub(crate) fn copy_decoded_ht_blocks_to_sub_band(
     decoded_blocks: &[DecodedHtBlock],
     sub_band: &SubBand,
     storage: &mut DecompositionStorage<'_>,
+    #[cfg(test)] coefficient_stats: &mut super::super::ParallelCoefficientStats,
 ) -> Result<()> {
-    copy_decoded_blocks_to_sub_band(decoded_blocks, sub_band, storage)
+    copy_decoded_blocks_to_sub_band(
+        decoded_blocks,
+        sub_band,
+        storage,
+        #[cfg(test)]
+        coefficient_stats,
+    )
 }
 
 fn copy_decoded_blocks_to_sub_band<B: DecodedSubBandBlock>(
     decoded_blocks: &[B],
     sub_band: &SubBand,
     storage: &mut DecompositionStorage<'_>,
+    #[cfg(test)] coefficient_stats: &mut super::super::ParallelCoefficientStats,
 ) -> Result<()> {
     let sub_band_width = sub_band.rect.width() as usize;
     let base_store = &mut storage.coefficients[sub_band.coefficients.clone()];
+    #[cfg(test)]
+    let mut scattered_bytes = 0usize;
     for block in decoded_blocks {
         let output_x = block.output_x();
         let output_y = block.output_y();
@@ -698,8 +737,15 @@ fn copy_decoded_blocks_to_sub_band<B: DecodedSubBandBlock>(
                 .ok_or(DecodingError::CodeBlockDecodeFailure)?;
             base_store[dst_start..dst_end]
                 .copy_from_slice(&block.coefficients()[src_start..src_end]);
+            #[cfg(test)]
+            {
+                scattered_bytes = scattered_bytes
+                    .saturating_add(block_width.saturating_mul(core::mem::size_of::<f32>()));
+            }
         }
     }
+    #[cfg(test)]
+    coefficient_stats.record_scatter(scattered_bytes);
     Ok(())
 }
 
@@ -950,6 +996,7 @@ mod tests {
             let mut structural = 0;
             let mut maximum_tasks = 0;
             let mut workspace_growths = 0;
+            let mut coefficient_stats = super::super::super::ParallelCoefficientStats::default();
             let mut malformed_budget = DecodeAllocationBudget::from_live_bytes(0).unwrap();
 
             let malformed_result = decode_ht_sub_band_blocks_parallel(
@@ -959,6 +1006,7 @@ mod tests {
                 &mut structural,
                 &mut maximum_tasks,
                 &mut workspace_growths,
+                &mut coefficient_stats,
                 &mut malformed_budget,
             );
             assert!(
@@ -977,6 +1025,7 @@ mod tests {
                 &mut structural,
                 &mut maximum_tasks,
                 &mut workspace_growths,
+                &mut coefficient_stats,
                 &mut valid_budget,
             )
             .expect("zero-pass blocks decode after the entropy error");

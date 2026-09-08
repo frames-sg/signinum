@@ -346,6 +346,35 @@ pub(crate) struct DecodeDebugCounters {
     pub(crate) ht_parallel_tasks: usize,
     #[cfg(all(test, feature = "parallel"))]
     pub(crate) ht_task_workspace_growths: usize,
+    #[cfg(all(test, feature = "parallel"))]
+    pub(crate) parallel_coefficients: ParallelCoefficientStats,
+}
+
+#[cfg(all(test, feature = "parallel"))]
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ParallelCoefficientStats {
+    pub(crate) allocations: usize,
+    pub(crate) allocated_bytes: usize,
+    pub(crate) peak_live_bytes: usize,
+    pub(crate) scatter_bytes: usize,
+}
+
+#[cfg(all(test, feature = "parallel"))]
+impl ParallelCoefficientStats {
+    fn record_allocation(&mut self, capacity: usize, live_bytes: &mut usize) {
+        if capacity == 0 {
+            return;
+        }
+        let bytes = capacity.saturating_mul(size_of::<f32>());
+        self.allocations = self.allocations.saturating_add(1);
+        self.allocated_bytes = self.allocated_bytes.saturating_add(bytes);
+        *live_bytes = live_bytes.saturating_add(bytes);
+        self.peak_live_bytes = self.peak_live_bytes.max(*live_bytes);
+    }
+
+    fn record_scatter(&mut self, bytes: usize) {
+        self.scatter_bytes = self.scatter_bytes.saturating_add(bytes);
+    }
 }
 
 #[expect(
@@ -1007,6 +1036,7 @@ mod tests {
     #[test]
     fn decoded_classic_block_copyback_covers_full_block() {
         let (sub_band, mut storage) = copyback_test_sub_band(4, 3);
+        let mut coefficient_stats = super::ParallelCoefficientStats::default();
         let block = super::DecodedClassicBlock {
             output_x: 0,
             output_y: 0,
@@ -1017,8 +1047,13 @@ mod tests {
                 .collect(),
         };
 
-        super::copy_decoded_classic_blocks_to_sub_band(&[block], &sub_band, &mut storage)
-            .expect("full classic block copyback");
+        super::copy_decoded_classic_blocks_to_sub_band(
+            &[block],
+            &sub_band,
+            &mut storage,
+            &mut coefficient_stats,
+        )
+        .expect("full classic block copyback");
 
         assert_eq!(
             storage.coefficients,
@@ -1026,12 +1061,14 @@ mod tests {
                 .map(|value| f32::from(u8::try_from(value).expect("test value fits u8")))
                 .collect::<Vec<_>>()
         );
+        assert_eq!(coefficient_stats.scatter_bytes, 12 * size_of::<f32>());
     }
 
     #[cfg(feature = "parallel")]
     #[test]
     fn decoded_ht_block_copyback_covers_partial_edge_block() {
         let (sub_band, mut storage) = copyback_test_sub_band(5, 3);
+        let mut coefficient_stats = super::ParallelCoefficientStats::default();
         let block = super::DecodedHtBlock {
             output_x: 3,
             output_y: 1,
@@ -1040,8 +1077,13 @@ mod tests {
             coefficients: vec![1.0, 2.0, 3.0, 4.0],
         };
 
-        super::copy_decoded_ht_blocks_to_sub_band(&[block], &sub_band, &mut storage)
-            .expect("partial HT block copyback");
+        super::copy_decoded_ht_blocks_to_sub_band(
+            &[block],
+            &sub_band,
+            &mut storage,
+            &mut coefficient_stats,
+        )
+        .expect("partial HT block copyback");
 
         assert_eq!(
             storage.coefficients,
@@ -1050,12 +1092,14 @@ mod tests {
                 4.0,
             ]
         );
+        assert_eq!(coefficient_stats.scatter_bytes, 4 * size_of::<f32>());
     }
 
     #[cfg(feature = "parallel")]
     #[test]
     fn decoded_block_copyback_rejects_out_of_bounds_blocks() {
         let (sub_band, mut storage) = copyback_test_sub_band(5, 3);
+        let mut coefficient_stats = super::ParallelCoefficientStats::default();
         let block = super::DecodedClassicBlock {
             output_x: 4,
             output_y: 1,
@@ -1064,11 +1108,16 @@ mod tests {
             coefficients: vec![1.0, 2.0],
         };
 
-        let error =
-            super::copy_decoded_classic_blocks_to_sub_band(&[block], &sub_band, &mut storage)
-                .expect_err("out-of-bounds block must fail");
+        let error = super::copy_decoded_classic_blocks_to_sub_band(
+            &[block],
+            &sub_band,
+            &mut storage,
+            &mut coefficient_stats,
+        )
+        .expect_err("out-of-bounds block must fail");
 
         assert_eq!(error, DecodingError::CodeBlockDecodeFailure.into());
+        assert_eq!(coefficient_stats.scatter_bytes, 0);
     }
 
     #[cfg(feature = "parallel")]

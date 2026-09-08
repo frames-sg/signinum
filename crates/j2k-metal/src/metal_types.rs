@@ -53,6 +53,10 @@ pub(crate) trait J2kComputeEncoderExt {
 
     fn set_bytes<T: GpuAbi>(&self, index: u64, value: &T);
 
+    // Fixed dynamic slot used only by the unselected IDWT experiment.
+    #[cfg(test)]
+    fn set_idwt_threadgroup_memory(&self, length: usize);
+
     fn memory_barrier_with_resources(&self, resources: &[&ProtocolObject<dyn MTLBuffer>]);
 }
 
@@ -93,6 +97,15 @@ impl J2kComputeEncoderExt for ProtocolObject<dyn MTLComputeCommandEncoder> {
         // padding-free bytes, Metal copies them synchronously, and the binding
         // index was checked above.
         unsafe { self.setBytes_length_atIndex(pointer, bytes.len(), index) };
+    }
+
+    #[cfg(test)]
+    fn set_idwt_threadgroup_memory(&self, length: usize) {
+        assert!(length > 0 && length.is_multiple_of(16));
+        // SAFETY: Slot zero matches the experiment's sole threadgroup argument.
+        // Its checked dispatch planner enforces device/pipeline memory limits;
+        // the positive 16-byte-aligned allocation contains the complete line.
+        unsafe { self.setThreadgroupMemoryLength_atIndex(length, 0) };
     }
 
     fn memory_barrier_with_resources(&self, resources: &[&ProtocolObject<dyn MTLBuffer>]) {

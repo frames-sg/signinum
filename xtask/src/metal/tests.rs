@@ -180,7 +180,13 @@ fn ignored_inventory_is_unique_and_has_expected_size() {
         .copied()
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(required.len(), 21);
-    assert_eq!(optional.len(), 3);
+    assert_eq!(optional.len(), 5);
+    assert!(optional.contains(
+        "engine::decode_dispatch::idwt::cooperative53::route::tests::cooperative53_end_to_end_timing"
+    ));
+    assert!(optional.contains(
+        "engine::decode_dispatch::idwt::cooperative53::tests::cooperative53_gpu_stage_timing"
+    ));
     assert!(
         optional.contains("decoder::tests::sampled::local_sampled_color_batch_characterization")
     );

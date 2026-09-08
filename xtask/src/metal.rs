@@ -55,6 +55,8 @@ const J2K_METAL_REQUIRED_IGNORED_TESTS: &[&str] = &[
 // Correctness, sampled pixel parity, and kernel reuse have non-ignored tests.
 // Inventory every diagnostic so ignored tests cannot silently escape review.
 const METAL_OPTIONAL_IGNORED_TESTS: &[&str] = &[
+    "engine::decode_dispatch::idwt::cooperative53::route::tests::cooperative53_end_to_end_timing",
+    "engine::decode_dispatch::idwt::cooperative53::tests::cooperative53_gpu_stage_timing",
     "decoder::tests::sampled::local_sampled_color_batch_characterization",
     "idwt::tests::metal_irreversible_idwt_gpu_capture",
     "engine::runtime::resource_profile_tests::benchmark_cold_and_repeated_session_kernel_initialization",

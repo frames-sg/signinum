@@ -13,6 +13,8 @@ use super::{
 };
 #[cfg(target_os = "macos")]
 mod batched_irreversible;
+#[cfg(all(test, target_os = "macos"))]
+mod cooperative53;
 #[cfg(target_os = "macos")]
 mod irreversible;
 #[cfg(target_os = "macos")]
@@ -341,6 +343,10 @@ pub(in crate::engine) fn dispatch_reversible53_repeated_buffers_in_encoder_with_
         (params.width, params.height, params.batch_count),
     );
     encoder.memory_barrier_with_resources(&[decoded]);
+    #[cfg(test)]
+    if cooperative53::route::try_dispatch(encoder, decoded, &params) {
+        return;
+    }
 
     encoder.setComputePipelineState(&kernels.idwt_reversible53_horizontal_batched);
     encoder.set_buffer(0, Some(decoded), 0);

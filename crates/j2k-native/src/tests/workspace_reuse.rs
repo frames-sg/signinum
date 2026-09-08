@@ -333,7 +333,7 @@ fn parallel_task_workspaces_match_serial_and_reuse_capacity() {
                     let (slots, bytes, tasks, growths) =
                         parallel_workspace_measurements(&context, ht);
                     assert!(
-                        tasks > 0 && tasks <= threads,
+                        tasks > 0 && tasks <= threads.saturating_mul(2),
                         "tasks={tasks}, pool={threads}"
                     );
                     assert!(slots > 0 && slots <= tasks);

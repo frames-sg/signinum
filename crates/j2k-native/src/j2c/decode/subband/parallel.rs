@@ -23,6 +23,8 @@ use crate::{
 use alloc::vec::Vec;
 use rayon::prelude::*;
 
+const PARALLEL_TASKS_PER_WORKER: usize = 2;
+
 #[derive(Clone, Copy)]
 struct PreparedTaskPlan {
     active_workspaces: usize,
@@ -230,7 +232,7 @@ fn prepare_classic_task_workspaces(
     structural_workspace_bytes: &mut usize,
     budget: &mut DecodeAllocationBudget,
 ) -> Result<(PreparedTaskPlan, usize)> {
-    let initial_tasks = pending_blocks.len().min(rayon::current_num_threads());
+    let initial_tasks = bounded_parallel_task_count(pending_blocks.len());
     let mut requested_tasks = initial_tasks;
     let mut evicted_retained_bank = false;
     loop {
@@ -373,7 +375,7 @@ fn prepare_ht_task_workspaces(
     structural_workspace_bytes: &mut usize,
     budget: &mut DecodeAllocationBudget,
 ) -> Result<(PreparedTaskPlan, usize)> {
-    let initial_tasks = pending_blocks.len().min(rayon::current_num_threads());
+    let initial_tasks = bounded_parallel_task_count(pending_blocks.len());
     let mut requested_tasks = initial_tasks;
     let mut evicted_retained_bank = false;
     loop {
@@ -409,6 +411,12 @@ fn prepare_ht_task_workspaces(
             result => return result.map(|growths| (plan, growths)),
         }
     }
+}
+
+fn bounded_parallel_task_count(job_count: usize) -> usize {
+    // Two tasks per worker preserve bounded workspace ownership while giving Rayon
+    // another ready chunk when code-block decode costs differ.
+    job_count.min(rayon::current_num_threads().saturating_mul(PARALLEL_TASKS_PER_WORKER))
 }
 
 fn balanced_task_plan(job_count: usize, requested_tasks: usize) -> Result<PreparedTaskPlan> {
@@ -978,7 +986,7 @@ mod tests {
     }
 
     #[test]
-    fn classic_parallel_workspace_count_is_bounded_by_the_current_pool() {
+    fn classic_parallel_workspace_count_uses_two_tasks_per_pool_worker() {
         let pool = ThreadPoolBuilder::new()
             .num_threads(2)
             .build()
@@ -997,7 +1005,7 @@ mod tests {
             )
             .expect("prepare classic workspaces");
 
-            assert!(workspaces.len() <= rayon::current_num_threads());
+            assert_eq!(workspaces.len(), 2 * rayon::current_num_threads());
             assert_eq!(workspaces.len(), plan.active_workspaces);
         });
     }
@@ -1235,12 +1243,13 @@ mod tests {
 
             let mut fresh_probe = crate::HtCodeBlockDecodeWorkspace::default();
             fresh_probe.reserve(16, 64).unwrap();
-            let fresh_cap = core::mem::size_of::<super::HtTaskWorkspace>()
-                + fresh_probe.allocated_bytes().unwrap();
+            let fresh_cap = 2
+                * (core::mem::size_of::<super::HtTaskWorkspace>()
+                    + fresh_probe.allocated_bytes().unwrap());
             assert!(old_bytes <= fresh_cap);
             let mut retry_budget =
                 DecodeAllocationBudget::from_live_bytes_with_cap(old_bytes, fresh_cap).unwrap();
-            let (_, growths) = prepare_ht_task_workspaces(
+            let (plan, growths) = prepare_ht_task_workspaces(
                 &ht_pending(&[(16, 64); 4]),
                 &mut workspaces,
                 &mut structural,
@@ -1248,7 +1257,9 @@ mod tests {
             )
             .expect("evicting the orthogonal retained shape lets the fresh bank fit");
 
-            assert_eq!(growths, 1);
+            assert_eq!(plan.active_workspaces, 2);
+            assert_eq!(growths, 2);
+            assert_eq!(workspaces.len(), 2);
             assert_eq!(
                 (workspaces[0].prepared_width, workspaces[0].prepared_height),
                 (16, 64)

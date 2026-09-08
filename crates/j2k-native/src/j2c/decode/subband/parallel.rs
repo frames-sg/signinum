@@ -6,6 +6,7 @@ use super::pending::{PendingClassicBlock, PendingHtBlock};
 use super::{DecodeAllocationBudget, DecompositionStorage, SubBand};
 use crate::error::{bail, DecodingError, Result, ValidationError};
 use crate::j2c::bitplane::classic_decode_workspace_bytes;
+use crate::j2c::decode::workspace::{ht_task_workspace_bytes, HtTaskWorkspace};
 use crate::j2c::ht_block_decode::ht_decode_workspace_bytes;
 use crate::scalar::{
     decode_ht_code_block_scalar_with_workspace_midpoint,
@@ -19,6 +20,25 @@ use crate::{
 };
 use alloc::vec::Vec;
 use rayon::prelude::*;
+
+const PARALLEL_TASKS_PER_WORKER: usize = 2;
+
+#[derive(Clone, Copy)]
+struct PreparedTaskPlan {
+    active_workspaces: usize,
+    large_jobs: usize,
+    large_chunk_size: usize,
+    small_chunk_size: usize,
+}
+
+impl PreparedTaskPlan {
+    fn chunks<'a, T>(&self, values: &'a [T]) -> impl Iterator<Item = &'a [T]> {
+        let (large, small) = values.split_at(self.large_jobs);
+        large
+            .chunks(self.large_chunk_size)
+            .chain(small.chunks(self.small_chunk_size))
+    }
+}
 
 pub(crate) struct DecodedClassicBlock {
     pub(crate) output_x: u32,
@@ -212,43 +232,69 @@ fn preallocate_classic_workspaces(
 pub(super) fn decode_ht_sub_band_blocks_parallel(
     pending_blocks: &[PendingHtBlock],
     parameters: HtParallelParameters,
+    workspaces: &mut Vec<HtTaskWorkspace>,
+    structural_workspace_bytes: &mut usize,
+    #[cfg(test)] maximum_tasks: &mut usize,
+    #[cfg(test)] workspace_growths: &mut usize,
     budget: &mut DecodeAllocationBudget,
 ) -> Result<Vec<DecodedHtBlock>> {
     let mut decoded_blocks = preallocate_ht_outputs(pending_blocks, budget)?;
-    let mut workspaces = preallocate_ht_workspaces(pending_blocks, budget)?;
-    decoded_blocks
-        .par_iter_mut()
-        .zip(pending_blocks.par_iter())
-        .zip(workspaces.par_iter_mut())
-        .try_for_each(|((decoded, pending), workspace)| -> Result<()> {
-            initialize_reserved_coefficients(
-                &mut decoded.coefficients,
-                block_coefficient_count(pending.width, pending.height)?,
-            )?;
-            let decode = if parameters.irreversible_midpoint {
-                decode_ht_code_block_scalar_with_workspace_midpoint
-            } else {
-                decode_ht_code_block_scalar_with_workspace
-            };
-            decode(
-                HtCodeBlockDecodeJob {
-                    data: &pending.combined.data,
-                    cleanup_length: pending.combined.cleanup_length,
-                    refinement_length: pending.combined.refinement_length,
-                    width: pending.width,
-                    height: pending.height,
-                    output_stride: pending.width as usize,
-                    missing_bit_planes: pending.missing_bit_planes,
-                    number_of_coding_passes: pending.number_of_coding_passes,
-                    num_bitplanes: parameters.num_bitplanes,
-                    roi_shift: parameters.roi_shift,
-                    stripe_causal: parameters.stripe_causal,
-                    strict: parameters.strict,
-                    dequantization_step: parameters.dequantization_step,
-                },
-                &mut decoded.coefficients,
-                workspace,
-            )
+    let (plan, growths) = prepare_ht_task_workspaces(
+        pending_blocks,
+        workspaces,
+        structural_workspace_bytes,
+        budget,
+    )?;
+    #[cfg(test)]
+    {
+        *maximum_tasks = (*maximum_tasks).max(plan.active_workspaces);
+        *workspace_growths = workspace_growths.saturating_add(growths);
+    }
+    #[cfg(not(test))]
+    let _ = growths;
+    let (large_decoded, small_decoded) = decoded_blocks.split_at_mut(plan.large_jobs);
+    let (large_pending, small_pending) = pending_blocks.split_at(plan.large_jobs);
+    large_decoded
+        .par_chunks_mut(plan.large_chunk_size)
+        .zip(large_pending.par_chunks(plan.large_chunk_size))
+        .chain(
+            small_decoded
+                .par_chunks_mut(plan.small_chunk_size)
+                .zip(small_pending.par_chunks(plan.small_chunk_size)),
+        )
+        .zip(workspaces[..plan.active_workspaces].par_iter_mut())
+        .try_for_each(|((decoded_chunk, pending_chunk), slot)| -> Result<()> {
+            for (decoded, pending) in decoded_chunk.iter_mut().zip(pending_chunk) {
+                initialize_reserved_coefficients(
+                    &mut decoded.coefficients,
+                    block_coefficient_count(pending.width, pending.height)?,
+                )?;
+                let decode = if parameters.irreversible_midpoint {
+                    decode_ht_code_block_scalar_with_workspace_midpoint
+                } else {
+                    decode_ht_code_block_scalar_with_workspace
+                };
+                decode(
+                    HtCodeBlockDecodeJob {
+                        data: &pending.combined.data,
+                        cleanup_length: pending.combined.cleanup_length,
+                        refinement_length: pending.combined.refinement_length,
+                        width: pending.width,
+                        height: pending.height,
+                        output_stride: pending.width as usize,
+                        missing_bit_planes: pending.missing_bit_planes,
+                        number_of_coding_passes: pending.number_of_coding_passes,
+                        num_bitplanes: parameters.num_bitplanes,
+                        roi_shift: parameters.roi_shift,
+                        stripe_causal: parameters.stripe_causal,
+                        strict: parameters.strict,
+                        dequantization_step: parameters.dequantization_step,
+                    },
+                    &mut decoded.coefficients,
+                    &mut slot.workspace,
+                )?;
+            }
+            Ok(())
         })?;
     Ok(decoded_blocks)
 }
@@ -282,32 +328,298 @@ fn preallocate_ht_outputs(
     Ok(decoded_blocks)
 }
 
-fn preallocate_ht_workspaces(
+fn prepare_ht_task_workspaces(
     pending_blocks: &[PendingHtBlock],
+    workspaces: &mut Vec<HtTaskWorkspace>,
+    structural_workspace_bytes: &mut usize,
     budget: &mut DecodeAllocationBudget,
-) -> Result<Vec<HtCodeBlockDecodeWorkspace>> {
-    let planned_bytes =
-        pending_blocks
-            .iter()
-            .try_fold(0usize, |bytes, pending| -> Result<usize> {
-                bytes
-                    .checked_add(ht_decode_workspace_bytes(pending.width, pending.height)?)
-                    .ok_or_else(|| ValidationError::ImageTooLarge.into())
-            })?;
-    budget.include_bytes(planned_bytes)?;
-    let mut workspaces = Vec::new();
-    budget.reserve_new(&mut workspaces, pending_blocks.len())?;
-    for pending in pending_blocks {
-        let planned = ht_decode_workspace_bytes(pending.width, pending.height)?;
-        let mut workspace = HtCodeBlockDecodeWorkspace::default();
-        workspace.reserve(pending.width, pending.height)?;
-        let actual = workspace.allocated_bytes()?;
-        if actual > planned {
-            budget.include_bytes(actual - planned)?;
+) -> Result<(PreparedTaskPlan, usize)> {
+    let initial_tasks = bounded_parallel_task_count(pending_blocks.len());
+    let mut requested_tasks = initial_tasks;
+    let mut evicted_retained_bank = false;
+    loop {
+        let plan = balanced_task_plan(pending_blocks.len(), requested_tasks)?;
+        match try_prepare_ht_task_workspaces(
+            pending_blocks,
+            plan,
+            workspaces,
+            structural_workspace_bytes,
+            budget,
+        ) {
+            Err(error)
+                if requested_tasks > 1
+                    && matches!(
+                        error,
+                        crate::DecodeError::Validation(ValidationError::ImageTooLarge)
+                    ) =>
+            {
+                requested_tasks = requested_tasks.div_ceil(2);
+            }
+            Err(error)
+                if !evicted_retained_bank
+                    && matches!(
+                        error,
+                        crate::DecodeError::Validation(ValidationError::ImageTooLarge)
+                    )
+                    && !workspaces.is_empty() =>
+            {
+                release_ht_task_bank(workspaces, structural_workspace_bytes, budget)?;
+                requested_tasks = initial_tasks;
+                evicted_retained_bank = true;
+            }
+            result => return result.map(|growths| (plan, growths)),
         }
-        workspaces.push(workspace);
     }
-    Ok(workspaces)
+}
+
+fn bounded_parallel_task_count(job_count: usize) -> usize {
+    // Two tasks per worker preserve bounded workspace ownership while giving Rayon
+    // another ready chunk when code-block decode costs differ.
+    job_count.min(rayon::current_num_threads().saturating_mul(PARALLEL_TASKS_PER_WORKER))
+}
+
+fn balanced_task_plan(job_count: usize, requested_tasks: usize) -> Result<PreparedTaskPlan> {
+    if job_count == 0 {
+        return Ok(PreparedTaskPlan {
+            active_workspaces: 0,
+            large_jobs: 0,
+            large_chunk_size: 1,
+            small_chunk_size: 1,
+        });
+    }
+    if requested_tasks == 0 {
+        return Err(DecodingError::CodeBlockDecodeFailure.into());
+    }
+    let active_workspaces = job_count.min(requested_tasks);
+    let small_chunk_size = job_count / active_workspaces;
+    let large_chunks = job_count % active_workspaces;
+    let large_chunk_size = if large_chunks == 0 {
+        small_chunk_size
+    } else {
+        small_chunk_size
+            .checked_add(1)
+            .ok_or(ValidationError::ImageTooLarge)?
+    };
+    let large_jobs = large_chunks
+        .checked_mul(large_chunk_size)
+        .ok_or(ValidationError::ImageTooLarge)?;
+    Ok(PreparedTaskPlan {
+        active_workspaces,
+        large_jobs,
+        large_chunk_size,
+        small_chunk_size,
+    })
+}
+
+fn release_ht_task_bank(
+    workspaces: &mut Vec<HtTaskWorkspace>,
+    structural_workspace_bytes: &mut usize,
+    budget: &mut DecodeAllocationBudget,
+) -> Result<()> {
+    let released = ht_task_workspace_bytes(workspaces)?;
+    let structural = structural_workspace_bytes
+        .checked_sub(released)
+        .ok_or(ValidationError::ImageTooLarge)?;
+    let mut adjusted = *budget;
+    adjusted.release_bytes(released)?;
+    *workspaces = Vec::new();
+    *structural_workspace_bytes = structural;
+    *budget = adjusted;
+    Ok(())
+}
+
+fn charge_actual_workspace(
+    budget: &mut DecodeAllocationBudget,
+    planned: usize,
+    actual: usize,
+) -> Result<()> {
+    if actual > planned {
+        budget.include_bytes(actual - planned)
+    } else {
+        budget.release_bytes(planned - actual)
+    }
+}
+
+fn updated_structural_bytes(
+    structural_workspace_bytes: usize,
+    old_bank_bytes: usize,
+    new_bank_bytes: usize,
+) -> Result<usize> {
+    structural_workspace_bytes
+        .checked_sub(old_bank_bytes)
+        .and_then(|bytes| bytes.checked_add(new_bank_bytes))
+        .ok_or(ValidationError::ImageTooLarge.into())
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "the staged replacement transaction keeps allocation, rollback, and ledger reconciliation together"
+)]
+fn try_prepare_ht_task_workspaces(
+    pending_blocks: &[PendingHtBlock],
+    plan: PreparedTaskPlan,
+    workspaces: &mut Vec<HtTaskWorkspace>,
+    structural_workspace_bytes: &mut usize,
+    budget: &mut DecodeAllocationBudget,
+) -> Result<usize> {
+    let old_bank_bytes = ht_task_workspace_bytes(workspaces)?;
+    let mut trial = *budget;
+    if workspaces.capacity() < plan.active_workspaces {
+        let mut replacement = Vec::new();
+        trial.reserve_new(&mut replacement, plan.active_workspaces)?;
+        for (index, chunk) in plan.chunks(pending_blocks).enumerate() {
+            let (required_width, required_height) = ht_chunk_dimensions(chunk);
+            let (width, height) =
+                workspaces
+                    .get(index)
+                    .map_or((required_width, required_height), |old| {
+                        (
+                            required_width.max(old.prepared_width),
+                            required_height.max(old.prepared_height),
+                        )
+                    });
+            let planned = ht_decode_workspace_bytes(width, height)?;
+            trial.include_bytes(planned)?;
+            let mut workspace = HtCodeBlockDecodeWorkspace::default();
+            workspace.reserve(width, height)?;
+            charge_actual_workspace(&mut trial, planned, workspace.allocated_bytes()?)?;
+            replacement.push(HtTaskWorkspace {
+                workspace,
+                prepared_width: width,
+                prepared_height: height,
+            });
+        }
+        let new_bank_bytes = ht_task_workspace_bytes(&replacement)?;
+        #[cfg(test)]
+        let growths = {
+            let mut growths = 0usize;
+            for (index, slot) in replacement.iter().enumerate() {
+                let grew = match workspaces.get(index) {
+                    Some(old) => {
+                        slot.workspace.allocated_bytes()? > old.workspace.allocated_bytes()?
+                    }
+                    None => true,
+                };
+                if grew {
+                    growths = growths.saturating_add(1);
+                }
+            }
+            growths
+        };
+        #[cfg(not(test))]
+        let growths = 0;
+        trial.release_bytes(old_bank_bytes)?;
+        let new_structural =
+            updated_structural_bytes(*structural_workspace_bytes, old_bank_bytes, new_bank_bytes)?;
+        *workspaces = replacement;
+        *structural_workspace_bytes = new_structural;
+        *budget = trial;
+        return Ok(growths);
+    }
+
+    let replacement_count = plan
+        .chunks(pending_blocks)
+        .enumerate()
+        .filter(|&(index, chunk)| {
+            let (width, height) = ht_chunk_dimensions(chunk);
+            workspaces
+                .get(index)
+                .is_none_or(|slot| width > slot.prepared_width || height > slot.prepared_height)
+        })
+        .count();
+    if replacement_count == 0 {
+        return Ok(0);
+    }
+
+    let mut replacements = Vec::new();
+    trial.reserve_new(&mut replacements, replacement_count)?;
+    let replacement_metadata_bytes = replacements
+        .capacity()
+        .checked_mul(core::mem::size_of::<(usize, HtTaskWorkspace)>())
+        .ok_or(ValidationError::ImageTooLarge)?;
+    let mut replaced_workspace_bytes = 0usize;
+    #[cfg(test)]
+    let mut growths = 0usize;
+    for (index, chunk) in plan.chunks(pending_blocks).enumerate() {
+        let (required_width, required_height) = ht_chunk_dimensions(chunk);
+        if workspaces.get(index).is_some_and(|slot| {
+            required_width <= slot.prepared_width && required_height <= slot.prepared_height
+        }) {
+            continue;
+        }
+        let (width, height) =
+            workspaces
+                .get(index)
+                .map_or((required_width, required_height), |old| {
+                    (
+                        required_width.max(old.prepared_width),
+                        required_height.max(old.prepared_height),
+                    )
+                });
+        let planned = ht_decode_workspace_bytes(width, height)?;
+        trial.include_bytes(planned)?;
+        let mut workspace = HtCodeBlockDecodeWorkspace::default();
+        workspace.reserve(width, height)?;
+        charge_actual_workspace(&mut trial, planned, workspace.allocated_bytes()?)?;
+        if let Some(old) = workspaces.get(index) {
+            #[cfg(test)]
+            if workspace.allocated_bytes()? > old.workspace.allocated_bytes()? {
+                growths = growths.saturating_add(1);
+            }
+            replaced_workspace_bytes = replaced_workspace_bytes
+                .checked_add(old.workspace.allocated_bytes()?)
+                .ok_or(ValidationError::ImageTooLarge)?;
+        } else {
+            #[cfg(test)]
+            {
+                growths = growths.saturating_add(1);
+            }
+        }
+        replacements.push((
+            index,
+            HtTaskWorkspace {
+                workspace,
+                prepared_width: width,
+                prepared_height: height,
+            },
+        ));
+    }
+    let added_workspace_bytes =
+        replacements
+            .iter()
+            .try_fold(0usize, |bytes, (_, slot)| -> Result<usize> {
+                bytes
+                    .checked_add(slot.workspace.allocated_bytes()?)
+                    .ok_or(ValidationError::ImageTooLarge.into())
+            })?;
+    let new_bank_bytes = old_bank_bytes
+        .checked_sub(replaced_workspace_bytes)
+        .and_then(|bytes| bytes.checked_add(added_workspace_bytes))
+        .ok_or(ValidationError::ImageTooLarge)?;
+    let new_structural =
+        updated_structural_bytes(*structural_workspace_bytes, old_bank_bytes, new_bank_bytes)?;
+    trial.release_bytes(replaced_workspace_bytes)?;
+    trial.release_bytes(replacement_metadata_bytes)?;
+    for (index, replacement) in replacements {
+        if let Some(slot) = workspaces.get_mut(index) {
+            *slot = replacement;
+        } else {
+            workspaces.push(replacement);
+        }
+    }
+    *structural_workspace_bytes = new_structural;
+    *budget = trial;
+    #[cfg(test)]
+    let result = growths;
+    #[cfg(not(test))]
+    let result = 0;
+    Ok(result)
+}
+
+fn ht_chunk_dimensions(chunk: &[PendingHtBlock]) -> (u32, u32) {
+    chunk.iter().fold((0, 0), |(width, height), pending| {
+        (width.max(pending.width), height.max(pending.height))
+    })
 }
 
 fn initialize_reserved_coefficients(coefficients: &mut Vec<f32>, len: usize) -> Result<()> {
@@ -393,10 +705,287 @@ fn copy_decoded_blocks_to_sub_band<B: DecodedSubBandBlock>(
 
 #[cfg(test)]
 mod tests {
-    use super::{initialize_reserved_coefficients, pending_coefficient_count};
+    use super::{
+        balanced_task_plan, decode_ht_sub_band_blocks_parallel,
+        initialize_reserved_coefficients, pending_coefficient_count, prepare_ht_task_workspaces,
+        try_prepare_ht_task_workspaces, HtParallelParameters,
+    };
     use crate::error::{DecodeError, ValidationError};
+    use crate::j2c::decode::subband::pending::PendingHtBlock;
+    use crate::j2c::decode::DecodeAllocationBudget;
+    use crate::j2c::ht_block_decode::CombinedCodeBlockData;
     use crate::try_reserve_decode_elements;
     use alloc::vec::Vec;
+    use rayon::ThreadPoolBuilder;
+
+    fn ht_pending(dimensions: &[(u32, u32)]) -> Vec<PendingHtBlock> {
+        dimensions
+            .iter()
+            .map(|&(width, height)| PendingHtBlock {
+                combined: CombinedCodeBlockData {
+                    data: Vec::new(),
+                    cleanup_length: 0,
+                    refinement_length: 0,
+                },
+                output_x: 0,
+                output_y: 0,
+                width,
+                height,
+                missing_bit_planes: 0,
+                number_of_coding_passes: 0,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn balanced_task_plans_preserve_exact_task_counts_and_input_order() {
+        for (job_count, requested_tasks, expected_lengths) in [
+            (16, 12, &[2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1][..]),
+            (13, 12, &[2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1][..]),
+            (12, 4, &[3, 3, 3, 3][..]),
+            (3, 12, &[1, 1, 1][..]),
+            (0, 12, &[][..]),
+        ] {
+            let values: Vec<_> = (0..job_count).collect();
+            let plan = balanced_task_plan(job_count, requested_tasks).unwrap();
+            let chunks: Vec<_> = plan.chunks(&values).collect();
+
+            assert_eq!(plan.active_workspaces, expected_lengths.len());
+            assert_eq!(
+                chunks.iter().map(|chunk| chunk.len()).collect::<Vec<_>>(),
+                expected_lengths
+            );
+            assert_eq!(
+                chunks.into_iter().flatten().copied().collect::<Vec<_>>(),
+                values
+            );
+        }
+    }
+
+    #[test]
+    fn ht_parallel_workspace_count_is_bounded_by_workers_and_jobs() {
+        let pool = ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+        pool.install(|| {
+            for (job_count, expected) in [(8, 4), (2, 2)] {
+                let pending = ht_pending(&vec![(32, 32); job_count]);
+                let mut budget = DecodeAllocationBudget::from_live_bytes(0).unwrap();
+                let mut workspaces = Vec::new();
+                let mut structural = 0;
+                let (plan, _) = prepare_ht_task_workspaces(
+                    &pending,
+                    &mut workspaces,
+                    &mut structural,
+                    &mut budget,
+                )
+                .unwrap();
+
+                assert_eq!(plan.active_workspaces, expected);
+                assert_eq!(workspaces.len(), expected);
+            }
+        });
+    }
+
+    #[test]
+    fn ht_capacity_retry_uses_actual_capacity_and_an_unpoisoned_budget() {
+        let pool = ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+        pool.install(|| {
+            let pending = ht_pending(&[(32, 32); 8]);
+            let mut workspace = crate::HtCodeBlockDecodeWorkspace::default();
+            workspace.reserve(32, 32).unwrap();
+            let workspace_bytes = workspace.allocated_bytes().unwrap();
+            let mut metadata = Vec::<super::HtTaskWorkspace>::new();
+            try_reserve_decode_elements(&mut metadata, 1).unwrap();
+            let one_task_cap = metadata.capacity() * core::mem::size_of::<super::HtTaskWorkspace>()
+                + workspace_bytes;
+            let mut budget =
+                DecodeAllocationBudget::from_live_bytes_with_cap(0, one_task_cap).unwrap();
+            let mut workspaces = Vec::new();
+            let mut structural = 0;
+
+            let (plan, growths) = prepare_ht_task_workspaces(
+                &pending,
+                &mut workspaces,
+                &mut structural,
+                &mut budget,
+            )
+            .expect("one HT task fits after larger task plans exceed the cap");
+
+            assert_eq!(plan.active_workspaces, 1);
+            assert_eq!(growths, 1);
+            assert_eq!(workspaces.len(), 1);
+            assert_eq!(super::ht_task_workspace_bytes(&workspaces).unwrap(), structural);
+            assert_eq!(budget.live_bytes(), structural);
+            assert_eq!(structural, one_task_cap);
+        });
+    }
+
+    #[test]
+    fn ht_mixed_shapes_grow_componentwise_then_reuse_warm_reservations() {
+        let pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+        pool.install(|| {
+            let mut workspaces = Vec::new();
+            let mut structural = 0;
+            for (dimensions, expect_growth) in [
+                ([(64, 32); 4], true),
+                ([(32, 64); 4], true),
+                ([(64, 32); 4], false),
+            ] {
+                let mut budget = DecodeAllocationBudget::from_live_bytes(structural).unwrap();
+                let (_, growths) = prepare_ht_task_workspaces(
+                    &ht_pending(&dimensions),
+                    &mut workspaces,
+                    &mut structural,
+                    &mut budget,
+                )
+                .unwrap();
+                assert_eq!(growths != 0, expect_growth);
+                let bytes_before_decode = super::ht_task_workspace_bytes(&workspaces).unwrap();
+                for slot in &mut workspaces {
+                    for &(width, height) in &dimensions {
+                        slot.workspace.prepare(width, height).unwrap();
+                    }
+                }
+                assert_eq!(
+                    super::ht_task_workspace_bytes(&workspaces).unwrap(),
+                    bytes_before_decode
+                );
+            }
+            assert!(workspaces.iter().all(|slot| {
+                (slot.prepared_width, slot.prepared_height) == (64, 64)
+            }));
+        });
+    }
+
+    #[test]
+    fn ht_failed_growth_rolls_back_then_retry_evicts_and_rebuilds_exactly() {
+        let pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+        pool.install(|| {
+            let mut workspaces = Vec::new();
+            let mut structural = 0;
+            let mut initial_budget = DecodeAllocationBudget::from_live_bytes(0).unwrap();
+            prepare_ht_task_workspaces(
+                &ht_pending(&[(64, 16); 4]),
+                &mut workspaces,
+                &mut structural,
+                &mut initial_budget,
+            )
+            .unwrap();
+            let old_bytes = structural;
+            let old_dimensions = workspaces
+                .iter()
+                .map(|slot| (slot.prepared_width, slot.prepared_height))
+                .collect::<Vec<_>>();
+            let plan = balanced_task_plan(4, 1).unwrap();
+            let mut rollback_budget =
+                DecodeAllocationBudget::from_live_bytes_with_cap(old_bytes, old_bytes).unwrap();
+
+            try_prepare_ht_task_workspaces(
+                &ht_pending(&[(16, 64); 4]),
+                plan,
+                &mut workspaces,
+                &mut structural,
+                &mut rollback_budget,
+            )
+            .expect_err("replacement peak exceeds the retained-bank cap");
+            assert_eq!(structural, old_bytes);
+            assert_eq!(rollback_budget.live_bytes(), old_bytes);
+            assert_eq!(
+                workspaces
+                    .iter()
+                    .map(|slot| (slot.prepared_width, slot.prepared_height))
+                    .collect::<Vec<_>>(),
+                old_dimensions
+            );
+
+            let mut fresh_workspace = crate::HtCodeBlockDecodeWorkspace::default();
+            fresh_workspace.reserve(16, 64).unwrap();
+            let mut fresh_metadata = Vec::<super::HtTaskWorkspace>::new();
+            try_reserve_decode_elements(&mut fresh_metadata, 2).unwrap();
+            let fresh_cap = fresh_metadata.capacity()
+                * core::mem::size_of::<super::HtTaskWorkspace>()
+                + 2 * fresh_workspace.allocated_bytes().unwrap();
+            assert!(old_bytes <= fresh_cap);
+            let mut retry_budget =
+                DecodeAllocationBudget::from_live_bytes_with_cap(old_bytes, fresh_cap).unwrap();
+            let (plan, growths) = prepare_ht_task_workspaces(
+                &ht_pending(&[(16, 64); 4]),
+                &mut workspaces,
+                &mut structural,
+                &mut retry_budget,
+            )
+            .expect("evicting the retained bank lets the fresh shape fit");
+
+            assert_eq!(plan.active_workspaces, 2);
+            assert_eq!(growths, 2);
+            assert_eq!(workspaces.len(), 2);
+            assert!(workspaces.iter().all(|slot| {
+                (slot.prepared_width, slot.prepared_height) == (16, 64)
+            }));
+            assert_eq!(super::ht_task_workspace_bytes(&workspaces).unwrap(), fresh_cap);
+            assert_eq!(structural, fresh_cap);
+            assert_eq!(retry_budget.live_bytes(), fresh_cap);
+        });
+    }
+
+    #[test]
+    fn ht_entropy_error_leaves_workspace_bank_reusable_for_valid_blocks() {
+        let pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+        pool.install(|| {
+            let parameters = HtParallelParameters {
+                strict: true,
+                num_bitplanes: 1,
+                roi_shift: 0,
+                stripe_causal: false,
+                dequantization_step: 1.0,
+                irreversible_midpoint: false,
+            };
+            let mut malformed = ht_pending(&[(16, 16); 4]);
+            for pending in &mut malformed {
+                pending.combined.cleanup_length = 1;
+                pending.number_of_coding_passes = 1;
+            }
+            let mut workspaces = Vec::new();
+            let mut structural = 0;
+            let mut maximum_tasks = 0;
+            let mut workspace_growths = 0;
+            let mut malformed_budget = DecodeAllocationBudget::from_live_bytes(0).unwrap();
+
+            let malformed_result = decode_ht_sub_band_blocks_parallel(
+                &malformed,
+                parameters,
+                &mut workspaces,
+                &mut structural,
+                &mut maximum_tasks,
+                &mut workspace_growths,
+                &mut malformed_budget,
+            );
+            assert!(
+                malformed_result.is_err(),
+                "truncated cleanup payload must fail after workspace activation"
+            );
+            let retained = super::ht_task_workspace_bytes(&workspaces).unwrap();
+            assert_eq!(retained, structural);
+
+            let mut valid_budget = DecodeAllocationBudget::from_live_bytes(structural).unwrap();
+            workspace_growths = 0;
+            let decoded = decode_ht_sub_band_blocks_parallel(
+                &ht_pending(&[(16, 16); 4]),
+                parameters,
+                &mut workspaces,
+                &mut structural,
+                &mut maximum_tasks,
+                &mut workspace_growths,
+                &mut valid_budget,
+            )
+            .expect("zero-pass blocks decode after the entropy error");
+
+            assert_eq!(workspace_growths, 0);
+            assert_eq!(super::ht_task_workspace_bytes(&workspaces).unwrap(), retained);
+            assert!(decoded
+                .iter()
+                .all(|block| block.coefficients.iter().all(|&value| value == 0.0)));
+        });
+    }
 
     #[test]
     fn coefficient_total_rejects_overflow_before_output_allocation() {

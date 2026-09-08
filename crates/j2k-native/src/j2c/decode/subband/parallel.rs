@@ -706,9 +706,9 @@ fn copy_decoded_blocks_to_sub_band<B: DecodedSubBandBlock>(
 #[cfg(test)]
 mod tests {
     use super::{
-        balanced_task_plan, decode_ht_sub_band_blocks_parallel,
-        initialize_reserved_coefficients, pending_coefficient_count, prepare_ht_task_workspaces,
-        try_prepare_ht_task_workspaces, HtParallelParameters,
+        balanced_task_plan, decode_ht_sub_band_blocks_parallel, initialize_reserved_coefficients,
+        pending_coefficient_count, prepare_ht_task_workspaces, try_prepare_ht_task_workspaces,
+        HtParallelParameters,
     };
     use crate::error::{DecodeError, ValidationError};
     use crate::j2c::decode::subband::pending::PendingHtBlock;
@@ -802,18 +802,17 @@ mod tests {
             let mut workspaces = Vec::new();
             let mut structural = 0;
 
-            let (plan, growths) = prepare_ht_task_workspaces(
-                &pending,
-                &mut workspaces,
-                &mut structural,
-                &mut budget,
-            )
-            .expect("one HT task fits after larger task plans exceed the cap");
+            let (plan, growths) =
+                prepare_ht_task_workspaces(&pending, &mut workspaces, &mut structural, &mut budget)
+                    .expect("one HT task fits after larger task plans exceed the cap");
 
             assert_eq!(plan.active_workspaces, 1);
             assert_eq!(growths, 1);
             assert_eq!(workspaces.len(), 1);
-            assert_eq!(super::ht_task_workspace_bytes(&workspaces).unwrap(), structural);
+            assert_eq!(
+                super::ht_task_workspace_bytes(&workspaces).unwrap(),
+                structural
+            );
             assert_eq!(budget.live_bytes(), structural);
             assert_eq!(structural, one_task_cap);
         });
@@ -850,9 +849,9 @@ mod tests {
                     bytes_before_decode
                 );
             }
-            assert!(workspaces.iter().all(|slot| {
-                (slot.prepared_width, slot.prepared_height) == (64, 64)
-            }));
+            assert!(workspaces
+                .iter()
+                .all(|slot| { (slot.prepared_width, slot.prepared_height) == (64, 64) }));
         });
     }
 
@@ -918,10 +917,13 @@ mod tests {
             assert_eq!(plan.active_workspaces, 2);
             assert_eq!(growths, 2);
             assert_eq!(workspaces.len(), 2);
-            assert!(workspaces.iter().all(|slot| {
-                (slot.prepared_width, slot.prepared_height) == (16, 64)
-            }));
-            assert_eq!(super::ht_task_workspace_bytes(&workspaces).unwrap(), fresh_cap);
+            assert!(workspaces
+                .iter()
+                .all(|slot| { (slot.prepared_width, slot.prepared_height) == (16, 64) }));
+            assert_eq!(
+                super::ht_task_workspace_bytes(&workspaces).unwrap(),
+                fresh_cap
+            );
             assert_eq!(structural, fresh_cap);
             assert_eq!(retry_budget.live_bytes(), fresh_cap);
         });
@@ -980,7 +982,10 @@ mod tests {
             .expect("zero-pass blocks decode after the entropy error");
 
             assert_eq!(workspace_growths, 0);
-            assert_eq!(super::ht_task_workspace_bytes(&workspaces).unwrap(), retained);
+            assert_eq!(
+                super::ht_task_workspace_bytes(&workspaces).unwrap(),
+                retained
+            );
             assert!(decoded
                 .iter()
                 .all(|block| block.coefficients.iter().all(|&value| value == 0.0)));

@@ -25,8 +25,19 @@ use rayon::prelude::*;
 
 #[derive(Clone, Copy)]
 struct PreparedTaskPlan {
-    chunk_size: usize,
     active_workspaces: usize,
+    large_jobs: usize,
+    large_chunk_size: usize,
+    small_chunk_size: usize,
+}
+
+impl PreparedTaskPlan {
+    fn chunks<'a, T>(&self, values: &'a [T]) -> impl Iterator<Item = &'a [T]> {
+        let (large, small) = values.split_at(self.large_jobs);
+        large
+            .chunks(self.large_chunk_size)
+            .chain(small.chunks(self.small_chunk_size))
+    }
 }
 
 pub(crate) struct DecodedClassicBlock {
@@ -141,9 +152,16 @@ pub(super) fn decode_classic_sub_band_blocks_parallel(
     }
     #[cfg(not(test))]
     let _ = growths;
-    decoded_blocks
-        .par_chunks_mut(plan.chunk_size)
-        .zip(pending_blocks.par_chunks(plan.chunk_size))
+    let (large_decoded, small_decoded) = decoded_blocks.split_at_mut(plan.large_jobs);
+    let (large_pending, small_pending) = pending_blocks.split_at(plan.large_jobs);
+    large_decoded
+        .par_chunks_mut(plan.large_chunk_size)
+        .zip(large_pending.par_chunks(plan.large_chunk_size))
+        .chain(
+            small_decoded
+                .par_chunks_mut(plan.small_chunk_size)
+                .zip(small_pending.par_chunks(plan.small_chunk_size)),
+        )
         .zip(workspaces[..plan.active_workspaces].par_iter_mut())
         .try_for_each(|((decoded_chunk, pending_chunk), slot)| -> Result<()> {
             for (decoded, pending) in decoded_chunk.iter_mut().zip(pending_chunk) {
@@ -216,7 +234,7 @@ fn prepare_classic_task_workspaces(
     let mut requested_tasks = initial_tasks;
     let mut evicted_retained_bank = false;
     loop {
-        let plan = uniform_task_plan(pending_blocks.len(), requested_tasks)?;
+        let plan = balanced_task_plan(pending_blocks.len(), requested_tasks)?;
         match try_prepare_classic_task_workspaces(
             pending_blocks,
             plan,
@@ -273,9 +291,16 @@ pub(super) fn decode_ht_sub_band_blocks_parallel(
     }
     #[cfg(not(test))]
     let _ = growths;
-    decoded_blocks
-        .par_chunks_mut(plan.chunk_size)
-        .zip(pending_blocks.par_chunks(plan.chunk_size))
+    let (large_decoded, small_decoded) = decoded_blocks.split_at_mut(plan.large_jobs);
+    let (large_pending, small_pending) = pending_blocks.split_at(plan.large_jobs);
+    large_decoded
+        .par_chunks_mut(plan.large_chunk_size)
+        .zip(large_pending.par_chunks(plan.large_chunk_size))
+        .chain(
+            small_decoded
+                .par_chunks_mut(plan.small_chunk_size)
+                .zip(small_pending.par_chunks(plan.small_chunk_size)),
+        )
         .zip(workspaces[..plan.active_workspaces].par_iter_mut())
         .try_for_each(|((decoded_chunk, pending_chunk), slot)| -> Result<()> {
             for (decoded, pending) in decoded_chunk.iter_mut().zip(pending_chunk) {
@@ -352,7 +377,7 @@ fn prepare_ht_task_workspaces(
     let mut requested_tasks = initial_tasks;
     let mut evicted_retained_bank = false;
     loop {
-        let plan = uniform_task_plan(pending_blocks.len(), requested_tasks)?;
+        let plan = balanced_task_plan(pending_blocks.len(), requested_tasks)?;
         match try_prepare_ht_task_workspaces(
             pending_blocks,
             plan,
@@ -386,20 +411,36 @@ fn prepare_ht_task_workspaces(
     }
 }
 
-fn uniform_task_plan(job_count: usize, requested_tasks: usize) -> Result<PreparedTaskPlan> {
+fn balanced_task_plan(job_count: usize, requested_tasks: usize) -> Result<PreparedTaskPlan> {
     if job_count == 0 {
         return Ok(PreparedTaskPlan {
-            chunk_size: 1,
             active_workspaces: 0,
+            large_jobs: 0,
+            large_chunk_size: 1,
+            small_chunk_size: 1,
         });
     }
     if requested_tasks == 0 {
         return Err(DecodingError::CodeBlockDecodeFailure.into());
     }
-    let chunk_size = job_count.div_ceil(requested_tasks);
+    let active_workspaces = job_count.min(requested_tasks);
+    let small_chunk_size = job_count / active_workspaces;
+    let large_chunks = job_count % active_workspaces;
+    let large_chunk_size = if large_chunks == 0 {
+        small_chunk_size
+    } else {
+        small_chunk_size
+            .checked_add(1)
+            .ok_or(ValidationError::ImageTooLarge)?
+    };
+    let large_jobs = large_chunks
+        .checked_mul(large_chunk_size)
+        .ok_or(ValidationError::ImageTooLarge)?;
     Ok(PreparedTaskPlan {
-        chunk_size,
-        active_workspaces: job_count.div_ceil(chunk_size),
+        active_workspaces,
+        large_jobs,
+        large_chunk_size,
+        small_chunk_size,
     })
 }
 
@@ -476,7 +517,7 @@ fn try_prepare_classic_task_workspaces(
     if workspaces.capacity() < plan.active_workspaces {
         let mut replacement = Vec::new();
         trial.reserve_new(&mut replacement, plan.active_workspaces)?;
-        for (index, chunk) in pending_blocks.chunks(plan.chunk_size).enumerate() {
+        for (index, chunk) in plan.chunks(pending_blocks).enumerate() {
             let (required_width, required_height) = classic_chunk_dimensions(chunk);
             let (width, height) =
                 workspaces
@@ -526,8 +567,8 @@ fn try_prepare_classic_task_workspaces(
         return Ok(growths);
     }
 
-    let replacement_count = pending_blocks
-        .chunks(plan.chunk_size)
+    let replacement_count = plan
+        .chunks(pending_blocks)
         .enumerate()
         .filter(|&(index, chunk)| {
             let (width, height) = classic_chunk_dimensions(chunk);
@@ -549,7 +590,7 @@ fn try_prepare_classic_task_workspaces(
     let mut replaced_workspace_bytes = 0usize;
     #[cfg(test)]
     let mut growths = 0usize;
-    for (index, chunk) in pending_blocks.chunks(plan.chunk_size).enumerate() {
+    for (index, chunk) in plan.chunks(pending_blocks).enumerate() {
         let (required_width, required_height) = classic_chunk_dimensions(chunk);
         if workspaces.get(index).is_some_and(|slot| {
             required_width <= slot.prepared_width && required_height <= slot.prepared_height
@@ -641,7 +682,7 @@ fn try_prepare_ht_task_workspaces(
     if workspaces.capacity() < plan.active_workspaces {
         let mut replacement = Vec::new();
         trial.reserve_new(&mut replacement, plan.active_workspaces)?;
-        for (index, chunk) in pending_blocks.chunks(plan.chunk_size).enumerate() {
+        for (index, chunk) in plan.chunks(pending_blocks).enumerate() {
             let (required_width, required_height) = ht_chunk_dimensions(chunk);
             let (width, height) =
                 workspaces
@@ -691,8 +732,8 @@ fn try_prepare_ht_task_workspaces(
         return Ok(growths);
     }
 
-    let replacement_count = pending_blocks
-        .chunks(plan.chunk_size)
+    let replacement_count = plan
+        .chunks(pending_blocks)
         .enumerate()
         .filter(|&(index, chunk)| {
             let (width, height) = ht_chunk_dimensions(chunk);
@@ -714,7 +755,7 @@ fn try_prepare_ht_task_workspaces(
     let mut replaced_workspace_bytes = 0usize;
     #[cfg(test)]
     let mut growths = 0usize;
-    for (index, chunk) in pending_blocks.chunks(plan.chunk_size).enumerate() {
+    for (index, chunk) in plan.chunks(pending_blocks).enumerate() {
         let (required_width, required_height) = ht_chunk_dimensions(chunk);
         if workspaces.get(index).is_some_and(|slot| {
             required_width <= slot.prepared_width && required_height <= slot.prepared_height
@@ -886,9 +927,10 @@ fn copy_decoded_blocks_to_sub_band<B: DecodedSubBandBlock>(
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_classic_sub_band_blocks_parallel, initialize_reserved_coefficients,
-        pending_coefficient_count, prepare_classic_task_workspaces, prepare_ht_task_workspaces,
-        try_prepare_classic_task_workspaces, try_prepare_ht_task_workspaces, uniform_task_plan,
+        balanced_task_plan, decode_classic_sub_band_blocks_parallel,
+        initialize_reserved_coefficients, pending_coefficient_count,
+        prepare_classic_task_workspaces, prepare_ht_task_workspaces,
+        try_prepare_classic_task_workspaces, try_prepare_ht_task_workspaces,
         ClassicParallelParameters,
     };
     use crate::error::{DecodeError, ValidationError};
@@ -958,6 +1000,31 @@ mod tests {
             assert!(workspaces.len() <= rayon::current_num_threads());
             assert_eq!(workspaces.len(), plan.active_workspaces);
         });
+    }
+
+    #[test]
+    fn balanced_task_plans_preserve_exact_task_counts_and_input_order() {
+        for (job_count, requested_tasks, expected_lengths) in [
+            (16, 12, &[2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1][..]),
+            (13, 12, &[2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1][..]),
+            (12, 4, &[3, 3, 3, 3][..]),
+            (3, 12, &[1, 1, 1][..]),
+            (0, 12, &[][..]),
+        ] {
+            let values: Vec<_> = (0..job_count).collect();
+            let plan = balanced_task_plan(job_count, requested_tasks).unwrap();
+            let chunks: Vec<_> = plan.chunks(&values).collect();
+
+            assert_eq!(plan.active_workspaces, expected_lengths.len());
+            assert_eq!(
+                chunks.iter().map(|chunk| chunk.len()).collect::<Vec<_>>(),
+                expected_lengths
+            );
+            assert_eq!(
+                chunks.into_iter().flatten().copied().collect::<Vec<_>>(),
+                values
+            );
+        }
     }
 
     #[test]
@@ -1112,7 +1179,7 @@ mod tests {
             let old_dimensions = (workspaces[0].prepared_width, workspaces[0].prepared_height);
             let mut tight_budget =
                 DecodeAllocationBudget::from_live_bytes_with_cap(old_bytes, old_bytes).unwrap();
-            let plan = uniform_task_plan(4, 1).unwrap();
+            let plan = balanced_task_plan(4, 1).unwrap();
 
             try_prepare_classic_task_workspaces(
                 &classic_pending(&[(64, 64); 4]),
@@ -1148,7 +1215,7 @@ mod tests {
             .unwrap();
             let old_bytes = structural;
             let old_dimensions = (workspaces[0].prepared_width, workspaces[0].prepared_height);
-            let plan = uniform_task_plan(4, 1).unwrap();
+            let plan = balanced_task_plan(4, 1).unwrap();
             let mut rollback_budget =
                 DecodeAllocationBudget::from_live_bytes_with_cap(old_bytes, old_bytes).unwrap();
             try_prepare_ht_task_workspaces(

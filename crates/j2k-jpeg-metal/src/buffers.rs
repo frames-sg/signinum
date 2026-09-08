@@ -352,7 +352,7 @@ mod tests {
                 &device,
                 "direct entropy staging limit test",
                 requested,
-                std::iter::empty(),
+                std::iter::empty::<&[u8]>(),
             )
             .expect_err("oversized staging must fail");
 
@@ -498,16 +498,21 @@ impl MetalBatchScratch {
         Ok(buffer)
     }
 
-    pub(crate) fn shared_buffer_with_byte_slices<'a>(
+    pub(crate) fn shared_buffer_with_byte_slices<I>(
         &mut self,
         device: &DeviceRef,
         key: &'static str,
         total_bytes: usize,
-        slices: impl IntoIterator<Item = &'a [u8]>,
-    ) -> Result<Buffer, Error> {
+        slices: I,
+    ) -> Result<Buffer, Error>
+    where
+        I: IntoIterator,
+        I::Item: AsRef<[u8]>,
+    {
         let buffer = self.shared_buffer(device, key, total_bytes)?;
         let mut offset = 0_usize;
-        for bytes in slices {
+        for chunk in slices {
+            let bytes = chunk.as_ref();
             let end = offset
                 .checked_add(bytes.len())
                 .ok_or_else(|| Error::MetalKernel {
@@ -539,7 +544,7 @@ impl MetalBatchScratch {
 
     /// Retain CPU-initialized, GPU-read-only bytes for this exclusive scratch lease.
     /// Callers must not write through returned buffers or bind them as GPU outputs.
-    pub(crate) fn shared_immutable_buffer_with_byte_slices<'a, I>(
+    pub(crate) fn shared_immutable_buffer_with_byte_slices<I>(
         &mut self,
         device: &DeviceRef,
         key: &'static str,
@@ -547,12 +552,13 @@ impl MetalBatchScratch {
         slices: I,
     ) -> Result<Buffer, Error>
     where
-        I: IntoIterator<Item = &'a [u8]>,
+        I: IntoIterator,
+        I::Item: AsRef<[u8]>,
         I::IntoIter: Clone,
     {
         let slices = slices.into_iter();
-        let actual = slices.clone().try_fold(0_usize, |len, bytes| {
-            len.checked_add(bytes.len())
+        let actual = slices.clone().try_fold(0_usize, |len, chunk| {
+            len.checked_add(chunk.as_ref().len())
                 .ok_or_else(|| Error::MetalKernel {
                     message: "JPEG Metal shared scratch staging length overflowed".to_string(),
                 })
@@ -586,7 +592,8 @@ impl MetalBatchScratch {
                     )
                 };
                 let mut offset = 0;
-                slices.clone().all(|bytes| {
+                slices.clone().all(|chunk| {
+                    let bytes = chunk.as_ref();
                     let end = offset + bytes.len();
                     let equal = retained[offset..end] == *bytes;
                     offset = end;

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use crate::{
-    buffers::{checked_copy_bytes_to_buffer_at, MetalBatchScratch},
+    buffers::MetalBatchScratch,
     metal_types::{Buffer, DeviceRef},
     Error,
 };
@@ -52,24 +52,85 @@ pub(in crate::compute) fn packet_buffers(
         checkpoint_bytes,
         "JPEG Metal entropy checkpoint upload bytes",
     )?;
-    let checkpoint_buffer =
-        scratch.shared_buffer(device, "single_decode_checkpoints", total_checkpoint_bytes)?;
-    for (index, checkpoint) in checkpoints.iter().copied().enumerate() {
-        let checkpoint = JpegEntropyCheckpointHost::from(checkpoint);
-        checked_copy_bytes_to_buffer_at(
-            &checkpoint_buffer,
-            index * checkpoint_bytes,
-            JpegEntropyCheckpointHost::as_bytes(&checkpoint),
-            "upload JPEG Metal entropy checkpoint",
-        )?;
-    }
+    let checkpoint_buffer = scratch.shared_immutable_buffer_with_byte_slices(
+        device,
+        "single_decode_checkpoints",
+        total_checkpoint_bytes,
+        checkpoints
+            .iter()
+            .copied()
+            .map(|checkpoint| CheckpointBytes(checkpoint.into())),
+    )?;
     Ok(ScratchPacketBuffers {
-        entropy: scratch.shared_buffer_with_bytes(device, "single_decode_entropy", entropy)?,
-        restart_offsets: scratch.shared_buffer_with_slice(
+        entropy: scratch.shared_immutable_buffer_with_byte_slices(
+            device,
+            "single_decode_entropy",
+            entropy.len(),
+            [entropy],
+        )?,
+        restart_offsets: scratch.shared_immutable_buffer_with_slice(
             device,
             "single_decode_restart_offsets",
             restart_offsets,
         )?,
         checkpoints: checkpoint_buffer,
     })
+}
+
+// Convert each ABI checkpoint on the stack while replaying the upload iterator.
+// This avoids a temporary checkpoint vector on both cache hits and misses.
+#[derive(Clone)]
+struct CheckpointBytes(JpegEntropyCheckpointHost);
+
+impl AsRef<[u8]> for CheckpointBytes {
+    fn as_ref(&self) -> &[u8] {
+        JpegEntropyCheckpointHost::as_bytes(&self.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn single_packet_retains_uploads_and_replaces_changed_checkpoints() {
+        if !j2k_test_support::metal_runtime_gate(module_path!()) {
+            return;
+        }
+        let device = j2k_metal_support::system_default_device().expect("Metal device");
+        let mut scratch = MetalBatchScratch::default();
+        let mut checkpoint = JpegEntropyCheckpointV1 {
+            mcu_index: 0,
+            entropy_pos: 0,
+            bit_acc: 0,
+            bit_count: 0,
+            y_prev_dc: 0,
+            cb_prev_dc: 0,
+            cr_prev_dc: 0,
+            reserved: 0,
+        };
+        for index in 0..3 {
+            if index == 2 {
+                checkpoint.y_prev_dc = -7;
+            }
+            crate::buffers::take_jpeg_scratch_upload_bytes_for_test();
+            let buffers =
+                packet_buffers(&mut scratch, &device, b"entropy", &[0], &[checkpoint]).unwrap();
+            let written = crate::buffers::take_jpeg_scratch_upload_bytes_for_test();
+            assert_eq!(
+                written,
+                match index {
+                    0 => 7 + 4 + core::mem::size_of::<JpegEntropyCheckpointHost>(),
+                    1 => 0,
+                    _ => core::mem::size_of::<JpegEntropyCheckpointHost>(),
+                }
+            );
+            let staged = crate::buffers::checked_buffer_read::<JpegEntropyCheckpointHost>(
+                &buffers.checkpoints,
+                "checkpoint",
+            )
+            .unwrap();
+            assert_eq!(staged.y_prev_dc, checkpoint.y_prev_dc);
+        }
+    }
 }

@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use super::scratch::decode_buffers as scratch_decode_buffers;
 use crate::metal_types::prelude::*;
 
 use super::super::{
@@ -9,10 +8,11 @@ use super::super::{
     entropy_decode_thread_count, fast444_params, fast444_region_params, fast444_scaled_params,
     fast444_scaled_region_params, fast_decode_status_error, fast_packet_huffman_tables,
     first_decode_error_status, mcu_range_for_rect, new_command_buffer, new_compute_command_encoder,
-    new_private_buffer, new_shared_buffer_with_data, pixel_format_to_out_format,
-    restart_offsets_buffer, restart_work_for_mcu_range, CpuDecoder, Error, FastDecodeEntropyInputs,
-    JpegColorSpace, JpegDecodeStatus, JpegFast444PacketV1, JpegFast444Params,
-    JpegFast444ScaledParams, MetalRuntime, PixelFormat, PlaneMode, PlaneStage, Surface,
+    new_decode_plane_buffer, new_private_buffer, new_shared_buffer_with_data,
+    pixel_format_to_out_format, restart_offsets_buffer, restart_work_for_mcu_range, CpuDecoder,
+    Error, FastDecodeEntropyInputs, JpegColorSpace, JpegDecodeStatus, JpegFast444PacketV1,
+    JpegFast444Params, JpegFast444ScaledParams, MetalRuntime, PixelFormat, PlaneMode, PlaneStage,
+    Surface,
 };
 
 #[cfg(target_os = "macos")]
@@ -40,29 +40,23 @@ pub(in crate::compute) fn try_decode_fast444_to_surface(
     let params = fast444_params(packet)?;
     let mode = fast444_plane_mode(decoder);
     let plane_len = params.width as usize * params.height as usize;
+    let y_plane = new_decode_plane_buffer(
+        &runtime.device,
+        plane_len,
+        fmt == PixelFormat::Gray8 && mode != PlaneMode::Rgb,
+    )?;
+    let chroma_blue_plane = new_private_buffer(&runtime.device, plane_len)?;
+    let chroma_red_plane = new_private_buffer(&runtime.device, plane_len)?;
     let decode_threads = entropy_decode_thread_count(
         packet.restart_interval_mcus,
         packet.restart_offsets.len(),
         packet.entropy_checkpoints.len(),
     );
-    let mut scratch = runtime.batch_scratch()?;
-    let buffers = scratch_decode_buffers(
-        &mut scratch,
-        &runtime.device,
-        plane_len,
-        fmt == PixelFormat::Gray8 && mode != PlaneMode::Rgb,
-        decode_threads,
-        &packet.entropy_bytes,
-        &packet.restart_offsets,
-        &packet.entropy_checkpoints,
-    )?;
-    let y_plane = buffers.plane0;
-    let chroma_blue_plane = buffers.plane1;
-    let chroma_red_plane = buffers.plane2;
-    let status_buffer = buffers.status;
-    let entropy_buffer = buffers.packet.entropy;
-    let restart_offsets_buffer = buffers.packet.restart_offsets;
-    let entropy_checkpoints_buffer = buffers.packet.checkpoints;
+    let status_buffer = decode_status_buffer(&runtime.device, decode_threads)?;
+    let entropy_buffer = new_shared_buffer_with_data(&runtime.device, &packet.entropy_bytes)?;
+    let restart_offsets_buffer = restart_offsets_buffer(&runtime.device, &packet.restart_offsets)?;
+    let entropy_checkpoints_buffer =
+        entropy_checkpoints_buffer(&runtime.device, &packet.entropy_checkpoints)?;
 
     let (dc_tables, ac_tables) = fast_packet_huffman_tables(packet);
 
@@ -211,29 +205,23 @@ pub(in crate::compute) fn try_decode_fast444_region_to_surface(
     )?;
     let mode = fast444_plane_mode(decoder);
     let plane_len = params.width as usize * params.height as usize;
+    let y_plane = new_decode_plane_buffer(
+        &runtime.device,
+        plane_len,
+        fmt == PixelFormat::Gray8 && mode != PlaneMode::Rgb,
+    )?;
+    let chroma_blue_plane = new_private_buffer(&runtime.device, plane_len)?;
+    let chroma_red_plane = new_private_buffer(&runtime.device, plane_len)?;
     let decode_threads = entropy_decode_thread_count(
         packet.restart_interval_mcus,
         restart_offsets.len(),
         packet.entropy_checkpoints.len(),
     );
-    let mut scratch = runtime.batch_scratch()?;
-    let buffers = scratch_decode_buffers(
-        &mut scratch,
-        &runtime.device,
-        plane_len,
-        fmt == PixelFormat::Gray8 && mode != PlaneMode::Rgb,
-        decode_threads,
-        &packet.entropy_bytes,
-        restart_offsets,
-        &packet.entropy_checkpoints,
-    )?;
-    let y_plane = buffers.plane0;
-    let chroma_blue_plane = buffers.plane1;
-    let chroma_red_plane = buffers.plane2;
-    let status_buffer = buffers.status;
-    let entropy_buffer = buffers.packet.entropy;
-    let restart_offsets_buffer = buffers.packet.restart_offsets;
-    let entropy_checkpoints_buffer = buffers.packet.checkpoints;
+    let status_buffer = decode_status_buffer(&runtime.device, decode_threads)?;
+    let entropy_buffer = new_shared_buffer_with_data(&runtime.device, &packet.entropy_bytes)?;
+    let restart_offsets_buffer = restart_offsets_buffer(&runtime.device, restart_offsets)?;
+    let entropy_checkpoints_buffer =
+        entropy_checkpoints_buffer(&runtime.device, &packet.entropy_checkpoints)?;
 
     let (dc_tables, ac_tables) = fast_packet_huffman_tables(packet);
 
@@ -298,29 +286,23 @@ pub(in crate::compute) fn try_decode_fast444_scaled_to_surface(
 
     let mode = fast444_plane_mode(decoder);
     let plane_len = params.scaled_width as usize * params.scaled_height as usize;
+    let y_plane = new_decode_plane_buffer(
+        &runtime.device,
+        plane_len,
+        fmt == PixelFormat::Gray8 && mode != PlaneMode::Rgb,
+    )?;
+    let chroma_blue_plane = new_private_buffer(&runtime.device, plane_len)?;
+    let chroma_red_plane = new_private_buffer(&runtime.device, plane_len)?;
     let decode_threads = entropy_decode_thread_count(
         packet.restart_interval_mcus,
         packet.restart_offsets.len(),
         packet.entropy_checkpoints.len(),
     );
-    let mut scratch = runtime.batch_scratch()?;
-    let buffers = scratch_decode_buffers(
-        &mut scratch,
-        &runtime.device,
-        plane_len,
-        fmt == PixelFormat::Gray8 && mode != PlaneMode::Rgb,
-        decode_threads,
-        &packet.entropy_bytes,
-        &packet.restart_offsets,
-        &packet.entropy_checkpoints,
-    )?;
-    let y_plane = buffers.plane0;
-    let chroma_blue_plane = buffers.plane1;
-    let chroma_red_plane = buffers.plane2;
-    let status_buffer = buffers.status;
-    let entropy_buffer = buffers.packet.entropy;
-    let restart_offsets_buffer = buffers.packet.restart_offsets;
-    let entropy_checkpoints_buffer = buffers.packet.checkpoints;
+    let status_buffer = decode_status_buffer(&runtime.device, decode_threads)?;
+    let entropy_buffer = new_shared_buffer_with_data(&runtime.device, &packet.entropy_bytes)?;
+    let restart_offsets_buffer = restart_offsets_buffer(&runtime.device, &packet.restart_offsets)?;
+    let entropy_checkpoints_buffer =
+        entropy_checkpoints_buffer(&runtime.device, &packet.entropy_checkpoints)?;
 
     let (dc_tables, ac_tables) = fast_packet_huffman_tables(packet);
 
@@ -429,29 +411,23 @@ pub(in crate::compute) fn try_decode_fast444_scaled_region_to_surface_with_mode_
     )?;
 
     let plane_len = params.scaled_width as usize * params.scaled_height as usize;
+    let y_plane = new_decode_plane_buffer(
+        &runtime.device,
+        plane_len,
+        fmt == PixelFormat::Gray8 && mode != PlaneMode::Rgb,
+    )?;
+    let chroma_blue_plane = new_private_buffer(&runtime.device, plane_len)?;
+    let chroma_red_plane = new_private_buffer(&runtime.device, plane_len)?;
     let decode_threads = entropy_decode_thread_count(
         packet.restart_interval_mcus,
         restart_offsets.len(),
         packet.entropy_checkpoints.len(),
     );
-    let mut scratch = runtime.batch_scratch()?;
-    let buffers = scratch_decode_buffers(
-        &mut scratch,
-        &runtime.device,
-        plane_len,
-        fmt == PixelFormat::Gray8 && mode != PlaneMode::Rgb,
-        decode_threads,
-        &packet.entropy_bytes,
-        restart_offsets,
-        &packet.entropy_checkpoints,
-    )?;
-    let y_plane = buffers.plane0;
-    let chroma_blue_plane = buffers.plane1;
-    let chroma_red_plane = buffers.plane2;
-    let status_buffer = buffers.status;
-    let entropy_buffer = buffers.packet.entropy;
-    let restart_offsets_buffer = buffers.packet.restart_offsets;
-    let entropy_checkpoints_buffer = buffers.packet.checkpoints;
+    let status_buffer = decode_status_buffer(&runtime.device, decode_threads)?;
+    let entropy_buffer = new_shared_buffer_with_data(&runtime.device, &packet.entropy_bytes)?;
+    let restart_offsets_buffer = restart_offsets_buffer(&runtime.device, restart_offsets)?;
+    let entropy_checkpoints_buffer =
+        entropy_checkpoints_buffer(&runtime.device, &packet.entropy_checkpoints)?;
 
     let (dc_tables, ac_tables) = fast_packet_huffman_tables(packet);
 

@@ -496,3 +496,36 @@ fn parallel_coefficient_allocation_report() {
         }
     }
 }
+
+#[cfg(feature = "parallel")]
+#[test]
+fn parallel_coefficient_buffers_reuse_capacity_across_fitting_images() {
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(2)
+        .build()
+        .expect("test pool");
+    for ht in [false, true] {
+        for reversible in [false, true] {
+            let first_bytes = parallel_gray_fixture(257, 263, ht, reversible);
+            let second_bytes = parallel_gray_fixture(241, 127, ht, reversible);
+            let first = Image::new(&first_bytes, &DecodeSettings::default()).expect("first image");
+            let second =
+                Image::new(&second_bytes, &DecodeSettings::default()).expect("second image");
+            pool.install(|| {
+                let mut context = DecoderContext::default();
+                first.decode_with_context(&mut context).expect("reserve coefficient buffers");
+                assert!(context.tile_decode_context.debug_counters.parallel_coefficients.allocations > 0);
+                for image in [&first, &second, &first] {
+                    let mut serial = DecoderContext::default();
+                    serial.set_cpu_decode_parallelism(crate::CpuDecodeParallelism::Serial);
+                    let expected = image.decode_with_context(&mut serial).expect("serial oracle");
+                    let actual = image.decode_with_context(&mut context).expect("reused decode");
+                    assert_eq!(actual.data, expected.data, "ht={ht}, reversible={reversible}");
+                    assert_eq!((actual.width, actual.height), (expected.width, expected.height));
+                    assert_eq!(context.tile_decode_context.debug_counters.parallel_coefficients.allocations, 0,
+                        "fitting coefficient buffers must not allocate again: ht={ht}, reversible={reversible}");
+                }
+            });
+        }
+    }
+}

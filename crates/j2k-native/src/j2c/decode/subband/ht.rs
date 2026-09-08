@@ -13,7 +13,8 @@ use crate::j2c::build::CodeBlockCoding;
 
 #[cfg(feature = "parallel")]
 use super::{
-    copy_decoded_ht_blocks_to_sub_band, decode_ht_sub_band_blocks_parallel, HtParallelParameters,
+    copy_decoded_ht_blocks_to_sub_band, decode_ht_sub_band_blocks_parallel,
+    release_coefficient_slab, HtParallelParameters,
 };
 
 #[expect(
@@ -208,17 +209,50 @@ pub(super) fn decode_sub_band_ht_blocks(
         #[cfg(feature = "parallel")]
         {
             let mut budget = DecodeAllocationBudget::for_storage(storage)?;
-            let pending_blocks = collect_pending_ht_blocks(
+            let mut collection_budget = budget;
+            let pending_result = collect_pending_ht_blocks(
                 sub_band_idx,
                 sub_band,
                 storage,
                 header,
                 num_bitplanes,
                 component_info.roi_shift,
-                &mut budget,
-            )?;
+                &mut collection_budget,
+            );
+            let pending_blocks = match pending_result {
+                Ok(pending_blocks) => {
+                    budget = collection_budget;
+                    pending_blocks
+                }
+                Err(error)
+                    if tile_ctx.parallel_coefficients.capacity() != 0
+                        && super::super::reuse::is_capacity_error(&error) =>
+                {
+                    release_coefficient_slab(
+                        &mut tile_ctx.parallel_coefficients,
+                        &mut storage.structural_workspace_bytes,
+                        #[cfg(test)]
+                        &mut tile_ctx.debug_counters.parallel_coefficients,
+                        &mut budget,
+                    )?;
+                    let mut retry_budget = budget;
+                    let pending_blocks = collect_pending_ht_blocks(
+                        sub_band_idx,
+                        sub_band,
+                        storage,
+                        header,
+                        num_bitplanes,
+                        component_info.roi_shift,
+                        &mut retry_budget,
+                    )?;
+                    budget = retry_budget;
+                    pending_blocks
+                }
+                Err(error) => return Err(error),
+            };
             let decoded_blocks = decode_ht_sub_band_blocks_parallel(
                 &pending_blocks,
+                sub_band,
                 HtParallelParameters {
                     strict: header.strict,
                     num_bitplanes,
@@ -228,6 +262,7 @@ pub(super) fn decode_sub_band_ht_blocks(
                     irreversible_midpoint,
                 },
                 &mut tile_ctx.ht_task_workspaces,
+                &mut tile_ctx.parallel_coefficients,
                 &mut storage.structural_workspace_bytes,
                 #[cfg(test)]
                 &mut tile_ctx.debug_counters.ht_parallel_tasks,

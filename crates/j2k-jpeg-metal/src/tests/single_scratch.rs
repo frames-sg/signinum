@@ -10,7 +10,7 @@ fn metal_single_session_buffer_allocation_report() {
 }
 
 #[test]
-fn warm_single_session_reuses_temporary_buffers() {
+fn warm_subsampled_session_reuses_temporaries_with_444_control() {
     single_session_buffer_allocations(true);
 }
 
@@ -43,13 +43,17 @@ fn single_session_buffer_allocations(require_reuse: bool) {
                 let shared = compute::jpeg_shared_buffer_allocations_for_test();
                 assert_eq!(surface.residency(), SurfaceResidency::MetalResidentDecode);
                 if require_reuse && iteration > 0 {
+                    // 4:4:4 pooling was rejected by the latency gate; retain
+                    // its fresh-allocation control while 4:2:0/4:2:2 reuse.
+                    let expected = if sampling == "444" {
+                        (if fmt == PixelFormat::Gray8 { 2 } else { 3 }, 5)
+                    } else {
+                        (0, 1)
+                    };
                     assert_eq!(
-                        private, 0,
-                        "warm {sampling}/{fmt:?} temporary private buffers"
-                    );
-                    assert_eq!(
-                        shared, 1,
-                        "warm {sampling}/{fmt:?} retains only fresh shared output allocation"
+                        (private, shared),
+                        expected,
+                        "warm {sampling}/{fmt:?} allocations including fresh output"
                     );
                 }
                 let mut actual = vec![0; expected.len()];
